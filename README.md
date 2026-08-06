@@ -63,7 +63,7 @@ These are not preferences; they decide the design.
 - `bridge-v1.json` — the generated manifest: every channel, and which
   profile requires it.
 
-151 channels exist. **iOS must implement 66, Android 68** — the rest are
+151 channels exist. **iOS must implement 65, Android 67** — the rest are
 desktop-only (WSL, the Minecraft client launcher, the installer) and gated
 off by capability, so the UI never calls them.
 
@@ -105,6 +105,16 @@ already solved the hard embedding problems — FFI lifecycle, panic
 containment, log capture, no-JIT wasm, WebView-process recovery — and those
 lessons are folded into the interfaces here. What it lacks is the product:
 config, console, connectivity, backgrounding.
+
+## Implementation plans
+
+The two platform tracks are built in parallel by different developers.
+
+| Plan | For |
+|---|---|
+| [`plans/shared-milestones.md`](plans/shared-milestones.md) | **Read first.** Ownership, the shared M0–M5 milestones, cross-cutting rules |
+| [`plans/ios.md`](plans/ios.md) | Swift host, Pumpkin engine wiring |
+| [`plans/android.md`](plans/android.md) | Kotlin host, JVM backend, foreground service |
 
 ## Getting started
 

@@ -42,7 +42,8 @@ node shared/conformance/check-coverage.js ios     ios/HomerunHost/BridgeRouter.s
 node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
 ```
 
-iOS must answer 66 channels, Android 68, of 151. The checker reads the
+Of 151 channels, iOS must implement 65 and Android 67 (44 and 45 of those
+are handlers; the rest are events the host emits). The checker reads the
 router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END` markers —
 keep those markers around the real table, not a duplicate list.
 
@@ -120,7 +121,9 @@ Roughly in dependency order:
 5. **Parity** — wireproxy via gomobile for reachability, the device
    WebSocket, perf sampling, player identity reporting.
 
-Plan and phasing: `homerun/plans/mobile-apps.md`.
+Platform plans: `plans/ios.md`, `plans/android.md`, and `plans/shared-milestones.md`
+(read that one first — it says who owns what). Overall phasing:
+`homerun/plans/mobile-apps.md`.
 
 ## Conventions
 
