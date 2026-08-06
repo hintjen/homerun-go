@@ -42,7 +42,7 @@ node shared/conformance/check-coverage.js ios     ios/HomerunHost/BridgeRouter.s
 node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
 ```
 
-Of 151 channels, iOS must implement 65 and Android 67 (45 and 46 of those
+Of 151 channels, iOS must implement 64 and Android 67 (44 and 46 of those
 are handlers; the rest are events the host emits). The checker reads the
 router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END` markers —
 keep those markers around the real table, not a duplicate list.

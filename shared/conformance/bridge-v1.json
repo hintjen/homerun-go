@@ -246,8 +246,9 @@
     {
       "channel": "import-minecraft-modpack",
       "kind": "invoke",
-      "tier": "core",
-      "note": "Mobile: document picker / SAF."
+      "tier": "capability",
+      "capability": "moddedServers",
+      "note": "Mobile: document picker / SAF. Never on a Pumpkin-only host — it runs no Forge/Fabric mod."
     },
     {
       "channel": "native-get-latest-bedrock-version",
@@ -884,6 +885,7 @@
         "tray": true,
         "autoUpdate": true,
         "privilegeElevation": true,
+        "moddedServers": true,
         "multipleRunningServers": true,
         "backgroundExecution": true,
         "backups": true,
@@ -1055,6 +1057,7 @@
         "tray": false,
         "autoUpdate": false,
         "privilegeElevation": false,
+        "moddedServers": false,
         "multipleRunningServers": false,
         "backgroundExecution": false,
         "backups": false,
@@ -1084,7 +1087,6 @@
         "get-storage-info",
         "get-system-language",
         "get-system-memory",
-        "import-minecraft-modpack",
         "import-minecraft-world",
         "install-type-changed",
         "is-installed",
@@ -1142,6 +1144,7 @@
         "tray": false,
         "autoUpdate": false,
         "privilegeElevation": false,
+        "moddedServers": true,
         "multipleRunningServers": false,
         "backgroundExecution": true,
         "backups": true,

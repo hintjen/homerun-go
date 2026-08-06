@@ -63,7 +63,7 @@ These are not preferences; they decide the design.
 - `bridge-v1.json` — the generated manifest: every channel, and which
   profile requires it.
 
-151 channels exist. **iOS must implement 65, Android 67** — the rest are
+151 channels exist. **iOS must implement 64, Android 67** — the rest are
 desktop-only (WSL, the Minecraft client launcher, the installer) and gated
 off by capability, so the UI never calls them.
 
