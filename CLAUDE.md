@@ -125,6 +125,20 @@ Platform plans: `plans/ios.md`, `plans/android.md`, and `plans/shared-milestones
 (read that one first — it says who owns what). Overall phasing:
 `homerun/plans/mobile-apps.md`.
 
+## Documentation
+
+**Write the doc with the code, not after.** Each subsystem gets one file in
+`docs/`, indexed from `docs/README.md`, in the house style — `## Overview`,
+sections named after the file they document, `## File map`, `## Triage`.
+`docs/ffi.md` is the worked example.
+
+Which doc belongs to which milestone is in
+`plans/shared-milestones.md` ("Documentation is part of the milestone").
+
+Most of what matters here cannot be inferred from the source: which thread a
+callback arrives on, why a workaround exists, what the OS does under memory
+pressure. Write that down.
+
 ## Conventions
 
 - Match the surrounding style. Comments explain *why*, not what.
