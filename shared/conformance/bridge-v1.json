@@ -1,0 +1,1224 @@
+{
+  "bridgeVersion": 1,
+  "counts": {
+    "invoke": 76,
+    "send": 23,
+    "event": 52,
+    "total": 151
+  },
+  "channels": [
+    {
+      "channel": "get-initial-config",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-app-version",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-system-language",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "set-posthog-distinct-id",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "cache-client-nonce",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "clipboard-write-text",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "open-external-url",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "push-notification",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "deep-link:consume",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "check-system-time",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: return true — phone clocks are network-synced."
+    },
+    {
+      "channel": "get-device-id",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "measure-region-latency",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "journey-modals-get",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "journey-modals-set",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-storage-info",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: device storage figures."
+    },
+    {
+      "channel": "get-system-memory",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-native-system-memory",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "is-installed",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: true once first-run backend setup completed."
+    },
+    {
+      "channel": "get-install-type",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: return \"native\" — the UI treats that as a locally-hosted server."
+    },
+    {
+      "channel": "get-installation-state",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "get-installation-path",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "select-installation-path",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "start-native-installation",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "start-native-install-additive",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "move-installation",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "moveInstallation"
+    },
+    {
+      "channel": "can-move-installation",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "moveInstallation"
+    },
+    {
+      "channel": "native-server-start",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-stop",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-delete",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-rcon",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Pumpkin has no RCON — dispatch the command in-process and reply on native-server-rcon-response."
+    },
+    {
+      "channel": "native-server-active-ids",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "One-running-server hosts return 0 or 1 id."
+    },
+    {
+      "channel": "native-server-get-uptime",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-get-ops",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-get-mem-usage",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-get-cpu-usage",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-get-players",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-get-perf-history",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-native-server-logs",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-native-server-port",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "get-native-local-network",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "set-native-local-network",
+      "kind": "invoke",
+      "tier": "core"
+    },
+    {
+      "channel": "server-files-exist",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Return { native: true, exists: null } to hide the files UI where unsupported."
+    },
+    {
+      "channel": "open-server-files",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Only called when server-files-exist reported exists:true."
+    },
+    {
+      "channel": "import-minecraft-world",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: document picker / SAF."
+    },
+    {
+      "channel": "import-minecraft-modpack",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: document picker / SAF."
+    },
+    {
+      "channel": "native-get-latest-bedrock-version",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "javaNative",
+      "note": "Bedrock dedicated server; not available under Pumpkin."
+    },
+    {
+      "channel": "start-wsl-migration",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "set-pending-server-upgrade",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "terminate-wsl",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "upgrade-native-server",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "wsl-server-get-insights",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "wsl-server-kick",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "wsl-server-rcon",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "wsl-bedrock-server-command",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "unmount-server-files",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "start-log-stream",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl",
+      "note": "Docker log stream. Local backends push native-server-log instead."
+    },
+    {
+      "channel": "stop-log-stream",
+      "kind": "invoke",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft:auth:get-profile",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:auth:login",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:auth:logout",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:get-setup",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:install",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:launch",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:cancel",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:open-files",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:delete-instance",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:check-bedrock-installed",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "download-modpack",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "open-modpack",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "check-game-launchers",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "get-device-ws-port",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "deviceWebsocket"
+    },
+    {
+      "channel": "wait-for-update-check",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "autoUpdate"
+    },
+    {
+      "channel": "update-firewall-rules",
+      "kind": "invoke",
+      "tier": "desktop-only",
+      "ungated": true,
+      "note": "Windows firewall. Port-toggle UI is not capability-gated yet; mobile should reply { success: true } until it is."
+    },
+    {
+      "channel": "discord-get-status",
+      "kind": "invoke",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "discord-get-user-id",
+      "kind": "invoke",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "discord-open-app",
+      "kind": "invoke",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "set-api-url",
+      "kind": "send",
+      "tier": "core"
+    },
+    {
+      "channel": "credentials-received",
+      "kind": "send",
+      "tier": "core"
+    },
+    {
+      "channel": "logout",
+      "kind": "send",
+      "tier": "core"
+    },
+    {
+      "channel": "start-installation-or-check",
+      "kind": "send",
+      "tier": "core",
+      "note": "Boot entry point. Mobile: run first-run backend setup, then emit system-check-complete."
+    },
+    {
+      "channel": "check-homerun-storage-limit",
+      "kind": "send",
+      "tier": "core"
+    },
+    {
+      "channel": "open-storage-settings",
+      "kind": "send",
+      "tier": "core"
+    },
+    {
+      "channel": "minimize-window",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "windowChrome"
+    },
+    {
+      "channel": "maximize-window",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "windowChrome"
+    },
+    {
+      "channel": "close-window",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "windowChrome"
+    },
+    {
+      "channel": "retry-installation",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "retry-native-installation",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "retry-download",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "cancel-download",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "restart-computer",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "system-check-continue",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "system-check-cancel",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "privilege-elevation-modal-acknowledged",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "privilegeElevation"
+    },
+    {
+      "channel": "privilege-elevation-modal-cancelled",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "privilegeElevation"
+    },
+    {
+      "channel": "quit-and-install",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "autoUpdate"
+    },
+    {
+      "channel": "set-distro-tag",
+      "kind": "send",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "discord-connect",
+      "kind": "send",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "discord-page-update",
+      "kind": "send",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "discord-wsl-server-update",
+      "kind": "send",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "credentials-set",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "credentials-error",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "system-check-complete",
+      "kind": "event",
+      "tier": "core",
+      "note": "Required: the boot state machine blocks until this or system-check-failed."
+    },
+    {
+      "channel": "system-check-failed",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "get-api-url",
+      "kind": "event",
+      "tier": "core",
+      "note": "Host pulls the API URL; UI replies on set-api-url."
+    },
+    {
+      "channel": "deep-link",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "install-type-changed",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "show-system-time-warning",
+      "kind": "event",
+      "tier": "core",
+      "note": "Mobile: never emitted."
+    },
+    {
+      "channel": "posthog-capture-event",
+      "kind": "event",
+      "tier": "core",
+      "note": "Optional to emit; UI just forwards."
+    },
+    {
+      "channel": "native-server-log",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-state-changed",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-port",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-rcon-response",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-error-report",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-network-error",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-players-changed",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-status-result",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "native-server-backup-lease-blocked",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "backups"
+    },
+    {
+      "channel": "installation-progress",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "installation-complete",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "installation-failed",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "installation-error",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "show-system-requirements-warning",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "native-additive-install-started",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "native-installation-report",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation"
+    },
+    {
+      "channel": "show-privilege-elevation-required-modal",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "privilegeElevation"
+    },
+    {
+      "channel": "move-installation-progress",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "moveInstallation"
+    },
+    {
+      "channel": "move-installation-complete",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "moveInstallation"
+    },
+    {
+      "channel": "move-installation-resumed",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "moveInstallation"
+    },
+    {
+      "channel": "move-installation-resume-complete",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "moveInstallation"
+    },
+    {
+      "channel": "storage-limit-exceeded",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "storage-limit-ok",
+      "kind": "event",
+      "tier": "core"
+    },
+    {
+      "channel": "open-storage-settings",
+      "kind": "event",
+      "tier": "core",
+      "note": "Loopback: host echoes the send back as an event."
+    },
+    {
+      "channel": "wsl-migration-started",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "server-upgrade-complete",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "server-upgrade-failed",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "wsl-server-log",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "wsl-bedrock-log",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft-log-batch",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft-log-error",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft-log-stream-started",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft-log-stream-stopped",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft-log-stream-ended",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft-log-stream-reconnecting",
+      "kind": "event",
+      "tier": "backend",
+      "backend": "wsl"
+    },
+    {
+      "channel": "minecraft:progress",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:exited",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:auth:ready",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "minecraft:auth:signed-out",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "clientLauncher"
+    },
+    {
+      "channel": "device-ws-ready",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "deviceWebsocket"
+    },
+    {
+      "channel": "update-available",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "autoUpdate"
+    },
+    {
+      "channel": "discord-status-changed",
+      "kind": "event",
+      "tier": "desktop-only",
+      "ungated": true
+    },
+    {
+      "channel": "discord-user-id",
+      "kind": "event",
+      "tier": "desktop-only",
+      "ungated": true
+    }
+  ],
+  "profiles": {
+    "desktop": {
+      "capabilities": {
+        "platform": "windows",
+        "serverBackends": [
+          "wsl",
+          "javaNative"
+        ],
+        "installation": true,
+        "moveInstallation": true,
+        "clientLauncher": true,
+        "windowChrome": true,
+        "tray": true,
+        "autoUpdate": true,
+        "privilegeElevation": true,
+        "multipleRunningServers": true,
+        "backgroundExecution": true,
+        "backups": true,
+        "deviceWebsocket": true
+      },
+      "required": [
+        "cache-client-nonce",
+        "can-move-installation",
+        "cancel-download",
+        "check-game-launchers",
+        "check-homerun-storage-limit",
+        "check-system-time",
+        "clipboard-write-text",
+        "close-window",
+        "credentials-error",
+        "credentials-received",
+        "credentials-set",
+        "deep-link",
+        "deep-link:consume",
+        "device-ws-ready",
+        "discord-connect",
+        "discord-get-status",
+        "discord-get-user-id",
+        "discord-open-app",
+        "discord-page-update",
+        "discord-status-changed",
+        "discord-user-id",
+        "discord-wsl-server-update",
+        "download-modpack",
+        "get-api-url",
+        "get-app-version",
+        "get-device-id",
+        "get-device-ws-port",
+        "get-initial-config",
+        "get-install-type",
+        "get-installation-path",
+        "get-installation-state",
+        "get-native-local-network",
+        "get-native-server-logs",
+        "get-native-server-port",
+        "get-native-system-memory",
+        "get-storage-info",
+        "get-system-language",
+        "get-system-memory",
+        "import-minecraft-modpack",
+        "import-minecraft-world",
+        "install-type-changed",
+        "installation-complete",
+        "installation-error",
+        "installation-failed",
+        "installation-progress",
+        "is-installed",
+        "journey-modals-get",
+        "journey-modals-set",
+        "logout",
+        "maximize-window",
+        "measure-region-latency",
+        "minecraft-log-batch",
+        "minecraft-log-error",
+        "minecraft-log-stream-ended",
+        "minecraft-log-stream-reconnecting",
+        "minecraft-log-stream-started",
+        "minecraft-log-stream-stopped",
+        "minecraft:auth:get-profile",
+        "minecraft:auth:login",
+        "minecraft:auth:logout",
+        "minecraft:auth:ready",
+        "minecraft:auth:signed-out",
+        "minecraft:cancel",
+        "minecraft:check-bedrock-installed",
+        "minecraft:delete-instance",
+        "minecraft:exited",
+        "minecraft:get-setup",
+        "minecraft:install",
+        "minecraft:launch",
+        "minecraft:open-files",
+        "minecraft:progress",
+        "minimize-window",
+        "move-installation",
+        "move-installation-complete",
+        "move-installation-progress",
+        "move-installation-resume-complete",
+        "move-installation-resumed",
+        "native-additive-install-started",
+        "native-get-latest-bedrock-version",
+        "native-installation-report",
+        "native-server-active-ids",
+        "native-server-backup-lease-blocked",
+        "native-server-delete",
+        "native-server-error-report",
+        "native-server-get-cpu-usage",
+        "native-server-get-mem-usage",
+        "native-server-get-ops",
+        "native-server-get-perf-history",
+        "native-server-get-players",
+        "native-server-get-uptime",
+        "native-server-log",
+        "native-server-network-error",
+        "native-server-players-changed",
+        "native-server-port",
+        "native-server-rcon",
+        "native-server-rcon-response",
+        "native-server-start",
+        "native-server-state-changed",
+        "native-server-status-result",
+        "native-server-stop",
+        "open-external-url",
+        "open-modpack",
+        "open-server-files",
+        "open-storage-settings",
+        "open-storage-settings",
+        "posthog-capture-event",
+        "privilege-elevation-modal-acknowledged",
+        "privilege-elevation-modal-cancelled",
+        "push-notification",
+        "quit-and-install",
+        "restart-computer",
+        "retry-download",
+        "retry-installation",
+        "retry-native-installation",
+        "select-installation-path",
+        "server-files-exist",
+        "server-upgrade-complete",
+        "server-upgrade-failed",
+        "set-api-url",
+        "set-distro-tag",
+        "set-native-local-network",
+        "set-pending-server-upgrade",
+        "set-posthog-distinct-id",
+        "show-privilege-elevation-required-modal",
+        "show-system-requirements-warning",
+        "show-system-time-warning",
+        "start-installation-or-check",
+        "start-log-stream",
+        "start-native-install-additive",
+        "start-native-installation",
+        "start-wsl-migration",
+        "stop-log-stream",
+        "storage-limit-exceeded",
+        "storage-limit-ok",
+        "system-check-cancel",
+        "system-check-complete",
+        "system-check-continue",
+        "system-check-failed",
+        "terminate-wsl",
+        "unmount-server-files",
+        "update-available",
+        "update-firewall-rules",
+        "upgrade-native-server",
+        "wait-for-update-check",
+        "wsl-bedrock-log",
+        "wsl-bedrock-server-command",
+        "wsl-migration-started",
+        "wsl-server-get-insights",
+        "wsl-server-kick",
+        "wsl-server-log",
+        "wsl-server-rcon"
+      ]
+    },
+    "ios": {
+      "capabilities": {
+        "platform": "ios",
+        "serverBackends": [
+          "pumpkin"
+        ],
+        "installation": false,
+        "moveInstallation": false,
+        "clientLauncher": false,
+        "windowChrome": false,
+        "tray": false,
+        "autoUpdate": false,
+        "privilegeElevation": false,
+        "multipleRunningServers": false,
+        "backgroundExecution": false,
+        "backups": false,
+        "deviceWebsocket": true
+      },
+      "required": [
+        "cache-client-nonce",
+        "check-homerun-storage-limit",
+        "check-system-time",
+        "clipboard-write-text",
+        "credentials-error",
+        "credentials-received",
+        "credentials-set",
+        "deep-link",
+        "deep-link:consume",
+        "device-ws-ready",
+        "get-api-url",
+        "get-app-version",
+        "get-device-id",
+        "get-device-ws-port",
+        "get-initial-config",
+        "get-install-type",
+        "get-native-local-network",
+        "get-native-server-logs",
+        "get-native-server-port",
+        "get-native-system-memory",
+        "get-storage-info",
+        "get-system-language",
+        "get-system-memory",
+        "import-minecraft-modpack",
+        "import-minecraft-world",
+        "install-type-changed",
+        "is-installed",
+        "journey-modals-get",
+        "journey-modals-set",
+        "logout",
+        "measure-region-latency",
+        "native-server-active-ids",
+        "native-server-delete",
+        "native-server-error-report",
+        "native-server-get-cpu-usage",
+        "native-server-get-mem-usage",
+        "native-server-get-ops",
+        "native-server-get-perf-history",
+        "native-server-get-players",
+        "native-server-get-uptime",
+        "native-server-log",
+        "native-server-network-error",
+        "native-server-players-changed",
+        "native-server-port",
+        "native-server-rcon",
+        "native-server-rcon-response",
+        "native-server-start",
+        "native-server-state-changed",
+        "native-server-status-result",
+        "native-server-stop",
+        "open-external-url",
+        "open-server-files",
+        "open-storage-settings",
+        "open-storage-settings",
+        "posthog-capture-event",
+        "push-notification",
+        "server-files-exist",
+        "set-api-url",
+        "set-native-local-network",
+        "set-posthog-distinct-id",
+        "show-system-time-warning",
+        "start-installation-or-check",
+        "storage-limit-exceeded",
+        "storage-limit-ok",
+        "system-check-complete",
+        "system-check-failed"
+      ]
+    },
+    "android": {
+      "capabilities": {
+        "platform": "android",
+        "serverBackends": [
+          "javaNative",
+          "pumpkin"
+        ],
+        "installation": false,
+        "moveInstallation": false,
+        "clientLauncher": false,
+        "windowChrome": false,
+        "tray": false,
+        "autoUpdate": false,
+        "privilegeElevation": false,
+        "multipleRunningServers": false,
+        "backgroundExecution": true,
+        "backups": true,
+        "deviceWebsocket": true
+      },
+      "required": [
+        "cache-client-nonce",
+        "check-homerun-storage-limit",
+        "check-system-time",
+        "clipboard-write-text",
+        "credentials-error",
+        "credentials-received",
+        "credentials-set",
+        "deep-link",
+        "deep-link:consume",
+        "device-ws-ready",
+        "get-api-url",
+        "get-app-version",
+        "get-device-id",
+        "get-device-ws-port",
+        "get-initial-config",
+        "get-install-type",
+        "get-native-local-network",
+        "get-native-server-logs",
+        "get-native-server-port",
+        "get-native-system-memory",
+        "get-storage-info",
+        "get-system-language",
+        "get-system-memory",
+        "import-minecraft-modpack",
+        "import-minecraft-world",
+        "install-type-changed",
+        "is-installed",
+        "journey-modals-get",
+        "journey-modals-set",
+        "logout",
+        "measure-region-latency",
+        "native-get-latest-bedrock-version",
+        "native-server-active-ids",
+        "native-server-backup-lease-blocked",
+        "native-server-delete",
+        "native-server-error-report",
+        "native-server-get-cpu-usage",
+        "native-server-get-mem-usage",
+        "native-server-get-ops",
+        "native-server-get-perf-history",
+        "native-server-get-players",
+        "native-server-get-uptime",
+        "native-server-log",
+        "native-server-network-error",
+        "native-server-players-changed",
+        "native-server-port",
+        "native-server-rcon",
+        "native-server-rcon-response",
+        "native-server-start",
+        "native-server-state-changed",
+        "native-server-status-result",
+        "native-server-stop",
+        "open-external-url",
+        "open-server-files",
+        "open-storage-settings",
+        "open-storage-settings",
+        "posthog-capture-event",
+        "push-notification",
+        "server-files-exist",
+        "set-api-url",
+        "set-native-local-network",
+        "set-posthog-distinct-id",
+        "show-system-time-warning",
+        "start-installation-or-check",
+        "storage-limit-exceeded",
+        "storage-limit-ok",
+        "system-check-complete",
+        "system-check-failed"
+      ]
+    }
+  }
+}
