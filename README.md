@@ -118,13 +118,23 @@ The two platform tracks are built in parallel by different developers.
 
 ## Getting started
 
-Prerequisites: Xcode + XcodeGen (iOS), Android Studio + NDK (Android), a Rust
-toolchain with the mobile targets, Node 20+.
+```bash
+npm install        # fetches and builds the shared UI bundle
+npm run doctor     # what this machine can build, and how to fix the gaps
+```
+
+Then, per platform:
 
 ```bash
-rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android
-cargo install cargo-ndk
+npm run build:android      # stages the UI + builds the .so into jniLibs
+npm run build:ios          # macOS only
+npm run test:rust          # 36 FFI tests, no device needed
 ```
+
+`npm run doctor` names every missing prerequisite and the exact command to
+install it. Full detail: [`docs/building.md`](docs/building.md).
+
+**iOS builds require macOS.** Android builds from any host.
 
 See `CLAUDE.md` for how the pieces fit and what to build next.
 

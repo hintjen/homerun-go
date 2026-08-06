@@ -1,0 +1,27 @@
+{
+  "name": "homerun-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Build tooling for the Homerun iOS and Android hosts. The apps are built by Xcode and Gradle; this orchestrates the shared UI bundle and the Rust FFI they both need.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "doctor": "node scripts/doctor.js",
+    "ui": "node scripts/build-ui.js",
+    "ui:ios": "node scripts/build-ui.js ios",
+    "ui:android": "node scripts/build-ui.js android",
+    "rust:host": "node scripts/build-rust.js host",
+    "rust:ios": "node scripts/build-rust.js ios",
+    "rust:ios-sim": "node scripts/build-rust.js ios-sim",
+    "rust:android": "node scripts/build-rust.js android",
+    "rust:android-x86_64": "node scripts/build-rust.js android-x86_64",
+    "build:ios": "npm run ui:ios && npm run rust:ios",
+    "build:android": "npm run ui:android && npm run rust:android",
+    "test:rust": "cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml",
+    "sync-contract": "node scripts/sync-contract.js",
+    "conformance:ios": "node shared/conformance/check-coverage.js ios ios/HomerunHost/BridgeRouter.swift",
+    "conformance:android": "node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt"
+  },
+  "dependencies": {
+    "homerun-app-ui": "github:hintjen/homerun-app-ui#main"
+  }
+}

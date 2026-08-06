@@ -13,6 +13,23 @@ main-process documentation lives in
 
 ## Documentation Index
 
+### 🔨 [Building](./building.md)
+
+How to produce what Xcode and Gradle need: the shared UI bundle staged into
+each platform's assets, and the Rust FFI compiled for its targets.
+
+**Contains**:
+- `npm run doctor` — what this machine can build and what is missing
+- Staging the shared UI, and the env overrides for local checkouts
+- Per-target Rust builds, triples, and where each artifact must land
+- Why Android native libraries must live in `jniLibs`
+- Typical loops, and a triage list for the usual toolchain failures
+
+**Read this for**: Setting up a machine, wiring CI, or decoding a toolchain
+error.
+
+---
+
 ### 🦀 [Pumpkin FFI](./ffi.md)
 
 The Rust library both hosts link — server lifecycle, console buffering,
