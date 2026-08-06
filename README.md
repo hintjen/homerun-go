@@ -90,9 +90,15 @@ Scaffolding. Nothing runs yet.
 | Bridge contract, vendored | done |
 | Conformance checker | done |
 | `ServerBackend` (Swift, Kotlin) | interfaces defined |
-| `homerun-pumpkin-ffi` | C surface defined, bodies are `not implemented` |
+| `homerun-pumpkin-ffi` | **implemented and tested** except the engine itself — see [docs/ffi.md](docs/ffi.md) |
+| Pumpkin engine | not wired (fork not yet pinned) |
 | iOS host | not started |
 | Android host | not started |
+
+The FFI crate has 36 passing tests covering the state machine, console
+cursors, port pre-flight, crash capture, and the whole C surface — none of
+which need a device or Pumpkin. `Engine` is the seam; a `StubEngine` stands
+in so the failure paths are exercised now rather than discovered on a phone.
 
 The prototype this builds on lives in the `Pumpkin` fork under `ios/`. It
 already solved the hard embedding problems — FFI lifecycle, panic

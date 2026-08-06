@@ -77,26 +77,36 @@ bugs that are miserable to diagnose.
 
 ## Building
 
-Rust builds on macOS/Linux; there is no Windows path for the mobile targets.
+The FFI crate builds and tests **host-native on any OS**, including Windows —
+36 tests, no device, no Pumpkin. Do that before reaching for a simulator.
+
+```bash
+cd rust/homerun-pumpkin-ffi
+cargo test
+cargo clippy --all-targets
+```
+
+Cross-compiling: Android targets work from any host with `cargo-ndk`; iOS
+targets require macOS.
 
 ```bash
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android
 cargo install cargo-ndk
-cd rust/homerun-pumpkin-ffi && cargo test    # host-native, no device needed
 ```
 
 The Pumpkin dependency is commented out in `Cargo.toml` until the fork's
-library-mode patches are pinned. That is deliberate: the crate compiles and
-its safety tests run without the engine, so the FFI surface can be reviewed
-first.
+library-mode patches are pinned. That is deliberate: everything except the
+engine is implemented and tested behind the `Engine` trait, so the FFI
+surface can be reviewed and exercised first. See `docs/ffi.md`.
 
 ## What to build next
 
 Roughly in dependency order:
 
-1. **`homerun-pumpkin-ffi` bodies** — wire the pinned Pumpkin fork, implement
-   start/stop/state/stats/players/logs/command. Port the prototype's bind
-   pre-flight, panic hook, and stdout capture; do not reinvent them.
+1. **Wire Pumpkin into `Engine`** — the rest of `homerun-pumpkin-ffi` is done
+   and tested (`docs/ffi.md`). Pin the fork, implement the trait, swap the
+   default in `server::host()`. Add stdout/stderr redirect once a real engine
+   writes to fd 1.
 2. **iOS host** — `WKWebView` on a custom scheme, `BridgeRouter` with the
    marker block, `PumpkinBackend` over the FFI. Evolve the prototype's
    `BridgeController`; its weak-handler proxy, ready handshake, event queue,
