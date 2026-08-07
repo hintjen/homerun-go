@@ -40,6 +40,9 @@ final class BridgeController: NSObject, BridgeEventSink {
         config.setURLSchemeHandler(AppSchemeHandler(), forURLScheme: AppSchemeHandler.scheme)
         config.userContentController.addUserScript(Capabilities.userScript())
         config.userContentController.addUserScript(Self.errorHookScript())
+        #if DEBUG
+            config.userContentController.addUserScript(Self.networkErrorHookScript())
+        #endif
 
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
@@ -167,6 +170,17 @@ extension BridgeController: WKScriptMessageHandler {
             return
         }
 
+        if incoming.method == "__host:netError" {
+            let details = incoming.params as? [String: Any] ?? [:]
+            NSLog(
+                "[bridge] API %@ %@ -> %@ %@",
+                details["method"] as? String ?? "?",
+                details["url"] as? String ?? "?",
+                String(describing: details["status"] ?? "?"),
+                details["body"] as? String ?? "")
+            return
+        }
+
         guard let handler = router.handler(for: incoming.method) else {
             // An unanswered invoke hangs a UI promise forever — the worst
             // failure mode in this protocol, and it looks like a frozen screen
@@ -261,6 +275,65 @@ extension BridgeController: WKScriptMessageHandler {
                 params: { message: 'Unhandled rejection: ' + String(e.reason), source: '', line: 0 }
               });
             });
+            """
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    /// Debug only: report failed API calls, with the server's response body.
+    ///
+    /// The UI turns a rejected request into a short human sentence, which is
+    /// right for a player and useless for debugging — "an error occurred while
+    /// creating the server" is the same message whatever the API actually
+    /// objected to. This surfaces the status and body in the device log.
+    ///
+    /// Deliberately logs the *response* only. Request headers carry the bearer
+    /// token, and this goes to a log that is not private.
+    private static func networkErrorHookScript() -> WKUserScript {
+        let source = """
+            (function () {
+              function report(method, url, status, body) {
+                try {
+                  window.webkit.messageHandlers.homerun.postMessage({
+                    v: 1, method: '__host:netError',
+                    params: {
+                      method: String(method || 'GET'), url: String(url),
+                      status: status, body: String(body || '').slice(0, 600)
+                    }
+                  });
+                } catch (e) {}
+              }
+
+              var fetch_ = window.fetch;
+              window.fetch = function (input, init) {
+                var url = (typeof input === 'string') ? input : (input && input.url);
+                var method = (init && init.method) || 'GET';
+                return fetch_.apply(this, arguments).then(function (res) {
+                  if (!res.ok) {
+                    res.clone().text().then(function (t) {
+                      report(method, url, res.status, t);
+                    }).catch(function () {});
+                  }
+                  return res;
+                });
+              };
+
+              // axios uses XHR by default, so hooking fetch alone misses it.
+              var open_ = XMLHttpRequest.prototype.open;
+              var send_ = XMLHttpRequest.prototype.send;
+              XMLHttpRequest.prototype.open = function (m, u) {
+                this.__m = m; this.__u = u;
+                return open_.apply(this, arguments);
+              };
+              XMLHttpRequest.prototype.send = function () {
+                var self = this;
+                this.addEventListener('load', function () {
+                  if (self.status >= 400) {
+                    report(self.__m, self.__u, self.status, self.responseText);
+                  }
+                });
+                return send_.apply(this, arguments);
+              };
+            })();
             """
         return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
