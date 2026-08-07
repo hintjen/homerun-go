@@ -49,6 +49,40 @@ in, or debugging a server that will not start.
 
 ---
 
+### 🧩 [The shared core](./shared-core.md)
+
+`homerun-core` — the decisions every Homerun app makes, in one tested place
+instead of once per platform.
+
+**Contains**:
+- The two divergences that prompted it, both live before it existed
+- Why it holds decisions and shapes but no transport and no processes
+- What is shared and what stays platform-specific, and why iOS forces that line
+- The test suite, and the mutation check that proves it can fail
+- Who has adopted it, and the order for who adopts next
+
+**Read this for**: Deciding where a behaviour belongs, or before changing
+anything the desktop also does.
+
+---
+
+### 🔌 [The core bridge](./core-bridge.md)
+
+How Kotlin reaches the core: one native entry point, JSON in and out.
+
+**Contains**:
+- Why it is not a supervisor, and why that distinction is the architecture
+- The envelope, and why errors are verdicts meant for a player
+- The full method catalogue with argument names and shapes
+- Adding a method, including the rebuild that Gradle will not do for you
+- The rules: no panics across JNI, no blocking, no global state
+- Triage, and what iOS would still need
+
+**Read this for**: Calling the core from Kotlin, adding a method, or decoding
+`the native core has no method "…"`.
+
+---
+
 ### 🤖 [Android host](./android-host.md)
 
 The Android app shell — WebView, asset loader, capability injection, and the
