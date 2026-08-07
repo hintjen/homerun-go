@@ -510,11 +510,9 @@ class BridgeRouter(
             // rather than in the backend so the access token never reaches
             // the server process's environment. Null means the lookup failed
             // — vanilla latest, the same fallback the desktop takes.
-            val settings = HomerunApi.serverSettings(
-                apiUrl(),
-                serverId,
-                obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty(),
-            )
+            val token = obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val api = apiUrl()
+            val settings = HomerunApi.serverSettings(api, serverId, token)
 
             try {
                 if (settings?.gameType == "bedrock") {
@@ -529,6 +527,16 @@ class BridgeRouter(
                         memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
                         version = settings?.version,
                         loader = settings?.loader ?: "vanilla",
+                        // A closure, so the token stays here. The backend
+                        // gets the ability to resolve a tunnel, never the
+                        // credential that resolves it — `ServerConfig.extra`
+                        // is forwarded into the server process's environment
+                        // and this must never be able to end up there.
+                        resolveTunnel = {
+                            HomerunApi.awaitTunnel(
+                                api, serverId, token, stale = settings?.tunnelBefore,
+                            )
+                        },
                     ),
                 )
                 buildJsonObject { put("success", true) }

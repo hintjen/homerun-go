@@ -24,7 +24,8 @@ and rebuilt while a server keeps running, so a backend hanging off
 | `JavaServerBackend.kt` | The real server jar as a child process. **Preferred.** |
 | `JavaRuntime.kt` | Finds and unpacks the bundled JVM. |
 | `ServerJar.kt` | Resolves and downloads the server jar. |
-| `HomerunApi.kt` | Reads a server's version and loader from the backend. |
+| `WireProxy.kt` | The gateway tunnel that makes the server reachable. |
+| `HomerunApi.kt` | Reads a server's version, loader and tunnel from the backend. |
 | `jni_bridge.rs` | Makes the Rust C ABI callable from the JVM. Nothing else. |
 | `NativeServer.kt` | The raw JNI surface plus the thread the engine needs. |
 | `PumpkinBackend.kt` | The Rust engine, in-process. Fallback. |
@@ -208,6 +209,83 @@ lookup lives in the router rather than the backend so the access token never
 reaches the server process's environment. If it fails, vanilla-latest, which
 is the desktop's fallback too.
 
+### Reaching the server from outside — `WireProxy`
+
+A phone on cellular sits behind carrier-grade NAT. There is no router to
+forward a port on and no UPnP to negotiate with, so unlike desktop **there is
+no fallback**: without the tunnel a server runs perfectly and nobody in the
+world can join it.
+
+`wireproxy` dials the Homerun gateway as a WireGuard peer. Players connect to
+the gateway, the gateway DNATs to a fixed port on the WireGuard interface,
+wireproxy accepts there and forwards to loopback. Same gateway, same config
+format and the same binary lineage as desktop — `wireproxyConfig.ts` is the
+spec, and a divergence is a bug by definition.
+
+**No VPN permission is involved**, and that is the most important property of
+the design. wireproxy terminates WireGuard in its own userspace netstack: the
+`Address` in the config is virtual, inside that process, never registered with
+Android. So no TUN device, no `VpnService`, no permission prompt, and none of
+the Play policy surface a real VPN carries.
+
+Built by `npm run wireproxy:android` from the private fork
+`hintjen/wireproxy-fork`, checked out beside this repo or pointed at with
+`HOMERUN_WIREPROXY_SRC`. The fork is required, not a preference: it adds
+`[UDPServerTunnel]`, which upstream lacks and which Bedrock, crossplay and
+voice chat all need.
+
+Three things about that build are easy to get wrong, so
+`scripts/build-wireproxy.js` asserts all three by parsing the ELF rather than
+trusting the toolchain:
+
+- **`GOOS=android`, never `GOOS=linux`.** A `linux/arm64` PIE binary builds
+  without complaint and then will not start, because Go stamps `PT_INTERP` as
+  `/lib/ld-linux-aarch64.so.1` — a glibc path bionic does not have. Same class
+  of failure as the JNA problem above.
+- **PIE is mandatory** since API 21. `GOOS=android` gives it by default.
+- **arm64 needs no NDK; x86_64 does** — Go reports `android/amd64 requires
+  external (cgo) linking`. Emulator-only, so the ship path is unaffected.
+
+It ships as `libwireproxy.so` in `jniLibs` and is exec'd from
+`nativeLibraryDir`, exactly like the JVM launcher and for the same reason. It
+is a Go executable, not a library.
+
+#### Where the credentials come from, and where they must not go
+
+The gateway provisions the WireGuard peer asynchronously once a server is
+marked running, so at launch they usually do not exist yet. `HomerunApi.awaitTunnel`
+polls `/api/server/<id>/` for `config.links[0].native_config` — 3 s apart, 20
+attempts, the desktop's numbers. It runs **in parallel** with the JVM booting,
+because a minute spent waiting is a minute the world could have been
+generating.
+
+The legacy provisioner mints fresh keys per session, so a config identical to
+the pre-launch snapshot is the *dead previous set* and using it fails the
+handshake. Gateway v2 reuses credentials deliberately, so that staleness check
+is skipped for `provisioner == "gateway2"` links — without the exception a v2
+link would poll until timeout on every start.
+
+`ServerConfig.resolveTunnel` is a **function, not a value**. Partly so the slow
+poll overlaps the boot, but mainly because it closes over the user's access
+token: `ServerConfig.extra` is forwarded into the server process's
+environment, and a credential must never be able to reach it.
+
+#### `running` means reachable
+
+`start()` waits for `Done (…)!`, then brings up the tunnel, and only then
+reports `running`. The server accepting connections on loopback is not the
+same as players being able to reach it, and announcing `running` first is how
+a server looks healthy to everyone except the people trying to join. The
+desktop learned this the hard way — its comment about "a silently-rejected
+start masquerading as running" is the same bug.
+
+A tunnel that cannot be established is loud but **not** fatal: the world is up
+and playable on the local network, and killing it would destroy something that
+works to punish something that does not. A tunnel that establishes and then
+dies is different — ten consecutive `Handshake did not complete after 5
+seconds` lines (~50 s) means the gateway's keys were regenerated and these
+credentials are permanently dead, so the server is stopped, as on desktop.
+
 ### The EULA is accepted for the user
 
 `JavaServerBackend.start` writes `eula=true` on **every** start, which is
@@ -353,6 +431,20 @@ expected after an upstream build: a new build is a new file.
 **"needs Java N, and this version of Homerun ships Java M".** The bundled
 runtime is older than the Minecraft version asks for. Restage with
 `npm run jre:android -- --java <N>` and rebuild.
+
+**"No gateway tunnel for this server."** Expected with no token, or when the
+gateway never provisioned one within 60 s. The server is up and joinable on
+the local network; it is not reachable from the internet. Check the API
+returned `config.links[0].native_config`.
+
+**The server is running but nobody can join, and the console says nothing.**
+Look for `HomerunTunnel` in logcat. wireproxy retries a failed handshake
+forever, so a dead credential set looks like a slow network for the first ~50
+seconds by design.
+
+**"could not be started" from the tunnel.** `libwireproxy.so` is missing for
+this ABI. Run `npm run wireproxy:android` (arm64) or
+`npm run wireproxy:android-x86_64` (emulator).
 
 **`UnsatisfiedLinkError` on launch.** The `.so` is missing for this ABI. Run
 `npm run rust:android` (arm64) or `npm run rust:android-x86_64` (emulator).

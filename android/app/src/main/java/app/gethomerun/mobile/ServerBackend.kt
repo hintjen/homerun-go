@@ -109,6 +109,17 @@ data class ServerConfig(
     /** `vanilla`, `paper`, … Which server jar [ServerJar] fetches. */
     val loader: String = "vanilla",
     /**
+     * Resolves the gateway tunnel, or null when this host cannot tunnel.
+     *
+     * A function rather than a value for two reasons. It is slow — the
+     * gateway provisions the peer asynchronously and the poll runs up to a
+     * minute — so the backend runs it *alongside* the server booting instead
+     * of before it. And it closes over the user's access token, which stays
+     * in the bridge layer and never becomes backend state that could reach
+     * the server process's environment.
+     */
+    val resolveTunnel: (suspend () -> WireProxy.Link?)? = null,
+    /**
      * Forwarded into the server process's environment, so it must never carry
      * anything secret — no tokens, no credentials.
      */

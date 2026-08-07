@@ -4,8 +4,10 @@ import android.app.ActivityManager
 import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -41,6 +43,19 @@ class JavaServerBackend(
 
     private var process: Process? = null
     private var pumpJob: Job? = null
+
+    private val wireProxy = WireProxy(context, scope)
+
+    /** The tunnel lookup, resolved alongside the JVM booting rather than before it. */
+    private var tunnelJob: Deferred<WireProxy.Link?>? = null
+
+    /**
+     * The console has printed `Done (…)!`. Distinct from [ServerState.RUNNING],
+     * which is only reported once the tunnel is up too.
+     */
+    @Volatile
+    private var consoleReady = false
+
     private var currentServerId: String? = null
     private var startedAt: Instant? = null
     private var currentPort: Int? = null
@@ -108,6 +123,14 @@ class JavaServerBackend(
         // progress lines are the only thing the UI can show meanwhile.
         transition(serverId, ServerState.STARTING)
         reset()
+
+        // Started now and awaited after the JVM is up. The gateway provisions
+        // the peer asynchronously and the poll runs up to a minute, so doing
+        // it here overlaps that with the download and the world generating,
+        // exactly as the desktop provisions in parallel with Java booting.
+        tunnelJob = config.resolveTunnel?.let { resolve ->
+            scope.async { runCatching { resolve() }.getOrNull() }
+        }
 
         // Nothing below has started a process, so a failure here is a launch
         // that did not happen — reported as stopped, with the reason on the
@@ -235,13 +258,14 @@ class JavaServerBackend(
         val ready = withTimeoutOrNull(START_TIMEOUT_MS) {
             while (true) {
                 if (!started.isAlive) return@withTimeoutOrNull false
-                if (lastState == ServerState.RUNNING) return@withTimeoutOrNull true
+                if (consoleReady) return@withTimeoutOrNull true
                 delay(POLL_MS)
             }
             @Suppress("UNREACHABLE_CODE") false
         }
 
         if (ready != true) {
+            tunnelJob?.cancel()
             stopProcess(started)
             transition(serverId, ServerState.CRASHED)
             throw ServerBackendException.Engine(
@@ -249,7 +273,57 @@ class JavaServerBackend(
                 else "The server stopped unexpectedly while starting."
             )
         }
+
+        openTunnel(serverId, dir, port)
+
+        // Only now. The server accepting connections on loopback is not the
+        // same as players being able to reach it, and reporting `running`
+        // before the tunnel is up is how a server looks healthy to everyone
+        // except the people trying to join. The desktop learned this too.
         startedAt = Instant.now()
+        transition(serverId, ServerState.RUNNING)
+    }
+
+    /**
+     * Bring up the gateway tunnel, if this server has one.
+     *
+     * A failure here is loud but not fatal: the world is up and playable on
+     * the local network, so killing it would destroy something that works in
+     * order to punish something that does not.
+     */
+    private suspend fun openTunnel(serverId: String, dir: File, port: Int) {
+        val link = tunnelJob?.let { job ->
+            note(serverId, "[Homerun] Connecting to the Homerun gateway...")
+            runCatching { job.await() }.getOrNull()
+        }
+        tunnelJob = null
+
+        if (link == null) {
+            note(
+                serverId,
+                "[Homerun] No gateway tunnel for this server — it is reachable on this " +
+                    "network, but not from the internet.",
+            )
+            return
+        }
+
+        runCatching {
+            wireProxy.start(
+                serverId = serverId,
+                dir = dir,
+                link = link,
+                minecraftPort = port,
+                onLog = { line -> note(serverId, line) },
+                // The gateway regenerating its keys is the usual cause, and
+                // the credentials we hold are then permanently dead. The
+                // desktop stops the server; so does this, rather than leave
+                // something running that nobody can join.
+                onHandshakeFailed = { scope.launch { runCatching { stop(serverId) } } },
+            )
+            note(serverId, "[Homerun] Connected to the Homerun gateway.")
+        }.onFailure { err ->
+            note(serverId, "[Homerun] ${err.message ?: "The tunnel could not be started."}")
+        }
     }
 
     override suspend fun stop(serverId: String) {
@@ -258,7 +332,12 @@ class JavaServerBackend(
             throw ServerBackendException.NotRunning(serverId)
         }
         transition(serverId, ServerState.STOPPING)
-        withContext(Dispatchers.IO) { stopProcess(running) }
+        withContext(Dispatchers.IO) {
+            // Before the JVM, so the gateway's peer slot is free by the time
+            // the next start asks for one.
+            wireProxy.stop()
+            stopProcess(running)
+        }
     }
 
     /**
@@ -308,6 +387,13 @@ class JavaServerBackend(
             val code = runCatching { running.waitFor() }.getOrDefault(-1)
             val intentional = lastState == ServerState.STOPPING
             Log.i(TAG, "server exited (code $code, intentional=$intentional)")
+            // However the JVM went — stopped, crashed, killed — the tunnel
+            // outliving it would hold the gateway's peer slot against the
+            // next start. The desktop kills it on java exit for the same
+            // reason.
+            tunnelJob?.cancel()
+            tunnelJob = null
+            wireProxy.stop()
             transition(serverId, if (intentional || code == 0) ServerState.STOPPED else ServerState.CRASHED)
             process = null
             currentServerId = null
@@ -322,9 +408,9 @@ class JavaServerBackend(
      * which is why the roster is best-effort and never blocks anything.
      */
     private fun interpret(serverId: String, line: String) {
-        if (lastState != ServerState.RUNNING && DONE.containsMatchIn(line)) {
-            transition(serverId, ServerState.RUNNING)
-        }
+        // Records that the JVM is up; `running` is announced by start(),
+        // after the tunnel, so the two are not the same thing.
+        if (DONE.containsMatchIn(line)) consoleReady = true
         JOINED.find(line)?.let {
             if (roster.add(it.groupValues[1])) onPlayersChanged?.invoke(serverId)
         }
@@ -364,6 +450,7 @@ class JavaServerBackend(
 
     @Synchronized
     private fun reset() {
+        consoleReady = false
         lines.clear()
         firstLineIndex = 0
         roster.clear()
