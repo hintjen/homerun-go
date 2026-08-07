@@ -473,6 +473,7 @@ class JavaServerBackend(
             val code = runCatching { running.waitFor() }.getOrDefault(-1)
             val intentional = lastState == ServerState.STOPPING
             Log.i(TAG, "server exited (code $code, intentional=$intentional)")
+            val outcome = runCatching { Core.exitState(intentional, code) }.getOrDefault("stopped")
             // However the JVM went — stopped, crashed, killed — the tunnel
             // outliving it would hold the gateway's peer slot against the
             // next start. The desktop kills it on java exit for the same
@@ -480,7 +481,10 @@ class JavaServerBackend(
             tunnelJob?.cancel()
             tunnelJob = null
             wireProxy.stop()
-            transition(serverId, if (intentional || code == 0) ServerState.STOPPED else ServerState.CRASHED)
+            transition(
+                serverId,
+                if (outcome == "crashed") ServerState.CRASHED else ServerState.STOPPED,
+            )
             process = null
             currentServerId = null
             startedAt = null
@@ -494,15 +498,20 @@ class JavaServerBackend(
      * which is why the roster is best-effort and never blocks anything.
      */
     private fun interpret(serverId: String, line: String) {
-        // Records that the JVM is up; `running` is announced by start(),
-        // after the tunnel, so the two are not the same thing.
-        if (DONE.containsMatchIn(line)) consoleReady = true
-        JOINED.find(line)?.let {
-            if (roster.add(it.groupValues[1])) onPlayersChanged?.invoke(serverId)
-        }
-        LEFT.find(line)?.let {
-            if (roster.remove(it.groupValues[1])) onPlayersChanged?.invoke(serverId)
-        }
+        // What a console line means is decided in `homerun-core::console`,
+        // which knows the things a regex here kept having to relearn — that a
+        // loader may add its own prefix, and that anyone can type "Notch
+        // joined the game" into chat.
+        val meaning = runCatching { Core.classify(line) }.getOrNull() ?: return
+
+        // Records that the JVM is up; `running` is announced by start(), after
+        // the tunnel, so the two are not the same thing.
+        if (meaning.ready) consoleReady = true
+        meaning.joined?.let { if (roster.add(it)) onPlayersChanged?.invoke(serverId) }
+        meaning.left?.let { if (roster.remove(it)) onPlayersChanged?.invoke(serverId) }
+
+        // Still local: the core has no opinion about server.properties, which
+        // is where this actually belongs once settings move across.
         MAX_PLAYERS.find(line)?.let { maxPlayers = it.groupValues[1].toIntOrNull() }
     }
 
@@ -632,9 +641,6 @@ class JavaServerBackend(
         const val PROVISIONING = "provisioning"
         const val HANDSHAKE = "handshake"
 
-        val DONE = Regex("""Done \([^)]*\)! For help""")
-        val JOINED = Regex("""]: (\w+) joined the game""")
-        val LEFT = Regex("""]: (\w+) left the game""")
         val MAX_PLAYERS = Regex("""max(?:-players|Players)[=: ]+(\d+)""", RegexOption.IGNORE_CASE)
     }
 }

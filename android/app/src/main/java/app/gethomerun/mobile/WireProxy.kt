@@ -7,6 +7,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.io.File
 
 /**
@@ -58,7 +63,31 @@ class WireProxy(
         val endpoint: String,
         val address: String? = null,
         val allowedIps: String? = null,
-    )
+    ) {
+        /** The core's field names, which are the API's. */
+        fun toJson(): JsonObject = buildJsonObject {
+            put("client_privkey", clientPrivateKey)
+            put("gateway_pubkey", gatewayPublicKey)
+            put("link_address", endpoint)
+            address?.let { put("address", it) }
+            allowedIps?.let { put("allowed_ips", it) }
+        }
+
+        companion object {
+            /** Rebuild from the core's shape, as `link.fromServerBody` returns it. */
+            fun fromJson(json: JsonObject): Link? {
+                fun field(name: String) =
+                    json[name]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                return Link(
+                    clientPrivateKey = field("client_privkey") ?: return null,
+                    gatewayPublicKey = field("gateway_pubkey") ?: return null,
+                    endpoint = field("link_address") ?: return null,
+                    address = field("address"),
+                    allowedIps = field("allowed_ips"),
+                )
+            }
+        }
+    }
 
     private var process: Process? = null
     private var pumpJob: Job? = null
@@ -70,43 +99,21 @@ class WireProxy(
         File(context.applicationInfo.nativeLibraryDir, BINARY).takeIf { it.canExecute() }
 
     /**
-     * Render the config the desktop would render.
+     * Render the config, in `homerun-core`.
      *
-     * The gateway-facing `ListenPort`s are **fixed**. The gateway always DNATs
-     * player traffic to 25565 (and voice to 24454) on the WireGuard interface,
-     * whatever local port we actually bound — only `Target` follows that.
-     * Changing these numbers silently makes the server unreachable.
+     * This used to be a list of strings built here, mirroring the desktop's
+     * generator by hand. It is one place now because the gateway is one thing:
+     * every `ListenPort` in it is fixed by what the gateway DNATs to, and a
+     * host that "corrected" one to match its local port would produce a config
+     * that loads, connects, and is unreachable. `homerun-core::wireproxy` has
+     * that written down and tested byte-for-byte.
      */
-    fun render(link: Link, minecraftPort: Int, voiceChatPort: Int? = null): String {
-        val lines = mutableListOf(
-            "[Interface]",
-            "PrivateKey = ${link.clientPrivateKey}",
-            "Address = ${link.address ?: "10.0.0.2/24"}",
-            "MTU = 1280",
-            "",
-            "[Peer]",
-            "PublicKey = ${link.gatewayPublicKey}",
-            "Endpoint = ${link.endpoint}",
-            "AllowedIPs = ${link.allowedIps ?: "10.0.0.1/32"}",
-            "PersistentKeepalive = 30",
-            "",
-            "[TCPServerTunnel]",
-            "ListenPort = 25565",
-            "Target = 127.0.0.1:$minecraftPort",
+    fun render(link: Link, minecraftPort: Int, voiceChatPort: Int? = null): String =
+        Core.renderWireproxy(
+            link = link.toJson(),
+            port = minecraftPort,
+            voiceChatPort = voiceChatPort,
         )
-        // Bedrock and crossplay need [UDPServerTunnel] too — that section is
-        // why we build the fork rather than upstream wireproxy. Neither is
-        // reachable on Android yet, so voice chat is the only UDP case here.
-        if (voiceChatPort != null) {
-            lines += listOf(
-                "",
-                "[UDPServerTunnel]",
-                "ListenPort = 24454",
-                "Target = 127.0.0.1:$voiceChatPort",
-            )
-        }
-        return lines.joinToString("\n") + "\n"
-    }
 
     /**
      * Write the config and spawn the tunnel.
@@ -176,8 +183,10 @@ class WireProxy(
     ) {
         pumpJob?.cancel()
         pumpJob = scope.launch(Dispatchers.IO) {
-            var failures = 0
-            var signalled = false
+            // Opaque state owned here and handed back each line. The
+            // threshold, and the fact a success resets it, live in
+            // `homerun-core::state` so they cannot drift from the desktop's.
+            var watch: JsonObject? = null
             // Everything here must be caught. This coroutine runs on a scope
             // whose SupervisorJob stops siblings being cancelled — it does NOT
             // stop an unhandled exception reaching the default handler, which
@@ -191,26 +200,17 @@ class WireProxy(
                         if (line.isEmpty()) continue
                         Log.d(TAG, line)
 
-                        when {
-                            line.contains(HANDSHAKE_TIMEOUT) -> {
-                                failures++
-                                if (failures >= HANDSHAKE_FAIL_THRESHOLD && !signalled) {
-                                    signalled = true
-                                    Log.w(TAG, "$serverId: handshake failed $failures times")
-                                    onLog(
-                                        "[Homerun] The connection to the Homerun gateway could " +
-                                            "not be established, so players cannot reach this server."
-                                    )
-                                    runCatching { onHandshakeFailed() }
-                                }
-                            }
-                            line.contains(HANDSHAKE_OK) -> {
-                                if (failures > 0) Log.i(TAG, "$serverId: handshake recovered")
-                                if (failures >= HANDSHAKE_FAIL_THRESHOLD) {
-                                    onLog("[Homerun] Connection to the Homerun gateway restored.")
-                                }
-                                failures = 0
-                            }
+                        val verdict = Core.observeHandshake(watch, line)
+                        watch = verdict.watch
+                        if (verdict.giveUp) {
+                            Log.w(TAG, "$serverId: the gateway stopped answering")
+                            onLog(
+                                "[Homerun] The connection to the Homerun gateway could " +
+                                    "not be established, so players cannot reach this server."
+                            )
+                            runCatching { onHandshakeFailed() }
+                        } else if (verdict.recovered) {
+                            onLog("[Homerun] Connection to the Homerun gateway restored.")
                         }
                     }
                 }
@@ -252,9 +252,6 @@ class WireProxy(
          */
         const val BINARY = "libwireproxy.so"
 
-        const val HANDSHAKE_TIMEOUT = "Handshake did not complete after 5 seconds"
-        const val HANDSHAKE_OK = "Received handshake response"
-        const val HANDSHAKE_FAIL_THRESHOLD = 10
         const val STOP_SECONDS = 5L
     }
 }

@@ -8,13 +8,16 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -88,7 +91,43 @@ object ServerJar {
         /** From Mojang's version metadata — the class-file level the jar needs. */
         val requiredJava: Int,
         val sizeBytes: Long?,
-    )
+    ) {
+        /** The core's field names. Its JSON is the contract between the two. */
+        fun toJson(): JsonObject = buildJsonObject {
+            put("url", url)
+            put("loader", loader)
+            put("version", version)
+            put("required_java", requiredJava)
+            sizeBytes?.let { put("size_bytes", it) }
+            checksum?.let {
+                put("checksum", buildJsonObject {
+                    put("algorithm", if (it.algorithm == "SHA-256") "Sha256" else "Sha1")
+                    put("hex", it.hex)
+                })
+            }
+        }
+
+        companion object {
+            fun fromCore(json: JsonObject): Artifact = Artifact(
+                url = json["url"]!!.jsonPrimitive.content,
+                loader = json["loader"]!!.jsonPrimitive.content,
+                version = json["version"]!!.jsonPrimitive.content,
+                checksum = json["checksum"]?.takeIf { it !is JsonNull }?.jsonObject?.let {
+                    Checksum(
+                        // Rust names the variant; MessageDigest wants the JCA
+                        // spelling, and getInstance throws on anything else.
+                        algorithm = when (it["algorithm"]?.jsonPrimitive?.contentOrNull) {
+                            "Sha256" -> "SHA-256"
+                            else -> "SHA-1"
+                        },
+                        hex = it["hex"]!!.jsonPrimitive.content,
+                    )
+                },
+                requiredJava = json["required_java"]?.jsonPrimitive?.intOrNull ?: 21,
+                sizeBytes = json["size_bytes"]?.jsonPrimitive?.longOrNull,
+            )
+        }
+    }
 
     /** What is on disk right now. */
     @Serializable
@@ -138,13 +177,10 @@ object ServerJar {
             )
         }
 
-        if (bundledJava != null && artifact.requiredJava > bundledJava) {
-            throw ServerBackendException.Engine(
-                "Minecraft ${artifact.version} needs Java ${artifact.requiredJava}, and this " +
-                    "version of Homerun ships Java $bundledJava. Update the app, or choose an " +
-                    "older Minecraft version."
-            )
-        }
+        // The core owns the comparison and the wording, so the desktop and
+        // this app refuse the same jars for the same stated reason.
+        runCatching { Core.checkJava(artifact.toJson(), bundledJava) }
+            .onFailure { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
 
         if (jar.isFile && onDisk != null && onDisk.satisfies(artifact)) {
             Log.i(TAG, "${artifact.loader} ${artifact.version} already downloaded")
@@ -189,94 +225,43 @@ object ServerJar {
     // -----------------------------------------------------------------------
 
     /**
+     * Which jar to run, decided in `homerun-core`.
+     *
+     * This host still makes both requests — the platform owns transport — but
+     * what the answers mean is one implementation now. That matters most for
+     * Paper: the v3 API returns builds newest-first and carries every
+     * experimental build ever cut, so choosing by position picks an alpha.
+     * The desktop still does exactly that (`mod-installer.ts` takes the last
+     * element); `homerun_core::jar::paper` picks the newest stable and has the
+     * regression test naming the discrepancy.
+     *
      * Mojang's manifest is consulted for every loader, not just vanilla: it is
-     * what turns "latest" into a concrete version and it is the only source
-     * for the Java level the jar needs.
+     * what turns "latest" into a concrete version, and the only source for the
+     * Java level the jar needs.
      */
     private fun resolve(version: String?, loader: String): Artifact {
-        val vanilla = resolveVanilla(version)
-        return when (loader.lowercase().ifBlank { "vanilla" }) {
-            "vanilla" -> vanilla
-            "paper" -> resolvePaper(vanilla)
-            else -> throw ServerBackendException.Engine(
-                "Homerun for Android cannot host $loader servers yet — those install by running " +
-                    "an installer at setup time. Vanilla and Paper both work, and Paper runs " +
-                    "Bukkit and Spigot plugins."
+        // Throws by name for anything needing an installer, rather than
+        // silently starting a Forge world as vanilla.
+        val kind = runCatching { Core.parseLoader(loader) }
+            .getOrElse { throw ServerBackendException.Engine(it.message ?: "Unsupported loader.") }
+
+        val manifest = fetchJson(VERSION_MANIFEST)
+        val resolved = Core.resolveVersion(manifest, version)
+        val metadata = fetchJson(Core.metadataUrl(manifest, resolved))
+        val vanilla = Core.vanillaArtifact(metadata, resolved)
+
+        val artifact = when (kind) {
+            "paper" -> Core.paperArtifact(
+                builds = fetchJson(paperBuildsUrl(resolved)),
+                version = resolved,
+                requiredJava = vanilla["required_java"]?.jsonPrimitive?.intOrNull ?: 21,
             )
+            else -> vanilla
         }
+        return Artifact.fromCore(artifact)
     }
 
-    private fun resolveVanilla(version: String?): Artifact {
-        val manifest = fetchJson(VERSION_MANIFEST).jsonObject
-        val target = version?.takeIf { it.isNotBlank() && !it.equals("LATEST", true) }
-            ?: manifest["latest"]?.jsonObject?.get("release")?.jsonPrimitive?.contentOrNull
-            ?: throw IOException("the version manifest names no latest release")
-
-        val entry = manifest["versions"]?.jsonArray
-            ?.firstOrNull { it.jsonObject["id"]?.jsonPrimitive?.contentOrNull == target }
-            ?.jsonObject
-            ?: throw IOException("Minecraft $target is not in the version manifest")
-
-        val url = entry["url"]?.jsonPrimitive?.contentOrNull
-            ?: throw IOException("Minecraft $target has no metadata URL")
-        val meta = fetchJson(url).jsonObject
-
-        val server = meta["downloads"]?.jsonObject?.get("server")?.jsonObject
-            ?: throw IOException("Minecraft $target publishes no server download")
-
-        return Artifact(
-            url = server["url"]?.jsonPrimitive?.contentOrNull
-                ?: throw IOException("Minecraft $target has no server jar URL"),
-            loader = "vanilla",
-            version = target,
-            checksum = server["sha1"]?.jsonPrimitive?.contentOrNull?.let { Checksum("SHA-1", it) },
-            // Everything before 1.17 predates the field and runs on anything
-            // modern; 21 is the desktop's floor for the same reason.
-            requiredJava = meta["javaVersion"]?.jsonObject?.get("majorVersion")
-                ?.jsonPrimitive?.intOrNull ?: 21,
-            sizeBytes = server["size"]?.jsonPrimitive?.longOrNull,
-        )
-    }
-
-    /**
-     * Paper for the same Minecraft version.
-     *
-     * **Builds come back newest-first**, and the array also carries every
-     * experimental build ever cut for the version — so this picks the highest
-     * *stable* id rather than trusting position. (The desktop takes the last
-     * element, which on this API is build 1, an alpha.)
-     */
-    private fun resolvePaper(vanilla: Artifact): Artifact {
-        val builds = fetchJson("$PAPER_BUILDS/${vanilla.version}/builds").jsonArray
-            .map { it.jsonObject }
-        if (builds.isEmpty()) {
-            throw ServerBackendException.Engine(
-                "Paper has no build for Minecraft ${vanilla.version} yet."
-            )
-        }
-
-        fun id(build: JsonObject) = build["id"]?.jsonPrimitive?.intOrNull ?: -1
-
-        val stable = builds.filter {
-            it["channel"]?.jsonPrimitive?.contentOrNull.equals("STABLE", ignoreCase = true)
-        }
-        val build = (stable.ifEmpty { builds }).maxByOrNull(::id)
-            ?: throw IOException("no usable Paper build for ${vanilla.version}")
-
-        val download = build["downloads"]?.jsonObject?.get("server:default")?.jsonObject
-            ?: throw IOException("Paper build ${id(build)} publishes no server download")
-
-        return Artifact(
-            url = download["url"]?.jsonPrimitive?.contentOrNull
-                ?: throw IOException("Paper build ${id(build)} has no download URL"),
-            loader = "paper",
-            version = vanilla.version,
-            checksum = download["checksums"]?.jsonObject?.get("sha256")
-                ?.jsonPrimitive?.contentOrNull?.let { Checksum("SHA-256", it) },
-            requiredJava = vanilla.requiredJava,
-            sizeBytes = download["size"]?.jsonPrimitive?.longOrNull,
-        )
-    }
+    private fun paperBuildsUrl(version: String) = "$PAPER_BUILDS/$version/builds"
 
     // -----------------------------------------------------------------------
     // Transfer
@@ -404,17 +389,19 @@ object ServerJar {
     // On-disk record
     // -----------------------------------------------------------------------
 
+    /** The core's shape for what is on disk. */
+    private fun JarMeta.toJson(): JsonObject = buildJsonObject {
+        put("loader", loader)
+        put("version", version)
+        checksum?.let { put("checksum", it) }
+    }
+
     private fun JarMeta.satisfies(artifact: Artifact): Boolean =
-        loader == artifact.loader &&
-            version == artifact.version &&
-            // Null on both sides means neither publisher gave us a digest, so
-            // loader and version are all there is to compare.
-            checksum == artifact.checksum?.hex
+        Core.jarSatisfies(toJson(), artifact.toJson())
 
     /** Loose enough for the offline fallback: any build of the right thing. */
     private fun JarMeta.couldSatisfy(version: String?, loader: String): Boolean =
-        this.loader == loader.lowercase().ifBlank { "vanilla" } &&
-            (version.isNullOrBlank() || version.equals("LATEST", true) || this.version == version)
+        runCatching { Core.jarCouldSatisfy(toJson(), version, loader) }.getOrDefault(false)
 
     private fun readMeta(dir: File): JarMeta? = runCatching {
         json.decodeFromString<JarMeta>(File(dir, META_NAME).readText())

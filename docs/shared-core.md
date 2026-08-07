@@ -90,21 +90,45 @@ out the desktop's algorithm and asserts we disagree with it. If PaperMC ever
 flips the ordering back, that test starts failing, which is exactly when
 someone should look at it again.
 
-## Not done yet
+## Who uses it
 
-The crate is built and tested; **nothing calls it in anger**. Android still has
-its own Kotlin copies of all of this, and the desktop its TypeScript ones.
-Adopting it is the next step, and the order matters:
+**Android does**, through `Core.kt` and `core_bridge.rs`. One native entry
+point, JSON in and out, replying `{ok, value}` or `{ok:false, error}` — a dozen
+mangled symbols would save microseconds and cost a dozen places for two
+languages to disagree about argument order.
 
-1. **Android first**, because it is unreleased and the Kotlin was written from
-   the same reference last week — replace `ServerJar`, `WireProxy.render`, the
-   handshake watch and the console buffer with calls across the JNI bridge.
-2. **Desktop last, and piecemeal.** It ships, it works, and rewriting a working
-   supervisor is a well-known way to break a product. Start with the pure
-   pieces (jar resolution, wireproxy config) behind the existing TypeScript
-   interfaces via napi-rs. Leave `supervisor.js` owning processes.
-3. **Process supervision stays per-platform.** It cannot be shared with iOS,
-   and pretending otherwise is where this design would go wrong.
+These moved out of Kotlin entirely:
 
-Adding Rust to the desktop build is real CI work and a new way for a release to
-fail. Worth doing deliberately, not as a side effect.
+| Was | Now |
+|---|---|
+| `ServerJar.resolveVanilla` / `resolvePaper` | `jar::resolve_version`, `jar::vanilla`, `jar::paper` |
+| `ServerJar`'s Java-version check and on-disk comparison | `jar::check_java`, `OnDisk::satisfies` |
+| `WireProxy.render`'s string list | `wireproxy::Config::render` |
+| `WireProxy`'s handshake counter and threshold | `state::HandshakeWatch` |
+| `JavaServerBackend`'s `DONE`/`JOINED`/`LEFT` regexes | `console::is_ready`, `joined`, `left` |
+| the exit-code-to-state rule | `state::exit_state` |
+
+Verified end to end on an emulator against the dev backend after the swap: jar
+resolved and downloaded, tunnel config rendered, handshake completed, `Done`
+detected, and a Minecraft ping from the public internet answered.
+
+Panics cannot cross the JNI boundary — one unwinding through it aborts the VM,
+which on a phone is the whole app — so every call runs inside `catch_unwind`
+and a panic becomes an ordinary error string.
+
+## Still to do
+
+**The desktop has not adopted anything**, so its TypeScript copies are still
+the ones that ship, Paper bug included. That is deliberate: it works, and
+rewriting a working supervisor is a well-known way to break a product. Start
+with the pure pieces behind the existing TypeScript interfaces via napi-rs, and
+leave `supervisor.js` owning processes. Adding Rust to the desktop build is
+real CI work and a new way for a release to fail — worth doing deliberately,
+not as a side effect.
+
+**The console ring buffer is still Kotlin's.** `console::Console` exists and is
+tested, but the cursor is read on a hot path and moving it means either a
+handle to free or a JSON round trip per line. Worth doing, not urgent.
+
+**Process supervision stays per-platform** and should. It cannot be shared with
+iOS, and pretending otherwise is where this design would go wrong.

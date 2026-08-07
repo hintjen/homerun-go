@@ -39,6 +39,12 @@ pub mod state;
 #[cfg(target_os = "android")]
 pub mod jni_bridge;
 
+// `homerun-core`'s shared decisions, reachable from Kotlin. Separate from
+// `jni_bridge` because it wraps something different: that adapts this crate's
+// engine, this adapts a crate that knows nothing about engines.
+#[cfg(target_os = "android")]
+pub mod core_bridge;
+
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;

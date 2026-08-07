@@ -88,9 +88,15 @@ pub const HANDSHAKE_OK_LINE: &str = "Received handshake response";
 ///
 /// Kept here rather than in each host so the threshold, and the fact that a
 /// success resets it, cannot drift between platforms.
-#[derive(Debug, Default, Clone)]
+///
+/// Serialisable so a host across an FFI boundary can hold it as opaque state
+/// and hand it back each line, rather than owning a pointer it has to
+/// remember to free. There is no allocation to leak this way.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HandshakeWatch {
+    #[serde(default)]
     failures: u32,
+    #[serde(default)]
     signalled: bool,
 }
 
