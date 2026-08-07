@@ -1,0 +1,59 @@
+# The bridge contract is a gate, not a lint.
+#
+# A channel a host does not answer hangs a UI promise forever, and on device
+# that looks like a frozen screen with no error — so a missing handler must
+# break the build here rather than surface as a bug report. This runs while it
+# still fails: the missing list is the remaining work.
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bridge:
+    name: bridge/v1 coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # No `npm ci`: the only dependency is the UI bundle, which these scripts
+      # do not need. The contract is vendored in shared/conformance/.
+      - name: iOS
+        run: node shared/conformance/check-coverage.js ios ios/HomerunHost/BridgeRouter.swift
+
+      # Guarded until the Android host exists: without the guard the checker
+      # dies on a missing file, which reads as a broken workflow rather than
+      # as work not yet started. Delete the guard with the router's first
+      # commit.
+      - name: Android
+        run: |
+          router=android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
+          if [ -f "$router" ]; then
+            node shared/conformance/check-coverage.js android "$router"
+          else
+            echo "No Android router yet — skipping."
+          fi
+
+  rust:
+    name: FFI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The crate builds and tests host-native on any OS — no device, no
+      # simulator, no Pumpkin. Most of the FFI is covered here.
+      - name: Test
+        run: cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml
+
+      - name: Clippy
+        run: cargo clippy --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml --all-targets -- -D warnings
