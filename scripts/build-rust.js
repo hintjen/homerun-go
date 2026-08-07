@@ -40,7 +40,7 @@ function run(cmd, cmdArgs, opts = {}) {
   return execFileSync(cmd, cmdArgs, {
     stdio: "inherit",
     shell: true,
-    cwd: CRATE,
+    cwd: target.crate || CRATE,
     ...opts,
   });
 }
@@ -129,7 +129,8 @@ if (target.kind === "ndk") {
 
 // --- stage the artifact ---------------------------------------------------
 
-const built = path.join(CRATE, "target", target.triple, profile, target.artifact);
+const crate = target.crate || CRATE;
+const built = path.join(crate, "target", target.triple, profile, target.artifact);
 if (!fs.existsSync(built)) {
   fail(
     `Build reported success but ${target.artifact} is not at:\n  ${built}\n` +
@@ -138,7 +139,7 @@ if (!fs.existsSync(built)) {
 }
 
 fs.mkdirSync(target.outDir, { recursive: true });
-const dest = path.join(target.outDir, target.artifact);
+const dest = path.join(target.outDir, target.outName || target.artifact);
 fs.copyFileSync(built, dest);
 
 const mb = (fs.statSync(dest).size / 1024 / 1024).toFixed(1);

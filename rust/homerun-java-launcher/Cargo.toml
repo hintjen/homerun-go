@@ -1,0 +1,21 @@
+[package]
+name = "homerun-java-launcher"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Starts a downloaded JVM in a child process, which Android's W^X rules otherwise forbid"
+
+# An ordinary executable. It ships as `libjavabin.so` in jniLibs, which is the
+# only way Android will let us exec it — see docs/android-server-backend.md.
+[[bin]]
+name = "homerun-java-launcher"
+path = "src/main.rs"
+
+[dependencies]
+jni = "0.21"
+libloading = "0.8"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

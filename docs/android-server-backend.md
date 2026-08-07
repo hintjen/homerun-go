@@ -51,38 +51,75 @@ moderation (kick/ban/op) lands.
 under memory pressure, not just the server, so an over-generous heap does not
 lose you a server — it loses you the app that was hosting it.
 
-### Packaging the JRE — the part with no wiggle room
+### Getting a JVM onto the device
 
-Two Android rules decide the whole design, and both are absolute:
+The desktop downloads Azul Zulu JREs on demand. Android can do the same, with
+one twist that decides the whole design.
 
-1. **Since API 29 an app may not `exec()` a file from writable storage.**
-   Anything executable must come out of the APK, in `nativeLibraryDir`. A JRE
-   unpacked into `filesDir` and run from there fails with `EACCES` no matter
-   what permissions you set.
-2. **The packager only ships `jniLibs` entries named `lib*.so`.** A file called
-   `java` is silently dropped from the APK — the same class of silent omission
-   as the `_next/` asset filter that cost us an afternoon.
+[Android 10 (API 29)](https://developer.android.com/about/versions/10/behavior-changes-10)
+says:
 
-So the runtime splits in two:
+> Untrusted apps that target Android 10 cannot invoke `execve()` directly on
+> files within the app's home directory.
 
-| Piece | Ships as | Ends up |
-|---|---|---|
-| The `java` launcher | `jniLibs/<abi>/libjavabin.so` | `nativeLibraryDir`, executable |
-| The class library | `assets/jre-<abi>.zip` | unpacked once into `filesDir/jre` |
+So a downloaded `java` binary can never be run. But the same page restricts
+`dlopen()` only for libraries with text relocations — an ordinary
+position-independent `.so` loads from app storage fine. That is the gap every
+Android Java runtime goes through, PojavLauncher included.
 
-`android.packaging.jniLibs.useLegacyPackaging` **must stay `true`**. With it
-false nothing is extracted to `nativeLibraryDir` at all — the linker maps
-libraries straight out of the APK — and there is no real file to exec.
+Hence `rust/homerun-java-launcher`: a ~200-line program that ships **inside the
+APK** as `jniLibs/<abi>/libjavabin.so`, so it lives in `nativeLibraryDir` and
+may legally be exec'd. Once running it `dlopen`s the *downloaded* `libjvm.so`
+and calls `JNI_CreateJavaVM`.
 
-Unpacking refuses entries whose path escapes the destination, because a zip is
-an untrusted archive format even when you built it yourself.
+The result is a real child process per server, which is what keeps Android on
+the same contract as the desktop supervisor: stdout is the console, stdin
+takes `stop`, and a JVM that dies takes nothing else with it. Running the VM
+in-process — the other option — would have meant a crash killing the app and
+`System.exit` from a plugin doing the same.
 
-**No JRE is bundled yet.** Which runtime to ship is a licensing and size
-decision (a headless JRE is roughly 40–100 MB per ABI), not a code one. Until
-one is added, `ServerHost` logs `no JVM bundled` and falls back to Pumpkin,
-and `native-server-start` answers with a plain sentence rather than a stack
-trace. The emulator is `x86_64`, so testing on it needs an `x86_64` build of
-whatever runtime is chosen — most Android JRE distributions lead with arm64.
+```text
+libjavabin.so <libjvm.so> <main-class> [jvm-option ...] -- [program arg ...]
+```
+
+The main class is resolved by the caller from the jar manifest, so the
+launcher needs no zip parsing.
+
+Two packaging rules still bind, and neither bends:
+
+1. **The packager only ships `jniLibs` entries named `lib*.so`.** A file called
+   `homerun-java-launcher` is silently dropped from the APK — the same class of
+   silent omission as the `_next/` asset filter.
+2. **`jniLibs.useLegacyPackaging` must stay `true`.** With it false nothing is
+   extracted to `nativeLibraryDir` at all — the linker maps libraries straight
+   out of the APK — and there is no real file to exec.
+
+#### Verified on the emulator
+
+Against a real downloaded runtime
+([`jre17-x86_64`](https://github.com/PojavLauncherTeam/android-openjdk-build-multiarch/releases),
+39 MB) unpacked into `files/jre`:
+
+| Step | Evidence |
+|---|---|
+| exec from `nativeLibraryDir` | launcher ran and printed its own diagnostics |
+| `dlopen` from app storage | no load error for `files/jre/lib/server/libjvm.so` |
+| `JNI_CreateJavaVM` | a bogus class gave `ClassNotFoundException`, not a VM failure |
+| class loading from the download | `java/lang/String` and `java/util/zip/ZipFile` both resolved |
+
+What is not yet proven is a Minecraft server jar actually booting; that needs
+the jar and an accepted EULA, and is mechanical from here.
+
+#### What to bundle vs download
+
+Only the launcher (0.3 MB) ships in the APK. The runtime is downloaded, which
+means install size stays small and multiple Java versions can coexist —
+important because Minecraft's required Java version moves with the game.
+
+**Availability is the catch.** The multiarch builds top out at **Java 17** for
+`x86_64`; Java 21 — needed for Minecraft 1.20.5+ — is published for `arm64`
+only. So the emulator can host up to roughly 1.20.4, and anything newer needs
+a physical arm64 device or a runtime built for x86_64.
 
 ## The Pumpkin backend
 
