@@ -34,12 +34,9 @@ extension BridgeRouter {
     /// neither leaves the app on a splash screen forever, so every path out of
     /// here emits exactly one of them.
     func startInstallationOrCheck(_ params: Any?) async throws -> Any? {
-        do {
-            try FileManager.default.createDirectory(
-                at: HostStore.serversDirectory, withIntermediateDirectories: true)
-            HostStore.firstRunComplete = true
+        if HostStore.ensureFirstRunSetup() {
             events?.emit("system-check-complete", [])
-        } catch {
+        } else {
             events?.emit(
                 "system-check-failed",
                 ["Homerun could not set up storage on this device. Free up some space and reopen the app."]

@@ -44,6 +44,28 @@ enum HostStore {
         set { defaults.set(newValue, forKey: Key.installed) }
     }
 
+    /// Create the data directory, at launch.
+    ///
+    /// There is nothing to install on a phone — the server ships inside the
+    /// app — so this is the whole of "setup", and it must be done *before* the
+    /// UI asks `is-installed`. Answering false sends the UI down the desktop
+    /// installation path, where it invokes `start-native-installation`; that
+    /// channel belongs to the `installation` capability, which iOS declares
+    /// false, so the invoke is rejected, the awaiting boot code throws, and
+    /// the app sits on its splash screen forever.
+    @discardableResult
+    static func ensureFirstRunSetup() -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: serversDirectory, withIntermediateDirectories: true)
+            firstRunComplete = true
+            return true
+        } catch {
+            NSLog("[host] first-run setup failed: %@", error.localizedDescription)
+            return false
+        }
+    }
+
     // MARK: - Locations
 
     /// Everything the host owns lives under `Documents/`, so a user can reach

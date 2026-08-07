@@ -86,11 +86,18 @@ extension BridgeRouter {
         true
     }
 
-    /// "Installed" has no wizard on mobile — it means first-run setup ran and
-    /// the data directory exists.
+    /// "Installed" has no wizard on mobile — the server ships inside the app,
+    /// so this is just "did the data directory get created".
+    ///
+    /// Setup runs at launch, so this is normally true by the time the UI asks.
+    /// It retries rather than reporting false, because a false answer here
+    /// sends the UI down the desktop installation path and strands it — see
+    /// `HostStore.ensureFirstRunSetup`.
     func isInstalled(_ params: Any?) async throws -> Any? {
-        HostStore.firstRunComplete
-            && FileManager.default.fileExists(atPath: HostStore.serversDirectory.path)
+        if FileManager.default.fileExists(atPath: HostStore.serversDirectory.path) {
+            return true
+        }
+        return HostStore.ensureFirstRunSetup()
     }
 
     /// The UI treats "native" as a locally-hosted server, which is exactly what

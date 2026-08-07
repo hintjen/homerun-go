@@ -240,15 +240,16 @@
     {
       "channel": "import-minecraft-world",
       "kind": "invoke",
-      "tier": "core",
-      "note": "Mobile: document picker / SAF."
+      "tier": "capability",
+      "capability": "fileImport",
+      "note": "Desktop folder picker. Mobile declares fileImport false — SAF import is not being built."
     },
     {
       "channel": "import-minecraft-modpack",
       "kind": "invoke",
       "tier": "capability",
-      "capability": "moddedServers",
-      "note": "Mobile: document picker / SAF. Never on a Pumpkin-only host — it runs no Forge/Fabric mod."
+      "capability": "fileImport",
+      "note": "Retiered from moddedServers, which is true on Android: a JVM host runs mods but is still not being given a file picker. A Pumpkin-only host is excluded by fileImport too."
     },
     {
       "channel": "native-get-latest-bedrock-version",
@@ -886,6 +887,7 @@
         "autoUpdate": true,
         "privilegeElevation": true,
         "moddedServers": true,
+        "fileImport": true,
         "multipleRunningServers": true,
         "backgroundExecution": true,
         "backups": true,
@@ -1058,6 +1060,7 @@
         "autoUpdate": false,
         "privilegeElevation": false,
         "moddedServers": false,
+        "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": false,
         "backups": false,
@@ -1087,7 +1090,6 @@
         "get-storage-info",
         "get-system-language",
         "get-system-memory",
-        "import-minecraft-world",
         "install-type-changed",
         "is-installed",
         "journey-modals-get",
@@ -1145,6 +1147,7 @@
         "autoUpdate": false,
         "privilegeElevation": false,
         "moddedServers": true,
+        "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": true,
         "backups": true,
@@ -1174,8 +1177,6 @@
         "get-storage-info",
         "get-system-language",
         "get-system-memory",
-        "import-minecraft-modpack",
-        "import-minecraft-world",
         "install-type-changed",
         "is-installed",
         "journey-modals-get",

@@ -173,11 +173,16 @@ extension BridgeRouter {
         ["error": "Opening server files is not available on iPhone."]
     }
 
-    /// Importing a world means a document picker, and the picker needs a view
-    /// controller — so the work belongs to the host, not here. Until that
-    /// lands this answers rather than hanging the promise.
+    /// Not a backlog item: the contract gates this behind `fileImport`, which
+    /// iOS declares false, so the UI hides world import and its entry points
+    /// entirely. Getting a world `.zip` onto a phone in the first place is the
+    /// flow that is not worth building.
+    ///
+    /// Answered anyway rather than dropped — a capability-gated channel called
+    /// regardless must return an error, never a silent success or a hang
+    /// (PROTOCOL.md §5).
     func importMinecraftWorld(_ params: Any?) async throws -> Any? {
-        ["success": false, "error": "Importing a world is not available on iPhone yet."]
+        ["success": false, "error": "Importing a world isn't supported on iPhone."]
     }
 
     // MARK: -

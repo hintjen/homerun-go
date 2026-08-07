@@ -36,6 +36,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             NSLog("[host] FFI ABI version %u", homerun_abi_version())
         #endif
 
+        // Before the WebView exists, because the UI asks `is-installed` on its
+        // post-login path and a false answer strands it on the splash screen.
+        HostStore.ensureFirstRunSetup()
+
         // A cold-start auth callback arrives here, long before the WebView can
         // receive anything; DeepLinkManager holds it for `deep-link:consume`.
         if let url = launchOptions?[.url] as? URL {
