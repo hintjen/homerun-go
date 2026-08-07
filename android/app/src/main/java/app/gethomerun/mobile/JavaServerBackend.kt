@@ -107,22 +107,21 @@ class JavaServerBackend(
                 "That server jar has no Main-Class, so it cannot be started."
             )
 
-        val javaMajor = (config.extra["javaMajor"] as? Int) ?: DEFAULT_JAVA
         transition(serverId, ServerState.STARTING)
         reset()
 
-        // Blocking, tens of megabytes, and the first start on a device pays
-        // for it. The bridge has no call timeout precisely so this is allowed
-        // to take as long as it takes.
+        // Blocking the first time — a hundred megabytes out of the APK — and
+        // the first start on a device pays for it. The bridge has no call
+        // timeout precisely so this is allowed to take as long as it takes.
         val javaHome = withContext(Dispatchers.IO) {
-            runCatching { JavaRuntime.ensure(context, javaMajor) }
+            runCatching { JavaRuntime.ensure(context) }
         }.getOrElse { err ->
             transition(serverId, ServerState.CRASHED)
             throw ServerBackendException.Engine(
-                err.message ?: "The Java runtime could not be installed."
+                err.message ?: "The Java runtime could not be unpacked."
             )
         }
-        val libjvm = JavaRuntime.libjvm(context, javaMajor)
+        val libjvm = JavaRuntime.libjvm(context)
             ?: throw ServerBackendException.Engine("The Java runtime is incomplete.")
 
         val dir = dataDir(serverId)
@@ -399,8 +398,6 @@ class JavaServerBackend(
     private companion object {
         const val TAG = "HomerunJava"
         const val DEFAULT_PORT = 25565
-        /** Minecraft 1.20.5+ requires 21, and Termux ships it for both ABIs. */
-        const val DEFAULT_JAVA = 21
         const val POLL_MS = 250L
         const val START_TIMEOUT_MS = 300_000L
         const val GRACEFUL_STOP_SECONDS = 30L

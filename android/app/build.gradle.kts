@@ -28,6 +28,16 @@ android {
         buildConfigField("String", "DISTRO_RELEASE_TAG", "\"${prop("distroReleaseTag", "")}\"")
         buildConfigField("String", "DEVICE_RELEASE_TAG", "\"${prop("deviceReleaseTag", "")}\"")
         buildConfigField("String", "GIT_COMMIT", "\"${prop("gitCommit", "")}\"")
+
+        // The staged Java runtime is architecture-specific and ~165 MB, so a
+        // build ships exactly one ABI — the same choice Anvil-MC makes. Pass
+        // the ABI that `npm run jre:*` staged:
+        //   ./gradlew assembleRelease -Pabi=arm64-v8a
+        // Omitted, every built ABI is packaged, which is right for local work
+        // and wrong for a release.
+        (project.findProperty("abi") as String?)?.let { abi ->
+            ndk { abiFilters += abi }
+        }
     }
 
     buildFeatures {
@@ -123,6 +133,31 @@ val verifyUiBundle by tasks.registering {
         }
     }
 }
+
+/**
+ * The Java runtime is staged by `npm run jre:android`, not committed. Without
+ * it the app builds and installs perfectly and then cannot host anything, so
+ * say so at build time instead.
+ */
+val verifyJavaRuntime by tasks.registering {
+    val marker = layout.projectDirectory.file("src/main/assets/jre/java-major")
+    inputs.file(marker).optional(true)
+    doFirst {
+        if (!marker.asFile.exists()) {
+            logger.warn(
+                """
+                WARNING: no Java runtime staged in app/src/main/assets/jre/.
+                         This build cannot host a Java server. Stage one with:
+                           npm run jre:android         (arm64, what ships)
+                           npm run jre:android-x86_64  (emulator)
+                """.trimIndent(),
+            )
+        }
+    }
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+    .configureEach { dependsOn(verifyJavaRuntime) }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach {

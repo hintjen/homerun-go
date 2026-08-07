@@ -9,6 +9,8 @@
     "ui": "node scripts/build-ui.js",
     "ui:ios": "node scripts/build-ui.js ios",
     "ui:android": "node scripts/build-ui.js android",
+    "jre:android": "python3 scripts/stage-jre.py arm64-v8a",
+    "jre:android-x86_64": "python3 scripts/stage-jre.py x86_64",
     "rust:host": "node scripts/build-rust.js host",
     "rust:ios": "node scripts/build-rust.js ios",
     "rust:ios-sim": "node scripts/build-rust.js ios-sim",

@@ -53,172 +53,96 @@ lose you a server — it loses you the app that was hosting it.
 
 ### Getting a JVM onto the device
 
-The desktop downloads Azul Zulu JREs on demand. Android can do the same, with
-one twist that decides the whole design.
+The runtime **ships inside the app**. It is not downloaded, and that is a
+policy constraint rather than a preference:
+[Google Play](https://support.google.com/googleplay/android-developer/answer/16559646)
+says an app "may not download executable code (such as dex, JAR, .so files)
+from a source other than Google Play". The carve-out for code that runs *in* a
+virtual machine does not help — `libjvm.so` **is** the virtual machine.
 
-[Android 10 (API 29)](https://developer.android.com/about/versions/10/behavior-changes-10)
-says:
+Server *jars* are different: they are data the JVM reads, and they are still
+downloaded. [Anvil-MC](https://anvil-mc.com/), which hosts Java servers on Play
+today with 100k+ downloads, draws the same line — a 154 MB arm64-only download
+with the runtime inside it, fetching server software at runtime.
 
-> Untrusted apps that target Android 10 cannot invoke `execve()` directly on
-> files within the app's home directory.
+#### Staging it
 
-So a downloaded `java` binary can never be run. But the same page restricts
-`dlopen()` only for libraries with text relocations — an ordinary
-position-independent `.so` loads from app storage fine. That is the gap every
-Android Java runtime goes through, PojavLauncher included.
-
-Hence `rust/homerun-java-launcher`: a ~200-line program that ships **inside the
-APK** as `jniLibs/<abi>/libjavabin.so`, so it lives in `nativeLibraryDir` and
-may legally be exec'd. Once running it `dlopen`s the *downloaded* `libjvm.so`
-and calls `JNI_CreateJavaVM`.
-
-The result is a real child process per server, which is what keeps Android on
-the same contract as the desktop supervisor: stdout is the console, stdin
-takes `stop`, and a JVM that dies takes nothing else with it. Running the VM
-in-process — the other option — would have meant a crash killing the app and
-`System.exit` from a plugin doing the same.
-
-```text
-libjavabin.so <libjvm.so> <main-class> [jvm-option ...] -- [program arg ...]
+```bash
+npm run jre:android          # arm64-v8a, what ships
+npm run jre:android-x86_64   # emulator
 ```
 
-The main class is resolved by the caller from the jar manifest, so the
-launcher needs no zip parsing.
+`scripts/stage-jre.py` pulls OpenJDK from
+[Termux](https://packages.termux.dev/apt/termux-main/) — the only source
+publishing current OpenJDK for Android on both architectures (17.0.20, 21.0.12,
+25.0.4) — and unpacks it into `assets/jre/`. Pinned by exact version, so an
+upstream bump cannot silently change what ships. It needs only the Python
+standard library: `ar`, `xz` and `tar` are none of them reliably present on
+Windows.
 
-Two packaging rules still bind, and neither bends:
+It prunes ~85 MB the runtime never uses on a phone — `jmods/` (jlink input),
+`demo/`, `man/`, `include/`, `lib/ct.sym`. `legal/` stays: these are GPLv2+CE
+builds and the notices ship with them.
 
-1. **The packager only ships `jniLibs` entries named `lib*.so`.** A file called
-   `homerun-java-launcher` is silently dropped from the APK — the same class of
-   silent omission as the `_next/` asset filter.
-2. **`jniLibs.useLegacyPackaging` must stay `true`.** With it false nothing is
-   extracted to `nativeLibraryDir` at all — the linker maps libraries straight
-   out of the APK — and there is no real file to exec.
+Result: **~167 MB staged, a 79.5 MB APK.**
 
-#### What to bundle vs download
+#### Why assets rather than jniLibs
 
-Only the launcher (0.3 MB) ships in the APK. The runtime is downloaded, so
-install size stays small and several Java versions can coexist — which matters,
-because Minecraft's required Java version moves with the game.
+`jniLibs` only packages files ending in `.so`, which would silently drop
+`libz.so.1` — a versioned soname the linker asks for by name — and would
+flatten a tree the JVM walks from `java.home`. Assets keep the layout, and the
+runtime is unpacked once into app storage on first start.
 
-#### Play Store policy — read before shipping this
+That is legal because the W^X rule bans **exec** from app storage, not
+`dlopen` of an ordinary position-independent library. Only the launcher is
+exec'd, and it alone lives in `nativeLibraryDir`.
 
-**Downloading the runtime is not compliant with Google Play.** The
-[Device and Network Abuse policy](https://support.google.com/googleplay/android-developer/answer/16559646)
-says:
+Two packaging traps, both of which fail silently:
 
-> an app may not download executable code (such as dex, JAR, .so files) from a
-> source other than Google Play.
->
-> This restriction does not apply to code that runs in a virtual machine or an
-> interpreter where either provides indirect access to Android APIs.
+1. **`jniLibs.useLegacyPackaging` must stay `true`**, or nothing is extracted
+   to `nativeLibraryDir` and there is no file to exec.
+2. **The version marker must not be dot-prefixed.** aapt's asset filter
+   includes `.*`, so `.java-major` never reached the APK and the app reported
+   "no JVM bundled" on a build that had one. It is `java-major` now — the same
+   trap as the UI bundle's `_next/`.
 
-Fetching `libjvm.so` from Termux is downloading a `.so` from a non-Play source,
-which is the case the rule names. The exception does not help: it covers code
-that *runs in* a VM, and `libjvm.so` **is** the VM.
+Ship one ABI per build (`-Pabi=arm64-v8a`); the runtime is architecture-
+specific and packaging both doubles the download for no one's benefit.
 
-The compliant shape is to **ship the runtime in the App Bundle** rather than
-fetch it:
+#### Termux's prefix, and the dependency closure
 
-- the runtime's `.so` files go in `jniLibs`, and Play's ABI splitting means a
-  device downloads only its own architecture — not every one you support;
-- `lib/modules` (the class library, ~40 MB) is *data*, not code, so it rides as
-  assets or an install-time asset pack.
+The packages are `.deb` (an `ar` wrapping `data.tar.xz`) built for
+`/data/data/com.termux/files/usr`, so unpacking strips that prefix. Their
+`DT_RUNPATH` points there too, which `LD_LIBRARY_PATH` overrides by being
+searched first.
 
-That costs the ability to fetch Java versions on demand: you support what you
-ship. It does not invalidate anything else here — the launcher, the `.deb`
-unpacking, the `LD_LIBRARY_PATH` override and the dependency closure are all
-still required. Only the *source* changes.
+Four dependency packages are load-bearing, established by reading `DT_NEEDED`
+across the whole **closure**:
 
-**The server jar is a separate and genuinely unsettled question.** A Minecraft
-server jar is a `JAR` fetched from Mojang, which the rule also names — but it
-runs inside the JVM, sandboxed from Android APIs, which is the situation the
-exception exists for. The wording ("provides indirect access to Android APIs")
-fits a WebView better than a headless JVM. Worth a policy read before launch
-rather than an assumption either way.
-
-#### What a shipping competitor does
-
-[Anvil-MC](https://anvil-mc.com/) (`com.armmc.app`) hosts Java Minecraft
-servers on Android, is **on Google Play**, and has 100,000+ downloads since
-February 2026. Its shape corroborates the reading above on both counts:
-
-| Signal | What it implies |
+| Library | Needed by |
 |---|---|
-| 154 MB XAPK, **arm64 only** | The runtime is **bundled**, not fetched. ~100 MB of JRE plus the app, and one ABI so they do not pay twice. |
-| Changelog: "a Java startup cache generated in the background after install" | AppCDS generation — something you only do for a runtime you ship. |
-| "the Java runtime retrieves the selected server software and runs it as an independent process" | Server jars **are** downloaded in-app, and a child-process model, same as here. |
-| Supports "Java 25 and older" | Multiple runtimes bundled, or one recent one running older targets. |
+| `libandroid-shmem` | `libjvm.so` |
+| `libandroid-spawn` | `libjvm.so`, `libjava.so` |
+| `zlib` | `libzip.so`, `libjli.so` want `libz.so.1`; Android's system `libz.so` has no such soname |
+| `libc++` | `libandroid-spawn.so` itself wants `libc++_shared.so` |
 
-So: bundling the runtime is viable on Play, and downloading server jars is
-evidently accepted in practice. Note "shipping and not removed" is evidence
-rather than proof — enforcement is uneven — but six months and 100k downloads
-is a meaningful signal, and it matches the policy text rather than
-contradicting it.
+That last one is why the scan must cover the closure: a pass over only the
+JRE's own libraries missed it, and the VM would not load. Four more are
+referenced but only by things a headless server never touches — `libasound`,
+`libiconv`, `libjpeg`, `liblcms2`.
 
-Their arm64-only restriction is worth copying for size, and it costs the
-emulator: x86_64 would have to stay a debug-only configuration.
-
-Distributing outside Play (F-Droid, direct APK) avoids the question entirely,
-and Anvil offers a direct download alongside the Play listing.
-
-#### Where runtimes come from
-
-[Termux](https://packages.termux.dev/apt/termux-main/), which publishes current
-OpenJDK for both architectures:
-
-| Package | x86_64 | aarch64 |
-|---|---|---|
-| openjdk-17 | 17.0.20 | 17.0.20 |
-| openjdk-21 | 21.0.12 | 21.0.12 |
-| openjdk-25 | 25.0.4 | 25.0.4 |
-
-Pinned by exact version, so an upstream bump cannot silently change a build.
-
-They are `.deb` — an `ar` archive wrapping `data.tar.xz` — and they carry their
-whole Termux install path, so unpacking strips
-`data/data/com.termux/files/usr/lib/jvm/java-<N>-openjdk`.
-
-Being built for Termux's prefix matters in two places, both handled:
-
-- **`DT_RUNPATH` points into that prefix**, which does not exist here.
-  `LD_LIBRARY_PATH` is searched *before* `DT_RUNPATH`, so ours wins.
-- **They need a few Termux libraries.** Four are load-bearing, and the list is
-  derived by reading `DT_NEEDED` across the whole closure rather than guessing:
-
-  | Library | Needed by |
-  |---|---|
-  | `libandroid-shmem` | `libjvm.so` |
-  | `libandroid-spawn` | `libjvm.so`, `libjava.so` |
-  | `zlib` | `libzip.so`, `libjli.so` want `libz.so.1`, and Android's system `libz.so` has no such soname |
-  | `libc++` | `libandroid-spawn.so` itself wants `libc++_shared.so` |
-
-  That last one is why the scan has to cover the closure: a first pass over
-  only the JRE's own libraries missed it, and the VM would not load.
-
-  Four more are referenced but only by things a headless server never touches —
-  `libasound` (sound), `libiconv` (JDWP), `libjpeg` and `liblcms2` (imaging).
-
-**Symlinks must be materialised, not skipped.** zlib ships `libz.so.1` as a
-link to the real file, and that is exactly the name the linker asks for.
-Dropping links would leave the JVM unable to read a jar.
+**Symlinks are materialised as real copies** at stage time. zlib ships
+`libz.so.1` as a link, which is exactly the soname the linker wants; keeping
+them as links also fails on Windows, where this may well be built.
 
 #### Verified on the emulator
 
-Minecraft **1.21.11 on Java 21**, from a clean install with no runtime present:
-
-```
-IMPLEMENTOR="Termux"   JAVA_VERSION="21.0.12"   OS_ARCH="x86_64"
-
-  at net.minecraft.server.Main.main(SourceFile:115)
-  at java.base/java.lang.Thread.run(Thread.java:1583)
-[ServerMain/INFO]: You need to agree to the EULA in order to run the server.
-```
-
-The whole chain: download the JDK and its four dependencies, unpack `.deb`
-through `ar` → `xz` → `tar`, strip the Termux prefix, materialise symlinks,
-exec the launcher from `nativeLibraryDir`, `dlopen` a `libjvm.so` in app
-storage, `JNI_CreateJavaVM`, and run Mojang's bundler through to the EULA gate.
-Console output arrived over `bridge/v1` throughout.
+| Configuration | Result |
+|---|---|
+| Java 21.0.12, x86_64 | Minecraft 1.21.11 boots to the EULA gate (`Thread.java:1583`) |
+| Java 25.0.4, x86_64 | same, on the newer runtime (`Thread.java:1474`) |
+| Java 21, **networking disabled** | still boots — the runtime is genuinely self-contained |
+| Java 25.0.4, **arm64** | stages and verifies (`OS_ARCH="aarch64"`, ELF `Machine: AArch64`), **not** runtime-tested — no arm64 device here |
 
 `eula.txt` is left at `false`. Accepting Mojang's licence belongs to the user.
 
