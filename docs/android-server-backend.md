@@ -100,6 +100,45 @@ Only the launcher (0.3 MB) ships in the APK. The runtime is downloaded, so
 install size stays small and several Java versions can coexist — which matters,
 because Minecraft's required Java version moves with the game.
 
+#### Play Store policy — read before shipping this
+
+**Downloading the runtime is not compliant with Google Play.** The
+[Device and Network Abuse policy](https://support.google.com/googleplay/android-developer/answer/16559646)
+says:
+
+> an app may not download executable code (such as dex, JAR, .so files) from a
+> source other than Google Play.
+>
+> This restriction does not apply to code that runs in a virtual machine or an
+> interpreter where either provides indirect access to Android APIs.
+
+Fetching `libjvm.so` from Termux is downloading a `.so` from a non-Play source,
+which is the case the rule names. The exception does not help: it covers code
+that *runs in* a VM, and `libjvm.so` **is** the VM.
+
+The compliant shape is to **ship the runtime in the App Bundle** rather than
+fetch it:
+
+- the runtime's `.so` files go in `jniLibs`, and Play's ABI splitting means a
+  device downloads only its own architecture — not every one you support;
+- `lib/modules` (the class library, ~40 MB) is *data*, not code, so it rides as
+  assets or an install-time asset pack.
+
+That costs the ability to fetch Java versions on demand: you support what you
+ship. It does not invalidate anything else here — the launcher, the `.deb`
+unpacking, the `LD_LIBRARY_PATH` override and the dependency closure are all
+still required. Only the *source* changes.
+
+**The server jar is a separate and genuinely unsettled question.** A Minecraft
+server jar is a `JAR` fetched from Mojang, which the rule also names — but it
+runs inside the JVM, sandboxed from Android APIs, which is the situation the
+exception exists for. The wording ("provides indirect access to Android APIs")
+fits a WebView better than a headless JVM. Worth a policy read before launch
+rather than an assumption either way.
+
+Distributing outside Play (F-Droid, direct APK) avoids all of this, which is
+where comparable Java-on-Android projects live.
+
 #### Where runtimes come from
 
 [Termux](https://packages.termux.dev/apt/termux-main/), which publishes current
