@@ -200,6 +200,14 @@ object DeviceRegistry {
      * Distinct from the `native-server-state-changed` bridge event, which only
      * tells the page in front of us. This is what the API waits on before it
      * considers a server actually up, and what the web dashboard reads.
+     *
+     * **Two reports, not one.** The state POST records what happened; the
+     * instance report is what the API derives *health* from, and health is
+     * what the UI shows. Leaving the instance report to the next 30 s tick
+     * meant a server that was genuinely up — JVM booted, tunnel handshaken —
+     * kept reading as not-running for up to another half minute, nine seconds
+     * of it in the run that found this. The desktop pushes both together in
+     * `onServerFullyRunning`, in this order, for exactly this reason.
      */
     fun reportServerState(serverId: String, state: ServerState) {
         val wire = when (state) {
@@ -210,6 +218,15 @@ object DeviceRegistry {
         }
         val registration = current() ?: return
         scope.launch {
+            // Read the running set now rather than capturing it: the backend
+            // has already applied this transition by the time it calls us, so
+            // this is the post-change truth in both directions.
+            HomerunApi.reportInstances(
+                apiUrl = apiUrl(),
+                deviceId = registration.deviceId,
+                deviceToken = registration.deviceToken,
+                instances = runCatching { runningIds() }.getOrDefault(emptyList()),
+            )
             HomerunApi.reportServerState(apiUrl(), serverId, wire, registration.deviceToken)
         }
     }
