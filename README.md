@@ -96,10 +96,15 @@ The Android app boots and renders the shared UI. No server runs yet.
 | Android host | **M0 done, M1 transport done** — see [docs/android-host.md](docs/android-host.md) |
 
 Android runs on an emulator today: the WebView serves the shared bundle,
-capabilities are injected at document start, and the bridge round-trips.
-`npm run conformance:android` reports **20 of 46** required channels handled —
-the app-shell set. The remaining 26 are the server backend and the file/OS
+capabilities are injected at document start, the bridge round-trips, and the
+post-login handshake routes through to the dashboard.
+`npm run conformance:android` reports **22 of 46** required channels handled —
+the app-shell set. The remaining 24 are the server backend and the file/OS
 integrations, and that report is the work queue.
+
+The dashboard renders at desktop proportions on a phone. Making the shared UI
+responsive is the largest piece of remaining mobile work and belongs to
+[homerun-app-ui](https://github.com/hintjen/homerun-app-ui), not here.
 
 The FFI crate has 36 passing tests covering the state machine, console
 cursors, port pre-flight, crash capture, and the whole C surface — none of

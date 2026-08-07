@@ -135,9 +135,25 @@ without a handler:
 npm run conformance:android
 ```
 
-It currently reports 20 of 46 — expected, and the list is the work queue.
+It currently reports 22 of 46 — expected, and the list is the work queue.
 Only strings in declaration position (`"channel" to handler`) count, so a
 string literal inside a handler body cannot masquerade as coverage.
+
+**What conformance does not prove.** It checks that the host implements every
+channel the profile *requires*. Nothing checks the other direction — that the
+UI never calls a channel the profile omits. That gap is not theoretical: it
+cost us the entire login flow (see below). Until there is a lint for it, the
+router's "not implemented" warnings are the detector, which is one reason
+unimplemented channels log rather than fail quietly.
+
+### The login handshake
+
+`credentials-received` is the one handler where getting the *event* wrong
+hangs the app. The UI authenticates against the backend itself and hands the
+tokens down; the host stores them and must then emit **`credentials-set`**.
+The boot state machine in `pages/index.tsx` waits on that event before routing
+to the dashboard, so a handler that stores the credentials and stays quiet
+leaves the user on a spinner with nothing in the log.
 
 ### Page death
 
@@ -167,10 +183,35 @@ has not been staged.
 Debug builds enable WebView remote debugging — open `chrome://inspect` on the
 host machine to get real DevTools against the running app.
 
+### Driving the app without an account
+
+Most of the product sits behind a magic-link login, which needs a real inbox.
+To exercise a path without one, talk to the page over the DevTools protocol:
+
+```bash
+adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof app.gethomerun.mobile.debug)
+curl http://127.0.0.1:9222/json          # find the page's webSocketDebuggerUrl
+```
+
+Then `Runtime.evaluate` against it. Posting a synthetic envelope through the
+real transport is how the post-login path was verified end to end:
+
+```js
+window.__homerunHost.postMessage(JSON.stringify({
+  v: 1, method: "credentials-received",
+  params: { access_token: "test", refresh_token: "test" },
+}));
+// -> host emits credentials-set -> UI routes to /dashboard
+```
+
+This drives the same code path the UI does, so it tests the host rather than
+bypassing it.
+
 ## Known gaps
 
 | Symptom | Cause |
 |---|---|
+| **The dashboard renders at desktop proportions** | The shared UI has no phone layout: the sidebar is a fixed width that consumes most of a phone screen and pushes content off it. The largest remaining piece of mobile work, and all of it lives in the UI repo. |
 | React error #418 on boot | Hydration mismatch. The UI's SSR stub prerenders with *desktop* capabilities; the client resolves Android ones. Needs a fix in the UI repo, not here. |
 | `sentry-ipc://` scheme errors flooding the console | `@sentry/electron` is bundled in the shared UI and tries to reach an Electron main process. Harmless, noisy; belongs to the UI repo. |
 | `PostHog was initialized without a token` | The bundle carries no mobile PostHog key yet. |

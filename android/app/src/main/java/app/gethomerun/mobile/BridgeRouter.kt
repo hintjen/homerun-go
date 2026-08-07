@@ -24,6 +24,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.Locale
@@ -290,6 +291,32 @@ class BridgeRouter(
             null
         },
 
+        // The UI authenticates against the backend itself and hands the result
+        // down. The host keeps them because the server backend and the device
+        // WebSocket need to call the API without a page in front of them.
+        //
+        // Emitting credentials-set is the load-bearing part: the boot state
+        // machine waits on that event before routing to the dashboard, so a
+        // handler that only stores and stays quiet hangs login at a spinner.
+        "credentials-received" to { params ->
+            if (params is JsonObject) {
+                prefs.edit().putString(KEY_CREDENTIALS, json.encodeToString(params)).apply()
+                (params["apiUrl"] as? JsonPrimitive)?.contentOrNull
+                    ?.let { prefs.edit().putString(KEY_API_URL, it).apply() }
+                emit("credentials-set")
+            } else {
+                emit("credentials-error", listOf(JsonPrimitive("Credentials were not an object")))
+            }
+            null
+        },
+
+        // Params are the user's email; the desktop also takes a
+        // shouldRemoveDistro flag that has no meaning here.
+        "logout" to { _ ->
+            prefs.edit().remove(KEY_CREDENTIALS).apply()
+            null
+        },
+
         "clipboard-write-text" to { params ->
             val text = params?.jsonPrimitive?.content.orEmpty()
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -396,6 +423,7 @@ class BridgeRouter(
         private const val KEY_POSTHOG_ID = "posthog-distinct-id"
         private const val KEY_CLIENT_NONCE = "client-nonce"
         private const val KEY_JOURNEY_MODALS = "journey-modals"
+        private const val KEY_CREDENTIALS = "credentials"
 
         /**
          * Legal in JSON, fatal in JavaScript source before ES2019. The WebView
