@@ -29,6 +29,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 /** A channel implementation. `params` is the raw payload; the return value is the result. */
 private typealias ChannelHandler = suspend (JsonElement?) -> JsonElement?
@@ -222,6 +223,44 @@ class BridgeRouter(
     private fun literal(envelope: Envelope): String = escapeForJs(json.encodeToString(envelope))
 
     // ---------------------------------------------------------------------
+    // Deep links
+    // ---------------------------------------------------------------------
+
+    /**
+     * A `homerun://` link that arrived before any page could hear about it.
+     *
+     * Atomic rather than main-thread-confined because `deep-link:consume` is
+     * answered from a coroutine like every other handler, and routing that one
+     * read back through the main thread would buy nothing.
+     *
+     * Deliberately **not** cleared by [onPageGone]: a link that arrived just
+     * before the render process died still deserves delivery to its
+     * replacement.
+     */
+    private val pendingDeepLink = AtomicReference<String?>(null)
+
+    /**
+     * A link that arrived with the activity itself — the app was not running.
+     *
+     * Held for the pull path rather than emitted, because at this point no
+     * page exists, and the event queue would flush at the `ready` handshake,
+     * which happens *before* the UI's deep-link subscription is wired. An
+     * event delivered then is dropped on the floor. This is the reason
+     * `bridge/v1` has both a pull and a push path for the same link.
+     */
+    fun captureColdStartDeepLink(url: String) {
+        pendingDeepLink.set(url)
+    }
+
+    /**
+     * A link that arrived while the app was already running. The UI is mounted
+     * and subscribed, so push it.
+     */
+    fun deliverDeepLink(url: String) {
+        emit("deep-link", listOf(JsonPrimitive(url)))
+    }
+
+    // ---------------------------------------------------------------------
     // Page lifecycle
     // ---------------------------------------------------------------------
 
@@ -352,9 +391,14 @@ class BridgeRouter(
             null
         },
 
-        // Cold-start deep links (email OTP, magic links) land here once App
-        // Links are wired in M2. Nothing captures them yet.
-        "deep-link:consume" to { _ -> JsonNull },
+        // The pull half of deep-link delivery. Read-and-clear: the UI calls
+        // this once on mount, and a link must not be redelivered on the next
+        // reload.
+        "deep-link:consume" to { _ ->
+            val url = pendingDeepLink.getAndSet(null)
+            Log.i(TAG, "deep-link:consume -> ${url ?: "nothing pending"}")
+            url?.let { JsonPrimitive(it) } ?: JsonNull
+        },
 
         "journey-modals-get" to { _ ->
             val stored = prefs.getString(KEY_JOURNEY_MODALS, null)

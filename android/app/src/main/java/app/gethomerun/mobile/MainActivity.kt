@@ -71,6 +71,12 @@ class MainActivity : ComponentActivity() {
         }
         setContentView(container)
 
+        // Before the page loads, so `deep-link:consume` finds it on mount.
+        intent?.dataString?.let {
+            Log.i(TAG, "cold-start deep link: $it")
+            router.captureColdStartDeepLink(it)
+        }
+
         installWebView()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -131,6 +137,18 @@ class MainActivity : ComponentActivity() {
         router.onPageGone()
 
         view.loadUrl(WebBundle.START_URL)
+    }
+
+    /**
+     * A link arriving while the app is already running. `launchMode` is
+     * singleTask, so Android routes it here instead of building a second
+     * activity — which is also what keeps the running server's WebView alive.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // Keep getIntent() current, or a later re-read returns the stale one.
+        setIntent(intent)
+        intent.dataString?.let { router.deliverDeepLink(it) }
     }
 
     override fun onDestroy() {

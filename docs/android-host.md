@@ -155,6 +155,53 @@ The boot state machine in `pages/index.tsx` waits on that event before routing
 to the dashboard, so a handler that stores the credentials and stays quiet
 leaves the user on a spinner with nothing in the log.
 
+### Deep links
+
+`homerun://` invite and join links. The manifest declares the scheme with no
+host, so every shape matches and the UI's `parseDeepLink` stays the single
+authority on which are meaningful.
+
+**Auth does not come through here.** The magic-link flow generates a
+`client_nonce`, mails a link, and then polls `/api/register/token/` until the
+backend hands over a token — which happens the moment the link is opened,
+anywhere. Login therefore works on a device that has never seen a deep link.
+This is worth knowing before anyone plans App Links work for it.
+
+Two delivery paths, and the split is not arbitrary:
+
+| Arrival | Path | Why |
+|---|---|---|
+| Cold start (`onCreate`) | stored, pulled by `deep-link:consume` | No page exists. An event would flush at the `ready` handshake, which fires *before* the UI subscribes — straight onto the floor. |
+| Warm start (`onNewIntent`) | pushed as a `deep-link` event | The UI is mounted and subscribed. |
+
+`launchMode="singleTask"` is what routes a warm link to `onNewIntent` instead
+of stacking a second activity — which also keeps a running server's WebView
+alive. `setIntent()` in that callback is not optional; without it a later
+`getIntent()` returns the launch intent forever.
+
+The pending slot is deliberately **not** cleared on render-process death: a
+link that arrived moments before the process died still deserves delivery to
+its replacement.
+
+#### The URL quirk that ate every link
+
+`homerun:` is a non-special scheme, and URL implementations disagree about
+whether `//` after it introduces an authority:
+
+| Engine | `new URL("homerun://join/CODE")` |
+|---|---|
+| Node, desktop Chromium | `host: "join"`, `pathname: "/CODE"` |
+| Android System WebView | `host: ""`, `pathname: "//join/CODE"` |
+
+`parseDeepLink` read the action from `url.host`, so on Android it returned
+`null` for every link — no error, no log, nothing ingested. The host was
+delivering correctly the whole time.
+
+Fixed in the shared parser (and its canonical desktop twin) by falling back to
+the first path segment when there is no host. Regression tests use the
+slashless form `homerun:join/CODE`, which Node parses into the same opaque
+shape, so the behaviour is pinned without needing a WebView.
+
 ### Page death
 
 `onRenderProcessGone` fires when the render process is killed — most likely

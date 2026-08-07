@@ -24,6 +24,26 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <!--
+              Invite and join links: homerun://join/<code>,
+              homerun://server|play|web-share-join/<id>.
+
+              No android:host is declared, so every host under the scheme
+              matches. The UI's parseDeepLink is the authority on which shapes
+              are meaningful, and it rejects the rest — filtering here as well
+              would mean two places to update when a link type is added.
+
+              Auth does NOT come through here. The magic-link flow polls the
+              backend with a client_nonce, so login completes wherever the
+              link is opened.
+            -->
+            <intent-filter android:label="@string/app_name">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="homerun" />
+            </intent-filter>
         </activity>
 
     </application>
