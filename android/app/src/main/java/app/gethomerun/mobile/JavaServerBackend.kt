@@ -165,6 +165,12 @@ class JavaServerBackend(
                                 listOfNotNull(
                                     "${javaHome.absolutePath}/lib",
                                     "${javaHome.absolutePath}/lib/server",
+                                    // Termux's libandroid-shmem, libandroid-spawn
+                                    // and libz.so.1. The runtime's DT_RUNPATH
+                                    // points at Termux's own prefix, which does
+                                    // not exist here — LD_LIBRARY_PATH is
+                                    // searched first, so this is what resolves.
+                                    "${javaHome.absolutePath}/${JavaRuntime.DEPS_DIR}",
                                     System.getenv("LD_LIBRARY_PATH"),
                                 ).joinToString(":"),
                             )
@@ -393,8 +399,8 @@ class JavaServerBackend(
     private companion object {
         const val TAG = "HomerunJava"
         const val DEFAULT_PORT = 25565
-        /** Minecraft 1.18–1.20.4. Newer needs 21, which is arm64-only today. */
-        const val DEFAULT_JAVA = 17
+        /** Minecraft 1.20.5+ requires 21, and Termux ships it for both ABIs. */
+        const val DEFAULT_JAVA = 21
         const val POLL_MS = 250L
         const val START_TIMEOUT_MS = 300_000L
         const val GRACEFUL_STOP_SECONDS = 30L

@@ -94,36 +94,6 @@ Two packaging rules still bind, and neither bends:
    extracted to `nativeLibraryDir` at all — the linker maps libraries straight
    out of the APK — and there is no real file to exec.
 
-#### Verified on the emulator
-
-A real Minecraft 1.20.4 server, on a downloaded Java 17 runtime, reached its
-EULA gate:
-
-```
-Unpacking 1.20.4/server-1.20.4.jar (versions:1.20.4) to versions/...
-Unpacking io/netty/netty-handler/4.1.97.Final/... to libraries/...
-[ServerMain/INFO]: You need to agree to the EULA in order to run the server.
-```
-
-That is the whole chain: exec from `nativeLibraryDir`, `dlopen` of a
-`libjvm.so` in app storage, `JNI_CreateJavaVM`, class loading from the
-downloaded runtime, Mojang's bundler unpacking its libraries, and
-`net.minecraft.server.Main` running far enough to write `server.properties`
-and `eula.txt`. Console output arrived over `bridge/v1` throughout.
-
-Two things only a real run found:
-
-- **`LD_LIBRARY_PATH` must include `<javaHome>/lib`.** The runtime's own
-  natives carry `DT_NEEDED` entries for each other (`libnio.so` needs
-  `libnet.so`), and Android's linker will not find them otherwise. It has to
-  be in the child's *environment* — the linker reads it at process start, so
-  setting it afterwards is too late. Without it the VM boots and then dies the
-  moment anything touches `java.nio`.
-- **Stopping at the EULA reports as a crash.** `start()` waits for `Done (…)!`
-  and the process exits before that, so the user is told "the server stopped
-  unexpectedly while starting". Accurate but unhelpful; the EULA needs
-  detecting and surfacing as its own state.
-
 #### What to bundle vs download
 
 Only the launcher (0.3 MB) ships in the APK. The runtime is downloaded, so
@@ -132,15 +102,8 @@ because Minecraft's required Java version moves with the game.
 
 #### Where runtimes come from
 
-Two sources, and the catalog currently points at the weaker one.
-
-**PojavLauncher multiarch builds** — what `JavaRuntime.CATALOG` uses today, and
-what the emulator run above was proven against. Plain `.tar.xz`, no external
-dependencies, drops straight into place. But the newest x86_64 asset is from
-2021 and tops out at Java 17.
-
-**Termux** — [`packages.termux.dev`](https://packages.termux.dev/apt/termux-main/)
-publishes current OpenJDK for **both** architectures:
+[Termux](https://packages.termux.dev/apt/termux-main/), which publishes current
+OpenJDK for both architectures:
 
 | Package | x86_64 | aarch64 |
 |---|---|---|
@@ -148,18 +111,66 @@ publishes current OpenJDK for **both** architectures:
 | openjdk-21 | 21.0.12 | 21.0.12 |
 | openjdk-25 | 25.0.4 | 25.0.4 |
 
-Strictly better on version currency and maintenance, with two costs worth
-knowing before switching:
+Pinned by exact version, so an upstream bump cannot silently change a build.
 
-- **`.deb`, not `.tar.xz`.** An `ar` archive wrapping a tar — commons-compress
-  reads both, so this is plumbing, not a blocker.
-- **Built for Termux's prefix.** These expect
-  `/data/data/com.termux/files/usr` and declare real dependencies
-  (`libandroid-shmem`, `libandroid-spawn`, `libiconv`, `libjpeg-turbo`, `zlib`,
-  `littlecms`), which would have to be fetched and merged into the same tree.
-  We already override `java.home` and `LD_LIBRARY_PATH`, so the prefix is
-  probably survivable — but "probably" is doing real work in that sentence and
-  it is unproven. **Assume nothing here until a server actually boots on one.**
+They are `.deb` — an `ar` archive wrapping `data.tar.xz` — and they carry their
+whole Termux install path, so unpacking strips
+`data/data/com.termux/files/usr/lib/jvm/java-<N>-openjdk`.
+
+Being built for Termux's prefix matters in two places, both handled:
+
+- **`DT_RUNPATH` points into that prefix**, which does not exist here.
+  `LD_LIBRARY_PATH` is searched *before* `DT_RUNPATH`, so ours wins.
+- **They need a few Termux libraries.** Four are load-bearing, and the list is
+  derived by reading `DT_NEEDED` across the whole closure rather than guessing:
+
+  | Library | Needed by |
+  |---|---|
+  | `libandroid-shmem` | `libjvm.so` |
+  | `libandroid-spawn` | `libjvm.so`, `libjava.so` |
+  | `zlib` | `libzip.so`, `libjli.so` want `libz.so.1`, and Android's system `libz.so` has no such soname |
+  | `libc++` | `libandroid-spawn.so` itself wants `libc++_shared.so` |
+
+  That last one is why the scan has to cover the closure: a first pass over
+  only the JRE's own libraries missed it, and the VM would not load.
+
+  Four more are referenced but only by things a headless server never touches —
+  `libasound` (sound), `libiconv` (JDWP), `libjpeg` and `liblcms2` (imaging).
+
+**Symlinks must be materialised, not skipped.** zlib ships `libz.so.1` as a
+link to the real file, and that is exactly the name the linker asks for.
+Dropping links would leave the JVM unable to read a jar.
+
+#### Verified on the emulator
+
+Minecraft **1.21.11 on Java 21**, from a clean install with no runtime present:
+
+```
+IMPLEMENTOR="Termux"   JAVA_VERSION="21.0.12"   OS_ARCH="x86_64"
+
+  at net.minecraft.server.Main.main(SourceFile:115)
+  at java.base/java.lang.Thread.run(Thread.java:1583)
+[ServerMain/INFO]: You need to agree to the EULA in order to run the server.
+```
+
+The whole chain: download the JDK and its four dependencies, unpack `.deb`
+through `ar` → `xz` → `tar`, strip the Termux prefix, materialise symlinks,
+exec the launcher from `nativeLibraryDir`, `dlopen` a `libjvm.so` in app
+storage, `JNI_CreateJavaVM`, and run Mojang's bundler through to the EULA gate.
+Console output arrived over `bridge/v1` throughout.
+
+`eula.txt` is left at `false`. Accepting Mojang's licence belongs to the user.
+
+Two things only a real run found:
+
+- **`LD_LIBRARY_PATH` must include `<javaHome>/lib` and the dependency
+  directory**, in the child's *environment* — the linker reads it at process
+  start, so setting it later is too late. Without it the VM boots and then dies
+  the moment anything touches `java.nio`, several layers from the cause.
+- **Stopping at the EULA reports as a crash.** `start()` waits for `Done (…)!`
+  and the process exits first, so the user is told "the server stopped
+  unexpectedly while starting". Accurate but unhelpful; the EULA needs its own
+  state.
 
 ## The Pumpkin backend
 
