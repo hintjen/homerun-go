@@ -25,6 +25,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 serde_json = "1"
 
+# The decisions every Homerun app shares — which jar, which tunnel config,
+# what state a server is in. A path dependency rather than a workspace member
+# on purpose: both crates carry their own [profile.release], and Cargo only
+# honours profiles at a workspace root.
+homerun-core = { path = "../homerun-core" }
+
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 android_logger = "0.14"

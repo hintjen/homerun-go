@@ -1,0 +1,26 @@
+[package]
+name = "homerun-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The host logic shared by the desktop, iOS and Android apps: what to download, how to reach the gateway, and what state a server is in"
+
+# Deliberately NOT part of a Cargo workspace. Both sibling crates carry their
+# own `[profile.release]` (opt-level = "z", lto, strip) and Cargo only honours
+# profiles at a workspace root — adding one here would silently drop those and
+# bloat what ships. Consumers depend on this by path instead.
+
+[lib]
+# rlib for the sibling crates that link it, cdylib/staticlib so the same code
+# can be reached over the existing JNI and C ABI surfaces without a second
+# copy of anything.
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
