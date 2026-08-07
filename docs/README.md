@@ -67,6 +67,23 @@ bridge router's threading.
 
 ---
 
+### 🎮 [Android server backend](./android-server-backend.md)
+
+How `native-server-*` becomes a real server running inside the app — the JNI
+adapter, the thread it needs, and the polling that stands in for callbacks.
+
+**Contains**:
+- Why a JNI layer exists at all, and why it calls the C ABI rather than bypassing it
+- The 16 MB engine stack, and the crash you get without it
+- Why `start` polls for *running* instead of waiting on the call
+- The log pump, the perf sampler, and one-server-at-a-time
+- What the memory and CPU numbers actually measure
+- Triage, symptom first
+
+**Read this for**: Working on the server backend, or wiring Pumpkin in.
+
+---
+
 *Add an entry here whenever you add a doc. A doc nobody can find is not
 written.*
 
@@ -78,7 +95,6 @@ Planned, one per milestone (see plans/shared-milestones.md):
   ios-server-backend.md   iOS      M3
   ios-lifecycle.md        iOS      M4
   android-bridge.md       Android  M1, extended at M2
-  android-server-backend.md  Android  M3
   android-lifecycle.md    Android  M4
 -->
 

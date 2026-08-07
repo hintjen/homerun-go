@@ -22,9 +22,11 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.Locale
@@ -99,6 +101,61 @@ class BridgeRouter(
     }
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /**
+     * The local server engine.
+     *
+     * Its callbacks are the only way console output and state changes reach
+     * the UI — nothing polls from the page side — so they are wired here at
+     * construction rather than lazily.
+     */
+    private val backend = PumpkinBackend(context, scope).apply {
+        onLog = { id, line ->
+            emit("native-server-log", listOf(buildJsonObject {
+                put("serverId", id)
+                put("line", line)
+            }))
+        }
+        onPlayersChanged = { id ->
+            emit("native-server-players-changed", listOf(buildJsonObject {
+                put("serverId", id)
+            }))
+        }
+        onStateChanged = { id, state ->
+            // The event contract carries only these three. `starting` and
+            // `stopping` are ours; the UI infers those from the pending call.
+            val wire = when (state) {
+                ServerState.RUNNING -> "running"
+                ServerState.STOPPED -> "stopped"
+                ServerState.CRASHED -> "crashed"
+                else -> null
+            }
+            if (wire != null) {
+                emit("native-server-state-changed", listOf(buildJsonObject {
+                    put("serverId", id)
+                    put("state", wire)
+                }))
+            }
+            if (state == ServerState.RUNNING) {
+                port(id)?.let { p ->
+                    emit("native-server-port", listOf(buildJsonObject {
+                        put("serverId", id)
+                        put("port", p)
+                    }))
+                }
+            }
+        }
+    }
+
+    /** The `native-server-*` channels that take an object payload. */
+    private fun JsonObject.serverId(): String =
+        this["serverId"]?.jsonPrimitive?.contentOrNull
+            ?: throw IllegalArgumentException("serverId is required")
+
+    /** The six metrics getters and the log reader take a bare string instead. */
+    private fun JsonElement?.asServerId(): String =
+        this?.jsonPrimitive?.contentOrNull
+            ?: throw IllegalArgumentException("serverId is required")
 
     // --- main-thread-only state ------------------------------------------
 
@@ -415,9 +472,164 @@ class BridgeRouter(
         "get-system-memory" to { _ -> systemMemory() },
         "get-native-system-memory" to { _ -> systemMemory() },
 
-        // No backend is wired, so nothing can be running. Answering honestly
-        // keeps the dashboard's server list coherent instead of hanging it.
-        "native-server-active-ids" to { _ -> buildJsonArray { } },
+        "native-server-active-ids" to { _ ->
+            buildJsonArray { backend.runningServerIds.forEach { add(JsonPrimitive(it)) } }
+        },
+
+        // The `native-server-*` family IS the local-server interface. The name
+        // is desktop-legacy; on Android it drives the in-process engine.
+        "native-server-start" to { params ->
+            val obj = params as? JsonObject ?: throw IllegalArgumentException("start needs an object")
+            val serverId = obj.serverId()
+            val config = obj["config"] as? JsonObject
+            backend.create(serverId)
+            try {
+                backend.start(
+                    serverId,
+                    ServerConfig(
+                        name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
+                        memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
+                    ),
+                )
+                buildJsonObject { put("success", true) }
+            } catch (already: ServerBackendException.AlreadyRunning) {
+                buildJsonObject {
+                    put("success", true)
+                    put("alreadyRunning", true)
+                }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        "native-server-stop" to { params ->
+            try {
+                backend.stop((params as JsonObject).serverId())
+                buildJsonObject { put("success", true) }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        "native-server-delete" to { params ->
+            try {
+                backend.delete((params as JsonObject).serverId())
+                buildJsonObject { put("success", true) }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        // Reply arrives on native-server-rcon-response, not here — Pumpkin has
+        // no RCON, so the command is dispatched in-process and its output
+        // comes back through the console.
+        "native-server-rcon" to { params ->
+            val obj = params as JsonObject
+            val serverId = obj.serverId()
+            val command = obj["command"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            try {
+                backend.command(serverId, command)
+                emit(
+                    "native-server-rcon-response",
+                    listOf(buildJsonObject {
+                        put("serverId", serverId)
+                        put("response", "")
+                    })
+                )
+                buildJsonObject { put("success", true) }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        // The six metrics getters and the log reader take a bare server id
+        // string, not an object. Desktop legacy, frozen in the contract.
+        "native-server-get-uptime" to { params ->
+            buildJsonObject {
+                val at = backend.uptime(params.asServerId())?.toEpochMilli()
+                if (at == null) put("startedAt", JsonNull) else put("startedAt", at)
+            }
+        },
+
+        "native-server-get-ops" to { _ -> buildJsonObject { put("ops", buildJsonArray { }) } },
+
+        "native-server-get-mem-usage" to { params ->
+            val usage = backend.memoryUsage(params.asServerId())
+            buildJsonObject {
+                if (usage?.usedKb == null) put("usedKb", JsonNull) else put("usedKb", usage.usedKb)
+                if (usage?.maxMb == null) put("maxMb", JsonNull) else put("maxMb", usage.maxMb)
+            }
+        },
+
+        "native-server-get-cpu-usage" to { params ->
+            val cpu = backend.cpuUsage(params.asServerId())
+            buildJsonObject {
+                if (cpu == null) put("cpuPercent", JsonNull) else put("cpuPercent", cpu)
+            }
+        },
+
+        "native-server-get-players" to { params ->
+            val roster = backend.players(params.asServerId())
+            if (roster == null) JsonNull else buildJsonObject {
+                put("players", buildJsonArray {
+                    roster.players.forEach { player ->
+                        add(buildJsonObject {
+                            put("name", player.name)
+                            if (player.uuid == null) put("uuid", JsonNull) else put("uuid", player.uuid)
+                        })
+                    }
+                })
+                if (roster.max == null) put("max", JsonNull) else put("max", roster.max)
+            }
+        },
+
+        "native-server-get-perf-history" to { params ->
+            buildJsonArray {
+                backend.perfHistory(params.asServerId()).forEach { sample ->
+                    add(buildJsonObject {
+                        put("t", sample.t)
+                        if (sample.memUsedMb == null) put("memUsedMb", JsonNull) else put("memUsedMb", sample.memUsedMb)
+                        if (sample.cpuPercent == null) put("cpuPercent", JsonNull) else put("cpuPercent", sample.cpuPercent)
+                        if (sample.playerCount == null) put("playerCount", JsonNull) else put("playerCount", sample.playerCount)
+                    })
+                }
+            }
+        },
+
+        "get-native-server-logs" to { params ->
+            // Whole-buffer read, independent of the pump's cursor: the UI asks
+            // for this when a console mounts and needs the backlog.
+            buildJsonArray {
+                backend.logs(params.asServerId(), 0).lines.forEach { add(JsonPrimitive(it)) }
+            }
+        },
+
+        "get-native-server-port" to { params ->
+            val port = backend.port((params as JsonObject).serverId())
+            buildJsonObject { if (port == null) put("port", JsonNull) else put("port", port) }
+        },
+
+        // Local-network exposure is a router/firewall concern the desktop
+        // solves with UPnP. Nothing to toggle here yet; report the truth.
+        "get-native-local-network" to { _ -> buildJsonObject { put("enabled", false) } },
+        "set-native-local-network" to { _ ->
+            buildJsonObject {
+                put("success", false)
+                put("error", "Local network exposure is not configurable on Android yet.")
+            }
+        },
         // BRIDGE-CHANNELS-END
     )
 
