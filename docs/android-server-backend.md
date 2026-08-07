@@ -136,8 +136,30 @@ exception exists for. The wording ("provides indirect access to Android APIs")
 fits a WebView better than a headless JVM. Worth a policy read before launch
 rather than an assumption either way.
 
-Distributing outside Play (F-Droid, direct APK) avoids all of this, which is
-where comparable Java-on-Android projects live.
+#### What a shipping competitor does
+
+[Anvil-MC](https://anvil-mc.com/) (`com.armmc.app`) hosts Java Minecraft
+servers on Android, is **on Google Play**, and has 100,000+ downloads since
+February 2026. Its shape corroborates the reading above on both counts:
+
+| Signal | What it implies |
+|---|---|
+| 154 MB XAPK, **arm64 only** | The runtime is **bundled**, not fetched. ~100 MB of JRE plus the app, and one ABI so they do not pay twice. |
+| Changelog: "a Java startup cache generated in the background after install" | AppCDS generation — something you only do for a runtime you ship. |
+| "the Java runtime retrieves the selected server software and runs it as an independent process" | Server jars **are** downloaded in-app, and a child-process model, same as here. |
+| Supports "Java 25 and older" | Multiple runtimes bundled, or one recent one running older targets. |
+
+So: bundling the runtime is viable on Play, and downloading server jars is
+evidently accepted in practice. Note "shipping and not removed" is evidence
+rather than proof — enforcement is uneven — but six months and 100k downloads
+is a meaningful signal, and it matches the policy text rather than
+contradicting it.
+
+Their arm64-only restriction is worth copying for size, and it costs the
+emulator: x86_64 would have to stay a debug-only configuration.
+
+Distributing outside Play (F-Droid, direct APK) avoids the question entirely,
+and Anvil offers a direct download alongside the Play listing.
 
 #### Where runtimes come from
 
