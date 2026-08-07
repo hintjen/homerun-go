@@ -102,6 +102,8 @@ dependencies {
     implementation(libs.androidx.webkit)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.commons.compress)
+    implementation(libs.tukaani.xz)
 }
 
 /**

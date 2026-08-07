@@ -92,50 +92,84 @@ class JavaServerBackend(
 
         val launcher = JavaRuntime.launcher(context)
             ?: throw ServerBackendException.Engine(
-                "This build has no Java runtime bundled, so it cannot host a Java server."
+                "This build has no Java launcher, so it cannot host a Java server."
             )
-        if (!JavaRuntime.ensureUnpacked(context)) {
-            throw ServerBackendException.Engine(
-                "The Java runtime could not be unpacked on this device."
-            )
-        }
 
         val jar = serverJar(serverId)
         if (!jar.isFile) {
+            throw ServerBackendException.Engine("This server has not finished downloading yet.")
+        }
+
+        // The jar names the class to run. Doing this here keeps the native
+        // launcher free of zip parsing.
+        val mainClass = mainClassOf(jar)
+            ?: throw ServerBackendException.Engine(
+                "That server jar has no Main-Class, so it cannot be started."
+            )
+
+        val javaMajor = (config.extra["javaMajor"] as? Int) ?: DEFAULT_JAVA
+        transition(serverId, ServerState.STARTING)
+        reset()
+
+        // Blocking, tens of megabytes, and the first start on a device pays
+        // for it. The bridge has no call timeout precisely so this is allowed
+        // to take as long as it takes.
+        val javaHome = withContext(Dispatchers.IO) {
+            runCatching { JavaRuntime.ensure(context, javaMajor) }
+        }.getOrElse { err ->
+            transition(serverId, ServerState.CRASHED)
             throw ServerBackendException.Engine(
-                "This server has not finished downloading yet."
+                err.message ?: "The Java runtime could not be installed."
             )
         }
+        val libjvm = JavaRuntime.libjvm(context, javaMajor)
+            ?: throw ServerBackendException.Engine("The Java runtime is incomplete.")
 
         val dir = dataDir(serverId)
         val heap = heapMb(config.memoryMb)
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
 
-        transition(serverId, ServerState.STARTING)
-        reset()
-
         val started = withContext(Dispatchers.IO) {
             runCatching {
                 ProcessBuilder(
-                    launcher.absolutePath,
-                    "-Xmx${heap}M",
-                    "-Xms${heap}M",
-                    "-jar",
-                    jar.absolutePath,
-                    "nogui",
+                    listOf(
+                        launcher.absolutePath,
+                        libjvm.absolutePath,
+                        mainClass.replace('.', '/'),
+                        // No `-jar` here: the VM is created through JNI, so the
+                        // jar goes on the classpath and the main class is named.
+                        "-Djava.class.path=${jar.absolutePath}",
+                        "-Djava.home=${javaHome.absolutePath}",
+                        // The JRE's own natives live here; without it the VM
+                        // starts but java.nio cannot load libnio.so.
+                        "-Djava.library.path=${javaHome.absolutePath}/lib",
+                        "-Duser.dir=${dir.absolutePath}",
+                        "-Xmx${heap}M",
+                        "-Xms${heap}M",
+                        "--",
+                        "nogui",
+                    )
                 )
                     .directory(dir)
                     .redirectErrorStream(true)
                     .also { builder ->
                         builder.environment().apply {
-                            put("JAVA_HOME", JavaRuntime.home(context).absolutePath)
-                            // The launcher resolves the class library relative
-                            // to itself, which is wrong here — it lives in the
-                            // APK's lib dir while the runtime is unpacked.
+                            put("JAVA_HOME", javaHome.absolutePath)
+                            // The runtime's .so files carry DT_NEEDED entries
+                            // for each other (libnio -> libnet), and Android's
+                            // linker will not find them without this. It has
+                            // to be in the environment: the linker reads it at
+                            // process start, so setting it later is too late.
+                            put(
+                                "LD_LIBRARY_PATH",
+                                listOfNotNull(
+                                    "${javaHome.absolutePath}/lib",
+                                    "${javaHome.absolutePath}/lib/server",
+                                    System.getenv("LD_LIBRARY_PATH"),
+                                ).joinToString(":"),
+                            )
                             put("HOME", dir.absolutePath)
-                            config.extra.forEach { (k, v) ->
-                                if (v is String) put(k, v)
-                            }
+                            config.extra.forEach { (k, v) -> if (v is String) put(k, v) }
                         }
                     }
                     .start()
@@ -345,6 +379,11 @@ class JavaServerBackend(
         return requestedMb.coerceIn(MIN_HEAP_MB, ceiling).also { lastHeapMb = it }
     }
 
+    /** `Main-Class` from the jar manifest, which is what `java -jar` reads. */
+    private fun mainClassOf(jar: File): String? = runCatching {
+        java.util.jar.JarFile(jar).use { it.manifest?.mainAttributes?.getValue("Main-Class") }
+    }.getOrNull()
+
     private fun transition(serverId: String, state: ServerState) {
         if (lastState == state) return
         lastState = state
@@ -354,6 +393,8 @@ class JavaServerBackend(
     private companion object {
         const val TAG = "HomerunJava"
         const val DEFAULT_PORT = 25565
+        /** Minecraft 1.18–1.20.4. Newer needs 21, which is arm64-only today. */
+        const val DEFAULT_JAVA = 17
         const val POLL_MS = 250L
         const val START_TIMEOUT_MS = 300_000L
         const val GRACEFUL_STOP_SECONDS = 30L

@@ -96,19 +96,33 @@ Two packaging rules still bind, and neither bends:
 
 #### Verified on the emulator
 
-Against a real downloaded runtime
-([`jre17-x86_64`](https://github.com/PojavLauncherTeam/android-openjdk-build-multiarch/releases),
-39 MB) unpacked into `files/jre`:
+A real Minecraft 1.20.4 server, on a downloaded Java 17 runtime, reached its
+EULA gate:
 
-| Step | Evidence |
-|---|---|
-| exec from `nativeLibraryDir` | launcher ran and printed its own diagnostics |
-| `dlopen` from app storage | no load error for `files/jre/lib/server/libjvm.so` |
-| `JNI_CreateJavaVM` | a bogus class gave `ClassNotFoundException`, not a VM failure |
-| class loading from the download | `java/lang/String` and `java/util/zip/ZipFile` both resolved |
+```
+Unpacking 1.20.4/server-1.20.4.jar (versions:1.20.4) to versions/...
+Unpacking io/netty/netty-handler/4.1.97.Final/... to libraries/...
+[ServerMain/INFO]: You need to agree to the EULA in order to run the server.
+```
 
-What is not yet proven is a Minecraft server jar actually booting; that needs
-the jar and an accepted EULA, and is mechanical from here.
+That is the whole chain: exec from `nativeLibraryDir`, `dlopen` of a
+`libjvm.so` in app storage, `JNI_CreateJavaVM`, class loading from the
+downloaded runtime, Mojang's bundler unpacking its libraries, and
+`net.minecraft.server.Main` running far enough to write `server.properties`
+and `eula.txt`. Console output arrived over `bridge/v1` throughout.
+
+Two things only a real run found:
+
+- **`LD_LIBRARY_PATH` must include `<javaHome>/lib`.** The runtime's own
+  natives carry `DT_NEEDED` entries for each other (`libnio.so` needs
+  `libnet.so`), and Android's linker will not find them otherwise. It has to
+  be in the child's *environment* — the linker reads it at process start, so
+  setting it afterwards is too late. Without it the VM boots and then dies the
+  moment anything touches `java.nio`.
+- **Stopping at the EULA reports as a crash.** `start()` waits for `Done (…)!`
+  and the process exits before that, so the user is told "the server stopped
+  unexpectedly while starting". Accurate but unhelpful; the EULA needs
+  detecting and surfacing as its own state.
 
 #### What to bundle vs download
 
