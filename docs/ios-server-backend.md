@@ -116,14 +116,102 @@ worlds through the Files app.
 
 ## How a player actually connects
 
-The host reports its LAN address and port, and a friend on the same Wi-Fi
-types it into Direct Connect. **Without that, nothing else here matters** — a
-server nobody can join is not a feature.
+Two ways, and only one of them works from outside the house.
 
-Appearing automatically in Minecraft's LAN-games list is a different thing: it
-needs Pumpkin's multicast broadcast *and* Apple's multicast entitlement, which
-is a request form with a real approval delay. v1 deliberately shows the
-address instead.
+**On the same Wi-Fi**, the host reports its LAN address and port and a friend
+types it into Direct Connect. Appearing automatically in Minecraft's LAN-games
+list is a different thing — it needs Pumpkin's multicast broadcast *and*
+Apple's multicast entitlement, which is a request form with a real approval
+delay. v1 deliberately shows the address instead.
+
+**From anywhere else**, through the tunnel below. A phone on cellular sits
+behind CGNAT, so there is no port-forwarding fallback the way there is on
+desktop: without the tunnel, a server runs and nobody outside can join.
+
+## The tunnel — `WireProxy.swift`, `go/wireproxy-ios/`
+
+Traffic is **ingress**. The Homerun gateway is the client and the phone is the
+server, which is the opposite of what "proxy" usually suggests:
+
+```
+player → <region>.gethomerun.app:<externalPort>   (link.forward_ports)
+       → gateway DNAT
+       → over WireGuard to <phone wg IP>:25565
+       → wireproxy [TCPServerTunnel]
+       → 127.0.0.1:<local Minecraft port>
+```
+
+> **No VPN permission is involved, and that is the most important property of
+> this design.** wireproxy terminates WireGuard in its own userspace netstack.
+> The interface address is virtual inside the process and is never registered
+> with the OS — no `NEPacketTunnelProvider`, no VPN profile, no system prompt,
+> and nothing for App Review to weigh. Android says the same about the same
+> design. Do not "simplify" this into a Network Extension.
+
+iOS cannot spawn the wireproxy binary that desktop and Android run, so the Go
+code is bound with gomobile and runs in-process. `go/wireproxy-ios/` is a thin
+wrapper — `Start`, `LastHandshakeUnix`, `Stop` — over the same
+`hintjen/wireproxy-fork` Android builds from. It spawns the routines the
+*config* declares rather than reimplementing forwarding, which is what keeps
+the two ends of the gateway contract from drifting.
+
+### The config is a shared contract
+
+`WireProxy.render` produces byte-for-byte what `wireproxyConfig.ts` (desktop)
+and `WireProxy.kt` (Android) produce. The same gateway is on the other end of
+all three, so a difference is a bug by definition.
+
+> **`ListenPort` is a fixed constant, not the local port.** The gateway
+> unconditionally DNATs player traffic to 25565 on the WireGuard interface,
+> whatever the server bound locally. Only `Target` follows the real port.
+> `MTU = 1280` and `PersistentKeepalive = 30` are load-bearing for NAT
+> traversal on an inbound tunnel.
+
+iOS renders TCP only. Desktop and Android also emit UDP sections for Bedrock
+(19132) and Simple Voice Chat (24454); neither can exist here, because a
+Pumpkin host is vanilla-only and runs no plugin, and Bedrock is rejected
+earlier.
+
+### Credentials, and the staleness rule
+
+The gateway provisions the WireGuard peer *asynchronously* after the server is
+marked running, so at launch the credentials usually do not exist yet.
+`HomerunAPI.awaitTunnel` polls `/api/server/<id>/` 20 times, 3 s apart.
+
+The legacy provisioner mints a fresh keypair every session and nulls the config
+on stop, so a polled config still equal to the pre-launch baseline is the
+*dead previous set* and must be ignored. Gateway v2 reuses credentials
+deliberately — **skipping the staleness check for v2 is required**, or a v2
+link polls until timeout on every single start.
+
+### `running` means reachable
+
+The tunnel comes up *before* the backend reports `running`. Listening on
+loopback is not the same as being joinable, and desktop learned this as "a
+silently-rejected start masquerading as running".
+
+**A tunnel failure stops the server.** Leaving it up would be a slower way to
+fail, since nobody could join. Two kinds, both reported on
+`native-server-network-error` **before** the stop — the stop itself goes
+through the ordinary clean path, so without the event the UI cannot tell it
+from the player pressing Stop:
+
+| Kind | Means |
+|---|---|
+| `provisioning` | The gateway never handed over credentials, or the tunnel would not open |
+| `handshake` | Credentials arrived but the peer never answered, or stopped answering |
+
+A consequence worth knowing: **a start with no account now fails.** No token
+means no credentials, which means no tunnel, which means no server.
+
+### Detecting a dead tunnel
+
+Desktop and Android count the string `"Handshake did not complete after 5
+seconds"` ten times in wireproxy's stdout. In-process there is no child stdout,
+and wireguard-go logs to fd 1 — which the Rust layer redirects into the
+*player-visible* console. So iOS asks the device for its real
+`last_handshake_time_sec` and treats 50 s without one as dead: the same
+threshold, a real signal, and no tunnel noise in the console.
 
 `get-native-local-network` reports enabled and `set-native-local-network`
 accepts without doing anything, because on a phone there is no LAN toggle to
@@ -147,6 +235,9 @@ make — the device is on the player's Wi-Fi or it is not.
 | `ios/HomerunHost/FFI/HomerunFFI.h` | Hand-written C declarations |
 | `ios/HomerunHost/DeviceMetrics.swift` | Process memory and CPU sampling |
 | `ios/HomerunHost/BridgeRouter+Server.swift` | The `native-server-*` channels |
+| `ios/HomerunHost/WireProxy.swift` | Tunnel config, lifecycle, handshake watchdog |
+| `ios/HomerunHost/HomerunAPI.swift` | Device registration; tunnel credential polling |
+| `go/wireproxy-ios/` | gomobile binding over the wireproxy fork |
 | `rust/homerun-pumpkin-ffi/examples/boot_engine.rs` | Boots the real engine host-native |
 
 ## Triage
@@ -178,3 +269,23 @@ broadcasting to the LAN list.
 
 **A world ends up in iCloud.** `isExcludedFromBackup` was not set on the
 directory — note it must be set on the URL, and it is set at create time.
+
+**The server starts and stops itself immediately, with a network error.** No
+tunnel. If the kind is `provisioning` the gateway never issued credentials —
+check the account is signed in and the server exists on the backend. If it is
+`handshake`, credentials arrived but the peer never answered; check the
+endpoint is reachable.
+
+**Every start waits the full 60 s and then fails.** The staleness check is
+rejecting a valid config. That is what happens when a gateway-v2 link is
+treated as legacy — v2 reuses credentials, so its config *does* equal the
+baseline and is supposed to.
+
+**`cannot find type 'WireProxy' in scope`, or the framework is missing.** Run
+`node scripts/build-wireproxy.js ios` before `xcodegen generate`; the project
+references the staged xcframework, and new Swift files need a regenerate.
+
+**`pkt.IsNil undefined` building the Go module.** gvisor was upgraded past the
+fork's 2023 wireguard-go. The generated `go.work` pins it — and note that
+`go work sync` *causes* this by writing resolved versions back into the fork's
+own `go.mod`, which also dirties another repository.

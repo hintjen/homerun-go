@@ -30,6 +30,15 @@ targets:
     type: application
     platform: iOS
 
+    dependencies:
+      # The wireproxy tunnel, gomobile-bound so it runs in-process — iOS
+      # cannot spawn the binary the way desktop and Android do. Staged by
+      # `node scripts/build-wireproxy.js ios`, so that must run before
+      # `xcodegen generate`.
+      - framework: HomerunHost/lib/WireproxyIOS.xcframework
+        embed: true
+        codeSign: true
+
     sources:
       - path: HomerunHost
         excludes:
@@ -55,10 +64,15 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"        # iPhone; the UI is untested on iPad
         SWIFT_OBJC_BRIDGING_HEADER: HomerunHost/FFI/HomerunFFI.h
 
-        # Simulator-first: no team, automatic signing. Set DEVELOPMENT_TEAM
-        # when you first deploy to a device.
+        # Simulator-first: no team needed, and Xcode signs simulator builds
+        # ad-hoc by itself. Set DEVELOPMENT_TEAM when you first deploy to a
+        # device.
+        #
+        # Do NOT turn signing off to avoid needing a team. An unsigned app has
+        # no application identifier, so the Keychain rejects every write with
+        # errSecMissingEntitlement (-34018) — which surfaces much later as the
+        # app behaving as though it were never signed in.
         CODE_SIGN_STYLE: Automatic
-        CODE_SIGNING_ALLOWED: NO
 
         # scripts/targets.js stages the device and simulator slices to
         # different directories; pick per SDK rather than building a fat lib.

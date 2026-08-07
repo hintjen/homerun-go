@@ -62,6 +62,22 @@ protocol ServerBackend: AnyObject {
     var onStateChanged: ((String, ServerState) -> Void)? { get set }
     var onLog: ((String, String) -> Void)? { get set }
     var onPlayersChanged: ((String) -> Void)? { get set }
+
+    /// The server is being stopped because it could not be reached, not
+    /// because anyone asked.
+    ///
+    /// Load-bearing: the stop that follows goes through the ordinary clean
+    /// path, so without this event the UI cannot tell it apart from the player
+    /// pressing Stop. Emitted *before* the stop, for the same reason.
+    var onNetworkError: ((String, NetworkErrorKind) -> Void)? { get set }
+}
+
+/// Why a server became unreachable. The shared UI words each one differently.
+enum NetworkErrorKind: String {
+    /// The gateway never handed over tunnel credentials.
+    case provisioning
+    /// Credentials arrived but the tunnel never came up, or stopped.
+    case handshake
 }
 
 enum ServerState: String {
@@ -78,6 +94,13 @@ struct ServerConfig {
     /// jetsam the whole app — not just the server — so pick conservatively.
     let memoryMb: Int
     var extra: [String: Any] = [:]
+
+    /// Fetches the tunnel credentials, once the server is up.
+    ///
+    /// A closure rather than data so the user's access token never becomes
+    /// backend state — it stays captured in the bridge layer, which is the
+    /// only place that legitimately has it.
+    var resolveTunnel: (() async -> WireProxy.Link?)?
 }
 
 struct PlayerRoster {

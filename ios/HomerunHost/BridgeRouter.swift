@@ -47,6 +47,7 @@ final class BridgeRouter {
 
     let deepLinks: DeepLinkManager
     let backend: PumpkinBackend
+    let deviceRegistrar = DeviceRegistrar()
 
     init(deepLinks: DeepLinkManager, backend: PumpkinBackend) {
         self.deepLinks = deepLinks

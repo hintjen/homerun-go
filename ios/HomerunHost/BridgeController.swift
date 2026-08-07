@@ -76,6 +76,13 @@ final class BridgeController: NSObject, BridgeEventSink {
             self?.emit("native-server-players-changed", [["serverId": serverId]])
         }
 
+        // Arrives before the stop it explains, so the UI can say why the
+        // server went away rather than showing it as an ordinary shutdown.
+        backend.onNetworkError = { [weak self] serverId, kind in
+            self?.emit(
+                "native-server-network-error", [["serverId": serverId, "kind": kind.rawValue]])
+        }
+
         // This is an app, not a document: the CSS owns the safe areas and the
         // scrolling, so the native layer must not add rubber-banding or insets
         // on top of it.
@@ -180,6 +187,13 @@ extension BridgeController: WKScriptMessageHandler {
                 details["body"] as? String ?? "")
             return
         }
+
+        #if DEBUG
+            // What the UI actually asks for, in order. Boot-path problems are
+            // usually a call that never happened rather than one that failed,
+            // and that is invisible without this.
+            NSLog("[bridge] <- %@%@", incoming.method, incoming.id == nil ? " (send)" : "")
+        #endif
 
         guard let handler = router.handler(for: incoming.method) else {
             // An unanswered invoke hangs a UI promise forever — the worst

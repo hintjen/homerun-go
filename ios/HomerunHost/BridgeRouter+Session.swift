@@ -12,20 +12,43 @@ extension BridgeRouter {
         return nil
     }
 
-    /// Credentials arrive after a successful login or a magic-link return. The
-    /// UI owns the session; the host acknowledges so anything listening for
-    /// `credentials-set` can react.
+    /// Credentials arrive after a successful login or a magic-link return.
+    ///
+    /// The host keeps the access token because it has to call the API with no
+    /// page in front of it — registering this device is the first such call,
+    /// and the UI cannot do it on our behalf.
+    ///
+    /// Emitting `credentials-set` is the load-bearing part: the boot state
+    /// machine waits on that event before routing to the dashboard, so a
+    /// handler that stores and stays quiet hangs login on a spinner.
     func credentialsReceived(_ params: Any?) async throws -> Any? {
-        guard params is [String: Any] else {
+        guard let credentials = params as? [String: Any],
+            let token = credentials["access_token"] as? String, !token.isEmpty
+        else {
             events?.emit("credentials-error", ["Sign-in did not complete. Please try again."])
             return nil
         }
+
+        TokenStore.accessToken = token
+        if let apiURL = credentials["apiUrl"] as? String, !apiURL.isEmpty {
+            HostStore.apiURL = apiURL
+        }
         events?.emit("credentials-set", [])
+
+        // Registration needs the token that just arrived, and the UI will ask
+        // for the device id as soon as the dashboard mounts. Starting now
+        // means it is usually already done by then; `DeviceRegistrar` handles
+        // the case where it is not.
+        Task { _ = await deviceRegistrar.deviceId() }
         return nil
     }
 
     func logout(_ params: Any?) async throws -> Any? {
         HostStore.clientNonce = nil
+        // The device registration deliberately survives: it belongs to the
+        // phone, not the session, and re-registering on the next login would
+        // orphan the servers already attached to it.
+        TokenStore.accessToken = nil
         return nil
     }
 

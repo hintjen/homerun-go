@@ -15,6 +15,23 @@ enum HostStore {
         static let clientNonce = "homerun.clientNonce"
         static let journeyModals = "homerun.journeyModals"
         static let installed = "homerun.firstRunComplete"
+        static let registeredDeviceId = "homerun.registeredDeviceId"
+        static let deviceGroupId = "homerun.deviceGroupId"
+    }
+
+    /// The device id the *backend* issued, from `/api/init/native/`.
+    ///
+    /// Distinct from `deviceID()` below, which is a local identifier and is
+    /// not something the API will accept — sending it as a server's `device`
+    /// is rejected with "does not exist".
+    static var registeredDeviceId: String? {
+        get { defaults.string(forKey: Key.registeredDeviceId) }
+        set { defaults.set(newValue, forKey: Key.registeredDeviceId) }
+    }
+
+    static var deviceGroupId: String? {
+        get { defaults.string(forKey: Key.deviceGroupId) }
+        set { defaults.set(newValue, forKey: Key.deviceGroupId) }
     }
 
     static var apiURL: String? {
@@ -82,10 +99,11 @@ enum HostStore {
         serversDirectory.appendingPathComponent(id, isDirectory: true)
     }
 
-    /// A stable per-install identifier. `identifierForVendor` resets when the
-    /// last app from this vendor is removed, which is the correct lifetime —
-    /// but it can be nil early in boot, so the value is persisted once.
-    static func deviceID() -> String? {
+    /// A stable per-install identifier, local to this app.
+    ///
+    /// Not the backend's device id — see `registeredDeviceId`. Kept because it
+    /// is a useful stable string for naming and diagnostics.
+    static func localInstallID() -> String? {
         if let existing = defaults.string(forKey: "homerun.deviceId") { return existing }
         guard let vendor = UIDevice.current.identifierForVendor?.uuidString else { return nil }
         defaults.set(vendor, forKey: "homerun.deviceId")

@@ -94,6 +94,34 @@ for (const platform of platforms) {
       xcodegen || "not found",
       "brew install xcodegen   (the .xcodeproj is generated, not committed)"
     );
+
+    // The tunnel. Without it a hosted server is reachable only on the phone's
+    // own Wi-Fi — on cellular, CGNAT means nobody can join at all.
+    const go = capture("go", ["version"]);
+    add(
+      Boolean(go),
+      "Go",
+      go || "not found",
+      "brew install go   (the wireproxy fork needs Go 1.26+)"
+    );
+    const gomobile = capture("gomobile", ["version"]);
+    add(
+      Boolean(gomobile),
+      "gomobile",
+      gomobile ? "installed" : "not found",
+      "go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init\n" +
+        "    It lands in $(go env GOPATH)/bin — put that on PATH."
+    );
+    const wireproxySrc = process.env.HOMERUN_WIREPROXY_SRC
+      ? path.resolve(ROOT, process.env.HOMERUN_WIREPROXY_SRC)
+      : path.join(path.dirname(ROOT), "wireproxy-fork");
+    add(
+      fs.existsSync(path.join(wireproxySrc, "wireproxy", "go.mod")),
+      "wireproxy fork",
+      fs.existsSync(path.join(wireproxySrc, "wireproxy", "go.mod")) ? wireproxySrc : "not found",
+      "git clone git@github.com:hintjen/wireproxy-fork.git   (as a sibling of this repo,\n" +
+        "    or set HOMERUN_WIREPROXY_SRC)"
+    );
   }
 
   if (platform === "android") {

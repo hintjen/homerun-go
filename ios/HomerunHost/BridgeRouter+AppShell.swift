@@ -56,8 +56,11 @@ extension BridgeRouter {
 
     // MARK: - Identity
 
+    /// The id the UI sends as a server's `device`, so it has to be the one the
+    /// backend issued. Registers on first ask; null until sign-in makes that
+    /// possible. See `DeviceRegistrar`.
     func getDeviceID(_ params: Any?) async throws -> Any? {
-        HostStore.deviceID()
+        await deviceRegistrar.deviceId()
     }
 
     /// The device WebSocket is parity work that has not landed on iOS yet.

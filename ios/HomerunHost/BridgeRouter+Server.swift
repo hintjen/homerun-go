@@ -28,10 +28,25 @@ extension BridgeRouter {
         }
 
         let raw = payload["config"] as? [String: Any] ?? [:]
-        let config = ServerConfig(
+        var config = ServerConfig(
             name: raw["name"] as? String ?? serverId,
             memoryMb: raw["memoryMb"] as? Int ?? 1024,
             extra: raw)
+
+        // The UI passes the user's token on this call specifically so the host
+        // can fetch tunnel credentials. Captured in a closure rather than put
+        // in `extra`, which is forwarded to the engine — a token has no
+        // business there.
+        let token = payload["userToken"] as? String ?? TokenStore.accessToken ?? ""
+        let apiURL = HostStore.apiURL ?? ""
+        if !token.isEmpty, !apiURL.isEmpty {
+            config.resolveTunnel = {
+                let baseline = await HomerunAPI.tunnelBaseline(
+                    apiURL: apiURL, serverId: serverId, token: token)
+                return await HomerunAPI.awaitTunnel(
+                    apiURL: apiURL, serverId: serverId, token: token, stale: baseline)
+            }
+        }
 
         do {
             try await backend.start(serverId: serverId, config: config)

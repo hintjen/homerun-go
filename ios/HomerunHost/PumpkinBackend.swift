@@ -12,6 +12,11 @@ final class PumpkinBackend: ServerBackend {
     var onStateChanged: ((String, ServerState) -> Void)?
     var onLog: ((String, String) -> Void)?
     var onPlayersChanged: ((String) -> Void)?
+    var onNetworkError: ((String, NetworkErrorKind) -> Void)?
+
+    /// The tunnel that makes this server reachable off the local Wi-Fi.
+    private let wireProxy = WireProxy()
+    private var tunnelTask: Task<WireProxy.Link?, Never>?
 
     /// The id whose thread is currently up. One at a time, enforced here and
     /// again in the engine.
@@ -72,6 +77,13 @@ final class PumpkinBackend: ServerBackend {
         emitState(serverId, .starting)
 
         let port = (config.extra["port"] as? Int).map(UInt16.init) ?? 25565
+
+        // Kicked before the engine, so the gateway's ≤60 s provisioning poll
+        // overlaps world generation rather than following it.
+        if let resolveTunnel = config.resolveTunnel {
+            tunnelTask = Task { await resolveTunnel() }
+        }
+
         startServerThread(serverId: serverId, port: port)
         startPumps(serverId: serverId)
 
@@ -88,6 +100,12 @@ final class PumpkinBackend: ServerBackend {
             }
 
             if HomerunFFI.state() == .running {
+                // The engine is listening on loopback. That is not the same as
+                // being joinable, so the tunnel goes up before anyone is told
+                // the server is running — desktop learned this the hard way,
+                // as "a silently-rejected start masquerading as running".
+                try await openTunnel(serverId: serverId, port: Int(port))
+
                 startedAt = Date()
                 listeningPort = HomerunFFI.stats()["port"] as? Int ?? Int(port)
                 emitState(serverId, .running)
@@ -123,6 +141,57 @@ final class PumpkinBackend: ServerBackend {
         thread.start()
     }
 
+    /// Bring the tunnel up, or stop the server.
+    ///
+    /// A tunnel failure is fatal, matching desktop and Android. A phone on
+    /// cellular is behind CGNAT and has no port-forwarding fallback, so a
+    /// server without a tunnel is one nobody can join — leaving it running
+    /// would just be a slower way to fail.
+    private func openTunnel(serverId: String, port: Int) async throws {
+        guard let tunnelTask else { return }
+        self.tunnelTask = nil
+
+        onLog?(serverId, "[Homerun] Connecting to the Homerun gateway...")
+
+        guard let link = await tunnelTask.value else {
+            try failTunnel(
+                serverId: serverId, kind: .provisioning,
+                message: "Could not connect to the Homerun gateway: it did not provide a connection.")
+            return
+        }
+
+        wireProxy.onHandshakeFailed = { [weak self] in
+            guard let self else { return }
+            Task { await self.stopForNetworkError(serverId: serverId, kind: .handshake) }
+        }
+
+        do {
+            try wireProxy.start(link: link, minecraftPort: port)
+        } catch {
+            let detail = (error as? ServerBackendError)?.errorDescription ?? "\(error)"
+            try failTunnel(serverId: serverId, kind: .provisioning, message: detail)
+            return
+        }
+
+        onLog?(serverId, "[Homerun] Connected to the Homerun gateway.")
+    }
+
+    /// Report, stop, and throw — so `native-server-start` answers with the
+    /// reason rather than reporting a server nobody can reach.
+    private func failTunnel(serverId: String, kind: NetworkErrorKind, message: String) throws {
+        onLog?(serverId, "[Homerun] \(message) Stopping server.")
+        Task { await stopForNetworkError(serverId: serverId, kind: kind) }
+        throw ServerBackendError.engine(message)
+    }
+
+    /// The event goes out *before* the stop. The stop itself is the ordinary
+    /// clean path, so without this the UI cannot tell it from the player
+    /// pressing Stop.
+    private func stopForNetworkError(serverId: String, kind: NetworkErrorKind) async {
+        onNetworkError?(serverId, kind)
+        try? await stop(serverId: serverId)
+    }
+
     private func serverThreadExited(_ reply: HomerunFFI.Reply) {
         threadFinished = true
         // A clean shutdown after a stop request is not a failure; anything
@@ -143,6 +212,13 @@ final class PumpkinBackend: ServerBackend {
         stopRequested = true
         emitState(serverId, .stopping)
 
+        // Tunnel first: one that outlives its server keeps the gateway's peer
+        // slot occupied, and the next start fails for a reason that looks
+        // nothing like this one.
+        tunnelTask?.cancel()
+        tunnelTask = nil
+        wireProxy.stop()
+
         // Graceful: the engine saves the world and then returns. Killing the
         // thread instead would risk the save, and a half-written world is the
         // worst outcome available here.
@@ -153,7 +229,15 @@ final class PumpkinBackend: ServerBackend {
     }
 
     /// Tear down one run's state and announce the final state, once.
+    ///
+    /// Also reached when the engine exits on its own, which is why the tunnel
+    /// is closed here as well as in `stop` — a crashed server must not leave
+    /// the gateway holding a peer slot.
     private func finish(serverId: String, state: ServerState) {
+        tunnelTask?.cancel()
+        tunnelTask = nil
+        wireProxy.stop()
+
         // The last of the console — including whatever the engine said on its
         // way down, which is usually the reason.
         drainLogs(serverId: serverId)
