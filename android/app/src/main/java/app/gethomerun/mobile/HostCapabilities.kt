@@ -25,6 +25,7 @@ data class HostCapabilities(
     val autoUpdate: Boolean,
     val privilegeElevation: Boolean,
     val moddedServers: Boolean,
+    val fileImport: Boolean,
     val multipleRunningServers: Boolean,
     val backgroundExecution: Boolean,
     val backups: Boolean,
@@ -53,6 +54,10 @@ data class HostCapabilities(
             privilegeElevation = false,
             // The JVM backend runs Bukkit-family plugins and Forge/Fabric mods.
             moddedServers = true,
+            // Mods and modpacks come from the in-app browser. Being handed a
+            // file — a world .zip, a .mrpack — is a desktop flow, and SAF
+            // import is deliberately not being built.
+            fileImport = false,
             // One server at a time, same as desktop.
             multipleRunningServers = false,
             // Via a foreground service (M4).
