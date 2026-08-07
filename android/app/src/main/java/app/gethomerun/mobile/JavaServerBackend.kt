@@ -64,13 +64,11 @@ class JavaServerBackend(
     private fun dataDir(serverId: String): File =
         File(context.filesDir, "servers/$serverId").apply { mkdirs() }
 
-    /** Server jars are *data*, so unlike the JRE they may be downloaded. */
-    private fun serverJar(serverId: String): File = File(dataDir(serverId), "server.jar")
+    /** Scratch space for the JVM, inside the server's own directory. */
+    private fun tmpDir(dir: File): File = File(dir, "tmp").apply { mkdirs() }
 
     override fun create(serverId: String) {
         dataDir(serverId)
-        // Accepting the EULA is the user's act; the UI collects it during
-        // creation. Writing it here would be doing it on their behalf.
     }
 
     override fun delete(serverId: String) {
@@ -84,6 +82,14 @@ class JavaServerBackend(
     // Lifecycle
     // -----------------------------------------------------------------------
 
+    /** Everything the JVM invocation needs, resolved before anything is spawned. */
+    private data class Launch(
+        val javaHome: File,
+        val libjvm: File,
+        val jar: File,
+        val mainClass: String,
+    )
+
     override suspend fun start(serverId: String, config: ServerConfig) {
         runningServerIds.firstOrNull()?.let { running ->
             if (running == serverId) throw ServerBackendException.AlreadyRunning(serverId)
@@ -95,36 +101,56 @@ class JavaServerBackend(
                 "This build has no Java launcher, so it cannot host a Java server."
             )
 
-        val jar = serverJar(serverId)
-        if (!jar.isFile) {
-            throw ServerBackendException.Engine("This server has not finished downloading yet.")
-        }
+        val dir = dataDir(serverId)
 
-        // The jar names the class to run. Doing this here keeps the native
-        // launcher free of zip parsing.
-        val mainClass = mainClassOf(jar)
-            ?: throw ServerBackendException.Engine(
-                "That server jar has no Main-Class, so it cannot be started."
-            )
-
+        // Open the console before the slow work, not after: unpacking the
+        // runtime and downloading a jar are minutes of a launch, and their
+        // progress lines are the only thing the UI can show meanwhile.
         transition(serverId, ServerState.STARTING)
         reset()
 
-        // Blocking the first time — a hundred megabytes out of the APK — and
-        // the first start on a device pays for it. The bridge has no call
-        // timeout precisely so this is allowed to take as long as it takes.
-        val javaHome = withContext(Dispatchers.IO) {
-            runCatching { JavaRuntime.ensure(context) }
+        // Nothing below has started a process, so a failure here is a launch
+        // that did not happen — reported as stopped, with the reason on the
+        // call. `crashed` is reserved for a JVM that ran and died.
+        val prepared = runCatching {
+            // Blocking the first time — a hundred megabytes out of the APK —
+            // and the first start on a device pays for it. The bridge has no
+            // call timeout precisely so this is allowed to take as long as it
+            // takes.
+            val javaHome = withContext(Dispatchers.IO) { JavaRuntime.ensure(context) }
+            val libjvm = JavaRuntime.libjvm(context)
+                ?: throw ServerBackendException.Engine("The Java runtime is incomplete.")
+
+            val jar = ServerJar.ensure(
+                dir = dir,
+                version = config.version,
+                loader = config.loader,
+                bundledJava = JavaRuntime.javaMajor(context),
+                onLog = { note(serverId, it) },
+            )
+
+            // Accept Mojang's EULA on the user's behalf, on every start —
+            // byte-for-byte what the desktop app does in
+            // `nativeServerManager.startServer`. The server will not boot
+            // without it, and there is no acceptance step anywhere in the
+            // product; `docs/android-server-backend.md` records that.
+            File(dir, "eula.txt").writeText("eula=true\n")
+
+            // The jar names the class to run. Doing this here keeps the native
+            // launcher free of zip parsing.
+            val mainClass = mainClassOf(jar)
+                ?: throw ServerBackendException.Engine(
+                    "That server jar has no Main-Class, so it cannot be started."
+                )
+            Launch(javaHome, libjvm, jar, mainClass)
         }.getOrElse { err ->
-            transition(serverId, ServerState.CRASHED)
-            throw ServerBackendException.Engine(
-                err.message ?: "The Java runtime could not be unpacked."
+            transition(serverId, ServerState.STOPPED)
+            throw err as? ServerBackendException ?: ServerBackendException.Engine(
+                err.message ?: "The server could not be prepared."
             )
         }
-        val libjvm = JavaRuntime.libjvm(context)
-            ?: throw ServerBackendException.Engine("The Java runtime is incomplete.")
 
-        val dir = dataDir(serverId)
+        val (javaHome, libjvm, jar, mainClass) = prepared
         val heap = heapMb(config.memoryMb)
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
 
@@ -142,6 +168,18 @@ class JavaServerBackend(
                         // The JRE's own natives live here; without it the VM
                         // starts but java.nio cannot load libnio.so.
                         "-Djava.library.path=${javaHome.absolutePath}/lib",
+                        // These builds are Termux's and carry Termux's prefix
+                        // compiled in as the temp directory — a path that does
+                        // not exist outside Termux, so anything writing a temp
+                        // file fails on a path no one can explain.
+                        //
+                        // Note this does NOT silence the JNA/oshi stack trace
+                        // at boot: JNA ships a glibc `libjnidispatch.so`, and
+                        // bionic cannot dlopen it wherever it is unpacked.
+                        // Minecraft wraps that probe in `ignoreErrors` and
+                        // boots regardless — the cost is no hardware detail in
+                        // crash reports.
+                        "-Djava.io.tmpdir=${tmpDir(dir).absolutePath}",
                         "-Duser.dir=${dir.absolutePath}",
                         "-Xmx${heap}M",
                         "-Xms${heap}M",
@@ -294,6 +332,18 @@ class JavaServerBackend(
             if (roster.remove(it.groupValues[1])) onPlayersChanged?.invoke(serverId)
         }
         MAX_PLAYERS.find(line)?.let { maxPlayers = it.groupValues[1].toIntOrNull() }
+    }
+
+    /**
+     * A line from Homerun rather than from the server — jar downloads, runtime
+     * unpacking. Recorded as well as emitted so a console that mounts after
+     * the fact still shows how the launch went; the log pump does not exist
+     * yet when these are written.
+     */
+    private fun note(serverId: String, line: String) {
+        Log.i(TAG, line)
+        record(line)
+        onLog?.invoke(serverId, line)
     }
 
     @Synchronized

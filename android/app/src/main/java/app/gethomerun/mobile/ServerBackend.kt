@@ -97,6 +97,21 @@ data class ServerConfig(
      * desktop defaults.
      */
     val memoryMb: Int,
+    /**
+     * Minecraft version to host. Null means the latest release — the same
+     * meaning the desktop gives an absent `VERSION`.
+     *
+     * The UI does not send this; the bridge reads it from the backend at
+     * launch ([HomerunApi.serverSettings]), so a version changed on the web
+     * dashboard takes effect on the next start.
+     */
+    val version: String? = null,
+    /** `vanilla`, `paper`, … Which server jar [ServerJar] fetches. */
+    val loader: String = "vanilla",
+    /**
+     * Forwarded into the server process's environment, so it must never carry
+     * anything secret — no tokens, no credentials.
+     */
     val extra: Map<String, Any> = emptyMap(),
 )
 

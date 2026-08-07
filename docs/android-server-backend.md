@@ -23,6 +23,8 @@ and rebuilt while a server keeps running, so a backend hanging off
 | `ServerHost.kt` | Chooses the backend, owns it for the process, fans out its callbacks. |
 | `JavaServerBackend.kt` | The real server jar as a child process. **Preferred.** |
 | `JavaRuntime.kt` | Finds and unpacks the bundled JVM. |
+| `ServerJar.kt` | Resolves and downloads the server jar. |
+| `HomerunApi.kt` | Reads a server's version and loader from the backend. |
 | `jni_bridge.rs` | Makes the Rust C ABI callable from the JVM. Nothing else. |
 | `NativeServer.kt` | The raw JNI surface plus the thread the engine needs. |
 | `PumpkinBackend.kt` | The Rust engine, in-process. Fallback. |
@@ -144,18 +146,96 @@ them as links also fails on Windows, where this may well be built.
 | Java 21, **networking disabled** | still boots — the runtime is genuinely self-contained |
 | Java 25.0.4, **arm64** | stages and verifies (`OS_ARCH="aarch64"`, ELF `Machine: AArch64`), **not** runtime-tested — no arm64 device here |
 
-`eula.txt` is left at `false`. Accepting Mojang's licence belongs to the user.
-
 Two things only a real run found:
 
 - **`LD_LIBRARY_PATH` must include `<javaHome>/lib` and the dependency
   directory**, in the child's *environment* — the linker reads it at process
   start, so setting it later is too late. Without it the VM boots and then dies
   the moment anything touches `java.nio`, several layers from the cause.
-- **Stopping at the EULA reports as a crash.** `start()` waits for `Done (…)!`
-  and the process exits first, so the user is told "the server stopped
-  unexpectedly while starting". Accurate but unhelpful; the EULA needs its own
-  state.
+- **`java.io.tmpdir` has Termux's prefix compiled in**, a path that does not
+  exist outside Termux, so anything writing a temp file fails on a path no one
+  can explain. `JavaServerBackend` overrides it to `<serverDir>/tmp`.
+
+#### The JNA stack trace at boot is expected
+
+Every Java server start logs a wall of `com.sun.jna` / `oshi` stack traces
+ending in `dlopen failed: library "libc.so.6" not found`. It is not a bug in
+this host and it is not fixable here: JNA ships a **glibc** `libjnidispatch.so`
+and Android is bionic, so it will not load wherever it is unpacked. Minecraft
+wraps that probe in `ignoreErrors` and boots regardless. The cost is no
+hardware detail in crash reports.
+
+### Getting a server jar onto the device — `ServerJar`
+
+Server jars **are** downloaded, and that is consistent with the runtime being
+bundled: Play's rule is about executable code, and a jar is data a virtual
+machine reads — the carve-out the policy names. `libjvm.so` is the VM and
+cannot use it; `server.jar` is not and can.
+
+`mod-installer.ts` in the `homerun` repo is the spec. Same endpoints, same
+"resolve the Mojang manifest first" order — it names the required Java for
+every loader, not just vanilla, and it is what turns "latest" into a version.
+
+| Loader | Resolved from |
+|---|---|
+| vanilla | `launchermeta.mojang.com` version manifest → per-version meta → `downloads.server` |
+| paper | `fill.papermc.io/v3` builds for the resolved version |
+| everything else | refused, with the reason — Fabric, Forge, NeoForge and Quilt install by *running* an installer, which is a separate piece of work |
+
+If the jar needs a newer Java than the build ships, that is said plainly before
+anything launches, rather than surfacing as `UnsupportedClassVersionError`.
+
+Three deliberate differences from the desktop, all because this is a phone:
+
+- **Downloads resume.** The partial file is named after the artifact's own
+  digest, so a resume can only ever continue the file it began — that is what
+  makes it safe without the desktop's ETag sidecar. Both CDNs answer `206`.
+- **Every download is checksum-verified**, vanilla by SHA-1 and Paper by the
+  SHA-256 the desktop already fetches and discards. A mismatch is not retried:
+  it means corrupt or substituted, not transient.
+- **A failed lookup falls back to the jar on disk.** Hosting on a LAN with no
+  internet is a real thing to want, and refusing to start a world that is
+  already downloaded would be worse than starting it.
+
+`homerun-jar.json` in the server directory records loader, version and digest.
+It is what makes a restart free and a version change re-download.
+
+**Which version and loader comes from the backend, not the UI.** The UI sends
+only a name and a memory ceiling, so `BridgeRouter` reads the rest from
+`/api/server/<id>/` (`HomerunApi`), exactly as `nativeServerManager` does — a
+version changed on the web dashboard then takes effect on the next start. The
+lookup lives in the router rather than the backend so the access token never
+reaches the server process's environment. If it fails, vanilla-latest, which
+is the desktop's fallback too.
+
+### The EULA is accepted for the user
+
+`JavaServerBackend.start` writes `eula=true` on **every** start, which is
+byte-for-byte what the desktop does in `nativeServerManager.startServer`.
+
+Worth being explicit about what that means: Mojang's EULA binds the person
+operating the server, and no Homerun client — desktop, web or mobile — shows
+it or asks. The product's own ToS says only that users "must adhere to any
+applicable third-party terms of service", without naming Minecraft. That gap
+is already logged as **T-6 / P1-18** in
+`docs/privacy-tos-audit-2026-08-03.md` in the `homerun` repo, where it is
+filed as a document-wording item rather than an engineering one.
+
+This also retired a failure mode the earlier build had: a server stopping at
+the EULA gate was reported as "the server stopped unexpectedly while
+starting", because `start()` waits for `Done (…)!` and the process exited
+first. Nothing stops there now.
+
+#### Verified on the emulator
+
+| Case | Result |
+|---|---|
+| Vanilla, cold, no account | 26.2 resolved, 58 MB fetched, SHA-1 verified, `Done (3.249s)` — **27 s** end to end |
+| Restart | no re-download, `Done (0.375s)` |
+| Paper 1.21.4 | build **232** picked (newest STABLE), SHA-256 verified, `plugins/` and `bukkit.yml` present, `Done (21.759s)` |
+
+Both were driven straight over the bridge with no login, so the path that ran
+is the no-token one: API lookup fails, vanilla-latest.
 
 ## The Pumpkin backend
 
@@ -237,6 +317,11 @@ Worlds live under `filesDir/servers/<serverId>` — app-private and preserved
 across updates. **Not `cacheDir`**: the system may delete that under storage
 pressure, and it would take the player's world with it.
 
+The server jar lives in that directory too, one copy per server, which is what
+the desktop does. On a phone that is worth revisiting — two servers on the same
+version is ~110 MB of identical bytes — but one-server-at-a-time makes it rare
+enough not to have earned a shared cache yet.
+
 ## Current engine
 
 `StubEngine`, because the Pumpkin fork is not pinned yet. It is not a no-op:
@@ -255,6 +340,19 @@ any build without a JRE — see the packaging section. It falls back to Pumpkin.
 
 **`EACCES` launching the JVM.** The launcher is not in `nativeLibraryDir`, or
 `useLegacyPackaging` was flipped to false so nothing was extracted there.
+
+**"Homerun for Android cannot host <loader> servers yet".** Working as
+intended — only vanilla and Paper resolve. The server's `TYPE` comes from the
+API, so this is what a Fabric or Forge server created on desktop does when
+someone tries to start it on a phone.
+
+**The jar re-downloads on every start.** `homerun-jar.json` is missing or its
+digest does not match what the endpoint now publishes. For Paper that is
+expected after an upstream build: a new build is a new file.
+
+**"needs Java N, and this version of Homerun ships Java M".** The bundled
+runtime is older than the Minecraft version asks for. Restage with
+`npm run jre:android -- --java <N>` and rebuild.
 
 **`UnsatisfiedLinkError` on launch.** The `.so` is missing for this ABI. Run
 `npm run rust:android` (arm64) or `npm run rust:android-x86_64` (emulator).

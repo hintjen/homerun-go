@@ -504,12 +504,31 @@ class BridgeRouter(
             val serverId = obj.serverId()
             val config = obj["config"] as? JsonObject
             backend.create(serverId)
+
+            // The UI sends only a name and a memory ceiling; which Minecraft
+            // version and which loader live on the backend. Fetched here
+            // rather than in the backend so the access token never reaches
+            // the server process's environment. Null means the lookup failed
+            // — vanilla latest, the same fallback the desktop takes.
+            val settings = HomerunApi.serverSettings(
+                apiUrl(),
+                serverId,
+                obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            )
+
             try {
+                if (settings?.gameType == "bedrock") {
+                    throw ServerBackendException.Engine(
+                        "Homerun for Android cannot host Bedrock servers yet."
+                    )
+                }
                 backend.start(
                     serverId,
                     ServerConfig(
                         name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
                         memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
+                        version = settings?.version,
+                        loader = settings?.loader ?: "vanilla",
                     ),
                 )
                 buildJsonObject { put("success", true) }
