@@ -111,16 +111,19 @@ actually means the caller is gone.
 ## Dispatch and the channel table — `BridgeRouter.swift`
 
 `shared/conformance/check-coverage.js` reads the block between the
-`BRIDGE-CHANNELS-BEGIN` / `BRIDGE-CHANNELS-END` markers and treats **every
-quoted string inside it** as a channel this host implements. It does not parse
-Swift — that is what lets one script check both Swift and Kotlin.
+`BRIDGE-CHANNELS-BEGIN` / `BRIDGE-CHANNELS-END` markers and counts a channel
+only where the string sits in **declaration position** — `"channel": handler`
+in Swift, `"channel" to handler` in Kotlin. It does not parse either language,
+which is what lets one script check both.
 
 Two rules follow, and both are about keeping the gate honest:
 
-- The block contains channel names and nothing else quoted. An inline closure
-  containing a string literal would register as a channel that does not exist,
-  and the check would pass while the UI hung. The table therefore registers
-  method references only: `on("get-app-version", getAppVersion)`.
+- **Keep the table a dictionary literal of method references.** The block is
+  the dispatch table itself, so it contains handler bodies too; matching every
+  quoted string would let a literal buried in a body pass as a handler for a
+  channel nobody implemented. A router that registers channels some other way
+  reads as having *no* handlers — the safe direction to fail, but it stops CI
+  dead until the table is put back in the expected shape.
 - **Do not park unimplemented channels there** pointing at a stub that throws.
   That turns the gate green while leaving the work undone. The failing list
   from `npm run conformance:ios` *is* the to-do list.

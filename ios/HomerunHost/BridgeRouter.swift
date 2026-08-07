@@ -26,17 +26,16 @@ protocol BridgeEventSink: AnyObject {
 /// Maps a `bridge/v1` channel to the code that answers it.
 ///
 /// `shared/conformance/check-coverage.js` reads the block between the
-/// BRIDGE-CHANNELS markers below and treats every quoted string inside it as a
-/// channel this host implements. Two consequences worth knowing before editing
-/// it:
+/// BRIDGE-CHANNELS markers below, and counts a channel only where the string
+/// is in *declaration position* — `"channel": handler` here, `"channel" to
+/// handler` in Kotlin. Two consequences worth knowing before editing it:
 ///
-///  - The block must contain channel names and nothing else quoted. An inline
-///    closure with a string literal in it would register as a channel that
-///    does not exist, and the check would pass while the UI hangs. So the
-///    table registers method references only.
-///  - Do not park unimplemented channels there pointing at a stub that throws.
+///  - Keep the table a dictionary literal of method references. A router that
+///    registers channels some other way reads as having no handlers at all,
+///    which is the safe direction to fail but will stop CI dead.
+///  - Do not park unimplemented channels here pointing at a stub that throws.
 ///    That turns the gate green while leaving the work undone; the failing
-///    list from `npm run conformance:ios` is the to-do list for M3.
+///    list from `npm run conformance:ios` is the to-do list.
 @MainActor
 final class BridgeRouter {
     typealias Handler = (_ params: Any?) async throws -> Any?
@@ -53,64 +52,62 @@ final class BridgeRouter {
         self.deepLinks = deepLinks
         self.backend = backend
 
-        func on(_ channel: String, _ handler: @escaping Handler) {
-            handlers[channel] = handler
-        }
-
         // BRIDGE-CHANNELS-BEGIN
-        on("get-initial-config", getInitialConfig)
-        on("get-app-version", getAppVersion)
-        on("get-system-language", getSystemLanguage)
-        on("set-posthog-distinct-id", setPosthogDistinctID)
-        on("cache-client-nonce", cacheClientNonce)
-        on("clipboard-write-text", clipboardWriteText)
-        on("open-external-url", openExternalURL)
-        on("push-notification", pushNotification)
-        on("deep-link:consume", deepLinkConsume)
-        on("check-system-time", checkSystemTime)
-        on("get-device-id", getDeviceID)
-        on("get-device-ws-port", getDeviceWSPort)
-        on("measure-region-latency", measureRegionLatency)
-        on("journey-modals-get", journeyModalsGet)
-        on("journey-modals-set", journeyModalsSet)
-        on("get-storage-info", getStorageInfo)
-        on("get-system-memory", getSystemMemory)
-        on("get-native-system-memory", getNativeSystemMemory)
-        on("is-installed", isInstalled)
-        on("get-install-type", getInstallType)
-        on("set-api-url", setAPIURL)
-        on("credentials-received", credentialsReceived)
-        on("logout", logout)
-        on("start-installation-or-check", startInstallationOrCheck)
-        on("check-homerun-storage-limit", checkHomerunStorageLimit)
-        on("open-storage-settings", openStorageSettings)
-        on("native-server-start", nativeServerStart)
-        on("native-server-stop", nativeServerStop)
-        on("native-server-delete", nativeServerDelete)
-        on("native-server-rcon", nativeServerRcon)
-        on("native-server-active-ids", nativeServerActiveIds)
-        on("native-server-get-uptime", nativeServerGetUptime)
-        on("native-server-get-ops", nativeServerGetOps)
-        on("native-server-get-mem-usage", nativeServerGetMemUsage)
-        on("native-server-get-cpu-usage", nativeServerGetCpuUsage)
-        on("native-server-get-players", nativeServerGetPlayers)
-        on("native-server-get-perf-history", nativeServerGetPerfHistory)
-        on("get-native-server-logs", getNativeServerLogs)
-        on("get-native-server-port", getNativeServerPort)
-        on("get-native-local-network", getNativeLocalNetwork)
-        on("set-native-local-network", setNativeLocalNetwork)
-        on("server-files-exist", serverFilesExist)
-        on("open-server-files", openServerFiles)
-        on("import-minecraft-world", importMinecraftWorld)
+        handlers = [
+            "get-initial-config": getInitialConfig,
+            "get-app-version": getAppVersion,
+            "get-system-language": getSystemLanguage,
+            "set-posthog-distinct-id": setPosthogDistinctID,
+            "cache-client-nonce": cacheClientNonce,
+            "clipboard-write-text": clipboardWriteText,
+            "open-external-url": openExternalURL,
+            "push-notification": pushNotification,
+            "deep-link:consume": deepLinkConsume,
+            "check-system-time": checkSystemTime,
+            "get-device-id": getDeviceID,
+            "get-device-ws-port": getDeviceWSPort,
+            "measure-region-latency": measureRegionLatency,
+            "journey-modals-get": journeyModalsGet,
+            "journey-modals-set": journeyModalsSet,
+            "get-storage-info": getStorageInfo,
+            "get-system-memory": getSystemMemory,
+            "get-native-system-memory": getNativeSystemMemory,
+            "is-installed": isInstalled,
+            "get-install-type": getInstallType,
+            "set-api-url": setAPIURL,
+            "credentials-received": credentialsReceived,
+            "logout": logout,
+            "start-installation-or-check": startInstallationOrCheck,
+            "check-homerun-storage-limit": checkHomerunStorageLimit,
+            "open-storage-settings": openStorageSettings,
+            "native-server-start": nativeServerStart,
+            "native-server-stop": nativeServerStop,
+            "native-server-delete": nativeServerDelete,
+            "native-server-rcon": nativeServerRcon,
+            "native-server-active-ids": nativeServerActiveIds,
+            "native-server-get-uptime": nativeServerGetUptime,
+            "native-server-get-ops": nativeServerGetOps,
+            "native-server-get-mem-usage": nativeServerGetMemUsage,
+            "native-server-get-cpu-usage": nativeServerGetCpuUsage,
+            "native-server-get-players": nativeServerGetPlayers,
+            "native-server-get-perf-history": nativeServerGetPerfHistory,
+            "get-native-server-logs": getNativeServerLogs,
+            "get-native-server-port": getNativeServerPort,
+            "get-native-local-network": getNativeLocalNetwork,
+            "set-native-local-network": setNativeLocalNetwork,
+            "server-files-exist": serverFilesExist,
+            "open-server-files": openServerFiles,
+            "import-minecraft-world": importMinecraftWorld,
         // Not in the iOS profile — see BridgeRouter+DesktopStubs.swift.
-        on("update-firewall-rules", updateFirewallRules)
-        on("discord-get-status", discordGetStatus)
-        on("discord-get-user-id", discordGetUserID)
-        on("discord-open-app", discordOpenApp)
-        on("discord-connect", ignoredSend)
-        on("discord-page-update", ignoredSend)
-        on("discord-wsl-server-update", ignoredSend)
-        on("set-distro-tag", ignoredSend)
+            "update-firewall-rules": updateFirewallRules,
+            "discord-get-status": discordGetStatus,
+            "discord-get-user-id": discordGetUserID,
+            "discord-open-app": discordOpenApp,
+            "discord-connect": ignoredSend,
+            "discord-page-update": ignoredSend,
+            "discord-wsl-server-update": ignoredSend,
+            "set-distro-tag": ignoredSend,
+        ]
         // BRIDGE-CHANNELS-END
     }
 
