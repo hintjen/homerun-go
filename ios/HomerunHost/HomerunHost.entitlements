@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Empty until there is a signing team. M2 adds
+	     com.apple.developer.associated-domains for Universal Links; the
+	     multicast entitlement stays out — v1 shows the IP instead of
+	     broadcasting to Minecraft's LAN list. -->
+</dict>
+</plist>

@@ -9,6 +9,12 @@ import Foundation
 /// iOS has exactly one implementation (`PumpkinBackend`, in-process Rust FFI)
 /// because the platform cannot spawn processes. Android adds a JVM backend.
 /// Nothing here may assume a child process, a pid, or stdio pipes.
+///
+/// Main-actor isolated: every caller is the bridge, which is main-actor, and
+/// the event callbacks below must arrive on the main queue anyway. Making
+/// that explicit is what stops a backend from touching this state off the
+/// thread the UI reads it from.
+@MainActor
 protocol ServerBackend: AnyObject {
     /// Engine identity, matching `ServerBackendKind` in the UI's capabilities.
     var kind: String { get }
@@ -90,8 +96,14 @@ struct MemoryUsage {
 
 struct LogSlice {
     let lines: [String]
-    /// Pass back as `since` next time. Cursors are per-run, not durable.
+    /// Pass back as `since` next time. Cursors are per-run, not durable: the
+    /// buffer clears on restart but sequence numbers keep climbing, so a stale
+    /// cursor reports `dropped` rather than silently replaying a new run as a
+    /// continuation of the old one.
     let cursor: Int
+    /// Lines were evicted before this read. Show the gap — a console that
+    /// quietly skips output is worse than one that admits it.
+    let dropped: Bool
 }
 
 enum ServerBackendError: LocalizedError {

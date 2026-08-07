@@ -1,0 +1,86 @@
+# XcodeGen project definition. The .xcodeproj is generated, never committed —
+# regenerate with `xcodegen generate` from this directory.
+#
+# Two directories this file references are build output, staged by the npm
+# scripts before Xcode runs (see docs/building.md):
+#
+#   HomerunHost/web/   the shared UI bundle      npm run ui:ios
+#   HomerunHost/lib/   libhomerun_pumpkin_ffi.a  npm run rust:ios / rust:ios-sim
+#
+# `xcodegen generate` FAILS if web/ is missing. That is deliberate: a project
+# that builds without the UI produces an app with a blank screen, which is a
+# far more expensive thing to debug than a missing-directory error.
+
+name: HomerunHost
+
+options:
+  bundleIdPrefix: app.gethomerun
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+
+targets:
+  HomerunHost:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: HomerunHost
+        excludes:
+          - web       # folder reference below; would otherwise be flattened
+          - lib       # build output, linked not compiled
+      # A folder reference, so the whole tree lands in the bundle as `web/`
+      # and restaging the UI needs no `xcodegen generate`.
+      - path: HomerunHost/web
+        type: folder
+        buildPhase: resources
+      # Capabilities are read out of this at runtime rather than transcribed
+      # into Swift, so the injected object cannot drift from the contract the
+      # conformance checker enforces.
+      - path: ../shared/conformance/bridge-v1.json
+        buildPhase: resources
+
+    settings:
+      base:
+        PRODUCT_NAME: Homerun
+        PRODUCT_BUNDLE_IDENTIFIER: app.gethomerun.ios
+        INFOPLIST_FILE: HomerunHost/Info.plist
+        CODE_SIGN_ENTITLEMENTS: HomerunHost/HomerunHost.entitlements
+        TARGETED_DEVICE_FAMILY: "1"        # iPhone; the UI is untested on iPad
+        SWIFT_OBJC_BRIDGING_HEADER: HomerunHost/FFI/HomerunFFI.h
+
+        # Simulator-first: no team, automatic signing. Set DEVELOPMENT_TEAM
+        # when you first deploy to a device.
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGNING_ALLOWED: NO
+
+        # scripts/targets.js stages the device and simulator slices to
+        # different directories; pick per SDK rather than building a fat lib.
+        LIBRARY_SEARCH_PATHS[sdk=iphoneos*]:
+          - "$(inherited)"
+          - "$(SRCROOT)/HomerunHost/lib"
+        LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*]:
+          - "$(inherited)"
+          - "$(SRCROOT)/HomerunHost/lib/sim"
+
+        # -lresolv and these frameworks are what the Rust standard library and
+        # its networking dependencies resolve against; without them the link
+        # fails on symbols no Swift source mentions. Learned from the
+        # prototype — do not prune speculatively.
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lhomerun_pumpkin_ffi"
+          - "-lresolv"
+          - "-framework Security"
+          - "-framework SystemConfiguration"
+          - "-framework CoreFoundation"
+          - "-framework Network"
+
+        # build-rust.js produces arm64 only for the simulator.
+        EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
