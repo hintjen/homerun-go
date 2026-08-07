@@ -143,36 +143,115 @@ error code:
 
 This matches the desktop app, where users create many servers and run one.
 
-## Wiring Pumpkin in
+## The engine seam — `engine.rs`, `pumpkin_engine.rs`
 
-`Engine` is the seam. Today `StubEngine` stands in — it reports startup,
-honours stop requests, and can be told to fail, which is how the failure
-paths are tested without a real server.
+`Engine` is the seam, and there are two implementations.
 
-To go live:
+`PumpkinEngine` (`pumpkin_engine.rs`) drives the real server, and sits behind
+the **`pumpkin-engine` feature, which is off by default**. `StubEngine` stands
+in otherwise: it reports startup, honours stop requests, and can be told to
+fail, which is how the failure paths are covered without a real server.
 
-1. Pin the fork in `Cargo.toml` (currently commented out, deliberately: the
-   crate compiles and its safety tests run without the engine, so the FFI
-   surface can be reviewed first).
-2. Implement `Engine` for Pumpkin — `run` blocks until shutdown, emits
-   console lines through `on_line`, and **returns** rather than exiting.
-3. Swap the default in `server::host()`.
+That default is load-bearing for the development loop. With the feature off,
+the crate builds and its 36 tests run in about two seconds on any machine,
+with no Pumpkin, no wasmtime, and no device. With it on, a cold build pulls in
+the whole server. `server::host()` picks between them at compile time; the app
+builds enable the feature (`scripts/build-rust.js`), and `--stub` cross-builds
+a target without it.
 
-Nothing else should need to change. If it does, the seam is in the wrong
-place.
+### What `PumpkinEngine::run` has to do
+
+Pumpkin is a program that was made into a library, and the seam has to absorb
+that. In order:
+
+1. **`reset_server_state()`** — the stop flags are process-wide statics. Skip
+   this and a second run sees the previous run's stop request and exits
+   immediately, which looks like "the server won't start".
+2. **Install the console capture** (see below).
+3. **`set_current_dir(data_dir)`** — the engine selects a world by working
+   directory. This is the concrete reason only one server runs at a time.
+4. **Load the config, then override it**: the port (there is no API for it —
+   it lives in `configuration.toml`), and `commands.use_console = false`.
+   There is no stdin on a phone, and with the console enabled `start()` blocks
+   forever waiting on a readline that cannot arrive.
+5. **`PumpkinServer::new(...)`**, which returns `Result` in our fork — see
+   below.
+6. Stash the `Arc<Server>` and a `tokio::runtime::Handle` in a static, so
+   `command` and `players` can reach the server from the host's threads while
+   `run` is blocked inside the runtime.
+7. **Bridge the stop signals.** Ours is an `AtomicBool`; Pumpkin's is a pair
+   of statics plus a cancellation token. A watchdog task polls one and calls
+   `stop_server()`. Without it a stop request is recorded and nothing acts on
+   it.
+
+### The fork patch that makes this possible
+
+`PumpkinServer::new` used to call `process::exit(1)` on any bind failure. That
+is fine for the standalone binary but fatal here: it takes the whole app down
+with no crash report and no way for the UI to explain itself, violating the
+first rule in this repo's `CLAUDE.md`. The fork now returns
+`Result<Self, io::Error>` and the binary makes the exit decision itself.
+
+The pre-flight in `preflight.rs` still runs first, because it produces a
+better message and avoids building a server that then has to be torn down.
+But it is no longer the only thing standing between a taken port and a
+vanished app.
+
+### Console output
+
+Pumpkin logs through `tracing` to fd 1, and there is no writer hook to
+redirect that to a callback. So the file descriptors themselves are replaced:
+`pipe`, then `dup2` over fds 1 and 2, and a reader thread turns the bytes back
+into lines.
+
+> **This is process-wide and permanent.** It is installed once, and it
+> captures *anything* in the process that writes to stdout, not just Pumpkin.
+> The reader thread also outlives any single run, which is why it appends to
+> the crate's console buffer directly rather than borrowing `run`'s `on_line`
+> — handing a thread a borrow that lives for one call would dangle the moment
+> that run ended.
+
+One consequence worth knowing before you debug with `println!`: anything you
+print after a server starts goes into the console buffer, not your terminal.
+And printing lines you *drained* from that buffer feeds them straight back
+into it, which loops. `examples/boot_engine.rs` keeps a `dup` of the original
+stdout from before the redirect for exactly this reason.
+
+ANSI colour escapes are stripped on the way in. The engine's logger assumes a
+terminal; the console it actually feeds is a WebView, which renders the
+escapes as literal `[2m` garbage in front of every line.
+
+### Readiness
+
+`run` takes an `on_ready` callback and must call it once the server is
+genuinely accepting connections. That is what moves the host from `Starting`
+to `Running`.
+
+> **The host cannot infer this moment.** `run` blocks from its first instant,
+> so before this signal existed the host flipped to `Running` immediately
+> before calling it — and with a real engine that meant telling a player to
+> join a world that was still generating. Pinned by
+> `a_slow_start_stays_starting_until_the_engine_is_ready`.
+
+An engine that returns without ever calling `on_ready` never started, and the
+failure path in `StubEngine` deliberately does not call it.
 
 ## Building
 
 ```bash
-cargo test                     # host-native; no device, no Pumpkin
+cargo test                     # host-native; no device, no Pumpkin, ~2s
 cargo clippy --all-targets
 cargo build --release
 
-# mobile targets
-cargo build --release --target aarch64-apple-ios          # iOS device
-cargo build --release --target aarch64-apple-ios-sim      # iOS simulator
-cargo ndk -t arm64-v8a build --release                    # Android
+# mobile targets — the engine feature is what links the real server
+cargo build --release --features pumpkin-engine --target aarch64-apple-ios
+cargo build --release --features pumpkin-engine --target aarch64-apple-ios-sim
+cargo ndk -t arm64-v8a build --release --features pumpkin-engine
 ```
+
+In practice use `node scripts/build-rust.js ios`, which adds the feature and
+stages the artifact. Add `--stub` to cross-compile without the engine when you
+only want to know that the FFI surface still builds for a target.
 
 `crate-type` is `["staticlib", "cdylib", "rlib"]` — iOS links the `.a`,
 Android loads the `.so`, and `rlib` keeps the test build fast.
@@ -185,8 +264,10 @@ around 1.8 GB, which is impractical to ship or even copy to a device.
 Implemented and tested: state machine, console buffer, pre-flight, crash
 capture, the whole C surface, one-server enforcement.
 
-Not implemented: the Pumpkin engine itself, and stdout/stderr redirection
-(`pipe`/`dup2` — needed once a real engine writes to fd 1 rather than
-calling `on_line`).
+Implemented, **not yet exercised against a running world**: `PumpkinEngine`
+and the stdout/stderr redirection. Both compile against the pinned fork; what
+has not happened is a server actually booting a world and a player joining it.
+Treat the run sequence above as the design until that has been done.
 
-Never run on a device. Everything here is verified on a desktop host.
+The 36 tests all run against `StubEngine`. Nothing in this crate has been run
+on a device.

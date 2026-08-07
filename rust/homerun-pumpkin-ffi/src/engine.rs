@@ -55,12 +55,21 @@ pub enum RunOutcome {
 /// exit the process: on a phone `process::exit` takes the entire app down
 /// with no report.
 pub trait Engine: Send + Sync {
-    /// Block until the server stops. Emit console output through `on_line`.
+    /// Block until the server stops. Emit console output through `on_line`,
+    /// and call `on_ready` once — and only once — the server is actually
+    /// accepting connections.
+    ///
+    /// `on_ready` is what moves the host from `Starting` to `Running`. The
+    /// host cannot infer that moment: `run` blocks from the first instant, so
+    /// without this signal the only options are to report running immediately
+    /// (telling a player to join a world that is still generating) or never.
+    /// An engine that returns without calling it never started.
     fn run(
         &self,
         request: &RunRequest,
         stop: StopSignal,
         on_line: &dyn Fn(String),
+        on_ready: &dyn Fn(),
     ) -> RunOutcome;
 
     /// Dispatch a console command. Pumpkin has no RCON, so this goes
@@ -97,8 +106,11 @@ impl Engine for StubEngine {
         request: &RunRequest,
         stop: StopSignal,
         on_line: &dyn Fn(String),
+        on_ready: &dyn Fn(),
     ) -> RunOutcome {
         if let Some(reason) = &self.fail_with {
+            // Deliberately without calling on_ready: a failed start must never
+            // reach Running, and this is the path that proves it.
             on_line(format!("[Homerun] server failed: {reason}"));
             return RunOutcome::Crashed(reason.clone());
         }
@@ -108,6 +120,7 @@ impl Engine for StubEngine {
             request.server_id, request.java_port
         ));
         on_line("[Homerun] Done! For help, type \"help\"".to_string());
+        on_ready();
 
         while !stop.should_stop() {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -155,11 +168,22 @@ mod tests {
         });
 
         let sink = lines.clone();
-        let outcome = engine.run(&request(), stop, &move |line| {
-            sink.lock().unwrap().push(line);
-        });
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_flag = ready.clone();
+        let outcome = engine.run(
+            &request(),
+            stop,
+            &move |line| {
+                sink.lock().unwrap().push(line);
+            },
+            &move || ready_flag.store(true, Ordering::SeqCst),
+        );
 
         assert!(matches!(outcome, RunOutcome::Stopped));
+        assert!(
+            ready.load(Ordering::SeqCst),
+            "a server that came up must announce it, or the host never leaves Starting"
+        );
         let captured = lines.lock().unwrap();
         assert!(captured.iter().any(|l| l.contains("Done!")));
         assert!(captured.iter().any(|l| l.contains("saving world")));
@@ -171,14 +195,25 @@ mod tests {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let sink = lines.clone();
 
-        let outcome = engine.run(&request(), StopSignal::default(), &move |line| {
-            sink.lock().unwrap().push(line);
-        });
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_flag = ready.clone();
+        let outcome = engine.run(
+            &request(),
+            StopSignal::default(),
+            &move |line| {
+                sink.lock().unwrap().push(line);
+            },
+            &move || ready_flag.store(true, Ordering::SeqCst),
+        );
 
         match outcome {
             RunOutcome::Crashed(reason) => assert!(reason.contains("25565")),
             RunOutcome::Stopped => panic!("expected a crash outcome"),
         }
+        assert!(
+            !ready.load(Ordering::SeqCst),
+            "a failed start must never reach Running — the UI would invite players to a dead server"
+        );
         // The reason has to reach the console too, or the UI shows a server
         // that stopped for no visible reason.
         assert!(lines.lock().unwrap().iter().any(|l| l.contains("failed")));

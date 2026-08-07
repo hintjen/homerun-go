@@ -31,6 +31,8 @@ pub mod crash;
 pub mod engine;
 pub mod log_buffer;
 pub mod preflight;
+#[cfg(feature = "pumpkin-engine")]
+pub mod pumpkin_engine;
 pub mod server;
 pub mod state;
 

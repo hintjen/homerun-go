@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crash;
-use crate::engine::{Engine, Roster, RunOutcome, RunRequest, StopSignal, StubEngine};
+use crate::engine::{Engine, Roster, RunOutcome, RunRequest, StopSignal};
+#[cfg(not(feature = "pumpkin-engine"))]
+use crate::engine::StubEngine;
 use crate::log_buffer::{LogBuffer, LogSlice};
 use crate::preflight;
 use crate::state::{ServerState, ServerStatus};
@@ -30,9 +32,22 @@ pub struct ServerHost {
 
 static HOST: OnceLock<ServerHost> = OnceLock::new();
 
-/// The process-wide host. Uses the stub engine until Pumpkin is pinned.
+/// The process-wide host.
+///
+/// Runs the real server when the `pumpkin-engine` feature is on — the app
+/// builds enable it. Without it the stub stands in, which is what keeps the
+/// test suite fast and device-free.
 pub fn host() -> &'static ServerHost {
-    HOST.get_or_init(|| ServerHost::new(Box::new(StubEngine::healthy())))
+    HOST.get_or_init(|| {
+        #[cfg(feature = "pumpkin-engine")]
+        {
+            ServerHost::new(Box::new(crate::pumpkin_engine::PumpkinEngine::new()))
+        }
+        #[cfg(not(feature = "pumpkin-engine"))]
+        {
+            ServerHost::new(Box::new(StubEngine::healthy()))
+        }
+    })
 }
 
 fn now_ms() -> u64 {
@@ -136,14 +151,24 @@ impl ServerHost {
 
         let stop = self.lock().stop.clone();
 
-        {
+        // Running is announced by the engine, not assumed here. `run` blocks
+        // from its first instant, so a host that flipped the state before
+        // calling it would tell a player to join a world that is still
+        // generating — which is exactly what happened before the engine grew
+        // this signal.
+        let on_ready = || {
             let mut inner = self.lock();
-            inner.status.transition(ServerState::Running)?;
-            inner.status.started_at_ms = Some(now_ms());
-            inner.status.port = Some(port);
-        }
+            if inner.status.state == ServerState::Starting
+                && inner.status.transition(ServerState::Running).is_ok()
+            {
+                inner.status.started_at_ms = Some(now_ms());
+                inner.status.port = Some(port);
+            }
+        };
 
-        let outcome = self.engine.run(&request, stop, &|line| self.push_log(line));
+        let outcome = self
+            .engine
+            .run(&request, stop, &|line| self.push_log(line), &on_ready);
 
         let mut inner = self.lock();
         match outcome {
@@ -225,6 +250,72 @@ mod tests {
         let port = l.local_addr().unwrap().port();
         drop(l);
         port
+    }
+
+    /// Takes a while to come up, like a real server generating a world.
+    struct SlowEngine {
+        ready_after: Duration,
+    }
+
+    impl Engine for SlowEngine {
+        fn run(
+            &self,
+            _request: &RunRequest,
+            stop: StopSignal,
+            on_line: &dyn Fn(String),
+            on_ready: &dyn Fn(),
+        ) -> RunOutcome {
+            on_line("generating world".to_string());
+            std::thread::sleep(self.ready_after);
+            on_ready();
+            while !stop.should_stop() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            RunOutcome::Stopped
+        }
+
+        fn command(&self, _command: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn players(&self) -> Option<Roster> {
+            None
+        }
+    }
+
+    /// The bug this pins: the host used to flip to Running immediately before
+    /// calling the engine, so the UI told players to join a world that was
+    /// still generating. Only the engine knows when it is actually up.
+    #[test]
+    fn a_slow_start_stays_starting_until_the_engine_is_ready() {
+        let host = Arc::new(ServerHost::new(Box::new(SlowEngine {
+            ready_after: Duration::from_millis(300),
+        })));
+        let dir = temp_dir();
+        let port = free_port();
+
+        let runner = {
+            let host = host.clone();
+            std::thread::spawn(move || host.start("slow", &dir, port))
+        };
+
+        // Well inside the engine's startup window.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            host.state(),
+            ServerState::Starting,
+            "reported Running while the world was still generating"
+        );
+
+        // And it does get there once the engine says so.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.state() != ServerState::Running && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(host.state(), ServerState::Running);
+
+        host.stop(Duration::from_secs(5)).unwrap();
+        runner.join().unwrap().unwrap();
     }
 
     #[test]

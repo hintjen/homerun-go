@@ -99,6 +99,22 @@ Release is the default. `--debug` exists for symbols, but debug builds are
 enormous once a real engine is linked (~1.8 GB for the prototype); the
 script says so rather than letting you sideload one by accident.
 
+### The engine feature
+
+Device builds pass `--features pumpkin-engine`, which links the real server.
+The host build deliberately does not — that is what keeps `cargo test` at
+about two seconds with no Pumpkin, no wasmtime and no device, and it is the
+reason the whole FFI surface could be tested before the engine existed.
+
+```bash
+node scripts/build-rust.js ios            # with the engine
+node scripts/build-rust.js ios --stub     # without it
+```
+
+`--stub` is for checking that the FFI surface still cross-compiles for a
+target without waiting for the engine to build. The first build with the
+engine pulls the pinned Pumpkin fork from GitHub and takes a few minutes.
+
 ## Typical loops
 
 **Change Rust, test it** — no device needed, and this is most of the FFI:
