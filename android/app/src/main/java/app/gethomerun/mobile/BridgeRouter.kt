@@ -103,25 +103,31 @@ class BridgeRouter(
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     /**
-     * The local server engine.
-     *
-     * Its callbacks are the only way console output and state changes reach
-     * the UI — nothing polls from the page side — so they are wired here at
-     * construction rather than lazily.
+     * The local server engine, owned by the process rather than by this
+     * router — a page reload must not take a running server with it.
      */
-    private val backend = PumpkinBackend(context, scope).apply {
-        onLog = { id, line ->
+    private val backend: ServerBackend get() = ServerHost.backend
+
+    /**
+     * Console output and state changes reach the UI only through these.
+     * Registered for the life of the router; `ServerHost` fans them out so the
+     * bridge and (from M4) the foreground service can both listen.
+     */
+    private val hostListener = object : ServerHost.Listener {
+        override fun onLog(serverId: String, line: String) {
             emit("native-server-log", listOf(buildJsonObject {
-                put("serverId", id)
+                put("serverId", serverId)
                 put("line", line)
             }))
         }
-        onPlayersChanged = { id ->
+
+        override fun onPlayersChanged(serverId: String) {
             emit("native-server-players-changed", listOf(buildJsonObject {
-                put("serverId", id)
+                put("serverId", serverId)
             }))
         }
-        onStateChanged = { id, state ->
+
+        override fun onStateChanged(serverId: String, state: ServerState) {
             // The event contract carries only these three. `starting` and
             // `stopping` are ours; the UI infers those from the pending call.
             val wire = when (state) {
@@ -129,22 +135,24 @@ class BridgeRouter(
                 ServerState.STOPPED -> "stopped"
                 ServerState.CRASHED -> "crashed"
                 else -> null
-            }
-            if (wire != null) {
-                emit("native-server-state-changed", listOf(buildJsonObject {
-                    put("serverId", id)
-                    put("state", wire)
-                }))
-            }
+            } ?: return
+            emit("native-server-state-changed", listOf(buildJsonObject {
+                put("serverId", serverId)
+                put("state", wire)
+            }))
             if (state == ServerState.RUNNING) {
-                port(id)?.let { p ->
+                backend.port(serverId)?.let { p ->
                     emit("native-server-port", listOf(buildJsonObject {
-                        put("serverId", id)
+                        put("serverId", serverId)
                         put("port", p)
                     }))
                 }
             }
         }
+    }
+
+    init {
+        ServerHost.addListener(hostListener)
     }
 
     /** The `native-server-*` channels that take an object payload. */
@@ -248,6 +256,19 @@ class BridgeRouter(
     private fun onReady() {
         ready = true
         while (queued.isNotEmpty()) evaluate(queued.removeFirst())
+        resyncServerState()
+    }
+
+    /**
+     * Tell a freshly-loaded page what is already running.
+     *
+     * The server outlives the page, so a reload — or an activity rebuilt after
+     * the render process died — starts with no idea a server is up. Without
+     * this it renders a stopped server that is very much running.
+     */
+    private fun resyncServerState() {
+        val serverId = ServerHost.runningServerId() ?: return
+        hostListener.onStateChanged(serverId, ServerState.RUNNING)
     }
 
     private fun reply(envelope: Envelope) {

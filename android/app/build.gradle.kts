@@ -79,9 +79,13 @@ android {
     }
 
     packaging {
-        // scripts/build-rust.js writes the Pumpkin FFI here. Keep it
-        // uncompressed so it can be mapped straight out of the APK.
-        jniLibs.useLegacyPackaging = false
+        // MUST stay true. The bundled JVM launcher ships as a jniLibs entry
+        // (`libjavabin.so`) because API 29+ refuses to exec anything outside
+        // nativeLibraryDir — and with legacy packaging off, nothing is
+        // extracted there: the linker maps libraries straight from the APK and
+        // no real file exists to exec. Flipping this to false costs install
+        // size but makes hosting a Java server impossible.
+        jniLibs.useLegacyPackaging = true
     }
 
     lint {

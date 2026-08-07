@@ -61,6 +61,13 @@ interface ServerBackend {
     fun logs(serverId: String, cursor: Int): LogSlice
 
     /**
+     * Recent samples for the metrics graphs, oldest first. Empty when the
+     * backend cannot sample — an empty graph is honest, a fabricated one is
+     * not.
+     */
+    fun perfHistory(serverId: String): List<PerfSample> = emptyList()
+
+    /**
      * Run a console command. The JVM backend can use RCON; Pumpkin dispatches
      * in-process. Either way the reply arrives on `native-server-rcon-response`.
      */
@@ -104,6 +111,14 @@ data class MemoryUsage(val usedKb: Int?, val maxMb: Int?)
 
 /** [cursor] is per-run, not durable across restarts. */
 data class LogSlice(val lines: List<String>, val cursor: Int)
+
+/** One point on the metrics graphs. Null fields render as "unavailable". */
+data class PerfSample(
+    val t: Long,
+    val memUsedMb: Int?,
+    val cpuPercent: Int?,
+    val playerCount: Int?,
+)
 
 sealed class ServerBackendException(message: String) : Exception(message) {
     class NotFound(id: String) : ServerBackendException("No server with id $id")

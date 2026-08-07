@@ -65,8 +65,6 @@ class PumpkinBackend(
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
 
-    data class PerfSample(val t: Long, val memUsedMb: Int?, val cpuPercent: Int?, val playerCount: Int?)
-
     // -----------------------------------------------------------------------
     // Storage
     // -----------------------------------------------------------------------
@@ -243,8 +241,7 @@ class PumpkinBackend(
         }
     }
 
-    /** Recent performance samples, newest last. */
-    fun perfHistory(serverId: String): List<PerfSample> =
+    override fun perfHistory(serverId: String): List<PerfSample> =
         if (currentServerId == serverId) perf.toList() else emptyList()
 
     // -----------------------------------------------------------------------

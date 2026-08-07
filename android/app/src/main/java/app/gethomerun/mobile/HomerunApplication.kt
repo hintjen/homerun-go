@@ -8,6 +8,10 @@ class HomerunApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
+        // Process-scoped, because a running server must survive the activity
+        // and the WebView being torn down and rebuilt.
+        ServerHost.init(this)
+
         // Debug builds are inspectable from the host machine at
         // chrome://inspect — the only practical way to debug the shared UI
         // running inside the app.
