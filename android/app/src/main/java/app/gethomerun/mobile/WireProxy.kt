@@ -2,6 +2,7 @@ package app.gethomerun.mobile
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -177,34 +178,48 @@ class WireProxy(
         pumpJob = scope.launch(Dispatchers.IO) {
             var failures = 0
             var signalled = false
-            running.inputStream.bufferedReader().useLines { lines ->
-                for (raw in lines) {
-                    val line = raw.trim()
-                    if (line.isEmpty()) continue
-                    Log.d(TAG, line)
+            // Everything here must be caught. This coroutine runs on a scope
+            // whose SupervisorJob stops siblings being cancelled — it does NOT
+            // stop an unhandled exception reaching the default handler, which
+            // kills the whole app. Stopping the tunnel closes this stream
+            // under a blocked readLine, and the InterruptedIOException that
+            // produces took the process down with it once already.
+            try {
+                running.inputStream.bufferedReader().useLines { lines ->
+                    for (raw in lines) {
+                        val line = raw.trim()
+                        if (line.isEmpty()) continue
+                        Log.d(TAG, line)
 
-                    when {
-                        line.contains(HANDSHAKE_TIMEOUT) -> {
-                            failures++
-                            if (failures >= HANDSHAKE_FAIL_THRESHOLD && !signalled) {
-                                signalled = true
-                                Log.w(TAG, "$serverId: handshake failed $failures times")
-                                onLog(
-                                    "[Homerun] The connection to the Homerun gateway could not " +
-                                        "be established, so players cannot reach this server."
-                                )
-                                onHandshakeFailed()
+                        when {
+                            line.contains(HANDSHAKE_TIMEOUT) -> {
+                                failures++
+                                if (failures >= HANDSHAKE_FAIL_THRESHOLD && !signalled) {
+                                    signalled = true
+                                    Log.w(TAG, "$serverId: handshake failed $failures times")
+                                    onLog(
+                                        "[Homerun] The connection to the Homerun gateway could " +
+                                            "not be established, so players cannot reach this server."
+                                    )
+                                    runCatching { onHandshakeFailed() }
+                                }
                             }
-                        }
-                        line.contains(HANDSHAKE_OK) -> {
-                            if (failures > 0) Log.i(TAG, "$serverId: handshake recovered")
-                            if (failures >= HANDSHAKE_FAIL_THRESHOLD) {
-                                onLog("[Homerun] Connection to the Homerun gateway restored.")
+                            line.contains(HANDSHAKE_OK) -> {
+                                if (failures > 0) Log.i(TAG, "$serverId: handshake recovered")
+                                if (failures >= HANDSHAKE_FAIL_THRESHOLD) {
+                                    onLog("[Homerun] Connection to the Homerun gateway restored.")
+                                }
+                                failures = 0
                             }
-                            failures = 0
                         }
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (err: Throwable) {
+                // The stream ending abruptly *is* how a stopped tunnel looks
+                // from here. Worth a line, never worth a crash.
+                Log.d(TAG, "tunnel output ended: ${err.message}")
             }
             Log.i(TAG, "wireproxy exited for $serverId")
         }

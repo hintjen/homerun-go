@@ -30,7 +30,6 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.Locale
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicReference
 
 /** A channel implementation. `params` is the raw payload; the return value is the result. */
@@ -141,6 +140,11 @@ class BridgeRouter(
         }
 
         override fun onStateChanged(serverId: String, state: ServerState) {
+            // Two different audiences. This one is the API's — it is what
+            // marks the service healthy, and the web dashboard reads it. The
+            // bridge event below only reaches the page in front of us.
+            DeviceRegistry.reportServerState(serverId, state)
+
             // The event contract carries only these three. `starting` and
             // `stopping` are ours; the UI infers those from the pending call.
             val wire = when (state) {
@@ -433,6 +437,13 @@ class BridgeRouter(
                 prefs.edit().putString(KEY_CREDENTIALS, json.encodeToString(params)).apply()
                 (params["apiUrl"] as? JsonPrimitive)?.contentOrNull
                     ?.let { prefs.edit().putString(KEY_API_URL, it).apply() }
+
+                // The first moment this host holds a user token, which is the
+                // only thing registration needs. Deliberately not awaited —
+                // the UI blocks on credentials-set to leave the login screen,
+                // and a device that registers a second later costs nothing.
+                scope.launch { DeviceRegistry.ensure(apiUrl(), userToken()) }
+
                 emit("credentials-set")
             } else {
                 emit("credentials-error", listOf(JsonPrimitive("Credentials were not an object")))
@@ -442,8 +453,14 @@ class BridgeRouter(
 
         // Params are the user's email; the desktop also takes a
         // shouldRemoveDistro flag that has no meaning here.
+        // Params are the user's email; the desktop also takes a
+        // shouldRemoveDistro flag that has no meaning here.
         "logout" to { _ ->
             prefs.edit().remove(KEY_CREDENTIALS).apply()
+            // The registration belongs to the user who made it, and its token
+            // authenticates reports as them. Keeping it would have the next
+            // person to log in heartbeating someone else's device.
+            DeviceRegistry.clear()
             null
         },
 
@@ -459,9 +476,16 @@ class BridgeRouter(
             JsonPrimitive(openExternal(url))
         },
 
-        // Stable per-install id. Regenerating it would orphan the device's
-        // history on the backend, so it is persisted rather than derived.
-        "get-device-id" to { _ -> JsonPrimitive(deviceId()) },
+        // The **backend's** id for this device, not a local one. A native
+        // server is hosted on a device and the API binds it by this id, so an
+        // invented value fails server creation with "does not exist" — which
+        // is exactly what earlier builds did. Registers on demand, because the
+        // sidebar asks for this on mount and may get there before the login
+        // handler's registration has finished.
+        "get-device-id" to { _ ->
+            val registration = DeviceRegistry.ensure(apiUrl(), userToken())
+            if (registration == null) JsonNull else JsonPrimitive(registration.deviceId)
+        },
 
         // Nothing listens yet; the device WebSocket server arrives with the
         // server backends. Null is the documented "not running" answer.
@@ -700,10 +724,18 @@ class BridgeRouter(
 
     private fun apiUrl(): String = prefs.getString(KEY_API_URL, null) ?: BuildConfig.API_URL
 
-    private fun deviceId(): String =
-        prefs.getString(KEY_DEVICE_ID, null) ?: UUID.randomUUID().toString().also {
-            prefs.edit().putString(KEY_DEVICE_ID, it).apply()
-        }
+    /**
+     * The user's access token, as handed down at login.
+     *
+     * Registration and the tunnel poll both need it, and it lives here rather
+     * than in the backend so it can never reach a server process's
+     * environment.
+     */
+    private fun userToken(): String = runCatching {
+        val stored = prefs.getString(KEY_CREDENTIALS, null) ?: return@runCatching ""
+        (json.parseToJsonElement(stored) as? JsonObject)
+            ?.get("access_token")?.jsonPrimitive?.contentOrNull.orEmpty()
+    }.getOrDefault("")
 
     private fun openExternal(url: String): Boolean = try {
         val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -736,7 +768,14 @@ class BridgeRouter(
 
         private const val PREFS = "homerun-host"
         private const val KEY_API_URL = "api-url"
-        private const val KEY_DEVICE_ID = "device-id"
+        /**
+         * Dead. Earlier builds stored a locally minted UUID here and handed it
+         * to the UI as the device id; the backend had never heard of it, so
+         * server creation failed with "does not exist". The real registration
+         * lives in [DeviceRegistry] under its own keys. Named here only so
+         * nobody reintroduces it.
+         */
+        private const val KEY_LEGACY_DEVICE_ID = "device-id"
         private const val KEY_POSTHOG_ID = "posthog-distinct-id"
         private const val KEY_CLIENT_NONCE = "client-nonce"
         private const val KEY_JOURNEY_MODALS = "journey-modals"

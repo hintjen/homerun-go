@@ -3,6 +3,7 @@ package app.gethomerun.mobile
 import android.app.ActivityManager
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
@@ -403,14 +404,25 @@ class JavaServerBackend(
     private fun startLogPump(serverId: String, running: Process) {
         pumpJob?.cancel()
         pumpJob = scope.launch(Dispatchers.IO) {
-            running.inputStream.bufferedReader().useLines { seq ->
-                for (raw in seq) {
-                    val line = raw.trim()
-                    if (line.isEmpty()) continue
-                    record(line)
-                    onLog?.invoke(serverId, line)
-                    interpret(serverId, line)
+            // Caught for the same reason as the tunnel's pump: this scope's
+            // SupervisorJob keeps siblings alive but does nothing about an
+            // unhandled exception, which reaches the default handler and kills
+            // the app. Killing the JVM closes this stream under a blocked
+            // readLine, so the throw is a normal part of stopping.
+            try {
+                running.inputStream.bufferedReader().useLines { seq ->
+                    for (raw in seq) {
+                        val line = raw.trim()
+                        if (line.isEmpty()) continue
+                        record(line)
+                        onLog?.invoke(serverId, line)
+                        interpret(serverId, line)
+                    }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (err: Throwable) {
+                Log.d(TAG, "console output ended: ${err.message}")
             }
             // The stream ends when the process does.
             val code = runCatching { running.waitFor() }.getOrDefault(-1)

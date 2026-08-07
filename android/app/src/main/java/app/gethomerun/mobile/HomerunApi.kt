@@ -7,10 +7,15 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -185,6 +190,127 @@ object HomerunApi {
             ),
             isGateway2 = link["provisioner"]?.jsonPrimitive?.contentOrNull == "gateway2",
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Device registration and reporting
+    // -----------------------------------------------------------------------
+
+    /**
+     * Register this device, or re-attach to an existing registration.
+     *
+     * One call does everything: creates the device, adds it to the user's
+     * default group and that group's gateway service, joins it to servers the
+     * user already has, and issues a device token. Authorised with the
+     * **user** token — owner, matrix id and device type are all derived
+     * server-side, so the client sends only a name.
+     *
+     * [existingDeviceId] must be an id the backend issued. It is looked up as
+     * a primary key owned by this user, so anything invented locally 404s.
+     */
+    suspend fun registerDevice(
+        apiUrl: String,
+        userToken: String,
+        deviceName: String,
+        existingDeviceId: String?,
+    ): DeviceRegistry.Registration? = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            put("device_name", deviceName)
+            if (existingDeviceId != null) put("existing_device_id", existingDeviceId)
+        }
+
+        val response = runCatching {
+            post(apiUrl, "/api/init/native/", body, userToken)
+        }.onFailure {
+            Log.w(TAG, "device registration failed: ${it.message}")
+        }.getOrNull() ?: return@withContext null
+
+        val deviceId = response["device_id"]?.jsonPrimitive?.contentOrNull
+        val deviceToken = response["device_token"]?.jsonPrimitive?.contentOrNull
+        if (deviceId == null || deviceToken == null) {
+            Log.w(TAG, "registration response had no device_id/device_token")
+            return@withContext null
+        }
+        DeviceRegistry.Registration(
+            deviceId = deviceId,
+            deviceToken = deviceToken,
+            groupId = response["group_id"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
+    /**
+     * The heartbeat. Authorised with the **device** token.
+     *
+     * An empty [instances] list is still a valid report — it is what keeps the
+     * device itself marked online, separately from any server.
+     */
+    suspend fun reportInstances(
+        apiUrl: String,
+        deviceId: String,
+        deviceToken: String,
+        instances: List<String>,
+    ) = withContext(Dispatchers.IO) {
+        val body = buildJsonObject {
+            put("instances", buildJsonArray { instances.forEach { add(JsonPrimitive(it)) } })
+            put("unacked_tasks", 0)
+        }
+        runCatching { post(apiUrl, "/api/reporting/device/$deviceId/instances/", body, deviceToken) }
+            .onFailure { Log.d(TAG, "heartbeat failed: ${it.message}") }
+        Unit
+    }
+
+    /**
+     * Acknowledge a server's state, with the **device** token. This is the
+     * report the API and the web dashboard wait on — the bridge event of the
+     * same name only reaches the page in front of us.
+     */
+    suspend fun reportServerState(
+        apiUrl: String,
+        serverId: String,
+        state: String,
+        deviceToken: String,
+    ) = withContext(Dispatchers.IO) {
+        val body = buildJsonObject { put("status", state) }
+        runCatching { post(apiUrl, "/api/server/$serverId/state/", body, deviceToken) }
+            .onFailure { Log.w(TAG, "state report ($state) failed for $serverId: ${it.message}") }
+        Unit
+    }
+
+    /** One authenticated POST, parsed. Throws on a non-2xx. */
+    private fun post(
+        apiUrl: String,
+        path: String,
+        body: JsonObject,
+        token: String,
+    ): JsonObject? {
+        val connection = (URL("${apiUrl.trimEnd('/')}$path").openConnection() as HttpURLConnection)
+            .apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = READ_TIMEOUT_MS
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+            }
+        try {
+            connection.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = connection.responseCode
+            if (code !in 200..299) {
+                // The error body is where the API says *why* — "Device with id
+                // … does not exist" and friends. Losing it turns a precise
+                // failure into "HTTP 400".
+                val detail = runCatching {
+                    connection.errorStream?.bufferedReader()?.use { it.readText() }
+                }.getOrNull().orEmpty().take(400)
+                throw IOException("HTTP $code from $path${if (detail.isBlank()) "" else ": $detail"}")
+            }
+            val text = connection.inputStream.bufferedReader().use { it.readText() }
+            return if (text.isBlank()) null
+            else json.parseToJsonElement(text) as? JsonObject
+        } finally {
+            connection.disconnect()
+        }
     }
 
     /** One authenticated GET, parsed. Null on any non-200 or transport error. */

@@ -12,6 +12,11 @@ class HomerunApplication : Application() {
         // and the WebView being torn down and rebuilt.
         ServerHost.init(this)
 
+        // The heartbeat starts with the process, not with a login or a server.
+        // The API marks a device unhealthy 60 s after its last report, and a
+        // relaunch already holds the token issued last time.
+        DeviceRegistry.init(this) { ServerHost.backend.runningServerIds }
+
         // Debug builds are inspectable from the host machine at
         // chrome://inspect — the only practical way to debug the shared UI
         // running inside the app.
