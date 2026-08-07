@@ -126,14 +126,40 @@ Two things only a real run found:
 
 #### What to bundle vs download
 
-Only the launcher (0.3 MB) ships in the APK. The runtime is downloaded, which
-means install size stays small and multiple Java versions can coexist —
-important because Minecraft's required Java version moves with the game.
+Only the launcher (0.3 MB) ships in the APK. The runtime is downloaded, so
+install size stays small and several Java versions can coexist — which matters,
+because Minecraft's required Java version moves with the game.
 
-**Availability is the catch.** The multiarch builds top out at **Java 17** for
-`x86_64`; Java 21 — needed for Minecraft 1.20.5+ — is published for `arm64`
-only. So the emulator can host up to roughly 1.20.4, and anything newer needs
-a physical arm64 device or a runtime built for x86_64.
+#### Where runtimes come from
+
+Two sources, and the catalog currently points at the weaker one.
+
+**PojavLauncher multiarch builds** — what `JavaRuntime.CATALOG` uses today, and
+what the emulator run above was proven against. Plain `.tar.xz`, no external
+dependencies, drops straight into place. But the newest x86_64 asset is from
+2021 and tops out at Java 17.
+
+**Termux** — [`packages.termux.dev`](https://packages.termux.dev/apt/termux-main/)
+publishes current OpenJDK for **both** architectures:
+
+| Package | x86_64 | aarch64 |
+|---|---|---|
+| openjdk-17 | 17.0.20 | 17.0.20 |
+| openjdk-21 | 21.0.12 | 21.0.12 |
+| openjdk-25 | 25.0.4 | 25.0.4 |
+
+Strictly better on version currency and maintenance, with two costs worth
+knowing before switching:
+
+- **`.deb`, not `.tar.xz`.** An `ar` archive wrapping a tar — commons-compress
+  reads both, so this is plumbing, not a blocker.
+- **Built for Termux's prefix.** These expect
+  `/data/data/com.termux/files/usr` and declare real dependencies
+  (`libandroid-shmem`, `libandroid-spawn`, `libiconv`, `libjpeg-turbo`, `zlib`,
+  `littlecms`), which would have to be fetched and merged into the same tree.
+  We already override `java.home` and `LD_LIBRARY_PATH`, so the prefix is
+  probably survivable — but "probably" is doing real work in that sentence and
+  it is unproven. **Assume nothing here until a server actually boots on one.**
 
 ## The Pumpkin backend
 
