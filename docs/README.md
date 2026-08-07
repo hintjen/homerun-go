@@ -49,6 +49,24 @@ in, or debugging a server that will not start.
 
 ---
 
+### 🤖 [Android host](./android-host.md)
+
+The Android app shell — WebView, asset loader, capability injection, and the
+bridge router's threading.
+
+**Contains**:
+- Why the bundle is served over an `https://` virtual host, not `file://`
+- The aapt asset filter that silently strips Next.js's entire `_next/` bundle
+- Where capability injection lands relative to the first page script, and the
+  `__homerunHost.postMessage` adapter the shared transport requires
+- Thread discipline: which callback lands on a binder thread and what ANRs
+- Render-process death, and why queued events are dropped rather than replayed
+- Building, running on an emulator, and remote debugging
+
+**Read this for**: Working on the Android host, or diagnosing a blank screen.
+
+---
+
 *Add an entry here whenever you add a doc. A doc nobody can find is not
 written.*
 
@@ -59,7 +77,6 @@ Planned, one per milestone (see plans/shared-milestones.md):
   ios-bridge.md           iOS      M1, extended at M2
   ios-server-backend.md   iOS      M3
   ios-lifecycle.md        iOS      M4
-  android-host.md         Android  M0
   android-bridge.md       Android  M1, extended at M2
   android-server-backend.md  Android  M3
   android-lifecycle.md    Android  M4

@@ -83,7 +83,7 @@ want to find out.
 
 ## Status
 
-Scaffolding. Nothing runs yet.
+The Android app boots and renders the shared UI. No server runs yet.
 
 | Piece | State |
 |---|---|
@@ -93,7 +93,13 @@ Scaffolding. Nothing runs yet.
 | `homerun-pumpkin-ffi` | **implemented and tested** except the engine itself — see [docs/ffi.md](docs/ffi.md) |
 | Pumpkin engine | not wired (fork not yet pinned) |
 | iOS host | not started |
-| Android host | not started |
+| Android host | **M0 done, M1 transport done** — see [docs/android-host.md](docs/android-host.md) |
+
+Android runs on an emulator today: the WebView serves the shared bundle,
+capabilities are injected at document start, and the bridge round-trips.
+`npm run conformance:android` reports **20 of 46** required channels handled —
+the app-shell set. The remaining 26 are the server backend and the file/OS
+integrations, and that report is the work queue.
 
 The FFI crate has 36 passing tests covering the state machine, console
 cursors, port pre-flight, crash capture, and the whole C surface — none of
@@ -130,6 +136,15 @@ npm run build:android      # stages the UI + builds the .so into jniLibs
 npm run build:ios          # macOS only
 npm run test:rust          # 36 FFI tests, no device needed
 ```
+
+To actually run the Android app:
+
+```bash
+npm run android:emulator   # start the AVD and wait for boot
+npm run android:run        # build, install, launch, follow logs
+```
+
+Debug builds are inspectable from `chrome://inspect` on the host machine.
 
 `npm run doctor` names every missing prerequisite and the exact command to
 install it. Full detail: [`docs/building.md`](docs/building.md).

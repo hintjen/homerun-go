@@ -1,0 +1,20 @@
+# This repo is worked on from Windows (Android) and macOS (iOS) at the same
+# time, so line endings are pinned rather than left to each machine's config.
+
+* text=auto eol=lf
+
+# `gradlew` is a shell script. With CRLF its shebang reads as `/bin/sh\r` and
+# a Mac fails with "bad interpreter: no such file or directory" — a confusing
+# way to discover a line-ending problem.
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Batch files are the opposite case: cmd.exe needs CRLF.
+*.bat text eol=crlf
+
+*.jar binary
+*.png binary
+*.so binary
+*.a binary
+*.ttf binary
+*.woff2 binary
