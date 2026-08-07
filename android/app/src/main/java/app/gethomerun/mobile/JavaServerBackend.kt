@@ -57,6 +57,20 @@ class JavaServerBackend(
     @Volatile
     private var consoleReady = false
 
+    /**
+     * The server whose launch is in flight, claimed before this coroutine can
+     * suspend.
+     *
+     * [currentServerId] is not enough on its own: it is only set once the JVM
+     * has been spawned, which is a download and a runtime unpack later. The
+     * UI's reconcile loop calls `native-server-start` on every poll until the
+     * server reports running, so that window used to admit a fresh launch on
+     * each tick — five of them, in the case that found this, all downloading
+     * into the same directory until one renamed the partial file out from
+     * under the others.
+     */
+    private var startingId: String? = null
+
     private var currentServerId: String? = null
     private var startedAt: Instant? = null
     private var currentPort: Int? = null
@@ -107,12 +121,43 @@ class JavaServerBackend(
         val mainClass: String,
     )
 
-    override suspend fun start(serverId: String, config: ServerConfig) {
-        runningServerIds.firstOrNull()?.let { running ->
-            if (running == serverId) throw ServerBackendException.AlreadyRunning(serverId)
-            throw ServerBackendException.AnotherServerRunning(running)
+    /**
+     * Take the one launch slot this host has, or say who holds it.
+     *
+     * `@Synchronized` and called before the first `suspend` point in [start],
+     * which is the entire point — a check that can suspend between testing and
+     * claiming is not a guard. The desktop marks `pendingStartup` the same way
+     * and for the same reason.
+     */
+    @Synchronized
+    private fun claimStart(serverId: String) {
+        val busy = startingId ?: currentServerId
+        if (busy != null) {
+            // The router turns this into { success: true, alreadyRunning: true },
+            // which is what the reconcile loop expects to hear.
+            if (busy == serverId) throw ServerBackendException.AlreadyRunning(serverId)
+            throw ServerBackendException.AnotherServerRunning(busy)
         }
+        startingId = serverId
+    }
 
+    @Synchronized
+    private fun releaseStart(serverId: String) {
+        if (startingId == serverId) startingId = null
+    }
+
+    override suspend fun start(serverId: String, config: ServerConfig) {
+        claimStart(serverId)
+        try {
+            launch(serverId, config)
+        } finally {
+            // By now either the JVM is up and currentServerId holds the slot,
+            // or the launch failed and nothing does.
+            releaseStart(serverId)
+        }
+    }
+
+    private suspend fun launch(serverId: String, config: ServerConfig) {
         val launcher = JavaRuntime.launcher(context)
             ?: throw ServerBackendException.Engine(
                 "This build has no Java launcher, so it cannot host a Java server."
