@@ -127,6 +127,19 @@ class BridgeRouter(
             }))
         }
 
+        /**
+         * A tunnel failure stops the server through the normal clean path, so
+         * without this the UI shows it flipping to stopped and cannot tell it
+         * from the user's own Stop. The shared UI already listens and toasts,
+         * worded per kind — this is the half that was missing.
+         */
+        override fun onNetworkError(serverId: String, kind: String) {
+            emit("native-server-network-error", listOf(buildJsonObject {
+                put("serverId", serverId)
+                put("kind", kind)
+            }))
+        }
+
         override fun onStateChanged(serverId: String, state: ServerState) {
             // The event contract carries only these three. `starting` and
             // `stopping` are ours; the UI infers those from the pending call.

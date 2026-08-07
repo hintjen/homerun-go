@@ -71,6 +71,7 @@ class JavaServerBackend(
     override var onStateChanged: ((String, ServerState) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
+    override var onNetworkError: ((String, String) -> Unit)? = null
 
     // -----------------------------------------------------------------------
     // Storage
@@ -285,26 +286,26 @@ class JavaServerBackend(
     }
 
     /**
-     * Bring up the gateway tunnel, if this server has one.
+     * Bring up the gateway tunnel. Failing to is fatal to the launch.
      *
-     * A failure here is loud but not fatal: the world is up and playable on
-     * the local network, so killing it would destroy something that works in
-     * order to punish something that does not.
+     * A server nobody can reach is not a working server, so the desktop stops
+     * it rather than leave something running that looks healthy and is not —
+     * `pollAndProvisionWireproxy` throws when the config never arrives, and
+     * `server-started`'s catch stops the server. This matches that exactly.
+     * Both paths also emit `native-server-network-error`, because a clean stop
+     * with no explanation is indistinguishable from the user's own Stop.
      */
     private suspend fun openTunnel(serverId: String, dir: File, port: Int) {
-        val link = tunnelJob?.let { job ->
-            note(serverId, "[Homerun] Connecting to the Homerun gateway...")
-            runCatching { job.await() }.getOrNull()
-        }
+        note(serverId, "[Homerun] Connecting to the Homerun gateway...")
+
+        val link = tunnelJob?.let { job -> runCatching { job.await() }.getOrNull() }
         tunnelJob = null
 
         if (link == null) {
-            note(
-                serverId,
-                "[Homerun] No gateway tunnel for this server — it is reachable on this " +
-                    "network, but not from the internet.",
+            failTunnel(
+                serverId, PROVISIONING,
+                "Failed to establish network tunnel: the gateway did not provide one.",
             )
-            return
         }
 
         runCatching {
@@ -314,16 +315,44 @@ class JavaServerBackend(
                 link = link,
                 minecraftPort = port,
                 onLog = { line -> note(serverId, line) },
-                // The gateway regenerating its keys is the usual cause, and
-                // the credentials we hold are then permanently dead. The
-                // desktop stops the server; so does this, rather than leave
-                // something running that nobody can join.
-                onHandshakeFailed = { scope.launch { runCatching { stop(serverId) } } },
+                // The tunnel came up and then stopped being answered — the
+                // gateway regenerating its keys is the usual cause, and the
+                // credentials we hold are permanently dead. Same verdict, but
+                // reported as `handshake` so the UI can say so.
+                onHandshakeFailed = {
+                    scope.launch {
+                        runCatching { stopForNetworkError(serverId, HANDSHAKE) }
+                    }
+                },
             )
-            note(serverId, "[Homerun] Connected to the Homerun gateway.")
         }.onFailure { err ->
-            note(serverId, "[Homerun] ${err.message ?: "The tunnel could not be started."}")
+            failTunnel(
+                serverId, PROVISIONING,
+                "Failed to establish network tunnel: ${err.message ?: "it could not be started"}.",
+            )
         }
+
+        note(serverId, "[Homerun] Connected to the Homerun gateway.")
+    }
+
+    /** Report, stop, and fail the launch. */
+    private suspend fun failTunnel(serverId: String, kind: String, message: String): Nothing {
+        note(serverId, "[Homerun] $message Stopping server.")
+        stopForNetworkError(serverId, kind)
+        throw ServerBackendException.Engine(message)
+    }
+
+    /**
+     * Stop a server because its tunnel failed.
+     *
+     * The event goes out *before* the stop so the UI has the reason in hand by
+     * the time the card flips — it stops through the normal clean path, so
+     * otherwise this is indistinguishable from the user pressing Stop.
+     */
+    private suspend fun stopForNetworkError(serverId: String, kind: String) {
+        Log.w(TAG, "$serverId: tunnel failed ($kind) — stopping")
+        onNetworkError?.invoke(serverId, kind)
+        runCatching { stop(serverId) }
     }
 
     override suspend fun stop(serverId: String) {
@@ -541,6 +570,10 @@ class JavaServerBackend(
         const val FORCE_STOP_SECONDS = 8L
         const val MAX_BUFFERED_LINES = 2000
         const val MIN_HEAP_MB = 512
+
+        /** The two `native-server-network-error` kinds the contract defines. */
+        const val PROVISIONING = "provisioning"
+        const val HANDSHAKE = "handshake"
 
         val DONE = Regex("""Done \([^)]*\)! For help""")
         val JOINED = Regex("""]: (\w+) joined the game""")

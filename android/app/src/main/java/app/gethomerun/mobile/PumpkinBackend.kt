@@ -65,6 +65,9 @@ class PumpkinBackend(
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
 
+    // Pumpkin has no tunnel of its own yet, so this never fires here.
+    override var onNetworkError: ((String, String) -> Unit)? = null
+
     // -----------------------------------------------------------------------
     // Storage
     // -----------------------------------------------------------------------

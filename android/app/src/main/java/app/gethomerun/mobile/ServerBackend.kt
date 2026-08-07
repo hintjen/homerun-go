@@ -79,6 +79,16 @@ interface ServerBackend {
     var onStateChanged: ((String, ServerState) -> Unit)?
     var onLog: ((String, String) -> Unit)?
     var onPlayersChanged: ((String) -> Unit)?
+
+    /**
+     * The network tunnel failed, and the server is being stopped for it.
+     *
+     * `kind` is `provisioning` (never came up) or `handshake` (came up, then
+     * the gateway stopped answering). Both stop the server through the normal
+     * clean path, so without this the UI just sees it flip to stopped with no
+     * explanation — the shared UI already toasts this event, worded per kind.
+     */
+    var onNetworkError: ((String, String) -> Unit)?
 }
 
 enum class ServerState(val wire: String) {

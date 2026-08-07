@@ -38,6 +38,7 @@ object ServerHost {
         fun onLog(serverId: String, line: String) {}
         fun onStateChanged(serverId: String, state: ServerState) {}
         fun onPlayersChanged(serverId: String) {}
+        fun onNetworkError(serverId: String, kind: String) {}
     }
 
     @Synchronized
@@ -53,6 +54,7 @@ object ServerHost {
         backend = (if (java) JavaServerBackend(appContext, scope) else PumpkinBackend(appContext, scope)).apply {
             onLog = { id, line -> forEach { it.onLog(id, line) } }
             onPlayersChanged = { id -> forEach { it.onPlayersChanged(id) } }
+            onNetworkError = { id, kind -> forEach { it.onNetworkError(id, kind) } }
             // M4 hooks a foreground service in here, so that a running
             // server survives the app being backgrounded.
             onStateChanged = { id, state -> forEach { it.onStateChanged(id, state) } }

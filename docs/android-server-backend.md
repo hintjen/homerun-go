@@ -279,12 +279,31 @@ a server looks healthy to everyone except the people trying to join. The
 desktop learned this the hard way — its comment about "a silently-rejected
 start masquerading as running" is the same bug.
 
-A tunnel that cannot be established is loud but **not** fatal: the world is up
-and playable on the local network, and killing it would destroy something that
-works to punish something that does not. A tunnel that establishes and then
-dies is different — ten consecutive `Handshake did not complete after 5
-seconds` lines (~50 s) means the gateway's keys were regenerated and these
-credentials are permanently dead, so the server is stopped, as on desktop.
+**A tunnel failure stops the server, in both of its forms.** A server nobody
+can reach is not a working server, and leaving one up would be worse than
+stopping it — it looks healthy to its owner and is unjoinable to everyone
+else. This is the desktop's rule, not a mobile one:
+`pollAndProvisionWireproxy` throws when the config never arrives, and
+`server-started`'s catch calls `stopServer`.
+
+| Failure | `kind` | When |
+|---|---|---|
+| Never came up | `provisioning` | The gateway did not provision within 60 s, or wireproxy would not spawn |
+| Came up, then died | `handshake` | Ten consecutive `Handshake did not complete after 5 seconds` (~50 s) — the gateway's keys were regenerated and these credentials are permanently dead |
+
+Both emit **`native-server-network-error`** before stopping. That event is
+load-bearing: the stop goes through the normal clean path, so without it the
+UI cannot tell a tunnel failure from the user pressing Stop, and the card just
+flips to stopped with no explanation. The shared UI already listens for it and
+toasts wording specific to each kind.
+
+The stop itself is graceful — `stop` on stdin, world saved — because the
+world is not what failed.
+
+One consequence worth knowing when testing: **a start with no account now
+stops.** No token means no tunnel, and no tunnel means no server, exactly as
+on desktop. Driving a server up over the bridge with a synthetic envelope
+needs a real token now.
 
 ### The EULA is accepted for the user
 
@@ -432,10 +451,10 @@ expected after an upstream build: a new build is a new file.
 runtime is older than the Minecraft version asks for. Restage with
 `npm run jre:android -- --java <N>` and rebuild.
 
-**"No gateway tunnel for this server."** Expected with no token, or when the
-gateway never provisioned one within 60 s. The server is up and joinable on
-the local network; it is not reachable from the internet. Check the API
-returned `config.links[0].native_config`.
+**"Failed to establish network tunnel… Stopping server."** Expected with no
+token, or when the gateway never provisioned one within 60 s. Check the API
+returned `config.links[0].native_config` for this server. The server stops on
+purpose — see the tunnel section.
 
 **The server is running but nobody can join, and the console says nothing.**
 Look for `HomerunTunnel` in logcat. wireproxy retries a failed handshake
