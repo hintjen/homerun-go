@@ -41,11 +41,11 @@ final class DeviceRegistrar {
 
     private func register() async -> String? {
         guard let token = TokenStore.accessToken, !token.isEmpty else {
-            NSLog("[device] not registering yet — no credentials")
+            HostLog.device.info("not registering yet — no credentials")
             return nil
         }
         guard let apiURL = HostStore.apiURL, !apiURL.isEmpty else {
-            NSLog("[device] not registering yet — no API URL")
+            HostLog.device.info("not registering yet — no API URL")
             return nil
         }
 
@@ -62,10 +62,10 @@ final class DeviceRegistrar {
             HostStore.deviceGroupId = device.groupId
             TokenStore.deviceToken = device.token
 
-            NSLog("[device] registered as %@", device.id)
+            HostLog.device.info("registered as \(device.id, privacy: .public)")
             return device.id
         } catch {
-            NSLog("[device] registration failed: %@", error.localizedDescription)
+            HostLog.device.error("registration failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }

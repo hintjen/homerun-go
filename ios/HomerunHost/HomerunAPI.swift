@@ -71,6 +71,39 @@ enum HomerunAPI {
             token: object["device_token"] as? String)
     }
 
+    // MARK: - Reporting
+
+    /// Tell the backend which servers this device is running.
+    ///
+    /// > **Without this the UI never leaves "Starting up".** The API marks a
+    /// > service unhealthy until its device reports it, so a server that is
+    /// > genuinely up and tunnelled still looks stuck. Desktop learned the
+    /// > same thing and reports on a timer.
+    ///
+    /// Authenticated with the **device** token from registration, not the
+    /// user's JWT — this is the device speaking for itself, and the two are
+    /// not interchangeable.
+    static func reportInstances(
+        apiURL: String,
+        deviceId: String,
+        deviceToken: String,
+        instances: [String]
+    ) async {
+        guard !deviceToken.isEmpty else { return }
+        do {
+            _ = try await post(
+                apiURL: apiURL,
+                path: "/api/reporting/device/\(deviceId)/instances/",
+                body: ["instances": instances, "unacked_tasks": 0],
+                token: deviceToken)
+        } catch {
+            // Best-effort: a missed beat is corrected by the next one, and
+            // failing a running server over it would be worse.
+            HostLog.tunnel.error(
+                "instance report failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
     // MARK: - Tunnel
 
     /// The tunnel credentials as they stood *before* launch, if any.
@@ -117,15 +150,15 @@ enum HomerunAPI {
             // check is skipped — without the exception a v2 link would poll
             // until timeout on every single start.
             if !polled.isGateway2, let stale, polled.link == stale {
-                NSLog("[tunnel] poll %d: still the pre-launch config, waiting", attempt)
+                HostLog.tunnel.info("poll \(attempt, privacy: .public): still the pre-launch config, waiting")
                 continue
             }
 
-            NSLog("[tunnel] ready after %d attempt(s)", attempt)
+            HostLog.tunnel.info("ready after \(attempt, privacy: .public) attempt(s)")
             return polled.link
         }
 
-        NSLog("[tunnel] no tunnel after %d attempts", attempts)
+        HostLog.tunnel.error("no tunnel after \(attempts, privacy: .public) attempts")
         return nil
     }
 

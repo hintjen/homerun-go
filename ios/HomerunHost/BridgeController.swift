@@ -155,7 +155,7 @@ extension BridgeController: WKScriptMessageHandler {
         guard message.name == "homerun" else { return }
 
         guard let incoming = BridgeEnvelope.decode(body: message.body) else {
-            NSLog("[bridge] discarded a message with no method: %@", String(describing: message.body))
+            HostLog.bridge.error("discarded a message with no method")
             return
         }
 
@@ -179,12 +179,13 @@ extension BridgeController: WKScriptMessageHandler {
 
         if incoming.method == "__host:netError" {
             let details = incoming.params as? [String: Any] ?? [:]
-            NSLog(
-                "[bridge] API %@ %@ -> %@ %@",
-                details["method"] as? String ?? "?",
-                details["url"] as? String ?? "?",
-                String(describing: details["status"] ?? "?"),
-                details["body"] as? String ?? "")
+            let method = details["method"] as? String ?? "?"
+            let url = details["url"] as? String ?? "?"
+            let status = String(describing: details["status"] ?? "?")
+            let body = details["body"] as? String ?? ""
+            HostLog.bridge.error(
+                "API \(method, privacy: .public) \(url, privacy: .public) -> \(status, privacy: .public) \(body, privacy: .public)"
+            )
             return
         }
 
@@ -192,7 +193,7 @@ extension BridgeController: WKScriptMessageHandler {
             // What the UI actually asks for, in order. Boot-path problems are
             // usually a call that never happened rather than one that failed,
             // and that is invisible without this.
-            NSLog("[bridge] <- %@%@", incoming.method, incoming.id == nil ? " (send)" : "")
+            HostLog.bridge.debug("<- \(incoming.method, privacy: .public)\(incoming.id == nil ? " (send)" : "", privacy: .public)")
         #endif
 
         guard let handler = router.handler(for: incoming.method) else {
@@ -247,7 +248,7 @@ extension BridgeController: WKScriptMessageHandler {
 
     private func reply(to id: String?, message: String, code: String) {
         guard let id else {
-            NSLog("[bridge] %@", message)
+            HostLog.bridge.error("\(message, privacy: .public)")
             return
         }
         deliver(BridgeEnvelope.failure(id: id, message: message, code: code))
@@ -266,11 +267,12 @@ extension BridgeController: WKScriptMessageHandler {
 
     private func logJSError(_ params: Any?) {
         let details = params as? [String: Any] ?? [:]
-        NSLog(
-            "[bridge] uncaught JS error: %@ (%@:%@)",
-            details["message"] as? String ?? "?",
-            details["source"] as? String ?? "?",
-            String(describing: details["line"] ?? "?"))
+        let message = details["message"] as? String ?? "?"
+        let source = details["source"] as? String ?? "?"
+        let line = String(describing: details["line"] ?? "?")
+        HostLog.bridge.error(
+            "uncaught JS error: \(message, privacy: .public) (\(source, privacy: .public):\(line, privacy: .public))"
+        )
     }
 
     /// Uncaught JS errors are otherwise invisible from the native side, and a
@@ -358,7 +360,7 @@ extension BridgeController: WKNavigationDelegate {
     /// the memory-hungry thing is the server the user is running. Recovery is
     /// part of normal operation, not a defensive extra (PROTOCOL.md §4.3).
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        NSLog("[bridge] WebView content process died; reloading")
+        HostLog.bridge.error("WebView content process died; reloading")
         resetForNewPage()
         load()
     }
@@ -374,14 +376,14 @@ extension BridgeController: WKNavigationDelegate {
     func webView(
         _ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error
     ) {
-        NSLog("[bridge] navigation failed: %@", error.localizedDescription)
+        HostLog.bridge.error("navigation failed: \(error.localizedDescription, privacy: .public)")
     }
 
     func webView(
         _ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        NSLog("[bridge] navigation failed before loading: %@", error.localizedDescription)
+        HostLog.bridge.error("navigation failed before loading: \(error.localizedDescription, privacy: .public)")
     }
 }
 

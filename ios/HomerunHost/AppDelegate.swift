@@ -33,7 +33,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             // A mismatch means the staged .a is not the one this source was
             // written against, which otherwise shows up as garbage decoded out
             // of an FFI reply much later.
-            NSLog("[host] FFI ABI version %u", homerun_abi_version())
+            HostLog.host.info("FFI ABI version \(homerun_abi_version(), privacy: .public)")
         #endif
 
         // Before the WebView exists, because the UI asks `is-installed` on its

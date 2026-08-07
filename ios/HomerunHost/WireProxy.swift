@@ -103,6 +103,11 @@ final class WireProxy {
                     + (error.map { ": \($0.localizedDescription)" } ?? "."))
         }
 
+        // Endpoint and address only — never the key material.
+        HostLog.tunnel.info(
+            "up: peer=\(link.endpoint, privacy: .public) address=\(link.address ?? "10.0.0.2/24", privacy: .public) allowed=\(link.allowedIps ?? "10.0.0.1/32", privacy: .public) target=127.0.0.1:\(minecraftPort, privacy: .public)"
+        )
+
         tunnel = started
         openedAt = Date()
         startWatchdog()
@@ -136,14 +141,32 @@ final class WireProxy {
         guard let tunnel, let openedAt else { return }
 
         let last = tunnel.lastHandshakeUnix()
-        // Never handshook: measure from when the tunnel opened, so a gateway
-        // that never answers still trips the threshold.
-        let age =
-            last == 0
-            ? Date().timeIntervalSince(openedAt)
-            : Date().timeIntervalSince1970 - Double(last)
 
-        guard age > Self.handshakeDeadline else { return }
+        // Two different questions, and conflating them kills healthy tunnels.
+        //
+        // *Never* handshaken means the gateway is not answering, measured from
+        // when the interface came up.
+        //
+        // Handshaken once and then quiet is **normal**. WireGuard renews a
+        // session roughly every two minutes, and only when there is traffic —
+        // keepalives do not produce a new handshake. So the timestamp
+        // legitimately sits still on an idle tunnel, and it only means
+        // anything once it passes the protocol's own reject window, after
+        // which the session is dead by definition rather than by our guess.
+        let age: TimeInterval
+        let deadline: TimeInterval
+        if last == 0 {
+            age = Date().timeIntervalSince(openedAt)
+            deadline = Self.firstHandshakeDeadline
+        } else {
+            age = Date().timeIntervalSince1970 - Double(last)
+            deadline = Self.sessionDeadline
+        }
+
+        guard age > deadline else { return }
+        HostLog.tunnel.error(
+            "no handshake for \(Int(age), privacy: .public)s (limit \(Int(deadline), privacy: .public)s) — treating the tunnel as dead"
+        )
 
         // Once only — the backend's response is to stop the server, and it
         // must not be asked twice.
@@ -158,6 +181,17 @@ final class WireProxy {
     /// A contract with the gateway, not a local choice.
     private static let gatewayJavaPort = 25565
 
-    /// Matches desktop and Android: ten missed handshakes at five seconds.
-    private static let handshakeDeadline: TimeInterval = 50
+    /// How long to wait for the *first* handshake before giving up. Matches
+    /// desktop and Android, which notice at ten missed attempts, five seconds
+    /// apart.
+    private static let firstHandshakeDeadline: TimeInterval = 50
+
+    /// How stale an established session may get before it is certainly dead.
+    ///
+    /// WireGuard's own `REJECT_AFTER_TIME` is 180 s: past that it refuses to
+    /// use the session at all. A healthy tunnel rekeys well inside that, so
+    /// anything beyond it is genuinely gone rather than merely idle. Do not
+    /// lower this to the 50 s above — that number counts *failed attempts* on
+    /// the other platforms, and a healthy idle tunnel makes none.
+    private static let sessionDeadline: TimeInterval = 180
 }

@@ -66,7 +66,7 @@ enum TokenStore {
             // the Keychain. -34018 (errSecMissingEntitlement) in particular
             // means the app is unsigned — the Keychain needs an application
             // identifier, which an ad-hoc simulator build still provides.
-            NSLog("[keychain] could not store %@: OSStatus %d", account, Int(status))
+            HostLog.keychain.error("could not store \(account, privacy: .public): OSStatus \(status, privacy: .public)")
             return
         }
     }

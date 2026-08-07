@@ -32,6 +32,7 @@ final class PumpkinBackend: ServerBackend {
 
     private var logCursor = 0
     private var logTimer: Timer?
+    private var heartbeat: Timer?
     private var pollTimer: Timer?
     private var lastPlayerSignature = ""
 
@@ -100,6 +101,7 @@ final class PumpkinBackend: ServerBackend {
             }
 
             if HomerunFFI.state() == .running {
+                HostLog.host.info("engine reports running; opening tunnel")
                 // The engine is listening on loopback. That is not the same as
                 // being joinable, so the tunnel goes up before anyone is told
                 // the server is running — desktop learned this the hard way,
@@ -108,6 +110,7 @@ final class PumpkinBackend: ServerBackend {
 
                 startedAt = Date()
                 listeningPort = HomerunFFI.stats()["port"] as? Int ?? Int(port)
+                startHeartbeat(serverId: serverId)
                 emitState(serverId, .running)
                 return
             }
@@ -151,6 +154,7 @@ final class PumpkinBackend: ServerBackend {
         guard let tunnelTask else { return }
         self.tunnelTask = nil
 
+        HostLog.tunnel.info("awaiting credentials")
         onLog?(serverId, "[Homerun] Connecting to the Homerun gateway...")
 
         guard let link = await tunnelTask.value else {
@@ -165,6 +169,7 @@ final class PumpkinBackend: ServerBackend {
             Task { await self.stopForNetworkError(serverId: serverId, kind: .handshake) }
         }
 
+        HostLog.tunnel.info("credentials in hand; bringing the interface up")
         do {
             try wireProxy.start(link: link, minecraftPort: port)
         } catch {
@@ -173,6 +178,7 @@ final class PumpkinBackend: ServerBackend {
             return
         }
 
+        HostLog.tunnel.info("interface up")
         onLog?(serverId, "[Homerun] Connected to the Homerun gateway.")
     }
 
@@ -241,6 +247,12 @@ final class PumpkinBackend: ServerBackend {
         // The last of the console — including whatever the engine said on its
         // way down, which is usually the reason.
         drainLogs(serverId: serverId)
+
+        heartbeat?.invalidate()
+        heartbeat = nil
+        // An empty report, so the backend stops believing this device hosts a
+        // server the moment it does not.
+        report(instances: [])
 
         logTimer?.invalidate()
         logTimer = nil
@@ -331,6 +343,31 @@ final class PumpkinBackend: ServerBackend {
 
     // MARK: - Pumps
 
+    /// Report this server to the backend, now and then periodically.
+    ///
+    /// The backend treats a service with no recent report as unhealthy, and
+    /// the UI shows that as a server still starting up — so this is what
+    /// finishes the start, not the tunnel.
+    private func startHeartbeat(serverId: String) {
+        heartbeat?.invalidate()
+        report(instances: [serverId])
+        heartbeat = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.report(instances: [serverId]) }
+        }
+    }
+
+    private func report(instances: [String]) {
+        guard let apiURL = HostStore.apiURL,
+            let deviceId = HostStore.registeredDeviceId,
+            let deviceToken = TokenStore.deviceToken
+        else { return }
+
+        Task {
+            await HomerunAPI.reportInstances(
+                apiURL: apiURL, deviceId: deviceId, deviceToken: deviceToken, instances: instances)
+        }
+    }
+
     private func startPumps(serverId: String) {
         // The console is polled rather than pushed: the engine buffers lines
         // and hands them over by cursor, which survives the UI not asking for
@@ -382,6 +419,7 @@ final class PumpkinBackend: ServerBackend {
     }
 
     private func emitState(_ serverId: String, _ state: ServerState) {
+        HostLog.host.info("state -> \(state.rawValue, privacy: .public)")
         onStateChanged?(serverId, state)
     }
 

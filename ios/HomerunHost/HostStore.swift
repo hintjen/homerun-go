@@ -78,7 +78,7 @@ enum HostStore {
             firstRunComplete = true
             return true
         } catch {
-            NSLog("[host] first-run setup failed: %@", error.localizedDescription)
+            HostLog.host.error("first-run setup failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }
