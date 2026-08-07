@@ -1277,6 +1277,7 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "jni",
+ "log",
  "pumpkin",
  "pumpkin-config",
  "serde_json",

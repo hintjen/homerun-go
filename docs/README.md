@@ -103,6 +103,41 @@ will not start, will not stop, or cannot be joined.
 
 ---
 
+### 🤖 [Android host](./android-host.md)
+
+The Android app shell — WebView, asset loader, capability injection, and the
+bridge router's threading.
+
+**Contains**:
+- Why the bundle is served over an `https://` virtual host, not `file://`
+- The aapt asset filter that silently strips Next.js's entire `_next/` bundle
+- Where capability injection lands relative to the first page script, and the
+  `__homerunHost.postMessage` adapter the shared transport requires
+- Thread discipline: which callback lands on a binder thread and what ANRs
+- Render-process death, and why queued events are dropped rather than replayed
+- Building, running on an emulator, and remote debugging
+
+**Read this for**: Working on the Android host, or diagnosing a blank screen.
+
+---
+
+### 🎮 [Android server backend](./android-server-backend.md)
+
+How `native-server-*` becomes a real server running inside the app — the JNI
+adapter, the thread it needs, and the polling that stands in for callbacks.
+
+**Contains**:
+- Why a JNI layer exists at all, and why it calls the C ABI rather than bypassing it
+- The 16 MB engine stack, and the crash you get without it
+- Why `start` polls for *running* instead of waiting on the call
+- The log pump, the perf sampler, and one-server-at-a-time
+- What the memory and CPU numbers actually measure
+- Triage, symptom first
+
+**Read this for**: Working on the server backend, or wiring Pumpkin in.
+
+---
+
 *Add an entry here whenever you add a doc. A doc nobody can find is not
 written.*
 
@@ -110,9 +145,7 @@ written.*
 Planned, one per milestone (see plans/shared-milestones.md):
 
   ios-lifecycle.md        iOS      M4
-  android-host.md         Android  M0
   android-bridge.md       Android  M1, extended at M2
-  android-server-backend.md  Android  M3
   android-lifecycle.md    Android  M4
 -->
 

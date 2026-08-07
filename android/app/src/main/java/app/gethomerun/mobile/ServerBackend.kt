@@ -61,6 +61,13 @@ interface ServerBackend {
     fun logs(serverId: String, cursor: Int): LogSlice
 
     /**
+     * Recent samples for the metrics graphs, oldest first. Empty when the
+     * backend cannot sample — an empty graph is honest, a fabricated one is
+     * not.
+     */
+    fun perfHistory(serverId: String): List<PerfSample> = emptyList()
+
+    /**
      * Run a console command. The JVM backend can use RCON; Pumpkin dispatches
      * in-process. Either way the reply arrives on `native-server-rcon-response`.
      */
@@ -72,6 +79,16 @@ interface ServerBackend {
     var onStateChanged: ((String, ServerState) -> Unit)?
     var onLog: ((String, String) -> Unit)?
     var onPlayersChanged: ((String) -> Unit)?
+
+    /**
+     * The network tunnel failed, and the server is being stopped for it.
+     *
+     * `kind` is `provisioning` (never came up) or `handshake` (came up, then
+     * the gateway stopped answering). Both stop the server through the normal
+     * clean path, so without this the UI just sees it flip to stopped with no
+     * explanation — the shared UI already toasts this event, worded per kind.
+     */
+    var onNetworkError: ((String, String) -> Unit)?
 }
 
 enum class ServerState(val wire: String) {
@@ -90,6 +107,32 @@ data class ServerConfig(
      * desktop defaults.
      */
     val memoryMb: Int,
+    /**
+     * Minecraft version to host. Null means the latest release — the same
+     * meaning the desktop gives an absent `VERSION`.
+     *
+     * The UI does not send this; the bridge reads it from the backend at
+     * launch ([HomerunApi.serverSettings]), so a version changed on the web
+     * dashboard takes effect on the next start.
+     */
+    val version: String? = null,
+    /** `vanilla`, `paper`, … Which server jar [ServerJar] fetches. */
+    val loader: String = "vanilla",
+    /**
+     * Resolves the gateway tunnel, or null when this host cannot tunnel.
+     *
+     * A function rather than a value for two reasons. It is slow — the
+     * gateway provisions the peer asynchronously and the poll runs up to a
+     * minute — so the backend runs it *alongside* the server booting instead
+     * of before it. And it closes over the user's access token, which stays
+     * in the bridge layer and never becomes backend state that could reach
+     * the server process's environment.
+     */
+    val resolveTunnel: (suspend () -> WireProxy.Link?)? = null,
+    /**
+     * Forwarded into the server process's environment, so it must never carry
+     * anything secret — no tokens, no credentials.
+     */
     val extra: Map<String, Any> = emptyMap(),
 )
 
@@ -104,6 +147,14 @@ data class MemoryUsage(val usedKb: Int?, val maxMb: Int?)
 
 /** [cursor] is per-run, not durable across restarts. */
 data class LogSlice(val lines: List<String>, val cursor: Int)
+
+/** One point on the metrics graphs. Null fields render as "unavailable". */
+data class PerfSample(
+    val t: Long,
+    val memUsedMb: Int?,
+    val cpuPercent: Int?,
+    val playerCount: Int?,
+)
 
 sealed class ServerBackendException(message: String) : Exception(message) {
     class NotFound(id: String) : ServerBackendException("No server with id $id")

@@ -1,0 +1,753 @@
+package app.gethomerun.mobile
+
+import android.app.ActivityManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.webkit.JavascriptInterface
+import android.webkit.WebView
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
+
+/** A channel implementation. `params` is the raw payload; the return value is the result. */
+private typealias ChannelHandler = suspend (JsonElement?) -> JsonElement?
+
+private const val PROTOCOL_VERSION = 1
+
+/**
+ * The `bridge/v1` wire envelope, both directions (PROTOCOL.md §2). Absent
+ * fields are omitted rather than sent as null, because the UI distinguishes
+ * "no error key" from "error: null".
+ */
+@Serializable
+private data class Envelope(
+    val v: Int = PROTOCOL_VERSION,
+    val id: String? = null,
+    val method: String? = null,
+    val params: JsonElement? = null,
+    val result: JsonElement? = null,
+    val error: BridgeError? = null,
+    val event: String? = null,
+    val args: List<JsonElement>? = null,
+)
+
+@Serializable
+private data class BridgeError(val message: String, val code: String? = null)
+
+/**
+ * The Android half of `bridge/v1` — see `shared/conformance/PROTOCOL.md`.
+ *
+ * Threading is the thing to get right here. `postMessage` is reached through
+ * `addJavascriptInterface`, which means **it runs on a binder thread**, not the
+ * main thread and not a thread we own. So:
+ *
+ *  - Parsing happens on the binder thread (cheap, no shared state).
+ *  - All router bookkeeping — the ready flag, the event queue — is confined to
+ *    the main thread, which is also the only thread allowed to touch the
+ *    WebView.
+ *  - Actual channel work runs on [scope], so a slow handler can never block
+ *    the binder thread. Blocking it ANRs the app in ways that look like
+ *    WebView bugs.
+ *
+ * There is deliberately **no call timeout**: `native-server-start` and modpack
+ * imports legitimately run for minutes. Pending work is cleared when the page
+ * goes away ([onPageGone]), not on a clock.
+ */
+class BridgeRouter(
+    private val context: Context,
+    private val scope: CoroutineScope,
+) {
+    private val main = Handler(Looper.getMainLooper())
+
+    /**
+     * Set by the activity, and re-set when the render process dies and the
+     * WebView is rebuilt. The router outlives any single WebView, which is
+     * the point — pending state belongs to the page, not to the transport.
+     */
+    private var webView: WebView? = null
+
+    fun attach(view: WebView) {
+        webView = view
+    }
+
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        explicitNulls = false
+    }
+
+    private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /**
+     * The local server engine, owned by the process rather than by this
+     * router — a page reload must not take a running server with it.
+     */
+    private val backend: ServerBackend get() = ServerHost.backend
+
+    /**
+     * Console output and state changes reach the UI only through these.
+     * Registered for the life of the router; `ServerHost` fans them out so the
+     * bridge and (from M4) the foreground service can both listen.
+     */
+    private val hostListener = object : ServerHost.Listener {
+        override fun onLog(serverId: String, line: String) {
+            emit("native-server-log", listOf(buildJsonObject {
+                put("serverId", serverId)
+                put("line", line)
+            }))
+        }
+
+        override fun onPlayersChanged(serverId: String) {
+            emit("native-server-players-changed", listOf(buildJsonObject {
+                put("serverId", serverId)
+            }))
+        }
+
+        /**
+         * A tunnel failure stops the server through the normal clean path, so
+         * without this the UI shows it flipping to stopped and cannot tell it
+         * from the user's own Stop. The shared UI already listens and toasts,
+         * worded per kind — this is the half that was missing.
+         */
+        override fun onNetworkError(serverId: String, kind: String) {
+            emit("native-server-network-error", listOf(buildJsonObject {
+                put("serverId", serverId)
+                put("kind", kind)
+            }))
+        }
+
+        override fun onStateChanged(serverId: String, state: ServerState) {
+            // The event contract carries only these three. `starting` and
+            // `stopping` are ours; the UI infers those from the pending call.
+            val wire = when (state) {
+                ServerState.RUNNING -> "running"
+                ServerState.STOPPED -> "stopped"
+                ServerState.CRASHED -> "crashed"
+                else -> null
+            } ?: return
+            emit("native-server-state-changed", listOf(buildJsonObject {
+                put("serverId", serverId)
+                put("state", wire)
+            }))
+            if (state == ServerState.RUNNING) {
+                backend.port(serverId)?.let { p ->
+                    emit("native-server-port", listOf(buildJsonObject {
+                        put("serverId", serverId)
+                        put("port", p)
+                    }))
+                }
+            }
+        }
+    }
+
+    init {
+        ServerHost.addListener(hostListener)
+    }
+
+    /** The `native-server-*` channels that take an object payload. */
+    private fun JsonObject.serverId(): String =
+        this["serverId"]?.jsonPrimitive?.contentOrNull
+            ?: throw IllegalArgumentException("serverId is required")
+
+    /** The six metrics getters and the log reader take a bare string instead. */
+    private fun JsonElement?.asServerId(): String =
+        this?.jsonPrimitive?.contentOrNull
+            ?: throw IllegalArgumentException("serverId is required")
+
+    // --- main-thread-only state ------------------------------------------
+
+    /** False until the page announces `__bridge:ready`; events queue meanwhile. */
+    private var ready = false
+
+    /** Serialised event envelopes awaiting the handshake, in emission order. */
+    private val queued = ArrayDeque<String>()
+
+    /**
+     * Parent of every in-flight handler for the *current* page. Cancelling it
+     * is how a page teardown abandons work whose reply has nowhere to go.
+     */
+    private var pageJobs = Job()
+
+    // ---------------------------------------------------------------------
+    // UI -> host
+    // ---------------------------------------------------------------------
+
+    /** Called from JavaScript as `HomerunHost.postMessage(json)`. Binder thread. */
+    @JavascriptInterface
+    fun postMessage(payload: String) {
+        val envelope = try {
+            json.decodeFromString<Envelope>(payload)
+        } catch (err: Exception) {
+            Log.e(TAG, "unparseable envelope from the page: ${err.message}")
+            return
+        }
+        main.post { dispatch(envelope) }
+    }
+
+    private fun dispatch(envelope: Envelope) {
+        val method = envelope.method ?: return
+
+        if (method == READY_METHOD) {
+            onReady()
+            return
+        }
+
+        val handler = handlers[method]
+        if (handler == null) {
+            // Answering with an error is not optional. An invoke with no reply
+            // leaves a promise pending forever and the UI hangs with no clue
+            // why (PROTOCOL.md §5).
+            val message = "Channel \"$method\" is not implemented by the Android host yet"
+            if (envelope.id != null) reply(Envelope(id = envelope.id, error = BridgeError(message)))
+            else Log.w(TAG, message)
+            return
+        }
+
+        scope.launch(pageJobs) {
+            try {
+                val result = handler(envelope.params)
+                if (envelope.id != null) {
+                    reply(Envelope(id = envelope.id, result = result ?: JsonNull))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (err: Throwable) {
+                Log.e(TAG, "handler for \"$method\" failed", err)
+                if (envelope.id != null) {
+                    reply(
+                        Envelope(
+                            id = envelope.id,
+                            error = BridgeError(err.message ?: err.javaClass.simpleName),
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // host -> UI
+    // ---------------------------------------------------------------------
+
+    /**
+     * Emit an event to the page. Safe from any thread. Before the handshake
+     * the event is queued rather than dropped, because the UI wires its
+     * subscriptions after the first paint and would otherwise miss anything
+     * emitted during startup.
+     */
+    fun emit(event: String, args: List<JsonElement> = emptyList()) {
+        val literal = literal(Envelope(event = event, args = args))
+        main.post {
+            if (ready) evaluate(literal) else queued.addLast(literal)
+        }
+    }
+
+    private fun onReady() {
+        ready = true
+        while (queued.isNotEmpty()) evaluate(queued.removeFirst())
+        resyncServerState()
+    }
+
+    /**
+     * Tell a freshly-loaded page what is already running.
+     *
+     * The server outlives the page, so a reload — or an activity rebuilt after
+     * the render process died — starts with no idea a server is up. Without
+     * this it renders a stopped server that is very much running.
+     */
+    private fun resyncServerState() {
+        val serverId = ServerHost.runningServerId() ?: return
+        hostListener.onStateChanged(serverId, ServerState.RUNNING)
+    }
+
+    private fun reply(envelope: Envelope) {
+        val literal = literal(envelope)
+        main.post { evaluate(literal) }
+    }
+
+    private fun evaluate(literal: String) {
+        val view = webView
+        if (view == null) {
+            Log.w(TAG, "dropped a message: no WebView attached")
+            return
+        }
+        try {
+            view.evaluateJavascript(
+                "window.__homerunHost && window.__homerunHost.receive($literal);",
+                null,
+            )
+        } catch (err: Exception) {
+            // The WebView can be torn down between the post and the delivery.
+            Log.w(TAG, "dropped a message: ${err.message}")
+        }
+    }
+
+    /**
+     * One JSON literal from the serializer — never string interpolation of
+     * values, which is how a server name containing a quote becomes a syntax
+     * error in the middle of `evaluateJavascript`.
+     */
+    private fun literal(envelope: Envelope): String = escapeForJs(json.encodeToString(envelope))
+
+    // ---------------------------------------------------------------------
+    // Deep links
+    // ---------------------------------------------------------------------
+
+    /**
+     * A `homerun://` link that arrived before any page could hear about it.
+     *
+     * Atomic rather than main-thread-confined because `deep-link:consume` is
+     * answered from a coroutine like every other handler, and routing that one
+     * read back through the main thread would buy nothing.
+     *
+     * Deliberately **not** cleared by [onPageGone]: a link that arrived just
+     * before the render process died still deserves delivery to its
+     * replacement.
+     */
+    private val pendingDeepLink = AtomicReference<String?>(null)
+
+    /**
+     * A link that arrived with the activity itself — the app was not running.
+     *
+     * Held for the pull path rather than emitted, because at this point no
+     * page exists, and the event queue would flush at the `ready` handshake,
+     * which happens *before* the UI's deep-link subscription is wired. An
+     * event delivered then is dropped on the floor. This is the reason
+     * `bridge/v1` has both a pull and a push path for the same link.
+     */
+    fun captureColdStartDeepLink(url: String) {
+        pendingDeepLink.set(url)
+    }
+
+    /**
+     * A link that arrived while the app was already running. The UI is mounted
+     * and subscribed, so push it.
+     */
+    fun deliverDeepLink(url: String) {
+        emit("deep-link", listOf(JsonPrimitive(url)))
+    }
+
+    // ---------------------------------------------------------------------
+    // Page lifecycle
+    // ---------------------------------------------------------------------
+
+    /**
+     * The page is being replaced — reload, or the render process died.
+     *
+     * The new page shares no state with the old one, so we re-arm the queue
+     * and abandon in-flight work: its replies carry ids only the dead page
+     * understood. Queued events are dropped rather than replayed because they
+     * describe a timeline the fresh page never saw; it re-reads current state
+     * on mount instead.
+     */
+    fun onPageGone() {
+        main.post {
+            ready = false
+            queued.clear()
+            pageJobs.cancel()
+            pageJobs = Job()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Dispatch table
+    // ---------------------------------------------------------------------
+
+    /**
+     * Every channel this host answers. `shared/conformance/check-coverage.js`
+     * reads the block below and fails the build for any required channel that
+     * is missing, so this is the to-do list as well as the implementation.
+     */
+    private val handlers: Map<String, ChannelHandler> = mapOf(
+        // BRIDGE-CHANNELS-BEGIN
+        "get-initial-config" to { _ ->
+            buildJsonObject {
+                put("apiUrl", apiUrl())
+                // Omitted rather than sent blank: the UI treats a missing tag
+                // as "use the default" but an empty string as a real value.
+                BuildConfig.DISTRO_RELEASE_TAG.ifBlank { null }?.let { put("distroReleaseTag", it) }
+                BuildConfig.DEVICE_RELEASE_TAG.ifBlank { null }?.let { put("deviceReleaseTag", it) }
+            }
+        },
+
+        "get-app-version" to { _ ->
+            buildJsonObject {
+                put("version", BuildConfig.VERSION_NAME)
+                put("commit", BuildConfig.GIT_COMMIT.ifEmpty { null })
+                put("apiUrl", apiUrl())
+                put("platform", "android")
+                put("arch", android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown")
+            }
+        },
+
+        "get-system-language" to { _ -> JsonPrimitive(Locale.getDefault().toLanguageTag()) },
+
+        // No install wizard exists on Android: "installed" means first-run
+        // setup has produced the data directory and the bundled JRE. Until
+        // that setup lands (M2) there is nothing to do and nothing to fail.
+        "is-installed" to { _ -> JsonPrimitive(true) },
+        "get-install-type" to { _ -> JsonPrimitive("native") },
+        "check-system-time" to { _ -> JsonPrimitive(true) },
+
+        // A send, not an invoke. The UI's boot state machine blocks until one
+        // of system-check-complete / system-check-failed arrives, so emitting
+        // is the whole contract here.
+        "start-installation-or-check" to { _ ->
+            emit("system-check-complete")
+            null
+        },
+
+        // The UI authenticates against the backend itself and hands the result
+        // down. The host keeps them because the server backend and the device
+        // WebSocket need to call the API without a page in front of them.
+        //
+        // Emitting credentials-set is the load-bearing part: the boot state
+        // machine waits on that event before routing to the dashboard, so a
+        // handler that only stores and stays quiet hangs login at a spinner.
+        "credentials-received" to { params ->
+            if (params is JsonObject) {
+                prefs.edit().putString(KEY_CREDENTIALS, json.encodeToString(params)).apply()
+                (params["apiUrl"] as? JsonPrimitive)?.contentOrNull
+                    ?.let { prefs.edit().putString(KEY_API_URL, it).apply() }
+                emit("credentials-set")
+            } else {
+                emit("credentials-error", listOf(JsonPrimitive("Credentials were not an object")))
+            }
+            null
+        },
+
+        // Params are the user's email; the desktop also takes a
+        // shouldRemoveDistro flag that has no meaning here.
+        "logout" to { _ ->
+            prefs.edit().remove(KEY_CREDENTIALS).apply()
+            null
+        },
+
+        "clipboard-write-text" to { params ->
+            val text = params?.jsonPrimitive?.content.orEmpty()
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("Homerun", text))
+            null
+        },
+
+        "open-external-url" to { params ->
+            val url = params?.jsonPrimitive?.content.orEmpty()
+            JsonPrimitive(openExternal(url))
+        },
+
+        // Stable per-install id. Regenerating it would orphan the device's
+        // history on the backend, so it is persisted rather than derived.
+        "get-device-id" to { _ -> JsonPrimitive(deviceId()) },
+
+        // Nothing listens yet; the device WebSocket server arrives with the
+        // server backends. Null is the documented "not running" answer.
+        "get-device-ws-port" to { _ -> JsonNull },
+
+        "set-api-url" to { params ->
+            prefs.edit().putString(KEY_API_URL, params?.jsonPrimitive?.content).apply()
+            null
+        },
+
+        "set-posthog-distinct-id" to { params ->
+            prefs.edit().putString(KEY_POSTHOG_ID, params?.jsonPrimitive?.content).apply()
+            null
+        },
+
+        "cache-client-nonce" to { params ->
+            prefs.edit().putString(KEY_CLIENT_NONCE, params?.jsonPrimitive?.content).apply()
+            null
+        },
+
+        // The pull half of deep-link delivery. Read-and-clear: the UI calls
+        // this once on mount, and a link must not be redelivered on the next
+        // reload.
+        "deep-link:consume" to { _ ->
+            val url = pendingDeepLink.getAndSet(null)
+            Log.i(TAG, "deep-link:consume -> ${url ?: "nothing pending"}")
+            url?.let { JsonPrimitive(it) } ?: JsonNull
+        },
+
+        "journey-modals-get" to { _ ->
+            val stored = prefs.getString(KEY_JOURNEY_MODALS, null)
+            if (stored == null) JsonObject(emptyMap())
+            else runCatching { json.parseToJsonElement(stored) as JsonObject }
+                .getOrElse { JsonObject(emptyMap()) }
+        },
+
+        "journey-modals-set" to { params ->
+            prefs.edit().putString(KEY_JOURNEY_MODALS, json.encodeToString(params ?: JsonNull)).apply()
+            JsonPrimitive(true)
+        },
+
+        "get-system-memory" to { _ -> systemMemory() },
+        "get-native-system-memory" to { _ -> systemMemory() },
+
+        "native-server-active-ids" to { _ ->
+            buildJsonArray { backend.runningServerIds.forEach { add(JsonPrimitive(it)) } }
+        },
+
+        // The `native-server-*` family IS the local-server interface. The name
+        // is desktop-legacy; on Android it drives the in-process engine.
+        "native-server-start" to { params ->
+            val obj = params as? JsonObject ?: throw IllegalArgumentException("start needs an object")
+            val serverId = obj.serverId()
+            val config = obj["config"] as? JsonObject
+            backend.create(serverId)
+
+            // The UI sends only a name and a memory ceiling; which Minecraft
+            // version and which loader live on the backend. Fetched here
+            // rather than in the backend so the access token never reaches
+            // the server process's environment. Null means the lookup failed
+            // — vanilla latest, the same fallback the desktop takes.
+            val token = obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val api = apiUrl()
+            val settings = HomerunApi.serverSettings(api, serverId, token)
+
+            try {
+                if (settings?.gameType == "bedrock") {
+                    throw ServerBackendException.Engine(
+                        "Homerun for Android cannot host Bedrock servers yet."
+                    )
+                }
+                backend.start(
+                    serverId,
+                    ServerConfig(
+                        name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
+                        memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
+                        version = settings?.version,
+                        loader = settings?.loader ?: "vanilla",
+                        // A closure, so the token stays here. The backend
+                        // gets the ability to resolve a tunnel, never the
+                        // credential that resolves it — `ServerConfig.extra`
+                        // is forwarded into the server process's environment
+                        // and this must never be able to end up there.
+                        resolveTunnel = {
+                            HomerunApi.awaitTunnel(
+                                api, serverId, token, stale = settings?.tunnelBefore,
+                            )
+                        },
+                    ),
+                )
+                buildJsonObject { put("success", true) }
+            } catch (already: ServerBackendException.AlreadyRunning) {
+                buildJsonObject {
+                    put("success", true)
+                    put("alreadyRunning", true)
+                }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        "native-server-stop" to { params ->
+            try {
+                backend.stop((params as JsonObject).serverId())
+                buildJsonObject { put("success", true) }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        "native-server-delete" to { params ->
+            try {
+                backend.delete((params as JsonObject).serverId())
+                buildJsonObject { put("success", true) }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        // Reply arrives on native-server-rcon-response, not here — Pumpkin has
+        // no RCON, so the command is dispatched in-process and its output
+        // comes back through the console.
+        "native-server-rcon" to { params ->
+            val obj = params as JsonObject
+            val serverId = obj.serverId()
+            val command = obj["command"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            try {
+                backend.command(serverId, command)
+                emit(
+                    "native-server-rcon-response",
+                    listOf(buildJsonObject {
+                        put("serverId", serverId)
+                        put("response", "")
+                    })
+                )
+                buildJsonObject { put("success", true) }
+            } catch (err: ServerBackendException) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", err.message)
+                }
+            }
+        },
+
+        // The six metrics getters and the log reader take a bare server id
+        // string, not an object. Desktop legacy, frozen in the contract.
+        "native-server-get-uptime" to { params ->
+            buildJsonObject {
+                val at = backend.uptime(params.asServerId())?.toEpochMilli()
+                if (at == null) put("startedAt", JsonNull) else put("startedAt", at)
+            }
+        },
+
+        "native-server-get-ops" to { _ -> buildJsonObject { put("ops", buildJsonArray { }) } },
+
+        "native-server-get-mem-usage" to { params ->
+            val usage = backend.memoryUsage(params.asServerId())
+            buildJsonObject {
+                if (usage?.usedKb == null) put("usedKb", JsonNull) else put("usedKb", usage.usedKb)
+                if (usage?.maxMb == null) put("maxMb", JsonNull) else put("maxMb", usage.maxMb)
+            }
+        },
+
+        "native-server-get-cpu-usage" to { params ->
+            val cpu = backend.cpuUsage(params.asServerId())
+            buildJsonObject {
+                if (cpu == null) put("cpuPercent", JsonNull) else put("cpuPercent", cpu)
+            }
+        },
+
+        "native-server-get-players" to { params ->
+            val roster = backend.players(params.asServerId())
+            if (roster == null) JsonNull else buildJsonObject {
+                put("players", buildJsonArray {
+                    roster.players.forEach { player ->
+                        add(buildJsonObject {
+                            put("name", player.name)
+                            if (player.uuid == null) put("uuid", JsonNull) else put("uuid", player.uuid)
+                        })
+                    }
+                })
+                if (roster.max == null) put("max", JsonNull) else put("max", roster.max)
+            }
+        },
+
+        "native-server-get-perf-history" to { params ->
+            buildJsonArray {
+                backend.perfHistory(params.asServerId()).forEach { sample ->
+                    add(buildJsonObject {
+                        put("t", sample.t)
+                        if (sample.memUsedMb == null) put("memUsedMb", JsonNull) else put("memUsedMb", sample.memUsedMb)
+                        if (sample.cpuPercent == null) put("cpuPercent", JsonNull) else put("cpuPercent", sample.cpuPercent)
+                        if (sample.playerCount == null) put("playerCount", JsonNull) else put("playerCount", sample.playerCount)
+                    })
+                }
+            }
+        },
+
+        "get-native-server-logs" to { params ->
+            // Whole-buffer read, independent of the pump's cursor: the UI asks
+            // for this when a console mounts and needs the backlog.
+            buildJsonArray {
+                backend.logs(params.asServerId(), 0).lines.forEach { add(JsonPrimitive(it)) }
+            }
+        },
+
+        "get-native-server-port" to { params ->
+            val port = backend.port((params as JsonObject).serverId())
+            buildJsonObject { if (port == null) put("port", JsonNull) else put("port", port) }
+        },
+
+        // Local-network exposure is a router/firewall concern the desktop
+        // solves with UPnP. Nothing to toggle here yet; report the truth.
+        "get-native-local-network" to { _ -> buildJsonObject { put("enabled", false) } },
+        "set-native-local-network" to { _ ->
+            buildJsonObject {
+                put("success", false)
+                put("error", "Local network exposure is not configurable on Android yet.")
+            }
+        },
+        // BRIDGE-CHANNELS-END
+    )
+
+    // ---------------------------------------------------------------------
+    // Handler helpers
+    // ---------------------------------------------------------------------
+
+    private fun apiUrl(): String = prefs.getString(KEY_API_URL, null) ?: BuildConfig.API_URL
+
+    private fun deviceId(): String =
+        prefs.getString(KEY_DEVICE_ID, null) ?: UUID.randomUUID().toString().also {
+            prefs.edit().putString(KEY_DEVICE_ID, it).apply()
+        }
+
+    private fun openExternal(url: String): Boolean = try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+        true
+    } catch (err: Exception) {
+        Log.w(TAG, "could not open $url: ${err.message}")
+        false
+    }
+
+    /** The desktop shape: a `memory` string in MB, or an error. */
+    private fun systemMemory(): JsonElement {
+        val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val info = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }
+        return buildJsonObject {
+            put("success", true)
+            put("memory", (info.totalMem / (1024 * 1024)).toString())
+        }
+    }
+
+    companion object {
+        const val TAG = "HomerunBridge"
+
+        /** The name JavaScript sees; PROTOCOL.md §3.3 fixes it. */
+        const val JS_INTERFACE = "HomerunHost"
+
+        /** Protocol-level, deliberately absent from the channel inventory. */
+        private const val READY_METHOD = "__bridge:ready"
+
+        private const val PREFS = "homerun-host"
+        private const val KEY_API_URL = "api-url"
+        private const val KEY_DEVICE_ID = "device-id"
+        private const val KEY_POSTHOG_ID = "posthog-distinct-id"
+        private const val KEY_CLIENT_NONCE = "client-nonce"
+        private const val KEY_JOURNEY_MODALS = "journey-modals"
+        private const val KEY_CREDENTIALS = "credentials"
+
+        /**
+         * Legal in JSON, fatal in JavaScript source before ES2019. The WebView
+         * is modern enough not to care, but the literal is pasted into a
+         * script and the cost of being certain is one string replace.
+         */
+        private fun escapeForJs(json: String): String =
+            json.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    }
+}

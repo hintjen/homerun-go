@@ -5,6 +5,9 @@
 # The shared UI bundle, fetched or built at package time — never committed
 /ios/HomerunHost/web/
 /android/app/src/main/assets/web/
+# The Java runtime, staged by `npm run jre:android` — 100+ MB, never committed
+/android/app/src/main/assets/jre/
+/.jre-cache/
 
 # iOS
 # libhomerun_pumpkin_ffi.a, staged by build-rust.js

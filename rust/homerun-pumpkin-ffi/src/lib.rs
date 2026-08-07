@@ -36,6 +36,11 @@ pub mod pumpkin_engine;
 pub mod server;
 pub mod state;
 
+// The JVM resolves `external fun` by mangled symbol name, so Android needs an
+// adapter around the C surface below. iOS links the C symbols directly.
+#[cfg(target_os = "android")]
+pub mod jni_bridge;
+
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;

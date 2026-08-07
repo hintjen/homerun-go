@@ -63,8 +63,15 @@ if (!block) {
   process.exit(1);
 }
 
+// Only strings in *declaration position* count — `"channel" to handler`
+// (Kotlin), `"channel": handler` or `case "channel":` (Swift). The block is
+// the dispatch table itself, so it contains handler bodies too, and matching
+// every quoted string in it would let a literal buried in a body pass as a
+// handler for a channel nobody implemented. Keep the table in one of those
+// two forms; a router that registers channels some other way will read as
+// having no handlers at all, which is the safe direction to fail.
 const declared = new Set(
-  Array.from(block[1].matchAll(/"([^"]+)"/g)).map((m) => m[1])
+  Array.from(block[1].matchAll(/"([^"]+)"\s*(?:to\b|:)/g)).map((m) => m[1])
 );
 
 const missing = required.filter((c) => !declared.has(c));
