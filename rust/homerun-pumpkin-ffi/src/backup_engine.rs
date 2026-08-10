@@ -279,7 +279,16 @@ fn restore(request: &Value) -> Result<Done, String> {
 
 fn read_latest(request: &Value) -> Result<Value, String> {
     let config = repo_config(request)?;
-    let repo = open_or_init(request, &config)?;
+
+    // Open-only. Asking what the newest snapshot is must never *create* a
+    // repository: this runs on every launch, before the restore decision, and
+    // initialising from a read path would mean merely starting a server writes
+    // to the backend. A repository that does not exist yet is not an error —
+    // it is a server whose first backup has not happened, which the core reads
+    // as "nothing to compare against".
+    let Some(repo) = open_existing(request, &config)? else {
+        return Ok(Value::Null);
+    };
 
     let mut snapshots = repo.get_all_snapshots().map_err(stringify)?;
     // Documented as unsorted, and it means it. restic's CLI sorted for us.
@@ -339,6 +348,38 @@ fn open_or_init(
     request: &Value,
     config: &RepoConfig,
 ) -> Result<Repository<rustic_core::OpenStatus>, String> {
+    if let Some(repo) = open_existing(request, config)? {
+        return Ok(repo);
+    }
+    job().note("[Backup] Preparing a new backup repository…");
+    connect(request, config)?
+        .init(
+            &Credentials::password(&config.restic_password),
+            &KeyOptions::default(),
+            &ConfigOptions::default(),
+        )
+        .map_err(stringify)
+}
+
+/// Open the repository, or `None` if there is not one there yet.
+///
+/// Distinguishing "no repository" from "could not reach the repository" is
+/// what stops a first launch reporting a backend failure it has not had.
+fn open_existing(
+    request: &Value,
+    config: &RepoConfig,
+) -> Result<Option<Repository<rustic_core::OpenStatus>>, String> {
+    let repo = connect(request, config)?;
+    if repo.config_id().map_err(stringify)?.is_none() {
+        return Ok(None);
+    }
+    repo.open(&Credentials::password(&config.restic_password))
+        .map(Some)
+        .map_err(stringify)
+}
+
+/// Build the backend and attach progress. Does not authenticate.
+fn connect(request: &Value, config: &RepoConfig) -> Result<Repository<()>, String> {
     let backends = BackendOptions::default()
         .repository(config.repo.clone())
         .to_backends()
@@ -352,18 +393,7 @@ fn open_or_init(
         options = options.cache_dir(std::path::PathBuf::from(cache_dir));
     }
 
-    let repo = Repository::new_with_progress(&options, &backends, JobProgressBars)
-        .map_err(stringify)?;
-    let credentials = Credentials::password(&config.restic_password);
-
-    let exists = repo.config_id().map_err(stringify)?.is_some();
-    if exists {
-        repo.open(&credentials).map_err(stringify)
-    } else {
-        job().note("[Backup] Preparing a new backup repository…");
-        repo.init(&credentials, &KeyOptions::default(), &ConfigOptions::default())
-            .map_err(stringify)
-    }
+    Repository::new_with_progress(&options, &backends, JobProgressBars).map_err(stringify)
 }
 
 // ---------------------------------------------------------------------------
