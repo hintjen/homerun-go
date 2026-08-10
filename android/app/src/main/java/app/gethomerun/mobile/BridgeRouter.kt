@@ -564,6 +564,10 @@ class BridgeRouter(
                         memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
                         version = settings?.version,
                         loader = settings?.loader ?: "vanilla",
+                        // Read and written to files by the backend, never
+                        // forwarded into the server's environment.
+                        settingsEnv = settings?.env,
+                        gameType = settings?.rawGameType ?: "java",
                         // A closure, so the token stays here. The backend
                         // gets the ability to resolve a tunnel, never the
                         // credential that resolves it — `ServerConfig.extra`

@@ -224,6 +224,23 @@ class JavaServerBackend(
         val heap = heapMb(config.memoryMb)
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
 
+        // Written on every launch, after the jar is in place and before the
+        // JVM reads any of it. This is what makes a setting changed in the
+        // wizard or on the web dashboard take effect — and what makes a
+        // *removal* take effect, since the files are the server's source of
+        // truth before it accepts anyone. Never throws: the server's own
+        // defaults are a better outcome than refusing to start.
+        config.settingsEnv?.let { env ->
+            ServerSettingsWriter.apply(
+                serverId = serverId,
+                dir = dir,
+                env = env,
+                gameType = config.gameType,
+                port = port,
+                onLog = { note(serverId, it) },
+            )
+        }
+
         val started = withContext(Dispatchers.IO) {
             runCatching {
                 ProcessBuilder(

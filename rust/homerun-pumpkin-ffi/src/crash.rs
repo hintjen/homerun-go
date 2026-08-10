@@ -76,7 +76,10 @@ fn record_panic(info: &PanicHookInfo<'_>) {
             .unwrap_or(0);
         let _ = fs::write(
             dir.join(format!("panic-{stamp}.txt")),
-            format!("{message}\n\nbacktrace:\n{}", std::backtrace::Backtrace::force_capture()),
+            format!(
+                "{message}\n\nbacktrace:\n{}",
+                std::backtrace::Backtrace::force_capture()
+            ),
         );
     }
 }
@@ -135,7 +138,10 @@ mod tests {
         let _guard = test_guard();
         let dir = std::env::temp_dir().join(format!(
             "homerun-crash-test-{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&dir).unwrap();
         set_crash_dir(&dir);

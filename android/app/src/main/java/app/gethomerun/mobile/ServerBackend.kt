@@ -1,5 +1,6 @@
 package app.gethomerun.mobile
 
+import kotlinx.serialization.json.JsonObject
 import java.time.Instant
 
 /**
@@ -129,6 +130,26 @@ data class ServerConfig(
      * the server process's environment.
      */
     val resolveTunnel: (suspend () -> WireProxy.Link?)? = null,
+    /**
+     * The server's `environment_variables`, as the API returned them.
+     *
+     * Every world setting a player chose — game mode, difficulty, seed, ops,
+     * whitelist — arrives here and reaches the world only by being written
+     * into `server.properties` and friends before the JVM starts
+     * ([ServerSettingsWriter]). Null means the settings could not be read, and
+     * the server's own defaults apply.
+     *
+     * Note this is **not** [extra]: nothing in here is forwarded into the
+     * server process's environment. It is read, resolved by the core, and
+     * written to files.
+     */
+    val settingsEnv: JsonObject? = null,
+    /**
+     * The API's game type verbatim (`java`, `native-crossplay`, …).
+     *
+     * Needed unreduced because crossplay decides online mode.
+     */
+    val gameType: String = "java",
     /**
      * Forwarded into the server process's environment, so it must never carry
      * anything secret — no tokens, no credentials.

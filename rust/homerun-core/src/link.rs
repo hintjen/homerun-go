@@ -3,7 +3,7 @@
 //!
 //! Reference: `pollForNativeConfig` in `src/electron/nativeServerManager.ts`.
 
-use crate::wireproxy::Link;
+use crate::tunnel::Link;
 use serde::{Deserialize, Serialize};
 
 /// A link as the API serialises it, plus the one field that changes how

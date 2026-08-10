@@ -44,6 +44,24 @@ object HomerunApi {
         /** `java` or `bedrock`. Android hosts only the former. */
         val gameType: String,
         /**
+         * The API's game type verbatim, before [gameType] collapses it.
+         *
+         * [gameType] cannot answer whether this is `native-crossplay`, and
+         * that distinction decides online mode — a crossplay vanilla server
+         * runs offline, because Geyser clients have no Mojang account to
+         * verify. `homerun-core::settings` needs the unreduced value.
+         */
+        val rawGameType: String,
+        /**
+         * `environment_variables`, untouched.
+         *
+         * Every world setting a player chose in the creation wizard arrives
+         * in here. Reading it is `homerun-core::settings`' job rather than
+         * this layer's, so that the desktop and this app cannot disagree
+         * about what any of these keys mean.
+         */
+        val env: JsonObject,
+        /**
          * The tunnel credentials as they stood *before* launch, if any.
          *
          * Carried on this response rather than fetched separately because
@@ -99,6 +117,8 @@ object HomerunApi {
                 version = env?.get("VERSION")?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() },
                 loader = if (type in LOADERS) type!! else "vanilla",
                 gameType = if (gameType == "bedrock" || gameType == "native-bedrock") "bedrock" else "java",
+                rawGameType = gameType,
+                env = env ?: JsonObject(emptyMap()),
                 tunnelBefore = linkOf(body)?.link,
             ).also { Log.i(TAG, "$serverId: ${it.loader} ${it.version ?: "latest"} (${it.gameType})") }
         } catch (err: Exception) {

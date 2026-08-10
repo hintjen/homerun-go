@@ -163,7 +163,9 @@ impl ServerHost {
                     Some(panic) => format!("{reason} ({panic})"),
                     None => reason,
                 };
-                inner.logs.push(format!("[Homerun] server stopped: {detail}"));
+                inner
+                    .logs
+                    .push(format!("[Homerun] server stopped: {detail}"));
                 inner.status.transition(ServerState::Crashed)?;
                 Err(detail)
             }
@@ -212,7 +214,10 @@ mod tests {
     fn temp_dir() -> String {
         let dir = std::env::temp_dir().join(format!(
             "homerun-server-test-{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.to_string_lossy().to_string()
@@ -275,7 +280,11 @@ mod tests {
         assert!(err.contains(&port.to_string()));
         // Recoverable: the user stops the other server and retries.
         assert_eq!(host.state(), ServerState::Stopped);
-        assert!(host.logs_since(0).lines.iter().any(|l| l.contains("in use")));
+        assert!(host
+            .logs_since(0)
+            .lines
+            .iter()
+            .any(|l| l.contains("in use")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -56,12 +56,7 @@ pub enum RunOutcome {
 /// with no report.
 pub trait Engine: Send + Sync {
     /// Block until the server stops. Emit console output through `on_line`.
-    fn run(
-        &self,
-        request: &RunRequest,
-        stop: StopSignal,
-        on_line: &dyn Fn(String),
-    ) -> RunOutcome;
+    fn run(&self, request: &RunRequest, stop: StopSignal, on_line: &dyn Fn(String)) -> RunOutcome;
 
     /// Dispatch a console command. Pumpkin has no RCON, so this goes
     /// in-process; the reply comes back as console output.
@@ -92,12 +87,7 @@ impl StubEngine {
 }
 
 impl Engine for StubEngine {
-    fn run(
-        &self,
-        request: &RunRequest,
-        stop: StopSignal,
-        on_line: &dyn Fn(String),
-    ) -> RunOutcome {
+    fn run(&self, request: &RunRequest, stop: StopSignal, on_line: &dyn Fn(String)) -> RunOutcome {
         if let Some(reason) = &self.fail_with {
             on_line(format!("[Homerun] server failed: {reason}"));
             return RunOutcome::Crashed(reason.clone());

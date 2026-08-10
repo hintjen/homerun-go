@@ -44,11 +44,18 @@
 //! docs name the file each behaviour came from. Where this crate deliberately
 //! differs from the desktop, it says so and why.
 
-pub mod console;
-pub mod jar;
+// The game-agnostic layer. None of this knows what it is hosting.
+pub mod game;
 pub mod link;
+pub mod properties;
 pub mod state;
-pub mod wireproxy;
+pub mod tunnel;
+
+// One game, implementing `game::Game`. Everything Minecraft-specific in this
+// crate is under here and nothing above depends on it except the registry.
+pub mod minecraft;
+
+mod md5;
 
 /// Anything this crate can refuse to do.
 ///

@@ -77,7 +77,9 @@ pub unsafe extern "C" fn homerun_free_string(ptr: *mut c_char) {
 }
 
 fn out(s: String) -> *mut c_char {
-    CString::new(s).map(CString::into_raw).unwrap_or(ptr::null_mut())
+    CString::new(s)
+        .map(CString::into_raw)
+        .unwrap_or(ptr::null_mut())
 }
 
 /// Run `f`, converting a panic into a JSON error rather than unwinding into
@@ -86,8 +88,8 @@ fn guarded<F: FnOnce() -> String>(f: F) -> *mut c_char {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(json) => out(json),
         Err(_) => {
-            let detail = crash::take_last_panic()
-                .unwrap_or_else(|| "internal server panic".to_string());
+            let detail =
+                crash::take_last_panic().unwrap_or_else(|| "internal server panic".to_string());
             out(json!({ "ok": false, "error": detail }).to_string())
         }
     }
@@ -132,7 +134,11 @@ pub unsafe extern "C" fn homerun_server_start(
         let (Some(id), Some(dir)) = (id, dir) else {
             return err("server_id and data_dir must be valid UTF-8 strings");
         };
-        let port = if port == 0 { server::DEFAULT_JAVA_PORT } else { port };
+        let port = if port == 0 {
+            server::DEFAULT_JAVA_PORT
+        } else {
+            port
+        };
 
         match server::host().start(&id, &dir, port) {
             Ok(()) => json!({ "ok": true }).to_string(),

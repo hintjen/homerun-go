@@ -50,7 +50,11 @@ impl LogBuffer {
     /// A cursor older than everything retained reports `dropped`, so the host
     /// can tell the difference between "nothing new" and "you fell behind".
     pub fn since(&self, since: u64) -> LogSlice {
-        let oldest = self.lines.front().map(|(seq, _)| *seq).unwrap_or(self.next_seq);
+        let oldest = self
+            .lines
+            .front()
+            .map(|(seq, _)| *seq)
+            .unwrap_or(self.next_seq);
         LogSlice {
             lines: self
                 .lines
