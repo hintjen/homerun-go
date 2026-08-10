@@ -36,6 +36,48 @@ pub mod pumpkin_engine;
 pub mod server;
 pub mod state;
 
+/// Progress, cancellation and the one-at-a-time guard for a backup.
+///
+/// Built on every platform, engine or not: the host polls and cancels through
+/// the same C surface whatever is underneath.
+pub mod backup_job;
+
+/// The linked backup engine. iOS only — see the `backup-engine` feature.
+#[cfg(feature = "backup-engine")]
+pub mod backup_engine;
+
+/// What a build with no engine answers.
+///
+/// The C surface is declared unconditionally, so a host build or an Android
+/// `.so` has to link these symbols even though it will never use them. Same
+/// name as the real module, so nothing above here is cfg'd.
+#[cfg(not(feature = "backup-engine"))]
+mod backup_engine {
+    pub fn available() -> bool {
+        false
+    }
+
+    pub fn latest_snapshot(_request: &str) -> String {
+        unavailable()
+    }
+
+    pub fn run(_request: &str) -> String {
+        unavailable()
+    }
+
+    fn unavailable() -> String {
+        serde_json::json!({
+            "ok": false,
+            // Written for a player, like every other error crossing this
+            // boundary — a host could reach it through a mis-built app.
+            "error": "This copy of Homerun cannot back up worlds.",
+            "message": "built without the backup-engine feature",
+            "cancelled": false,
+        })
+        .to_string()
+    }
+}
+
 // The JVM resolves `external fun` by mangled symbol name, so Android needs an
 // adapter around the C surface below. iOS links the C symbols directly.
 #[cfg(target_os = "android")]
@@ -60,8 +102,15 @@ use std::time::Duration;
 
 use serde_json::json;
 
-/// Bumped when the C surface changes shape. Hosts check it at startup.
-pub const FFI_ABI_VERSION: u32 = 1;
+/// Bumped when the C surface changes shape.
+///
+/// 2 added the `homerun_backup_*` calls.
+///
+/// Hosts *report* this at startup; neither of them currently compares it to
+/// anything, so a stale staged library is caught by the linker (a missing
+/// symbol) rather than by this. Worth wiring up properly — the failure it
+/// exists to catch is a `.a` that links but decodes garbage.
+pub const FFI_ABI_VERSION: u32 = 2;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -280,6 +329,106 @@ pub unsafe extern "C" fn homerun_server_command(command: *const c_char) -> *mut 
             Ok(()) => json!({ "ok": true }).to_string(),
             Err(message) => err(message),
         },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Backups
+// ---------------------------------------------------------------------------
+//
+// Separate entry points rather than methods on `homerun_core_call`, and the
+// reason matters. That dispatch is one table compiled for both platforms, and
+// every method in it is instantaneous and pure — hosts call it from the main
+// thread without a second thought, because so far that has always been safe.
+// A method there that opens TLS and blocks for four minutes would eventually
+// be called the same way, and the app would hang with nothing to point at.
+// A different symbol, with a doc comment that shouts, is the only guard the
+// type system will give us.
+
+/// Whether this build links a backup engine. 0 on Android and host builds.
+#[no_mangle]
+pub extern "C" fn homerun_backup_available() -> u32 {
+    u32::from(backup_engine::available())
+}
+
+/// The newest snapshot, reduced to `homerun-core`'s `Snapshot` shape, or null.
+///
+/// Networked: seconds, not milliseconds. Do not call this on a UI thread.
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated UTF-8 JSON object.
+#[no_mangle]
+pub unsafe extern "C" fn homerun_backup_latest_snapshot(
+    request_json: *const c_char,
+) -> *mut c_char {
+    let request = borrow(request_json).map(str::to_owned);
+    guarded(move || match request {
+        None => err("the backup request must be a valid UTF-8 string"),
+        Some(request) => backup_engine::latest_snapshot(&request),
+    })
+}
+
+/// Run one backup or restore to completion.
+///
+/// **Blocks for minutes**, and must run on a dedicated thread with at least an
+/// 8 MB stack — the tree walk and the engine's own worker pool do not fit in
+/// the 512 KB a default thread gets, and the failure mode is a stack overflow
+/// with no panic report. Same rule as [`homerun_server_start`], same reason.
+///
+/// One at a time: a second call while one is in flight is an error, not a
+/// queue. Watch it with [`homerun_backup_progress_since`].
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated UTF-8 JSON object.
+#[no_mangle]
+pub unsafe extern "C" fn homerun_backup_run(request_json: *const c_char) -> *mut c_char {
+    let request = borrow(request_json).map(str::to_owned);
+    guarded(move || match request {
+        None => err("the backup request must be a valid UTF-8 string"),
+        Some(request) => backup_engine::run(&request),
+    })
+}
+
+/// Progress since `cursor`.
+///
+/// Cheap — a lock and a clone — and safe to call from the main thread while
+/// [`homerun_backup_run`] blocks another one. Same idiom as
+/// [`homerun_server_logs_since`].
+///
+/// `total` of 0 means "not known yet", which is most of the scanning phase.
+#[no_mangle]
+pub extern "C" fn homerun_backup_progress_since(cursor: u64) -> *mut c_char {
+    guarded(move || {
+        let progress = backup_job::job().progress_since(cursor);
+        json!({
+            "ok": true,
+            "lines": progress.lines,
+            "cursor": progress.cursor,
+            "dropped": progress.dropped,
+            "phase": progress.phase,
+            "current": progress.current,
+            "total": progress.total,
+            "running": backup_job::job().is_running(),
+        })
+        .to_string()
+    })
+}
+
+/// Ask the running backup to stop.
+///
+/// **Cooperative and coarse.** It takes effect at the next phase boundary and
+/// cannot interrupt a transfer already inside the engine — rustic exposes no
+/// cancellation hook, and unwinding out of a progress callback would panic
+/// through its worker pool.
+///
+/// Never blocks, and is not an error when nothing is running: the caller is
+/// usually a background-task expiry handler with a few seconds to live, and
+/// the useful thing it can do is report the backup failed so the lease closes.
+#[no_mangle]
+pub extern "C" fn homerun_backup_cancel() -> *mut c_char {
+    guarded(move || {
+        backup_job::job().request_cancel();
+        json!({ "ok": true }).to_string()
     })
 }
 

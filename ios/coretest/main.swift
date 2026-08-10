@@ -66,10 +66,54 @@ let env: [String: Any] = [
 ]
 
 print("ABI")
-check("homerun_abi_version is 1") {
+check("homerun_abi_version matches what this source expects") {
+    // Bump alongside FFI_ABI_VERSION in lib.rs. The point is not the number,
+    // it is that the staged .a is the one this source was written against —
+    // a mismatch otherwise shows up as garbage decoded out of a reply much
+    // later, or as a symbol that links and does something else.
+    let expected: UInt32 = 2
     let v = homerun_abi_version()
-    try expect(v == 1, "expected 1, got \(v)")
+    try expect(v == expected, "expected \(expected), got \(v) — is the staged .a stale?")
     return "v\(v)"
+}
+
+check("the backup engine reports whether it is linked") {
+    // 0 here in a host build is correct: `backup-engine` is an iOS feature.
+    // What matters is that the symbol exists at all, because the header
+    // declares it unconditionally and a build without the stub would not link.
+    let available = homerun_backup_available()
+    return available == 1 ? "linked" : "not linked (host build, as expected)"
+}
+
+check("the engine answers rather than crashing when it is not linked") {
+    guard homerun_backup_available() == 0 else {
+        return "engine is linked; skipping the no-engine path"
+    }
+    guard let reply = homerun_backup_run("{\"operation\":\"backup\"}") else {
+        throw Wrong(what: "no reply from homerun_backup_run")
+    }
+    defer { homerun_free_string(reply) }
+    let text = String(cString: reply)
+    try expect(text.contains("\"ok\":false"), "expected a refusal, got \(text)")
+    return "refused politely"
+}
+
+check("progress and cancel work with no engine and no job") {
+    guard let progress = homerun_backup_progress_since(0) else {
+        throw Wrong(what: "no reply from homerun_backup_progress_since")
+    }
+    defer { homerun_free_string(progress) }
+    let text = String(cString: progress)
+    try expect(text.contains("\"running\":false"), "expected running:false, got \(text)")
+
+    // Cancelling nothing must be a no-op, not an error: the caller is a
+    // background-task expiry handler with seconds to live.
+    guard let cancel = homerun_backup_cancel() else {
+        throw Wrong(what: "no reply from homerun_backup_cancel")
+    }
+    defer { homerun_free_string(cancel) }
+    try expect(String(cString: cancel).contains("\"ok\":true"), "cancel refused")
+    return "idle progress reads clean; cancelling nothing is a no-op"
 }
 
 print("\ntunnel")
@@ -496,6 +540,189 @@ check("backupReport refuses an unknown operation") {
     } catch let e as Core.CoreError {
         return "refused: \(e.message)"
     }
+}
+
+// MARK: - The engine, end to end
+//
+// Runs only where an engine is linked, which today means an iOS build. The
+// repository is a local directory rather than the `rest:` URL the API hands
+// out — rustic compiles the local backend unconditionally, and the format is
+// the same one either way, so this exercises init, backup, snapshot listing
+// and restore without needing a server.
+
+func callEngine(_ fn: (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?, _ request: [String: Any])
+    throws -> [String: Any]
+{
+    let data = try JSONSerialization.data(withJSONObject: request)
+    let json = String(data: data, encoding: .utf8)!
+    guard let reply = json.withCString({ fn($0) }) else {
+        throw Wrong(what: "the engine returned nothing")
+    }
+    defer { homerun_free_string(reply) }
+    let text = String(cString: reply)
+    guard let object = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+    else { throw Wrong(what: "the engine answered with nonsense: \(text)") }
+    return object
+}
+
+if homerun_backup_available() == 1 {
+    print("\nengine — a real backup and restore")
+
+    let root = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("homerun-engine-test-\(ProcessInfo.processInfo.processIdentifier)")
+    let world = root.appendingPathComponent("servers/abc123")
+    let repo = root.appendingPathComponent("repo")
+    let cache = root.appendingPathComponent("cache")
+    let restored = root.appendingPathComponent("restored")
+
+    let repoBlock: [String: Any] = [
+        "repo": repo.path,
+        "restic_password": "a-test-passphrase",
+        "keep": ["last": 30, "hourly": 24, "daily": 30],
+    ]
+    let marker = "level.dat contents — \(UUID().uuidString)"
+    var snapshotId = ""
+
+    check("a world can be backed up into a fresh repository") {
+        try? FileManager.default.removeItem(at: root)
+        try FileManager.default.createDirectory(
+            at: world.appendingPathComponent("world"), withIntermediateDirectories: true)
+        try marker.write(
+            to: world.appendingPathComponent("world/level.dat"), atomically: true, encoding: .utf8)
+
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "backup",
+            "repo": repoBlock,
+            "cacheDir": cache.path,
+            "sourceDir": world.path,
+            "deviceId": "device-a",
+        ])
+        try expect(reply["ok"] as? Bool == true, "backup failed: \(reply)")
+        guard let id = reply["snapshotId"] as? String, !id.isEmpty else {
+            throw Wrong(what: "no snapshot id in \(reply)")
+        }
+        snapshotId = id
+        let bytes = reply["bytes"] as? Int ?? 0
+        try expect(bytes > 0, "a backup that stored nothing reported \(bytes) bytes")
+        return "snapshot \(id.prefix(8)), \(bytes) bytes"
+    }
+
+    check("the snapshot is written under this device's id, not the machine's hostname") {
+        // The single most load-bearing field in the whole subsystem. The API
+        // resolves `pushed_by` from it, and restoreDecision compares it to
+        // decide whether another device wrote the newest snapshot. Wrong here
+        // and a device restores over its own work on its next launch.
+        let reply = try callEngine(homerun_backup_latest_snapshot, [
+            "repo": repoBlock, "cacheDir": cache.path,
+        ])
+        try expect(reply["ok"] as? Bool == true, "listing failed: \(reply)")
+        guard let snapshot = reply["snapshot"] as? [String: Any] else {
+            throw Wrong(what: "no snapshot in \(reply)")
+        }
+        try expect(
+            snapshot["host"] as? String == "device-a",
+            "host was \(snapshot["host"] ?? "nil"), expected device-a")
+        try expect(snapshot["id"] as? String == snapshotId, "listed a different snapshot")
+        return "host=device-a id=\(snapshotId.prefix(8))"
+    }
+
+    check("the decision layer reads the engine's snapshot without translation") {
+        // The two halves have never met before this point: the shape the
+        // engine returns is fed straight into homerun-core.
+        let reply = try callEngine(homerun_backup_latest_snapshot, [
+            "repo": repoBlock, "cacheDir": cache.path,
+        ])
+        let snapshot = reply["snapshot"] as! [String: Any]
+
+        let ours = try Core.restoreDecision(
+            pinned: nil, latest: snapshot, deviceId: "device-a", hasLocalWorld: true)
+        guard case .skip = ours else { throw Wrong(what: "our own snapshot asked for a restore: \(ours)") }
+
+        let theirs = try Core.restoreDecision(
+            pinned: nil, latest: snapshot, deviceId: "device-b", hasLocalWorld: true)
+        guard case .latest(_, let reason) = theirs else {
+            throw Wrong(what: "another device's snapshot did not ask for a restore: \(theirs)")
+        }
+        return "skip for device-a, \(reason) for device-b"
+    }
+
+    check("the world restores byte-for-byte through the SNAP:PATH selector") {
+        let selector = try Core.internalPath(world.path)
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "restore",
+            "repo": repoBlock,
+            "cacheDir": cache.path,
+            "snapshotId": snapshotId,
+            "selectorPath": selector,
+            "targetDir": restored.path,
+        ])
+        try expect(reply["ok"] as? Bool == true, "restore failed: \(reply)")
+
+        let file = restored.appendingPathComponent("world/level.dat")
+        let back = try String(contentsOf: file, encoding: .utf8)
+        try expect(back == marker, "restored contents differ:\n  \(back)\n  \(marker)")
+        return "selector \(selector) restored identical bytes"
+    }
+
+    check("a second backup of an unchanged world adds almost nothing") {
+        // Deduplication against the parent snapshot, which is what makes
+        // on-stop backups affordable on a phone.
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "backup",
+            "repo": repoBlock,
+            "cacheDir": cache.path,
+            "sourceDir": world.path,
+            "deviceId": "device-a",
+        ])
+        try expect(reply["ok"] as? Bool == true, "second backup failed: \(reply)")
+        let bytes = reply["bytes"] as? Int ?? -1
+        try expect(bytes >= 0, "no byte count")
+        return "\(bytes) bytes added the second time"
+    }
+
+    check("a bad passphrase fails cleanly, with a sentence for the player") {
+        var wrong = repoBlock
+        wrong["restic_password"] = "not the passphrase"
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "backup", "repo": wrong, "cacheDir": cache.path,
+            "sourceDir": world.path, "deviceId": "device-a",
+        ])
+        try expect(reply["ok"] as? Bool == false, "a wrong passphrase was accepted")
+        guard let player = reply["error"] as? String, let raw = reply["message"] as? String else {
+            throw Wrong(what: "no error/message split in \(reply)")
+        }
+        try expect(!player.isEmpty && !raw.isEmpty, "empty error text")
+
+        // And the host must be able to classify it without an exit code.
+        let verdict = try Core.classifyBackupFailure(message: raw, host: "device-a")
+        try expect(!verdict.succeeded, "a failed backup classified as succeeded")
+        return "player=\"\(player)\" kind=\(verdict.kind)"
+    }
+
+    check("an unreachable repository is a retryable failure, not a fatal one") {
+        // Port 9 is discard: refused immediately rather than timing out.
+        //
+        // The assertion that matters is not that it failed — it is that the
+        // engine's error text still carries enough for the core to call it
+        // transient. A linked engine has no exit code, so this string is the
+        // only thing standing between "we will try again" and telling a player
+        // their backup is broken because the wifi dropped.
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "backup",
+            "repo": ["repo": "rest:http://127.0.0.1:9/nope/", "restic_password": "x"],
+            "cacheDir": cache.path, "sourceDir": world.path, "deviceId": "device-a",
+        ])
+        try expect(reply["ok"] as? Bool == false, "an unreachable repository reported success")
+        let raw = reply["message"] as? String ?? ""
+
+        let verdict = try Core.classifyBackupFailure(message: raw, host: "device-a")
+        try expect(
+            verdict.retryable,
+            "classified \(verdict.kind), not retryable. The engine's text was:\n\(raw)")
+        return "kind=\(verdict.kind) retryable=true"
+    }
+
+    try? FileManager.default.removeItem(at: root)
 }
 
 print("\nerror paths")

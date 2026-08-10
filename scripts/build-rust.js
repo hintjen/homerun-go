@@ -118,7 +118,11 @@ const profileArgs = debug ? [] : ["--release"];
 // not, so `cargo test` stays a couple of seconds and needs no Pumpkin. Pass
 // --stub to cross-compile without the engine, which is how you check that the
 // FFI surface itself still builds for a target without waiting for wasmtime.
-const engineArgs = args.includes("--stub") ? [] : ["--features", "pumpkin-engine"];
+//
+// Which features a target wants lives in targets.js, because iOS and Android
+// no longer want the same ones — see `backup-engine` there.
+const features = args.includes("--stub") ? [] : target.features ?? [];
+const engineArgs = features.length ? ["--features", features.join(",")] : [];
 
 if (target.kind === "host") {
   run("cargo", ["build", ...profileArgs]);
@@ -130,13 +134,19 @@ if (target.kind === "ndk") {
   // cargo-ndk wants its own flags before `build`.
   run("cargo", ["ndk", "-t", target.abi, "build", ...profileArgs, ...engineArgs]);
 } else {
-  run("cargo", [
-    "build",
-    ...profileArgs,
-    ...engineArgs,
-    "--target",
-    target.triple,
-  ]);
+  run(
+    "cargo",
+    ["build", ...profileArgs, ...engineArgs, "--target", target.triple],
+    // cc-rs compiles the C in our native dependencies, and with nothing to
+    // tell it otherwise it picks a deployment target old enough that
+    // `___chkstk_darwin` does not exist — which surfaces as zstd failing to
+    // link with undefined symbols and no mention of a deployment target
+    // anywhere. Must match ios/project.yml, or the app links C built against
+    // a different floor than the Swift beside it.
+    target.deploymentTarget
+      ? { env: { ...process.env, IPHONEOS_DEPLOYMENT_TARGET: target.deploymentTarget } }
+      : {}
+  );
 }
 
 // --- stage the artifact ---------------------------------------------------

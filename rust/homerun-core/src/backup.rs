@@ -360,8 +360,21 @@ pub fn classify(exit_code: Option<i32>, message: &str, my_host: &str) -> Failure
     }
 }
 
+/// Does this failure look like the network rather than the repository?
+///
+/// Two dialects, because two engines. The first group is restic's, which a
+/// spawned binary prints. The second is what a linked `rustic_core` produces
+/// through `reqwest` — different words for the same events, and none of them
+/// overlapping the first group.
+///
+/// Getting this wrong is not cosmetic in either direction. Too narrow and a
+/// dropped connection is reported to a player as a permanently broken backup
+/// and never retried; too wide and a genuinely broken repository is retried
+/// for ever. The wordings below are ones we have actually observed, not ones
+/// that seemed plausible.
 fn is_transient(lowercase: &str) -> bool {
     [
+        // restic
         "connection reset",
         "connection refused",
         "timeout",
@@ -369,6 +382,15 @@ fn is_transient(lowercase: &str) -> bool {
         "temporary failure",
         "eof",
         "broken pipe",
+        // rustic / reqwest. "error sending request" is what a refused or
+        // unroutable host surfaces as; "client error (connect)" is its cause,
+        // and "backoff failed" means rustic already retried and gave up —
+        // which is transient by definition, since it only retries transports.
+        "error sending request",
+        "client error (connect)",
+        "backoff failed",
+        "dns error",
+        "tcp connect error",
     ]
     .iter()
     .any(|needle| lowercase.contains(needle))
@@ -775,6 +797,41 @@ mod tests {
         ] {
             assert_eq!(classify(Some(1), msg, "me"), Failure::Transient, "{msg}");
             assert!(classify(Some(1), msg, "me").is_retryable());
+        }
+    }
+
+    /// The linked engine speaks a different dialect, and this is the exact
+    /// text it produces — captured from a real run on an iOS simulator against
+    /// a refused port, not invented.
+    ///
+    /// Before this was handled, a phone that lost wifi mid-backup told the
+    /// player their world could not be backed up, permanently, and never tried
+    /// again. `exit_code` is `None` because a linked library has none.
+    #[test]
+    fn a_linked_engines_network_trouble_is_retryable_too() {
+        let observed = "`rustic_core` experienced an error related to `the backend`. \
+             Message: Backoff failed, please check the logs for more information. \
+             Caused by: error sending request for url (http://127.0.0.1:9/nope/config) \
+             : (source: client error (Connect))";
+
+        assert_eq!(classify(None, observed, "me"), Failure::Transient);
+        assert!(classify(None, observed, "me").is_retryable());
+        assert!(
+            !classify(None, observed, "me").succeeded(),
+            "a failed backup must never report a snapshot"
+        );
+    }
+
+    /// The guard on widening `is_transient`: restic's own failures must not
+    /// start being retried because a second dialect was added for iOS.
+    #[test]
+    fn widening_for_the_linked_engine_did_not_soften_restic() {
+        for msg in [
+            "wrong password or no key found",
+            "Fatal: unable to open config file: Stat: stat failed",
+            "repository master key and config already initialized",
+        ] {
+            assert_eq!(classify(Some(1), msg, "me"), Failure::Fatal, "{msg}");
         }
     }
 
