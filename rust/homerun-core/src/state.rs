@@ -144,6 +144,25 @@ mod tests {
         assert_eq!(State::Stopping.wire(), None);
     }
 
+    /// The case that reported a user's deliberate stop as a crash.
+    ///
+    /// A stop asked for during startup is carried out later, and the JVM is
+    /// terminated rather than exiting cleanly — 143 is SIGTERM. What decides
+    /// the verdict is whether a stop was *requested*, not the exit code, and
+    /// not a state a still-running launch can overwrite on its way past.
+    ///
+    /// Getting this wrong is not cosmetic: the host skips the on-stop backup
+    /// when it thinks a server crashed, so a mislabelled stop silently loses
+    /// the session's play.
+    #[test]
+    fn a_terminated_server_is_stopped_when_a_stop_was_asked_for() {
+        assert_eq!(exit_state(true, 143), State::Stopped);
+        assert_eq!(exit_state(true, 1), State::Stopped);
+
+        // And an unasked-for termination is still a crash.
+        assert_eq!(exit_state(false, 143), State::Crashed);
+    }
+
     #[test]
     fn the_api_hears_stopped_for_a_crash() {
         assert_eq!(State::Crashed.api_status(), Some("stopped"));

@@ -128,12 +128,22 @@ class ResticEngine(private val context: Context) {
         Triple(code, out.toString(), err.toString())
     }
 
-    /** Create the repository if it does not exist. Harmless when it does. */
+    /**
+     * Create the repository if it does not exist.
+     *
+     * Run before every backup, so the *expected* outcome after the first one
+     * is a refusal. restic words that two ways depending on the backend —
+     * "already initialized", and "config file already exists" from the REST
+     * server — and neither is a problem worth a log line that reads like a
+     * failure.
+     */
     suspend fun initIfNeeded(repo: Repo, dir: File, onLog: (String) -> Unit) {
         val (code, out, err) = run(repo, dir, listOf("init"), onLog)
-        if (code != 0 && !"$out$err".contains("already initialized", ignoreCase = true)) {
-            Log.i(TAG, "init said: ${err.trim().takeLast(200)}")
-        }
+        if (code == 0) return
+
+        val text = "$out$err"
+        val alreadyThere = ALREADY_INITIALISED.any { text.contains(it, ignoreCase = true) }
+        if (!alreadyThere) Log.w(TAG, "init failed: ${err.trim().takeLast(200)}")
     }
 
     /**
@@ -259,6 +269,9 @@ class ResticEngine(private val context: Context) {
     private companion object {
         const val TAG = "HomerunBackup"
         const val BINARY = "librestic.so"
+
+        /** How restic says "there is already a repository here". */
+        val ALREADY_INITIALISED = listOf("already initialized", "config file already exists")
         val parser = Json { ignoreUnknownKeys = true }
     }
 }
