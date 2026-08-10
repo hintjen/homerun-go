@@ -23,9 +23,19 @@ extension BridgeRouter {
 
         if backend.runningServerIds.contains(serverId) {
             // Not an error the player needs to see — the server they asked for
-            // is already up, which is the outcome they wanted.
+            // is already up (or on its way), which is the outcome they wanted.
             return ["success": true, "alreadyRunning": true]
         }
+
+        // Claimed here, synchronously, before the first `await`. From this
+        // point `native-server-active-ids` reports the server as coming up,
+        // which the contract requires "from the moment the call arrives" — and
+        // everything below this line, the settings fetch especially, is a
+        // network round trip during which this host has committed to a launch.
+        // Released on every path that does not reach `start`; a no-op once it
+        // has.
+        backend.claimStart(serverId: serverId)
+        defer { backend.releaseStart(serverId: serverId) }
 
         let raw = payload["config"] as? [String: Any] ?? [:]
         var config = ServerConfig(

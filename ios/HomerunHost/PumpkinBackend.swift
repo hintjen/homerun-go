@@ -76,6 +76,9 @@ final class PumpkinBackend: ServerBackend {
         try create(serverId: serverId)
 
         activeServerId = serverId
+        // Ownership passes from the claim to the real id here, so the two are
+        // never both set and `runningServerIds` never reports twice.
+        claimedServerId = nil
         startedAt = nil
         runFailure = nil
         threadFinished = false
@@ -326,8 +329,36 @@ final class PumpkinBackend: ServerBackend {
         }
     }
 
+    /// A start this host has accepted but not yet begun.
+    ///
+    /// The contract requires `native-server-active-ids` to answer "running
+    /// **or coming up**, from the moment the call arrives". Everything between
+    /// the call and the engine thread — the settings fetch, the backup lease
+    /// gate — is time in which this host has committed to a launch and has no
+    /// `activeServerId` to show for it.
+    ///
+    /// Reporting nothing there is not a cosmetic gap. The UI's reconcile loop
+    /// reads a missing id as a start issued from *another* device and asks the
+    /// API to `force_link_up`, which regenerates the gateway keys underneath a
+    /// launch that has already resolved its tunnel config — the tunnel then
+    /// connects and carries nothing, which looks like a server that came up
+    /// and cannot be joined.
+    private var claimedServerId: String?
+
+    /// Claim the slot synchronously, before anything is awaited.
+    func claimStart(serverId: String) {
+        claimedServerId = serverId
+    }
+
+    /// Give it back. A no-op once `start` has taken ownership, so a caller can
+    /// `defer` this without having to know which happened.
+    func releaseStart(serverId: String) {
+        if claimedServerId == serverId { claimedServerId = nil }
+    }
+
     var runningServerIds: [String] {
-        activeServerId.map { [$0] } ?? []
+        if let activeServerId { return [activeServerId] }
+        return claimedServerId.map { [$0] } ?? []
     }
 
     // MARK: - Introspection
