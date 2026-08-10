@@ -276,7 +276,15 @@ impl Lifecycle {
         if entry.stop_requested && state == State::Running {
             return false;
         }
-        entry.state != state
+        // Deliberately not "and this is a change". The core reaches `Running`
+        // when the console says the server is listening; the host announces it
+        // only once the tunnel is up, which is later and on purpose — a server
+        // on loopback is not one anyone can join. Two clocks, and the core's
+        // must not veto the host's: comparing them suppressed the announcement
+        // entirely, so the server ran, the tunnel came up, and the app never
+        // heard about either. Repeat-suppression is the host's own business
+        // and it already does it.
+        true
     }
 
     // ── Events ──────────────────────────────────────────────────────────────
@@ -638,6 +646,22 @@ mod tests {
         let exit = life.exited("s", 143);
         assert_eq!(exit.state, State::Stopped);
         assert!(exit.intentional, "the user asked for this");
+    }
+
+    /// The announcement that went missing: the server was up, the tunnel was
+    /// up, and the app never heard, because the core had already advanced to
+    /// `Running` at console-ready and read the host's later announcement as a
+    /// no-op.
+    #[test]
+    fn a_running_server_may_still_be_announced_after_its_tunnel_is_up() {
+        let mut life = one();
+        life.start_requested("s");
+        life.spawned("s");
+        life.console_ready("s");
+        assert!(
+            life.may_announce("s", State::Running),
+            "the host announces running after the tunnel, not at console-ready"
+        );
     }
 
     /// A launch still catching up must not announce `running` for a server
