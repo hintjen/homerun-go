@@ -352,10 +352,11 @@ Declared in `ios/HomerunHost/homerun_ffi.h`; add it to the bridging header.
 those to calling the C function directly, and note that the reply must be freed
 on every path, which `Core.call` does with a `defer`.
 
-What is *not* done: iOS still uses `StubEngine`, and the Pumpkin fork has never
-been executed through the FFI by anyone. The shared decisions are reachable;
-the engine underneath them is not yet real.
+`WireProxy.swift` is the first adopter: it renders the tunnel config through
+`Core.renderTunnel` instead of the hand-written copy it used to carry.
 
-Pumpkin also needs its own artifact resolution rather than borrowing
-`minecraft.jar.*` — see the note in `game.rs` about why artifact resolution is
-deliberately outside the `Game` trait.
+What is *not* done: Pumpkin needs its own artifact resolution rather than
+borrowing `minecraft.jar.*` — see the note in `game.rs` about why artifact
+resolution is deliberately outside the `Game` trait. `DeviceRegistrar.swift`
+and `HomerunAPI.swift` also parallel Android's equivalents and are candidates
+for the same treatment.

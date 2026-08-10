@@ -89,6 +89,60 @@ decoding `the native core has no method "…"`.
 
 ---
 
+### 📱 [iOS Host](./ios-host.md)
+
+The app around the WebView: how the project is generated, how the shared UI
+bundle is embedded and served, and how the device's capabilities reach the UI.
+
+**Contains**:
+- XcodeGen project generation, and why the `.xcodeproj` is not committed
+- Linking the Rust static library, including the link flags nothing references
+- Why the bundle is served over `homerun-app://` and never `file://`
+- Path resolution, the traversal guard, and why a missing asset 404s
+- Capability injection at document start, read from the vendored contract
+- Why the shell is UIKit rather than SwiftUI
+
+**Read this for**: Setting up the Xcode build, or debugging a blank screen.
+
+---
+
+### 🌉 [iOS Bridge](./ios-bridge.md)
+
+The `bridge/v1` transport: invokes, sends and events between the shared UI and
+the iOS host.
+
+**Contains**:
+- Transport in both directions, and the U+2028/9 escaping that keeps it working
+- The weak message-handler proxy, and what leaks without it
+- The event queue and the `__bridge:ready` handshake
+- Content-process death recovery, and the generation counter behind it
+- Why there is no call timeout
+- The channel table the conformance checker reads, and how to keep it honest
+
+**Read this for**: Adding a channel, or debugging a screen that hangs with no
+error.
+
+---
+
+### 🎮 [iOS Server Backend](./ios-server-backend.md)
+
+Hosting Minecraft on the phone: the server thread, the FFI, the console, and
+how a friend actually joins.
+
+**Contains**:
+- Why the server thread needs a 16 MB stack, and what happens without one
+- Why starting a server has no timeout
+- FFI string ownership, including on error paths
+- Console cursors, and admitting to dropped output
+- Which states the UI is told about, and which are host-internal
+- Memory and CPU sampling for a server that is not its own process
+- World storage, iCloud exclusion, and LAN connectivity
+
+**Read this for**: Working on server lifecycle, or debugging a server that
+will not start, will not stop, or cannot be joined.
+
+---
+
 ### 🤖 [Android host](./android-host.md)
 
 The Android app shell — WebView, asset loader, capability injection, and the
@@ -145,9 +199,6 @@ written.*
 <!--
 Planned, one per milestone (see plans/shared-milestones.md):
 
-  ios-host.md             iOS      M0
-  ios-bridge.md           iOS      M1, extended at M2
-  ios-server-backend.md   iOS      M3
   ios-lifecycle.md        iOS      M4
   android-bridge.md       Android  M1, extended at M2
   android-lifecycle.md    Android  M4

@@ -114,6 +114,12 @@ console.log(`\nBuilding ${target.label} (${profile})\n`);
 
 const profileArgs = debug ? [] : ["--release"];
 
+// The device builds link the real server; the host build deliberately does
+// not, so `cargo test` stays a couple of seconds and needs no Pumpkin. Pass
+// --stub to cross-compile without the engine, which is how you check that the
+// FFI surface itself still builds for a target without waiting for wasmtime.
+const engineArgs = args.includes("--stub") ? [] : ["--features", "pumpkin-engine"];
+
 if (target.kind === "host") {
   run("cargo", ["build", ...profileArgs]);
   console.log("\nHost build done. `cargo test` runs the suite.");
@@ -122,9 +128,15 @@ if (target.kind === "host") {
 
 if (target.kind === "ndk") {
   // cargo-ndk wants its own flags before `build`.
-  run("cargo", ["ndk", "-t", target.abi, "build", ...profileArgs]);
+  run("cargo", ["ndk", "-t", target.abi, "build", ...profileArgs, ...engineArgs]);
 } else {
-  run("cargo", ["build", ...profileArgs, "--target", target.triple]);
+  run("cargo", [
+    "build",
+    ...profileArgs,
+    ...engineArgs,
+    "--target",
+    target.triple,
+  ]);
 }
 
 // --- stage the artifact ---------------------------------------------------

@@ -33,6 +33,9 @@ mentioned, and a missing NDK as one about `cc`.
 | Shared UI bundle | both | `npm install` |
 | Xcode + `xcode-select --install` | iOS | App Store |
 | XcodeGen | iOS | `brew install xcodegen` |
+| Go 1.26+ | both | `brew install go` (the wireproxy fork needs it) |
+| gomobile | iOS | `go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init` |
+| `wireproxy-fork` checkout | both | clone as a sibling, or `HOMERUN_WIREPROXY_SRC` |
 | Android NDK + `ANDROID_NDK_HOME` | Android | Android Studio → SDK Manager → NDK |
 | `cargo-ndk` | Android | `cargo install cargo-ndk` |
 | Rust targets | both | `rustup target add <triple>` |
@@ -98,6 +101,47 @@ libraries — and later the bundled JRE — must ship inside the APK and land in
 Release is the default. `--debug` exists for symbols, but debug builds are
 enormous once a real engine is linked (~1.8 GB for the prototype); the
 script says so rather than letting you sideload one by accident.
+
+### The engine feature
+
+Device builds pass `--features pumpkin-engine`, which links the real server.
+The host build deliberately does not — that is what keeps `cargo test` at
+about two seconds with no Pumpkin, no wasmtime and no device, and it is the
+reason the whole FFI surface could be tested before the engine existed.
+
+```bash
+node scripts/build-rust.js ios            # with the engine
+node scripts/build-rust.js ios --stub     # without it
+```
+
+`--stub` is for checking that the FFI surface still cross-compiles for a
+target without waiting for the engine to build. The first build with the
+engine pulls the pinned Pumpkin fork from GitHub and takes a few minutes.
+
+## The tunnel — `scripts/build-wireproxy.js`
+
+```bash
+node scripts/build-wireproxy.js ios            # gomobile → xcframework
+node scripts/build-wireproxy.js android        # go build → jniLibs
+```
+
+Android gets an executable staged into `jniLibs`; iOS gets
+`WireproxyIOS.xcframework` (device + simulator slices, ~32 MB) staged into
+`ios/HomerunHost/lib/`, because the platform cannot spawn a binary and the
+tunnel has to run in-process.
+
+**Run it before `xcodegen generate`** — the project references the staged
+framework.
+
+The Go binding lives in `go/wireproxy-ios/` and reaches the fork through a
+`go.work` the script regenerates each build. That workspace is generated
+rather than committed because the fork's location is configurable, and it
+pins gvisor: the fork's wireguard-go is on a 2023 upstream commit whose
+netstack does not compile against anything newer.
+
+> Do not run `go work sync` there. It writes the resolved versions back into
+> the fork's own `go.mod` files — a change to a different repository, and
+> precisely the gvisor upgrade that breaks the build.
 
 ## Typical loops
 

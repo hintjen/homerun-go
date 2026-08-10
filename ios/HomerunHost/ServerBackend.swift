@@ -9,6 +9,12 @@ import Foundation
 /// iOS has exactly one implementation (`PumpkinBackend`, in-process Rust FFI)
 /// because the platform cannot spawn processes. Android adds a JVM backend.
 /// Nothing here may assume a child process, a pid, or stdio pipes.
+///
+/// Main-actor isolated: every caller is the bridge, which is main-actor, and
+/// the event callbacks below must arrive on the main queue anyway. Making
+/// that explicit is what stops a backend from touching this state off the
+/// thread the UI reads it from.
+@MainActor
 protocol ServerBackend: AnyObject {
     /// Engine identity, matching `ServerBackendKind` in the UI's capabilities.
     var kind: String { get }
@@ -56,6 +62,22 @@ protocol ServerBackend: AnyObject {
     var onStateChanged: ((String, ServerState) -> Void)? { get set }
     var onLog: ((String, String) -> Void)? { get set }
     var onPlayersChanged: ((String) -> Void)? { get set }
+
+    /// The server is being stopped because it could not be reached, not
+    /// because anyone asked.
+    ///
+    /// Load-bearing: the stop that follows goes through the ordinary clean
+    /// path, so without this event the UI cannot tell it apart from the player
+    /// pressing Stop. Emitted *before* the stop, for the same reason.
+    var onNetworkError: ((String, NetworkErrorKind) -> Void)? { get set }
+}
+
+/// Why a server became unreachable. The shared UI words each one differently.
+enum NetworkErrorKind: String {
+    /// The gateway never handed over tunnel credentials.
+    case provisioning
+    /// Credentials arrived but the tunnel never came up, or stopped.
+    case handshake
 }
 
 enum ServerState: String {
@@ -72,6 +94,13 @@ struct ServerConfig {
     /// jetsam the whole app — not just the server — so pick conservatively.
     let memoryMb: Int
     var extra: [String: Any] = [:]
+
+    /// Fetches the tunnel credentials, once the server is up.
+    ///
+    /// A closure rather than data so the user's access token never becomes
+    /// backend state — it stays captured in the bridge layer, which is the
+    /// only place that legitimately has it.
+    var resolveTunnel: (() async -> WireProxy.Link?)?
 }
 
 struct PlayerRoster {
@@ -90,8 +119,14 @@ struct MemoryUsage {
 
 struct LogSlice {
     let lines: [String]
-    /// Pass back as `since` next time. Cursors are per-run, not durable.
+    /// Pass back as `since` next time. Cursors are per-run, not durable: the
+    /// buffer clears on restart but sequence numbers keep climbing, so a stale
+    /// cursor reports `dropped` rather than silently replaying a new run as a
+    /// continuation of the old one.
     let cursor: Int
+    /// Lines were evicted before this read. Show the gap — a console that
+    /// quietly skips output is worse than one that admits it.
+    let dropped: Bool
 }
 
 enum ServerBackendError: LocalizedError {

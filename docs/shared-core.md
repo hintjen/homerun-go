@@ -177,10 +177,11 @@ not as a side effect.
 exists and is tested, but the cursor is read on a hot path and moving it means
 either a handle to free or a JSON round trip per line. Worth doing, not urgent.
 
-**iOS can reach the core but has no engine behind it.** `Core.swift` and the C
-surface are in place; the host still uses `StubEngine`, and the Pumpkin fork
-has never been run through the FFI by anyone. Pumpkin will also need its own
-artifact resolution rather than borrowing `minecraft.jar.*`.
+**iOS has adopted one thing so far.** `Core.swift` and the C surface are in
+place, and `WireProxy.swift` renders its tunnel config through the core rather
+than the hand-written copy it carried. `DeviceRegistrar` and `HomerunAPI` are
+the obvious next candidates, and Pumpkin will need its own artifact resolution
+rather than borrowing `minecraft.jar.*`.
 
 **Nothing here has run on arm64.** Every verification so far is x86_64 on an
 emulator. That gap needs a physical device, not more code.

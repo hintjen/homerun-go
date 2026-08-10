@@ -10,18 +10,32 @@ description = "C ABI around the Pumpkin server for the Homerun iOS and Android h
 # cdylib    -> Android loads libhomerun_pumpkin_ffi.so
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = []
+# Links the real server. Off by default so the rest of the crate — state
+# machine, console buffer, pre-flight, crash capture, the whole C surface —
+# builds and tests in seconds on any machine, with no Pumpkin and no device.
+# The iOS and Android builds turn it on; see scripts/build-rust.js.
+pumpkin-engine = ["dep:pumpkin", "dep:pumpkin-config", "dep:tokio"]
+
 [dependencies]
 # Pumpkin stays an ordinary dependency at a pinned rev. Keeping our FFI in
 # this crate means upstream's Cargo.toml needs no crate-type change, which is
 # one less thing carried in the fork.
 #
-# Point this at hintjen/Pumpkin until the library-mode patches land upstream:
-#   - no process::exit on bind failure (it kills the host app)
+# hintjen/Pumpkin carries the library-mode patches, on branch `ios-port`:
+#   - PumpkinServer::new returns Result rather than calling process::exit
+#     (an exit kills the host app with no report)
 #   - reset_server_state() so restart-in-process works
 #   - STOP_INTERRUPT as ArcSwap
 #   - dlopen plugin loader cfg'd off iOS
 #   - wasmtime configured for Pulley (iOS forbids JIT)
-# pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "<pin>" }
+#
+# Pinned to an exact rev on purpose: upstream tracks Minecraft protocol
+# releases, and that churn must not land in an app build uninvited.
+pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
+pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true }
 
 serde_json = "1"
 
@@ -43,3 +57,11 @@ log = "0.4"
 opt-level = "z"
 lto = true
 strip = true
+
+# Unix-only: it saves the terminal's stdout with dup(2) and writes to it
+# directly, because starting the engine replaces fd 1 with the console pipe.
+# Without this, `cargo test` on Windows fails to link an example nobody asked
+# it to build.
+[[example]]
+name = "boot_engine"
+required-features = ["pumpkin-engine"]
