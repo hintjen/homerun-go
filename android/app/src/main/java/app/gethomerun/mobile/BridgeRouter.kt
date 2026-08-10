@@ -17,6 +17,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -527,6 +534,117 @@ class BridgeRouter(
             JsonPrimitive(true)
         },
 
+        // ─── storage ─────────────────────────────────────────────────────
+        //
+        // All three of these were unhandled until now, and an unanswered
+        // invoke does not fail — it hangs the UI's promise for ever
+        // (PROTOCOL.md §5). A screen that asks for storage figures simply
+        // froze.
+
+        "get-storage-info" to { _ -> storageInfo() },
+
+        /**
+         * A send, not an invoke: the answer comes back as an event.
+         *
+         * Under a gigabyte free a world save can fail partway through, which
+         * is how worlds get corrupted. Warning before that happens is the
+         * whole point, so the threshold matches iOS exactly.
+         */
+        "check-homerun-storage-limit" to { _ ->
+            val free = usableBytes()
+            emit(
+                if (free != null && free < LOW_STORAGE_BYTES) "storage-limit-exceeded"
+                else "storage-limit-ok"
+            )
+            null
+        },
+
+        /**
+         * A loopback. Android has a per-app storage pane, but opening it from
+         * here would take the player out of the app mid-flow; the UI decides
+         * what to do with the echo, exactly as on iOS.
+         */
+        "open-storage-settings" to { _ ->
+            emit("open-storage-settings")
+            null
+        },
+
+        // ─── region picking ──────────────────────────────────────────────
+
+        /**
+         * Round-trip time to a gateway region, in milliseconds.
+         *
+         * 9999 is the contract's "unreachable" — a number rather than an
+         * error, because the UI sorts regions by this and a throw would lose
+         * the whole list to one bad host.
+         */
+        "measure-region-latency" to { params ->
+            JsonPrimitive(measureLatency(params?.jsonPrimitive?.contentOrNull))
+        },
+
+        // ─── notifications ───────────────────────────────────────────────
+
+        /**
+         * Show a local notification.
+         *
+         * POST_NOTIFICATIONS is a runtime permission from API 33, and it is
+         * not requested here: a notification that cannot be shown is not worth
+         * a permission prompt in the middle of whatever the player was doing.
+         * Silently doing nothing is the documented behaviour when it is
+         * denied.
+         */
+        "push-notification" to { params ->
+            val payload = params as? JsonObject
+            val message = payload?.get("message")?.jsonPrimitive?.contentOrNull
+            if (message != null) {
+                notify(
+                    title = payload["title"]?.jsonPrimitive?.contentOrNull ?: "Homerun",
+                    body = message,
+                )
+            }
+            null
+        },
+
+        // ─── files ───────────────────────────────────────────────────────
+
+        /**
+         * `exists: null` hides the files UI entirely.
+         *
+         * A phone has no file manager a player can usefully be dropped into,
+         * and the server directory is app-private storage no other app can
+         * read. Reporting `false` would show the UI in an empty state; null is
+         * the contract's "do not offer this".
+         */
+        "server-files-exist" to { _ ->
+            buildJsonObject {
+                put("native", true)
+                put("exists", JsonNull)
+            }
+        },
+
+        /**
+         * Unreachable while `server-files-exist` answers null, but answered
+         * rather than dropped: a channel the UI calls anyway must return an
+         * error, never a silent success and never a hang.
+         */
+        "open-server-files" to { _ ->
+            buildJsonObject { put("error", "Opening server files isn't available on Android.") }
+        },
+
+        // ─── Bedrock ─────────────────────────────────────────────────────
+
+        /**
+         * Android hosts Java servers only, so there is no Bedrock server
+         * version to report. Required by the contract because this host
+         * declares the `javaNative` backend, which the desktop uses for both.
+         */
+        "native-get-latest-bedrock-version" to { _ ->
+            buildJsonObject {
+                put("success", false)
+                put("error", "Bedrock servers aren't supported on Android.")
+            }
+        },
+
         "get-system-memory" to { _ -> systemMemory() },
         "get-native-system-memory" to { _ -> systemMemory() },
 
@@ -752,6 +870,97 @@ class BridgeRouter(
     }
 
     /** The desktop shape: a `memory` string in MB, or an error. */
+    /**
+     * Free bytes on the volume holding app-private storage.
+     *
+     * `usableSpace` rather than `freeSpace`: the difference is the reserve
+     * only privileged processes may touch, and a server writing a world is
+     * not one of them. Reporting the larger number would promise room that
+     * does not exist.
+     */
+    private fun usableBytes(): Long? =
+        runCatching { context.filesDir.usableSpace.takeIf { it > 0 } }.getOrNull()
+
+    /**
+     * Device storage figures, in gigabytes, as the UI's storage panel expects.
+     *
+     * Decimal GB (1e9), matching iOS — a phone's advertised capacity is
+     * decimal, so binary units here would report a 128 GB device as 119 and
+     * look like a bug to the player.
+     */
+    private fun storageInfo(): JsonElement = buildJsonObject {
+        put("installType", "native")
+
+        val dir = context.filesDir
+        val total = runCatching { dir.totalSpace.takeIf { it > 0 } }.getOrNull()
+        val free = usableBytes()
+        val gb = { bytes: Long -> bytes / 1_000_000_000.0 }
+
+        if (total != null) put("totalStorageGB", gb(total))
+        if (free != null) {
+            put("totalStorageFreeGB", gb(free))
+            if (total != null) put("totalStorageUsedGB", gb(total) - gb(free))
+        }
+    }
+
+    /**
+     * Round-trip time to a region endpoint, in milliseconds.
+     *
+     * A HEAD with a short timeout, and [UNREACHABLE_MS] for anything that
+     * fails. The UI sorts regions by this figure, so an exception would cost
+     * the whole list rather than one entry.
+     */
+    private suspend fun measureLatency(url: String?): Int = withContext(Dispatchers.IO) {
+        val target = url?.let { runCatching { URL(it) }.getOrNull() } ?: return@withContext UNREACHABLE_MS
+        runCatching {
+            val started = System.nanoTime()
+            val connection = (target.openConnection() as HttpURLConnection).apply {
+                requestMethod = "HEAD"
+                connectTimeout = LATENCY_TIMEOUT_MS
+                readTimeout = LATENCY_TIMEOUT_MS
+                useCaches = false
+            }
+            try {
+                connection.responseCode
+            } finally {
+                connection.disconnect()
+            }
+            ((System.nanoTime() - started) / 1_000_000).toInt()
+        }.getOrDefault(UNREACHABLE_MS)
+    }
+
+    /**
+     * Post a local notification, or do nothing if we may not.
+     *
+     * From API 33 this needs POST_NOTIFICATIONS at runtime, and it is
+     * deliberately not requested here: a permission prompt interrupting
+     * whatever the player was doing costs more than the notification is worth.
+     * Denied means silence, which is what the contract allows.
+     */
+    private fun notify(title: String, body: String) {
+        runCatching {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (!manager.areNotificationsEnabled()) return
+
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL,
+                    "Homerun",
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                )
+            )
+
+            val notification = Notification.Builder(context, NOTIFICATION_CHANNEL)
+                .setContentTitle(title)
+                .setContentText(body)
+                .setSmallIcon(context.applicationInfo.icon)
+                .setAutoCancel(true)
+                .build()
+
+            manager.notify(body.hashCode(), notification)
+        }.onFailure { Log.w(TAG, "could not post a notification: ${it.message}") }
+    }
+
     private fun systemMemory(): JsonElement {
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val info = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }
@@ -763,6 +972,20 @@ class BridgeRouter(
 
     companion object {
         const val TAG = "HomerunBridge"
+
+        /**
+         * Below this, warn. A world save that runs out of room partway through
+         * is how worlds get corrupted, and one gigabyte is the same line iOS
+         * draws.
+         */
+        const val LOW_STORAGE_BYTES = 1_073_741_824L
+
+        /** The contract's "unreachable", as a latency rather than an error. */
+        const val UNREACHABLE_MS = 9999
+
+        const val LATENCY_TIMEOUT_MS = 5_000
+
+        const val NOTIFICATION_CHANNEL = "homerun"
 
         /** The name JavaScript sees; PROTOCOL.md §3.3 fixes it. */
         const val JS_INTERFACE = "HomerunHost"

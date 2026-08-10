@@ -62,8 +62,21 @@ data class HostCapabilities(
             multipleRunningServers = false,
             // Via a foreground service (M4).
             backgroundExecution = true,
+            // restic, being wired now. Left true because that work is in
+            // flight — but until it lands the UI offers a feature that does
+            // nothing, and, the part that costs data, a world played here
+            // never becomes the newest snapshot, so the next desktop launch
+            // restores over it.
             backups = true,
-            deviceWebsocket = true,
+            // Nothing implements this: `get-device-ws-port` returns null, and
+            // it is blocked behind M4's foreground service anyway — without
+            // one, a device-hosted WebSocket server exists only while the app
+            // is in front of the user, which is not something to advertise.
+            //
+            // Declaring a capability we do not have is worse than declaring it
+            // off: the UI renders the feature, conformance passes because the
+            // channel is answered, and nothing anywhere says it is absent.
+            deviceWebsocket = false,
         )
     }
 }
