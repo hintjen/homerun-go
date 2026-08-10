@@ -140,6 +140,32 @@ impl BuildContext {
 }
 
 /// A game a Homerun host can run.
+///
+/// # This signature is frozen — `game/v1`
+///
+/// Three codebases build against it in parallel: the Android host, the iOS
+/// host, and this crate. A signature change breaks all of them at once, and
+/// breaks them *silently* for anyone who has not rebuilt, because the bridge
+/// resolves methods by string at runtime rather than by symbol at link time.
+///
+/// **Additive changes only.** Specifically:
+///
+/// - do not add, remove or reorder a method's parameters
+/// - do not change a parameter or return type, including inside the structs
+///   above — their serde names are the wire format both hosts parse
+/// - do not rename a method
+/// - adding a new method with a default implementation is fine
+/// - adding a new field to a struct is fine only if it is `#[serde(default)]`,
+///   so an older host that does not send it still deserialises
+///
+/// This is enforced, not merely requested: `tests::frozen` implements this
+/// trait against the exact signatures, so any change to them fails to compile
+/// with a pointer back to this note. If you genuinely need to break it, change
+/// the canary deliberately and coordinate all three codebases in one go.
+///
+/// The reason for the strictness is recent and concrete: `required_lookups`
+/// changed twice in a single afternoon while two hosts were being written
+/// against it.
 pub trait Game: Sync {
     /// Stable identifier, used by the bridge and by stored state.
     fn id(&self) -> &'static str;
@@ -187,6 +213,107 @@ pub fn by_id(id: &str) -> Option<&'static dyn Game> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The frozen shape of [`Game`], written out so a change to it cannot be
+    /// made by accident.
+    ///
+    /// This implements nothing useful. Its whole job is to fail to compile the
+    /// moment a method is renamed, a parameter is added, moved or retyped, or
+    /// a return type changes — see the stability note on [`Game`].
+    ///
+    /// If you are here because this stopped compiling: that is the alarm
+    /// working. Either revert the trait change, or change this canary
+    /// deliberately and update the Android and iOS hosts in the same commit.
+    struct Frozen;
+
+    impl Game for Frozen {
+        fn id(&self) -> &'static str {
+            "frozen"
+        }
+
+        fn classify(&self, _line: &str) -> LineMeaning {
+            LineMeaning::default()
+        }
+
+        fn config_inputs(&self, _env: &Value) -> Vec<ConfigInput> {
+            Vec::new()
+        }
+
+        fn required_lookups(&self, _env: &Value, _game_type: &str) -> Vec<Lookup> {
+            Vec::new()
+        }
+
+        fn config_files(&self, _ctx: &BuildContext) -> Result<Vec<FileWrite>> {
+            Ok(Vec::new())
+        }
+
+        fn forwards(&self, _exposure: &str, _port: u16, _extra: &Value) -> Result<Vec<Forward>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// The canary must also stay usable as a trait object, since that is how
+    /// the registry hands games out.
+    #[test]
+    fn the_frozen_shape_is_object_safe() {
+        let game: &dyn Game = &Frozen;
+        assert_eq!(game.id(), "frozen");
+        assert!(game.config_inputs(&serde_json::json!({})).is_empty());
+    }
+
+    // ─── the wire format both hosts parse ───────────────────────────────────
+    //
+    // Field names here are the contract. A rename compiles cleanly and fails
+    // at runtime on a device, which is the worst place to find out — so each
+    // is pinned against the literal JSON a host sends or reads.
+
+    #[test]
+    fn line_meaning_serialises_as_the_hosts_read_it() {
+        let json = serde_json::to_value(LineMeaning {
+            ready: true,
+            joined: Some("Notch".into()),
+            left: None,
+        })
+        .unwrap();
+        assert_eq!(json["ready"], true);
+        assert_eq!(json["joined"], "Notch");
+        assert!(json.get("left").is_some(), "absent is null, not missing");
+    }
+
+    #[test]
+    fn config_input_and_file_write_share_their_field_names() {
+        let input = serde_json::to_value(ConfigInput {
+            path: "server.properties".into(),
+            encoding: Encoding::Latin1,
+        })
+        .unwrap();
+        assert_eq!(input["path"], "server.properties");
+        assert_eq!(input["encoding"], "latin1");
+
+        let write = serde_json::to_value(FileWrite {
+            path: "ops.json".into(),
+            contents: "[]".into(),
+            encoding: Encoding::Utf8,
+        })
+        .unwrap();
+        assert_eq!(write["path"], "ops.json");
+        assert_eq!(write["contents"], "[]");
+        assert_eq!(write["encoding"], "utf8");
+    }
+
+    #[test]
+    fn lookup_and_identity_keep_their_names() {
+        let lookup = serde_json::to_value(Lookup { name: "Notch".into() }).unwrap();
+        assert_eq!(lookup["name"], "Notch");
+
+        let identity = serde_json::to_value(Identity {
+            name: "Notch".into(),
+            id: "b50ad385-829d-3141-a216-7e7d7539ba7f".into(),
+        })
+        .unwrap();
+        assert_eq!(identity["name"], "Notch");
+        assert_eq!(identity["id"], "b50ad385-829d-3141-a216-7e7d7539ba7f");
+    }
 
     #[test]
     fn every_registered_game_is_reachable_by_its_own_id() {

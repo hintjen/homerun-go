@@ -57,29 +57,35 @@ instead of once per platform.
 **Contains**:
 - The two divergences that prompted it, both live before it existed
 - Why it holds decisions and shapes but no transport and no processes
+- The layout: a game-agnostic core with Minecraft as one implementation
+- Why the `Game` trait is frozen, and how that is enforced rather than asked
 - What is shared and what stays platform-specific, and why iOS forces that line
 - The test suite, and the mutation check that proves it can fail
 - Who has adopted it, and the order for who adopts next
 
-**Read this for**: Deciding where a behaviour belongs, or before changing
-anything the desktop also does.
+**Read this for**: Deciding where a behaviour belongs, adding a game, or
+before changing anything the desktop also does.
 
 ---
 
 ### 🔌 [The core bridge](./core-bridge.md)
 
-How Kotlin reaches the core: one native entry point, JSON in and out.
+How both mobile hosts reach the core: one dispatch, two thin adapters, JSON in
+and out.
 
 **Contains**:
 - Why it is not a supervisor, and why that distinction is the architecture
 - The envelope, and why errors are verdicts meant for a player
-- The full method catalogue with argument names and shapes
+- The full method catalogue — game-neutral `game.*`/`tunnel.*` versus
+  game-specific `minecraft.*`
+- The `BuildContext` wire shape, including the casing that gets "tidied" and
+  silently breaks settings
 - Adding a method, including the rebuild that Gradle will not do for you
-- The rules: no panics across JNI, no blocking, no global state
-- Triage, and what iOS would still need
+- The rules: no panics across either boundary, no blocking, no global state
+- Triage for both hosts
 
-**Read this for**: Calling the core from Kotlin, adding a method, or decoding
-`the native core has no method "…"`.
+**Read this for**: Calling the core from Kotlin or Swift, adding a method, or
+decoding `the native core has no method "…"`.
 
 ---
 
@@ -115,6 +121,21 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
 - Triage, symptom first
 
 **Read this for**: Working on the server backend, or wiring Pumpkin in.
+
+---
+
+### 🌐 [The tunnel wrapper plan](../plans/tunnel-wrapper.md)
+
+Not a subsystem doc yet — the spec for sharing one wireproxy implementation
+between iOS and Android, and the fork patches it needs.
+
+**Contains**:
+- Why iOS forces the question (it cannot spawn a process at all)
+- The gomobile binding's exported surface, and why the config stays an INI
+- The three fork patches, all landed in `wireproxy-fork`
+- What linking costs: fault isolation, and nothing else that is not just work
+
+**Read this for**: Working on the tunnel on either platform.
 
 ---
 

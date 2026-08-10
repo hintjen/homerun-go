@@ -24,6 +24,7 @@ and rebuilt while a server keeps running, so a backend hanging off
 | `JavaServerBackend.kt` | The real server jar as a child process. **Preferred.** |
 | `JavaRuntime.kt` | Finds and unpacks the bundled JVM. |
 | `ServerJar.kt` | Resolves and downloads the server jar. |
+| `ServerSettingsWriter.kt` | Writes the config files the server reads at boot. |
 | `WireProxy.kt` | The gateway tunnel that makes the server reachable. |
 | `HomerunApi.kt` | Reads a server's version, loader and tunnel from the backend. |
 | `jni_bridge.rs` | Makes the Rust C ABI callable from the JVM. Nothing else. |
@@ -304,6 +305,70 @@ One consequence worth knowing when testing: **a start with no account now
 stops.** No token means no tunnel, and no tunnel means no server, exactly as
 on desktop. Driving a server up over the bridge with a synthetic envelope
 needs a real token now.
+
+### The settings a player chose — `ServerSettingsWriter`
+
+A server reads its config **once**, before it accepts anyone. So the files are
+written on every launch, between the jar landing and the JVM starting.
+
+That timing is what makes a change on the web dashboard take effect on the next
+start — and, more importantly, what makes a *removal* take effect. The files
+are the source of truth at launch, so a de-opped player stops being an operator
+because `ops.json` no longer lists them. An add-only pass over RCON, which the
+desktop used to do, leaves them op forever.
+
+Until this existed **Android wrote nothing**, and every server ran vanilla
+defaults no matter what the creation wizard was told. It was not subtle once
+looked for: a server created with `MOTD=Android tunnel test` answered a
+server-list ping with `"description": "A Minecraft Server"`.
+
+#### This file does not know what Minecraft is
+
+It asks the core three questions and does as it is told:
+
+```kotlin
+val existing = Core.configInputs(env).mapNotNull { ... readText(it.encoding.charset) }
+val resolved = Core.requiredLookups(env, gameType).mapNotNull { fetchIdentity(it) }
+val files    = Core.configFiles(env, gameType, port, bindAddress, existing, resolved, now)
+for (file in files) File(dir, file.path).writeText(file.contents, file.encoding.charset)
+```
+
+No property keys, no file names, no encoding constant, no UUID derivation, no
+ban semantics. All of that is `homerun-core::minecraft::settings` behind the
+`Game` trait, so this app, iOS and the desktop cannot drift — see
+[`core-bridge.md`](./core-bridge.md).
+
+**The encoding travels with each file, for reading as well as writing.**
+`server.properties` is latin-1. Decoding it as UTF-8 turns `§` — the colour
+code marker in a MOTD — into U+FFFD, and writing that back as latin-1 turns it
+into `?`. A player's coloured MOTD destroyed by a launch that changed nothing.
+
+**Identity lookups are only what the core cannot derive.** An offline server
+returns *no* lookups and makes no Mojang requests, because its UUIDs are an
+MD5 of the name and the core computes them. Asking the network there would be
+both wasted and wrong: an online UUID does not match an offline server's idea
+of the same player. A name that fails to resolve is left out, and the core
+skips it rather than writing an id that can never match.
+
+**Nothing here throws.** A settings failure must not stop a server that would
+otherwise run, so every failure is logged and surfaced to the console. The
+flip side is that a bug looks like silence — which is why the exact JSON this
+sends is pinned by a test in the core.
+
+#### Two desktop bugs fixed rather than copied
+
+- **Online mode is derived once.** The desktop computes it twice and the two
+  disagree: `server.properties` uses `crossplay && vanilla` and ignores
+  `ONLINE_MODE`, while UUID resolution uses `ONLINE_MODE`. Both mismatches are
+  reachable, and both silently break op-ing.
+- **Numbers cannot become `NaN`.** `parseInt(env.MAX_PLAYERS)` on a
+  non-numeric value writes the literal text `NaN` into `server.properties`.
+
+#### Not yet proven end to end
+
+The logic is covered by tests, including the wire shape, but writing settings
+needs a logged-in server start and that has not been run. The app installs,
+launches and loads the native library; the last mile is untested.
 
 ### The EULA is accepted for the user
 

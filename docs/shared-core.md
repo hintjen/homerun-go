@@ -56,20 +56,59 @@ the JVM, spawning the tunnel, sampling CPU, talking to the UI.
 | server state machine, exit classification | RCON transport |
 | handshake supervision and its threshold | CPU/memory sampling |
 | console ring buffer, join/leave/ready parsing | bridge IPC |
+| which config files a server needs, and their contents | writing them |
+| how a player name becomes the id a server matches | fetching it |
 
-## Modules
+## Layout
+
+The crate splits in two, and the split is the point: **a game is one
+implementation, not the core.**
+
+```
+game.rs        the capability surface every game exposes
+link.rs        gateway credentials and the staleness rule
+properties.rs  key=value config merging, comments preserved
+state.rs       handshake supervision, exit classification
+tunnel.rs      WireGuard config from a list of forwards
+minecraft/     jar, console, settings — one implementation of game.rs
+```
+
+Nothing above `minecraft/` knows that a Java server listens on 25565 or what
+`Done (12.431s)!` means. `tunnel` renders whatever `Forward`s it is given;
+Minecraft is what names them.
 
 | Module | Reference implementation |
 |---|---|
-| `jar` | `src/electron/mod-installer.ts` |
-| `wireproxy` | `src/electron/wireproxyConfig.ts` |
+| `minecraft::jar` | `src/electron/mod-installer.ts` |
+| `minecraft::console` | `JavaServerBackend` (Android) + supervisor log handling |
+| `minecraft::settings` | `writeServerProperties`, `writeOpsAndWhitelistFiles` |
+| `tunnel` | `src/electron/wireproxyConfig.ts` |
+| `properties` | `mergeServerProperties` |
 | `link` | `pollForNativeConfig` in `nativeServerManager.ts` |
 | `state` | `onServerFullyRunning` + supervisor exit handling |
-| `console` | `JavaServerBackend` (Android) + supervisor log handling |
 
 The desktop is the reference for all of it, and each module names the file its
 behaviour came from. Where this crate deliberately differs, it says so and why
-— `jar::paper` is the clearest example.
+— `minecraft::jar::paper` and `minecraft::settings`' online-mode note are the
+clearest examples.
+
+### The `Game` trait is frozen
+
+`game.rs` is `game/v1`: **additive changes only**. Three codebases build
+against it in parallel, and because the bridge resolves methods by string at
+runtime rather than by symbol at link time, a signature change breaks them
+silently for anyone who has not rebuilt.
+
+It is enforced rather than requested — `game.rs`'s `tests::Frozen` implements
+the trait against the exact signatures, so any change fails to compile with a
+pointer back to the rule. New methods need defaults; new struct fields need
+`#[serde(default)]`.
+
+**Artifact resolution is deliberately outside the trait.** Minecraft resolves a
+jar from Mojang's manifest; another game might resolve a Steam depot, a
+container image, or nothing at all because it ships in the app. There is no
+honest common signature, and forcing one produces a method every implementation
+ignores half the arguments of.
 
 ## The tests are the deliverable
 
@@ -92,29 +131,37 @@ someone should look at it again.
 
 ## Who uses it
 
-**Android does**, through `Core.kt` and `core_bridge.rs`. One native entry
-point, JSON in and out, replying `{ok, value}` or `{ok:false, error}` — a dozen
-mangled symbols would save microseconds and cost a dozen places for two
-languages to disagree about argument order.
+**Both mobile hosts.** Dispatch lives in `core_dispatch.rs` with no platform in
+it, and each host is a thin adapter over the same function — Android via JNI,
+iOS via `homerun_core_call`. See [`core-bridge.md`](./core-bridge.md).
 
 These moved out of Kotlin entirely:
 
 | Was | Now |
 |---|---|
-| `ServerJar.resolveVanilla` / `resolvePaper` | `jar::resolve_version`, `jar::vanilla`, `jar::paper` |
-| `ServerJar`'s Java-version check and on-disk comparison | `jar::check_java`, `OnDisk::satisfies` |
-| `WireProxy.render`'s string list | `wireproxy::Config::render` |
+| `ServerJar.resolveVanilla` / `resolvePaper` | `minecraft::jar::resolve_version`, `vanilla`, `paper` |
+| `ServerJar`'s Java-version check and on-disk comparison | `minecraft::jar::check_java`, `OnDisk::satisfies` |
+| `WireProxy.render`'s string list | `tunnel::Config::render` |
 | `WireProxy`'s handshake counter and threshold | `state::HandshakeWatch` |
-| `JavaServerBackend`'s `DONE`/`JOINED`/`LEFT` regexes | `console::is_ready`, `joined`, `left` |
+| `JavaServerBackend`'s `DONE`/`JOINED`/`LEFT` regexes | `minecraft::console::is_ready`, `joined`, `left` |
 | the exit-code-to-state rule | `state::exit_state` |
+| — (Android wrote no config at all) | `minecraft::settings`, via `game.configFiles` |
+
+That last row is the largest: every setting a player chose was silently
+discarded before it existed. `ServerSettingsWriter.kt` now asks the core which
+files to read, whose identity to fetch, and what to write — it knows no
+property keys, no encoding, and no UUID derivation.
 
 Verified end to end on an emulator against the dev backend after the swap: jar
 resolved and downloaded, tunnel config rendered, handshake completed, `Done`
-detected, and a Minecraft ping from the public internet answered.
+detected, and a Minecraft ping from the public internet answered. The settings
+path is covered by tests including the exact JSON a host sends, but has not yet
+been through a real logged-in server start.
 
-Panics cannot cross the JNI boundary — one unwinding through it aborts the VM,
-which on a phone is the whole app — so every call runs inside `catch_unwind`
-and a panic becomes an ordinary error string.
+Panics cannot cross either boundary — one unwinding through JNI aborts the VM
+and one through the C ABI is undefined behaviour — so every call runs inside
+`catch_unwind` and a panic becomes an ordinary error string. A `cfg(test)`
+method panics on purpose to prove it.
 
 ## Still to do
 
@@ -126,9 +173,17 @@ leave `supervisor.js` owning processes. Adding Rust to the desktop build is
 real CI work and a new way for a release to fail — worth doing deliberately,
 not as a side effect.
 
-**The console ring buffer is still Kotlin's.** `console::Console` exists and is
-tested, but the cursor is read on a hot path and moving it means either a
-handle to free or a JSON round trip per line. Worth doing, not urgent.
+**The console ring buffer is still Kotlin's.** `minecraft::console::Console`
+exists and is tested, but the cursor is read on a hot path and moving it means
+either a handle to free or a JSON round trip per line. Worth doing, not urgent.
+
+**iOS can reach the core but has no engine behind it.** `Core.swift` and the C
+surface are in place; the host still uses `StubEngine`, and the Pumpkin fork
+has never been run through the FFI by anyone. Pumpkin will also need its own
+artifact resolution rather than borrowing `minecraft.jar.*`.
+
+**Nothing here has run on arm64.** Every verification so far is x86_64 on an
+emulator. That gap needs a physical device, not more code.
 
 **Process supervision stays per-platform** and should. It cannot be shared with
 iOS, and pretending otherwise is where this design would go wrong.
