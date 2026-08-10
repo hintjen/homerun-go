@@ -326,6 +326,120 @@ object Core {
             .jsonPrimitive.content
 
     // -----------------------------------------------------------------------
+    // Backups
+    // -----------------------------------------------------------------------
+    //
+    // Decisions only. Nothing here runs an engine or touches a repository —
+    // the host does that — which is what lets iOS reach the same answers over
+    // the C ABI without a second copy of any of this.
+
+    /** What to do with the local world before launching. */
+    sealed class Restore {
+        /** A dashboard rollback. Unconditional, and one-shot. */
+        data class Rollback(val snapshotId: String) : Restore()
+        /** Pull the newest snapshot over the local world. */
+        data class Latest(val snapshotId: String, val reason: String) : Restore()
+        /** Keep what is on disk. */
+        data class Skip(val reason: String) : Restore()
+    }
+
+    fun restoreDecision(
+        pinned: String?,
+        latest: JsonObject?,
+        deviceId: String,
+        hasLocalWorld: Boolean,
+    ): Restore {
+        val reply = call("backup.restoreDecision", buildJsonObject {
+            pinned?.let { put("pinned", it) }
+            latest?.let { put("latest", it) }
+            put("deviceId", deviceId)
+            put("hasLocalWorld", hasLocalWorld)
+        }).jsonObject
+
+        val reason = reply["reason"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        return when (reply["action"]?.jsonPrimitive?.contentOrNull) {
+            "rollback" -> Restore.Rollback(reply["snapshot_id"]!!.jsonPrimitive.content)
+            "restoreLatest" -> Restore.Latest(reply["snapshot_id"]!!.jsonPrimitive.content, reason)
+            else -> Restore.Skip(reason)
+        }
+    }
+
+    /** Whether the backup lease permits this device to launch. */
+    sealed class Lease {
+        data object Launch : Lease()
+        data class Blocked(val device: String) : Lease()
+        data class Forced(val takenFrom: String) : Lease()
+    }
+
+    fun leaseDecision(leaseDevice: String?, deviceId: String, force: Boolean): Lease {
+        val reply = call("backup.leaseDecision", buildJsonObject {
+            leaseDevice?.let { put("leaseDevice", it) }
+            put("deviceId", deviceId)
+            put("force", force)
+        }).jsonObject
+
+        return when (reply["action"]?.jsonPrimitive?.contentOrNull) {
+            "blocked" -> Lease.Blocked(reply["device"]!!.jsonPrimitive.content)
+            "forced" -> Lease.Forced(reply["taken_from"]!!.jsonPrimitive.content)
+            else -> Lease.Launch
+        }
+    }
+
+    /**
+     * Whether there is anything worth backing up.
+     *
+     * A launch that died before generating a world must not push an empty
+     * snapshot over a good one — it would become the newest and look fine.
+     */
+    fun shouldBackUp(hasLocalWorld: Boolean): Boolean =
+        call("backup.shouldBackUp", buildJsonObject { put("hasLocalWorld", hasLocalWorld) })
+            .jsonPrimitive.boolean
+
+    /** A normalised engine failure. */
+    data class Failure(val kind: String, val retryable: Boolean, val succeeded: Boolean)
+
+    fun classifyBackupFailure(exitCode: Int?, message: String, host: String): Failure {
+        val reply = call("backup.classify", buildJsonObject {
+            exitCode?.let { put("exitCode", it) }
+            put("message", message)
+            put("host", host)
+        }).jsonObject
+        return Failure(
+            kind = reply["failure"]?.jsonObject?.get("kind")?.jsonPrimitive?.contentOrNull.orEmpty(),
+            retryable = reply["retryable"]?.jsonPrimitive?.boolean == true,
+            succeeded = reply["succeeded"]?.jsonPrimitive?.boolean == true,
+        )
+    }
+
+    /** The directory name a snapshot's recorded path ends in. */
+    fun recordedBasename(path: String): String? =
+        (call("backup.recordedBasename", buildJsonObject { put("path", path) }) as? JsonPrimitive)
+            ?.contentOrNull
+
+    /** The `POST /backup-state/` body, and whether sending it frees the lease. */
+    data class Report(val body: JsonObject, val releasesLease: Boolean)
+
+    fun backupReport(
+        operation: String,
+        snapshotId: String? = null,
+        error: String? = null,
+        bytes: Long = 0,
+        durationSeconds: Double = 0.0,
+    ): Report {
+        val reply = call("backup.stateReport", buildJsonObject {
+            put("operation", operation)
+            snapshotId?.let { put("snapshotId", it) }
+            error?.let { put("error", it) }
+            put("bytes", bytes)
+            put("durationSeconds", durationSeconds)
+        }).jsonObject
+        return Report(
+            body = reply["body"]!!.jsonObject,
+            releasesLease = reply["releasesLease"]?.jsonPrimitive?.boolean == true,
+        )
+    }
+
+    // -----------------------------------------------------------------------
     // Console
     // -----------------------------------------------------------------------
 

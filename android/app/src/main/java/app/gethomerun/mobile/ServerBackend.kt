@@ -77,7 +77,14 @@ interface ServerBackend {
     // --- Events ---
 
     /** Set by the bridge layer. Backends must dispatch on the main thread. */
-    var onStateChanged: ((String, ServerState) -> Unit)?
+    /**
+     * Third argument: this stop is about to be followed by a backup.
+     *
+     * It rides along with the state change because it must reach the API on
+     * the *same* `stopped` ack — that ack is what opens the backup lease, and
+     * a separate call afterwards would race a co-host's launch.
+     */
+    var onStateChanged: ((String, ServerState, Boolean) -> Unit)?
     var onLog: ((String, String) -> Unit)?
     var onPlayersChanged: ((String) -> Unit)?
 
@@ -151,10 +158,30 @@ data class ServerConfig(
      */
     val gameType: String = "java",
     /**
+     * Everything the backup lifecycle needs, or null when this server has no
+     * repository (the feature is off, or it has no volume yet).
+     *
+     * Deliberately **not** in [extra]: that map is forwarded into the server
+     * process's environment, and this carries the repository password.
+     */
+    val backupContext: BackupContext? = null,
+    /**
      * Forwarded into the server process's environment, so it must never carry
      * anything secret — no tokens, no credentials.
      */
     val extra: Map<String, Any> = emptyMap(),
+)
+
+/**
+ * What a backup needs that only the launch path knows.
+ *
+ * The device id is the identity restic records as the snapshot hostname, and
+ * the API resolves `pushed_by` from it — so it must be the same id the API
+ * issued, not a locally-generated one.
+ */
+data class BackupContext(
+    val settings: HomerunApi.ServerSettings,
+    val deviceId: String,
 )
 
 data class PlayerRoster(

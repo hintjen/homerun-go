@@ -87,6 +87,16 @@ object DeviceRegistry {
     }
 
     /** What is stored, or null if this device has never registered. */
+    /**
+     * This device's id, or null if it has not registered.
+     *
+     * The identity restic records as a snapshot's hostname, and the one the
+     * API resolves `pushed_by` from — so it must be the id the API issued,
+     * never a locally-generated one, or every device would think every
+     * snapshot was someone else's.
+     */
+    fun currentDeviceId(): String? = current()?.deviceId
+
     fun current(): Registration? {
         val id = prefs.getString(KEY_ID, null) ?: return null
         val token = prefs.getString(KEY_TOKEN, null) ?: return null
@@ -209,7 +219,7 @@ object DeviceRegistry {
      * of it in the run that found this. The desktop pushes both together in
      * `onServerFullyRunning`, in this order, for exactly this reason.
      */
-    fun reportServerState(serverId: String, state: ServerState) {
+    fun reportServerState(serverId: String, state: ServerState, backupInProgress: Boolean = false) {
         val wire = when (state) {
             ServerState.RUNNING -> "running"
             ServerState.STOPPED, ServerState.CRASHED -> "stopped"
@@ -227,7 +237,20 @@ object DeviceRegistry {
                 deviceToken = registration.deviceToken,
                 instances = runCatching { runningIds() }.getOrDefault(emptyList()),
             )
-            HomerunApi.reportServerState(apiUrl(), serverId, wire, registration.deviceToken)
+            HomerunApi.reportServerState(
+                apiUrl(), serverId, wire, registration.deviceToken, backupInProgress,
+            )
+        }
+    }
+
+    /**
+     * Report a backup or restore outcome, releasing the lease if it was a
+     * backup. Needs the device token, which only this object holds.
+     */
+    fun reportBackupState(serverId: String, body: kotlinx.serialization.json.JsonObject) {
+        val registration = current() ?: return
+        scope.launch {
+            HomerunApi.reportBackupState(apiUrl(), serverId, body, registration.deviceToken)
         }
     }
 

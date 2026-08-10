@@ -30,6 +30,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -146,11 +147,15 @@ class BridgeRouter(
             }))
         }
 
-        override fun onStateChanged(serverId: String, state: ServerState) {
+        override fun onStateChanged(
+            serverId: String,
+            state: ServerState,
+            backupInProgress: Boolean,
+        ) {
             // Two different audiences. This one is the API's — it is what
             // marks the service healthy, and the web dashboard reads it. The
             // bridge event below only reaches the page in front of us.
-            DeviceRegistry.reportServerState(serverId, state)
+            DeviceRegistry.reportServerState(serverId, state, backupInProgress)
 
             // The event contract carries only these three. `starting` and
             // `stopping` are ours; the UI infers those from the pending call.
@@ -292,7 +297,7 @@ class BridgeRouter(
      */
     private fun resyncServerState() {
         val serverId = ServerHost.runningServerId() ?: return
-        hostListener.onStateChanged(serverId, ServerState.RUNNING)
+        hostListener.onStateChanged(serverId, ServerState.RUNNING, false)
     }
 
     private fun reply(envelope: Envelope) {
@@ -669,11 +674,27 @@ class BridgeRouter(
             val api = apiUrl()
             val settings = HomerunApi.serverSettings(api, serverId, token)
 
+            // The device id restic records as the snapshot hostname, and the
+            // one the API resolves `pushed_by` from. Registration is already
+            // done by now in any normal flow; null just means no backups.
+            val deviceId = DeviceRegistry.currentDeviceId()
+
             try {
                 if (settings?.gameType == "bedrock") {
                     throw ServerBackendException.Engine(
                         "Homerun for Android cannot host Bedrock servers yet."
                     )
+                }
+
+                // Refuse to launch while another device is finishing its
+                // backup: starting now would build a second world from a
+                // snapshot that is still being written. `force` is the UI's
+                // data-loss-warning takeover.
+                if (settings != null && deviceId != null) {
+                    val force = obj["force"]?.jsonPrimitive?.booleanOrNull == true
+                    BackupManager(context).leaseBlockedReason(settings, deviceId, force)?.let {
+                        throw ServerBackendException.Engine(it)
+                    }
                 }
                 backend.start(
                     serverId,
@@ -686,6 +707,13 @@ class BridgeRouter(
                         // forwarded into the server's environment.
                         settingsEnv = settings?.env,
                         gameType = settings?.rawGameType ?: "java",
+                        // Null when the server has no repository, backups are
+                        // off for it, or this device is not registered — all
+                        // of which mean "host without backups" rather than
+                        // "refuse to host".
+                        backupContext = if (settings?.backup != null && deviceId != null) {
+                            BackupContext(settings, deviceId)
+                        } else null,
                         // A closure, so the token stays here. The backend
                         // gets the ability to resolve a tunnel, never the
                         // credential that resolves it — `ServerConfig.extra`

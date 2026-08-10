@@ -36,7 +36,7 @@ object ServerHost {
 
     interface Listener {
         fun onLog(serverId: String, line: String) {}
-        fun onStateChanged(serverId: String, state: ServerState) {}
+        fun onStateChanged(serverId: String, state: ServerState, backupInProgress: Boolean = false) {}
         fun onPlayersChanged(serverId: String) {}
         fun onNetworkError(serverId: String, kind: String) {}
     }
@@ -57,7 +57,9 @@ object ServerHost {
             onNetworkError = { id, kind -> forEach { it.onNetworkError(id, kind) } }
             // M4 hooks a foreground service in here, so that a running
             // server survives the app being backgrounded.
-            onStateChanged = { id, state -> forEach { it.onStateChanged(id, state) } }
+            onStateChanged = { id, state, backingUp ->
+                forEach { it.onStateChanged(id, state, backingUp) }
+            }
         }
     }
 

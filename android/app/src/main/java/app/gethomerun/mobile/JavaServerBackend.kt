@@ -46,6 +46,15 @@ class JavaServerBackend(
     private var pumpJob: Job? = null
 
     private val wireProxy = WireProxy(context, scope)
+    private val backups = BackupManager(context)
+
+    /**
+     * The backup context for a server that is running, kept until it exits.
+     *
+     * The exit handler needs the repository and device id, and by then the
+     * caller's `ServerConfig` is long out of scope.
+     */
+    private val backupOnStop = java.util.concurrent.ConcurrentHashMap<String, BackupContext>()
 
     /** The tunnel lookup, resolved alongside the JVM booting rather than before it. */
     private var tunnelJob: Deferred<WireProxy.Link?>? = null
@@ -83,7 +92,7 @@ class JavaServerBackend(
     private val roster = LinkedHashSet<String>()
     private var maxPlayers: Int? = null
 
-    override var onStateChanged: ((String, ServerState) -> Unit)? = null
+    override var onStateChanged: ((String, ServerState, Boolean) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
     override var onNetworkError: ((String, String) -> Unit)? = null
@@ -220,6 +229,10 @@ class JavaServerBackend(
             )
         }
 
+        // Held for the stop path: the exit handler needs the repository and
+        // device id, and by then the caller's config is long gone.
+        config.backupContext?.let { backupOnStop[serverId] = it }
+
         val (javaHome, libjvm, jar, mainClass) = prepared
         val heap = heapMb(config.memoryMb)
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
@@ -230,6 +243,21 @@ class JavaServerBackend(
         // *removal* take effect, since the files are the server's source of
         // truth before it accepts anyone. Never throws: the server's own
         // defaults are a better outcome than refusing to start.
+        // Before the world is read by anything: if another device holds a
+        // newer snapshot, its world wins over this device's stale copy. A
+        // failure here stops the launch rather than starting a server on a
+        // world we were told is out of date — quietly diverging two devices is
+        // the failure this exists to prevent.
+        config.backupContext?.let { backup ->
+            backups.restoreBeforeLaunch(
+                serverId = serverId,
+                dir = dir,
+                settings = backup.settings,
+                deviceId = backup.deviceId,
+                onLog = { note(serverId, it) },
+            )
+        }
+
         config.settingsEnv?.let { env ->
             ServerSettingsWriter.apply(
                 serverId = serverId,
@@ -498,14 +526,36 @@ class JavaServerBackend(
             tunnelJob?.cancel()
             tunnelJob = null
             wireProxy.stop()
+            // The stop ack carries `backup_in_progress`, which is what opens
+            // the backup lease — so it is claimed only when a backup is
+            // actually about to run, and `backupAfterStop` reports an outcome
+            // either way, because only that closes it again.
+            val backup = backupOnStop.remove(serverId)
+                ?.takeIf { outcome != "crashed" && backups.hasLocalWorld(dataDir(serverId)) }
+
             transition(
                 serverId,
                 if (outcome == "crashed") ServerState.CRASHED else ServerState.STOPPED,
+                backupInProgress = backup != null,
             )
             process = null
             currentServerId = null
             startedAt = null
             currentPort = null
+
+            if (backup != null) {
+                scope.launch {
+                    runCatching {
+                        backups.backupAfterStop(
+                            serverId = serverId,
+                            dir = dataDir(serverId),
+                            settings = backup.settings,
+                            deviceId = backup.deviceId,
+                            onLog = { note(serverId, it) },
+                        )
+                    }.onFailure { Log.w(TAG, "on-stop backup failed for $serverId: ${it.message}") }
+                }
+            }
         }
     }
 
@@ -638,10 +688,14 @@ class JavaServerBackend(
         java.util.jar.JarFile(jar).use { it.manifest?.mainAttributes?.getValue("Main-Class") }
     }.getOrNull()
 
-    private fun transition(serverId: String, state: ServerState) {
+    private fun transition(
+        serverId: String,
+        state: ServerState,
+        backupInProgress: Boolean = false,
+    ) {
         if (lastState == state) return
         lastState = state
-        onStateChanged?.invoke(serverId, state)
+        onStateChanged?.invoke(serverId, state, backupInProgress)
     }
 
     private companion object {

@@ -583,6 +583,42 @@ mod tests {
         }
     }
 
+    /// The snapshot shape restic 0.18.0 actually emits on Android, after the
+    /// host maps `hostname` to `host`. Captured from a real device run rather
+    /// than written from the documentation, because the field that matters —
+    /// who wrote it — is the one a co-host restores over live work if we read
+    /// it wrong.
+    #[test]
+    fn a_real_snapshot_from_a_device_parses_and_decides() {
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "id": "e9f8c5d760847000d8dc5d47924e06bba2fa7d91e8887495edec38b17f383b01",
+            "time": "2026-08-10T19:09:22.3199328Z",
+            "host": "device-a",
+            "paths": ["/data/data/app.gethomerun.mobile.debug/files/e2e/server"]
+        }))
+        .expect("restic's shape must parse");
+
+        // The writing device sees its own work as authoritative.
+        assert_eq!(
+            restore_decision(None, Some(&snapshot), "device-a", true),
+            RestoreDecision::Skip {
+                reason: SkipReason::LocalIsAuthoritative
+            }
+        );
+
+        // Any other device restores it — the handoff.
+        assert!(matches!(
+            restore_decision(None, Some(&snapshot), "device-b", true),
+            RestoreDecision::RestoreLatest {
+                reason: RestoreReason::AnotherDeviceIsNewer,
+                ..
+            }
+        ));
+
+        // And the recorded path yields the directory to relocate.
+        assert_eq!(recorded_basename(&snapshot.paths[0]), Some("server"));
+    }
+
     // ─── the lease ──────────────────────────────────────────────────────────
 
     #[test]

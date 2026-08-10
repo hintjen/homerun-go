@@ -13,6 +13,8 @@
     "jre:android-x86_64": "python3 scripts/stage-jre.py x86_64",
     "wireproxy:android": "node scripts/build-wireproxy.js android",
     "wireproxy:android-x86_64": "node scripts/build-wireproxy.js android-x86_64",
+    "restic:android": "node scripts/build-restic.js android",
+    "restic:android-x86_64": "node scripts/build-restic.js android-x86_64",
     "rust:host": "node scripts/build-rust.js host",
     "rust:ios": "node scripts/build-rust.js ios",
     "rust:ios-sim": "node scripts/build-rust.js ios-sim",

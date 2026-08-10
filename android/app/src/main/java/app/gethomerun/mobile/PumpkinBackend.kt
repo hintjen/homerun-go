@@ -61,7 +61,7 @@ class PumpkinBackend(
 
     private val perf = ArrayDeque<PerfSample>()
 
-    override var onStateChanged: ((String, ServerState) -> Unit)? = null
+    override var onStateChanged: ((String, ServerState, Boolean) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
 
@@ -304,7 +304,7 @@ class PumpkinBackend(
     private fun transition(serverId: String, state: ServerState) {
         if (lastState == state) return
         lastState = state
-        onStateChanged?.invoke(serverId, state)
+        onStateChanged?.invoke(serverId, state, false)
     }
 
     private fun parse(raw: String): JsonObject =

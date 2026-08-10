@@ -62,6 +62,33 @@ object HomerunApi {
          */
         val env: JsonObject,
         /**
+         * The repository credentials and retention policy, or null when the
+         * server has no volume or the feature is off for it.
+         *
+         * Handed down whole by `get_backup` — the URL is assembled API-side by
+         * `build_restic_repo_url`, and the retention policy is the API's
+         * choice, not ours. A client that assembled either would be a second
+         * place for the rest-server topology to live.
+         */
+        val backup: JsonObject?,
+        /**
+         * The device holding the backup lease, or null.
+         *
+         * Single-writer coordination for the friend-hosting handoff: the API
+         * opens the lease on a `stopped` ack that says `backup_in_progress`,
+         * and closes it when that device reports `backup-state`. Launching
+         * while another device holds it would start a second world from a
+         * snapshot still being written.
+         */
+        val backupLeaseDevice: String?,
+        /**
+         * A snapshot the dashboard staged for restore (`RESTORE_FROM_SNAPSHOT`).
+         *
+         * One-shot: the API clears the pin on the next running ack, so acting
+         * on it once is the whole contract.
+         */
+        val restoreFromSnapshot: String?,
+        /**
          * The tunnel credentials as they stood *before* launch, if any.
          *
          * Carried on this response rather than fetched separately because
@@ -119,6 +146,11 @@ object HomerunApi {
                 gameType = if (gameType == "bedrock" || gameType == "native-bedrock") "bedrock" else "java",
                 rawGameType = gameType,
                 env = env ?: JsonObject(emptyMap()),
+                backup = body["backup"]?.jsonObject,
+                backupLeaseDevice = body["backup_lease_device"]?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.isNotBlank() },
+                restoreFromSnapshot = env?.get("RESTORE_FROM_SNAPSHOT")?.jsonPrimitive
+                    ?.contentOrNull?.takeIf { it.isNotBlank() },
                 tunnelBefore = linkOf(body)?.link,
             ).also { Log.i(TAG, "$serverId: ${it.loader} ${it.version ?: "latest"} (${it.gameType})") }
         } catch (err: Exception) {
@@ -289,10 +321,43 @@ object HomerunApi {
         serverId: String,
         state: String,
         deviceToken: String,
+        backupInProgress: Boolean = false,
     ) = withContext(Dispatchers.IO) {
-        val body = buildJsonObject { put("status", state) }
+        val body = buildJsonObject {
+            put("status", state)
+            // This flag is what *opens* the backup lease. Sending it commits
+            // this device to reporting `backup-state` afterwards — the lease
+            // has no timeout, so a device that claims it and never reports
+            // locks every other device out until its own next running ack.
+            if (backupInProgress) put("backup_in_progress", true)
+        }
         runCatching { post(apiUrl, "/api/server/$serverId/state/", body, deviceToken) }
             .onFailure { Log.w(TAG, "state report ($state) failed for $serverId: ${it.message}") }
+        Unit
+    }
+
+    /**
+     * Report the outcome of a backup or restore.
+     *
+     * For a backup this is also what **releases the lease**, on success and on
+     * failure alike — a failed backup that held it forever would strand the
+     * server. The body comes from `homerun-core`, so its field names cannot
+     * drift from what the endpoint reads.
+     *
+     * Best-effort: a reporting failure must never turn a completed backup into
+     * a failed one. It does mean the lease stays open, which is why the log
+     * line says so rather than being silent.
+     */
+    suspend fun reportBackupState(
+        apiUrl: String,
+        serverId: String,
+        body: JsonObject,
+        deviceToken: String,
+    ) = withContext(Dispatchers.IO) {
+        runCatching { post(apiUrl, "/api/server/$serverId/backup-state/", body, deviceToken) }
+            .onFailure {
+                Log.w(TAG, "backup-state report failed for $serverId (lease may stay open): ${it.message}")
+            }
         Unit
     }
 
