@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{self, jar, settings};
-use homerun_core::{game, link, properties, state, tunnel};
+use homerun_core::{backup, game, link, properties, state, tunnel};
 
 /// Dispatch one call and render the reply envelope.
 ///
@@ -240,6 +240,90 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 .config_files(&ctx)
                 .map_err(|e| e.to_string())?;
             serde_json::to_value(files).map_err(|e| e.to_string())
+        }
+
+        // --- backups (game-agnostic) --------------------------------------
+        //
+        // Decisions only. Nothing here runs an engine or touches a repository,
+        // which is what lets a host that spawns a binary and a host that links
+        // a library share the same answers.
+        "backup.restoreDecision" => {
+            let latest: Option<backup::Snapshot> = match args.get("latest") {
+                Some(v) if !v.is_null() => Some(
+                    serde_json::from_value(v.clone()).map_err(|e| format!("bad snapshot: {e}"))?,
+                ),
+                _ => None,
+            };
+            let decision = backup::restore_decision(
+                optional_text("pinned").as_deref(),
+                latest.as_ref(),
+                &text("deviceId")?,
+                args.get("hasLocalWorld")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            );
+            serde_json::to_value(decision).map_err(|e| e.to_string())
+        }
+
+        "backup.leaseDecision" => {
+            let decision = backup::lease_decision(
+                optional_text("leaseDevice").as_deref(),
+                &text("deviceId")?,
+                args.get("force").and_then(|v| v.as_bool()).unwrap_or(false),
+            );
+            serde_json::to_value(decision).map_err(|e| e.to_string())
+        }
+
+        "backup.shouldBackUp" => Ok(Value::Bool(backup::should_back_up(
+            args.get("hasLocalWorld")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        ))),
+
+        "backup.classify" => {
+            let failure = backup::classify(
+                args.get("exitCode")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32),
+                &text("message")?,
+                optional_text("host").as_deref().unwrap_or_default(),
+            );
+            Ok(json!({
+                "failure": serde_json::to_value(&failure).map_err(|e| e.to_string())?,
+                "retryable": failure.is_retryable(),
+                "succeeded": failure.succeeded(),
+            }))
+        }
+
+        "backup.recordedBasename" => Ok(backup::recorded_basename(&text("path")?)
+            .map(Value::from)
+            .unwrap_or(Value::Null)),
+
+        "backup.internalPath" => Ok(Value::from(backup::internal_path(&text("path")?))),
+
+        "backup.stateReport" => {
+            let operation = match optional_text("operation").as_deref().unwrap_or("backup") {
+                "backup" => backup::Operation::Backup,
+                "restore" => backup::Operation::Restore,
+                other => return Err(format!("unknown backup operation \"{other}\"")),
+            };
+            let snapshot_id = optional_text("snapshotId");
+
+            let report = match optional_text("error") {
+                Some(error) => backup::StateReport::failed(operation, snapshot_id, error),
+                None => backup::StateReport::complete(
+                    operation,
+                    snapshot_id,
+                    args.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0),
+                    args.get("durationSeconds")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                ),
+            };
+            Ok(json!({
+                "body": serde_json::to_value(&report).map_err(|e| e.to_string())?,
+                "releasesLease": report.releases_lease(),
+            }))
         }
 
         // --- generic config-file merging ----------------------------------
@@ -581,5 +665,90 @@ mod tests {
                 "port": 25565
             }),
         );
+    }
+
+    // ─── backups ────────────────────────────────────────────────────────────
+
+    /// The handoff, over the wire a host actually sends.
+    #[test]
+    fn the_restore_decision_crosses_the_bridge() {
+        let decision = ok(
+            "backup.restoreDecision",
+            json!({
+                "deviceId": "device-a",
+                "hasLocalWorld": true,
+                "latest": { "id": "s1", "time": "2026-08-10T12:00:00Z", "host": "device-b" }
+            }),
+        );
+        assert_eq!(decision["action"], "restoreLatest");
+        assert_eq!(decision["snapshot_id"], "s1");
+        assert_eq!(decision["reason"], "anotherDeviceIsNewer");
+    }
+
+    #[test]
+    fn a_missing_snapshot_is_null_not_an_error() {
+        let decision = ok(
+            "backup.restoreDecision",
+            json!({ "deviceId": "device-a", "hasLocalWorld": true, "latest": null }),
+        );
+        assert_eq!(decision["action"], "skip");
+        assert_eq!(decision["reason"], "noSnapshotAvailable");
+    }
+
+    #[test]
+    fn the_lease_gate_crosses_the_bridge() {
+        let blocked = ok(
+            "backup.leaseDecision",
+            json!({ "leaseDevice": "device-b", "deviceId": "device-a" }),
+        );
+        assert_eq!(blocked["action"], "blocked");
+        assert_eq!(blocked["device"], "device-b");
+
+        let forced = ok(
+            "backup.leaseDecision",
+            json!({ "leaseDevice": "device-b", "deviceId": "device-a", "force": true }),
+        );
+        assert_eq!(forced["action"], "forced");
+    }
+
+    /// Android's every-backup case: complete, verified, and non-zero.
+    #[test]
+    fn exit_three_reaches_the_host_as_success() {
+        let verdict = ok(
+            "backup.classify",
+            json!({
+                "exitCode": 3,
+                "message": "Warning: at least one source file could not be read",
+                "host": "localhost"
+            }),
+        );
+        assert_eq!(verdict["failure"]["kind"], "completedWithWarnings");
+        assert_eq!(verdict["succeeded"], true);
+    }
+
+    #[test]
+    fn the_state_report_body_is_built_for_the_host() {
+        let built = ok(
+            "backup.stateReport",
+            json!({ "operation": "backup", "snapshotId": "abc", "bytes": 10, "durationSeconds": 2.0 }),
+        );
+        assert_eq!(built["body"]["status"], "complete");
+        assert_eq!(built["body"]["speed_bps"], 5.0);
+        assert_eq!(built["releasesLease"], true);
+
+        let failed = ok(
+            "backup.stateReport",
+            json!({ "operation": "backup", "error": "disk full" }),
+        );
+        assert_eq!(failed["body"]["status"], "failed");
+        assert_eq!(
+            failed["releasesLease"], true,
+            "a failed backup must still release it"
+        );
+    }
+
+    #[test]
+    fn an_unknown_backup_operation_is_refused() {
+        assert!(err("backup.stateReport", json!({ "operation": "sync" })).contains("sync"));
     }
 }

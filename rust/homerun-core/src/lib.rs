@@ -45,6 +45,7 @@
 //! differs from the desktop, it says so and why.
 
 // The game-agnostic layer. None of this knows what it is hosting.
+pub mod backup;
 pub mod game;
 pub mod link;
 pub mod properties;

@@ -303,7 +303,10 @@ mod tests {
 
     #[test]
     fn lookup_and_identity_keep_their_names() {
-        let lookup = serde_json::to_value(Lookup { name: "Notch".into() }).unwrap();
+        let lookup = serde_json::to_value(Lookup {
+            name: "Notch".into(),
+        })
+        .unwrap();
         assert_eq!(lookup["name"], "Notch");
 
         let identity = serde_json::to_value(Identity {

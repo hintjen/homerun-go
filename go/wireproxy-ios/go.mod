@@ -21,16 +21,7 @@ require (
 	golang.org/x/time v0.7.0 // indirect
 	golang.org/x/tools v0.48.0 // indirect
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
-	gvisor.dev/gvisor v0.0.0-20230927004350-cbd86285d259 // indirect
+	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 )
 
 tool golang.org/x/mobile/cmd/gobind
-
-// Our fork. Upstream's RoutineSpawner calls log.Fatal — i.e. os.Exit — on
-// every shutdown path, which in-process is the app terminating. See
-// wireproxy-fork/PATCHES.md.
-replace github.com/windtf/wireproxy => ../../../wireproxy-fork/wireproxy
-
-// The fork's wireproxy uses ClientOnlyBind from the matching wireguard-go
-// fork; the two are a pair and must be replaced together.
-replace golang.zx2c4.com/wireguard => ../../../wireproxy-fork/wireguard-go

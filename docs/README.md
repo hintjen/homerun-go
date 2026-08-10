@@ -193,6 +193,25 @@ between iOS and Android, and the fork patches it needs.
 
 ---
 
+### 📲 [iOS handoff](../plans/ios-handoff.md)
+
+Where the iOS side stands, what was changed without a Swift compiler, and the
+open questions on backups.
+
+**Contains**:
+- Which Swift files changed and have never been compiled, ranked by risk
+- The app-killing tunnel bug: what it was, how it was fixed, how to re-verify it
+- The `go.work` setup that will bite you if the fork is not checked out beside
+  this repo
+- Backups: the decisions that exist, the API contract, and why the engine is
+  still open
+- The iOS background-execution question, which may shape the design more than
+  the engine choice does
+
+**Read this for**: Picking the iOS work back up.
+
+---
+
 *Add an entry here whenever you add a doc. A doc nobody can find is not
 written.*
 
