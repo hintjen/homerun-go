@@ -62,7 +62,10 @@ final class BridgeController: NSObject, BridgeEventSink {
         // The contract's state event carries only these three; `starting` and
         // `stopping` are host-internal and the UI infers them from its own
         // pending call.
-        backend.onStateChanged = { [weak self] serverId, state in
+        // `backupInProgress` is deliberately dropped: it is an API concern, and
+        // the contract's payload is `{serverId, state}`. Inventing a field here
+        // would be a channel the UI repo never agreed to.
+        backend.onStateChanged = { [weak self] serverId, state, _ in
             guard let wire = ["running", "stopped", "crashed"].first(where: { $0 == state.rawValue })
             else { return }
             self?.emit("native-server-state-changed", [["serverId": serverId, "state": wire]])
