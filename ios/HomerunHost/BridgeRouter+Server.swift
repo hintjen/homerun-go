@@ -39,12 +39,41 @@ extension BridgeRouter {
         // business there.
         let token = payload["userToken"] as? String ?? TokenStore.accessToken ?? ""
         let apiURL = HostStore.apiURL ?? ""
+
+        // Fetched once, on the critical path, because two things need it before
+        // the engine starts: the backup lease gate, and the tunnel baseline. It
+        // costs a round trip that this host did not previously pay — the same
+        // one Android has always paid.
+        let settings = token.isEmpty || apiURL.isEmpty
+            ? nil
+            : await HomerunAPI.serverSettings(apiURL: apiURL, serverId: serverId, token: token)
+
+        // A launch is refused only when another device is *actively* backing
+        // this world up. No settings, no backup block and no device id all mean
+        // "host without backups" — never "refuse to host".
+        if let settings, let deviceId = HostStore.registeredDeviceId {
+            let force = payload["force"] as? Bool ?? false
+            if let reason = backups.leaseBlockedReason(
+                settings: settings, deviceId: deviceId, force: force)
+            {
+                // Emitted as well as returned: the contract declares this event
+                // for hosts that advertise `backups`, and the error return is
+                // what the calling promise actually sees.
+                events?.emit("native-server-backup-lease-blocked", [["serverId": serverId]])
+                return ["success": false, "error": reason]
+            }
+            if settings.backup != nil {
+                config.backupContext = BackupContext(settings: settings, deviceId: deviceId)
+            }
+        }
+
         if !token.isEmpty, !apiURL.isEmpty {
             config.resolveTunnel = {
-                let baseline = await HomerunAPI.tunnelBaseline(
-                    apiURL: apiURL, serverId: serverId, token: token)
-                return await HomerunAPI.awaitTunnel(
-                    apiURL: apiURL, serverId: serverId, token: token, stale: baseline)
+                // The baseline came with the settings above, so this no longer
+                // re-fetches the same endpoint a second time per launch.
+                await HomerunAPI.awaitTunnel(
+                    apiURL: apiURL, serverId: serverId, token: token,
+                    stale: settings?.tunnelBefore)
             }
         }
 

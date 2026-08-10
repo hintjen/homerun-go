@@ -202,9 +202,7 @@ fn restore(request: &Value) -> Result<Done, String> {
     let config = repo_config(request)?;
     let snapshot_id = required(request, "snapshotId")?;
     let target = required(request, "targetDir")?;
-    // Produced by `backup.internalPath`, which folds a drive letter so the
-    // `SNAP:PATH` split cannot land on the wrong colon.
-    let selector = required(request, "selectorPath")?;
+    let server_id = required(request, "serverId")?;
 
     job().begin("[Backup] Opening the backup repository…");
     let repo = open_or_init(request, &config)?;
@@ -216,8 +214,36 @@ fn restore(request: &Value) -> Result<Done, String> {
     // starts rather than alongside a running world.
     let repo = repo.to_indexed().map_err(stringify)?;
 
+    let snapshot = repo
+        .get_snapshot_from_str(&snapshot_id, |_| true)
+        .map_err(stringify)?;
+
+    // The selector has to be the path the *writing* device recorded, not this
+    // device's. A desktop's snapshot says `/home/you/.homerun/servers/<id>` or
+    // `C:\Users\You\...\servers\<id>`; a phone's says something under its own
+    // container. Restoring cross-device is the entire point of this feature,
+    // so resolving it from our own path would work only for the one case that
+    // needs it least.
+    //
+    // Resolved here rather than in the host because this is where the snapshot
+    // is. `recorded_basename` picks the recorded path belonging to this server
+    // and `internal_path` folds a drive letter so the `SNAP:PATH` split cannot
+    // land on the wrong colon — both written for exactly this and, until now,
+    // used by nobody.
+    let recorded = snapshot
+        .paths
+        .iter()
+        .find(|path| homerun_core::backup::recorded_basename(path) == Some(server_id.as_str()))
+        .ok_or_else(|| {
+            format!(
+                "that backup does not contain this server (it holds: {})",
+                snapshot.paths.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+    let selector = homerun_core::backup::internal_path(recorded);
+
     let node = repo
-        .node_from_snapshot_path(&format!("{snapshot_id}:{selector}"), |_| true)
+        .node_from_snapshot_and_path(&snapshot, &selector)
         .map_err(stringify)?;
 
     // `ls` is `Clone` precisely because the streamer is consumed twice: once

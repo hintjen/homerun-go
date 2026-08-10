@@ -40,6 +40,13 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // post-login path and a false answer strands it on the splash screen.
         HostStore.ensureFirstRunSetup()
 
+        // A backup report that never reached the API leaves the backup lease
+        // open, and the lease has no timeout — every other device stays locked
+        // out of that world until this one speaks again. This is that. It
+        // needs only the API URL and the device token, both of which are
+        // readable here, and it is a no-op when there is nothing pending.
+        Task { await BackupManager.flushPendingReports() }
+
         // A cold-start auth callback arrives here, long before the WebView can
         // receive anything; DeepLinkManager holds it for `deep-link:consume`.
         if let url = launchOptions?[.url] as? URL {

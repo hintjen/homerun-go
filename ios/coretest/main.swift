@@ -646,14 +646,13 @@ if homerun_backup_available() == 1 {
         return "skip for device-a, \(reason) for device-b"
     }
 
-    check("the world restores byte-for-byte through the SNAP:PATH selector") {
-        let selector = try Core.internalPath(world.path)
+    check("the world restores byte-for-byte") {
         let reply = try callEngine(homerun_backup_run, [
             "operation": "restore",
             "repo": repoBlock,
             "cacheDir": cache.path,
             "snapshotId": snapshotId,
-            "selectorPath": selector,
+            "serverId": "abc123",
             "targetDir": restored.path,
         ])
         try expect(reply["ok"] as? Bool == true, "restore failed: \(reply)")
@@ -661,7 +660,54 @@ if homerun_backup_available() == 1 {
         let file = restored.appendingPathComponent("world/level.dat")
         let back = try String(contentsOf: file, encoding: .utf8)
         try expect(back == marker, "restored contents differ:\n  \(back)\n  \(marker)")
-        return "selector \(selector) restored identical bytes"
+        return "identical bytes"
+    }
+
+    check("a snapshot written by another device restores here too") {
+        // The case the whole feature exists for, and the one a selector built
+        // from *our* path would silently fail: the snapshot records the writing
+        // machine's absolute path, which on a desktop looks nothing like an
+        // iOS container. The engine resolves it from the snapshot instead.
+        let elsewhere = root.appendingPathComponent("another-device/home/you/.homerun/servers/abc123")
+        try FileManager.default.createDirectory(
+            at: elsewhere.appendingPathComponent("world"), withIntermediateDirectories: true)
+        let theirMarker = "written on a different machine — \(UUID().uuidString)"
+        try theirMarker.write(
+            to: elsewhere.appendingPathComponent("world/level.dat"), atomically: true,
+            encoding: .utf8)
+
+        let backup = try callEngine(homerun_backup_run, [
+            "operation": "backup", "repo": repoBlock, "cacheDir": cache.path,
+            "sourceDir": elsewhere.path, "deviceId": "device-b",
+        ])
+        try expect(backup["ok"] as? Bool == true, "the other device's backup failed: \(backup)")
+        let theirSnapshot = backup["snapshotId"] as! String
+
+        let here = root.appendingPathComponent("restored-from-elsewhere")
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "restore", "repo": repoBlock, "cacheDir": cache.path,
+            "snapshotId": theirSnapshot, "serverId": "abc123", "targetDir": here.path,
+        ])
+        try expect(reply["ok"] as? Bool == true, "cross-device restore failed: \(reply)")
+
+        let back = try String(
+            contentsOf: here.appendingPathComponent("world/level.dat"), encoding: .utf8)
+        try expect(back == theirMarker, "restored the wrong world:\n  \(back)")
+        return "a path this device has never seen resolved correctly"
+    }
+
+    check("a snapshot that does not hold this server is refused, and says so") {
+        let reply = try callEngine(homerun_backup_run, [
+            "operation": "restore", "repo": repoBlock, "cacheDir": cache.path,
+            "snapshotId": snapshotId, "serverId": "some-other-server",
+            "targetDir": root.appendingPathComponent("nope").path,
+        ])
+        try expect(reply["ok"] as? Bool == false, "restored a server the snapshot does not hold")
+        let message = reply["message"] as? String ?? ""
+        try expect(
+            message.contains("does not contain this server"),
+            "unhelpful message: \(message)")
+        return "refused, and names what the snapshot does hold"
     }
 
     check("a second backup of an unchanged world adds almost nothing") {

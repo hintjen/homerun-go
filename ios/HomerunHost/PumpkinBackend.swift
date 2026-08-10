@@ -39,6 +39,13 @@ final class PumpkinBackend: ServerBackend {
     private var perfHistory: [(t: Date, memUsedMb: Double?, cpuPercent: Double?, players: Int?)] = []
     private let cpuSampler = CPUSampler()
 
+    private let backups = BackupManager()
+
+    /// Held for the life of one run. By the time the server exits, the
+    /// caller's `ServerConfig` is long gone and the on-stop backup still needs
+    /// the repository credentials and this device's id.
+    private var backupContext: BackupContext?
+
     // MARK: - Lifecycle
 
     func create(serverId: String) throws {
@@ -75,7 +82,31 @@ final class PumpkinBackend: ServerBackend {
         stopRequested = false
         logCursor = 0
         perfHistory.removeAll()
+        backupContext = config.backupContext
         emitState(serverId, .starting)
+
+        // Before anything reads or writes the world, and before the engine
+        // thread exists — a restore loads the whole repository index into
+        // memory, and doing that beside a running Pumpkin is how a phone gets
+        // jetsammed.
+        //
+        // A failure here aborts the launch, which is correct: starting on a
+        // world we have been told is stale is the divergence this exists to
+        // prevent. The state has to be unwound by hand, because nothing has
+        // been started yet for `finish` to tear down.
+        if let backup = config.backupContext {
+            do {
+                try await backups.restoreBeforeLaunch(
+                    serverId: serverId, dir: HostStore.serverDirectory(id: serverId),
+                    context: backup,
+                    onLog: { [weak self] line in self?.onLog?(serverId, line) })
+            } catch {
+                activeServerId = nil
+                backupContext = nil
+                emitState(serverId, .stopped)
+                throw error
+            }
+        }
 
         let port = (config.extra["port"] as? Int).map(UInt16.init) ?? 25565
 
@@ -262,7 +293,37 @@ final class PumpkinBackend: ServerBackend {
         activeServerId = nil
         startedAt = nil
         listeningPort = nil
-        emitState(serverId, state)
+
+        // Every precondition, decided here, *before* the ack.
+        //
+        // The ack below is what opens the backup lease, and the lease has no
+        // timeout — a device that claims it and then finds it has nothing to do
+        // locks every other device out of this world until its own next
+        // `running` ack. So the question "will we back up" is answered once,
+        // in one variable, and the answer is what the ack carries. Android
+        // decides it in two places and leaks the lease on two paths as a
+        // result.
+        //
+        // A crash is never backed up: the world was not shut down cleanly and
+        // pushing it over a good snapshot is how a corrupted save spreads.
+        let context = backupContext
+        backupContext = nil
+        let willBackUp =
+            state != .crashed
+            && context?.settings.backup != nil
+            && BackupFFI.isAvailable
+            && backups.hasLocalWorld(HostStore.serverDirectory(id: serverId))
+
+        emitState(serverId, state, backupInProgress: willBackUp)
+
+        if willBackUp, let context, let repo = context.settings.backup {
+            let dir = HostStore.serverDirectory(id: serverId)
+            Task { [backups] in
+                await backups.backupAfterStop(
+                    serverId: serverId, dir: dir, repo: repo, deviceId: context.deviceId,
+                    onLog: { [weak self] line in self?.onLog?(serverId, line) })
+            }
+        }
     }
 
     var runningServerIds: [String] {

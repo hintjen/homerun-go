@@ -48,6 +48,9 @@ final class BridgeRouter {
     let deepLinks: DeepLinkManager
     let backend: PumpkinBackend
     let deviceRegistrar = DeviceRegistrar()
+    /// Only the lease gate is reached from here; the restore and the on-stop
+    /// backup belong to the backend, which is where a run's start and end are.
+    let backups = BackupManager()
 
     init(deepLinks: DeepLinkManager, backend: PumpkinBackend) {
         self.deepLinks = deepLinks
