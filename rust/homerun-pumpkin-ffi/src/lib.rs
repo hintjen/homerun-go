@@ -39,9 +39,15 @@ pub mod state;
 #[cfg(target_os = "android")]
 pub mod jni_bridge;
 
-// `homerun-core`'s shared decisions, reachable from Kotlin. Separate from
-// `jni_bridge` because it wraps something different: that adapts this crate's
-// engine, this adapts a crate that knows nothing about engines.
+// `homerun-core`'s shared decisions. Separate from `jni_bridge` because it
+// wraps something different: that adapts this crate's engine, this adapts a
+// crate that knows nothing about engines.
+//
+// Built everywhere, because both hosts reach the same dispatch — Android via
+// the JNI adapter below, iOS via `homerun_core_call`. Compiling it on the host
+// too is what lets its tests run under plain `cargo test`.
+pub mod core_dispatch;
+
 #[cfg(target_os = "android")]
 pub mod core_bridge;
 
@@ -62,6 +68,48 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(30);
 #[no_mangle]
 pub extern "C" fn homerun_abi_version() -> u32 {
     FFI_ABI_VERSION
+}
+
+/// Call into `homerun-core` — the C surface Android reaches over JNI.
+///
+/// `method` and `args` are NUL-terminated UTF-8; `args` is a JSON object. The
+/// reply is a heap-allocated JSON string the caller **must** release with
+/// [`homerun_free_string`], shaped `{"ok":true,"value":…}` or
+/// `{"ok":false,"error":"…"}`.
+///
+/// Errors are verdicts written for players — "Homerun cannot host forge servers
+/// on this device yet" — so a host should surface the text rather than reword
+/// it. Fix the wording in the core, where every platform shares it.
+///
+/// Null is returned only if the reply could not be allocated. Nothing here
+/// panics: [`core_dispatch::call`] contains its own `catch_unwind`, and a
+/// panic arrives as an ordinary error envelope.
+///
+/// # Safety
+/// `method` and `args` must be valid NUL-terminated strings for the duration
+/// of the call. Passing null for either yields an error envelope rather than
+/// dereferencing it.
+#[no_mangle]
+pub unsafe extern "C" fn homerun_core_call(
+    method: *const c_char,
+    args: *const c_char,
+) -> *mut c_char {
+    // A null or non-UTF-8 argument is the host's bug, but answering it with the
+    // same envelope as any other failure keeps hosts to a single parse path.
+    let read = |ptr: *const c_char| -> Option<&str> {
+        if ptr.is_null() {
+            return None;
+        }
+        CStr::from_ptr(ptr).to_str().ok()
+    };
+
+    let (Some(method), Some(args)) = (read(method), read(args)) else {
+        return out(
+            json!({ "ok": false, "error": "method and arguments must be UTF-8 text" }).to_string(),
+        );
+    };
+
+    out(core_dispatch::call(method, args))
 }
 
 /// Release a string returned by this library. Passing anything else is UB.
@@ -254,6 +302,48 @@ mod tests {
     #[test]
     fn freeing_null_is_a_no_op() {
         unsafe { homerun_free_string(ptr::null_mut()) };
+    }
+
+    /// The surface iOS links against, exercised the way Swift will use it:
+    /// two C strings in, one owned C string out, freed by the caller.
+    #[test]
+    fn the_core_is_reachable_over_the_c_abi() {
+        let method = CString::new("game.classify").unwrap();
+        let args = CString::new(
+            r#"{"line":"[12:00:00] [Server thread/INFO]: Done (1.0s)! For help, type \"help\""}"#,
+        )
+        .unwrap();
+
+        let reply = take(unsafe { homerun_core_call(method.as_ptr(), args.as_ptr()) });
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["value"]["ready"], true);
+    }
+
+    /// Both hosts must see the same wording for the same mistake, so the C
+    /// surface reports an unknown method exactly as JNI does.
+    #[test]
+    fn an_unknown_method_over_c_names_itself() {
+        let method = CString::new("does.not.exist").unwrap();
+        let args = CString::new("{}").unwrap();
+
+        let reply = take(unsafe { homerun_core_call(method.as_ptr(), args.as_ptr()) });
+        assert_eq!(reply["ok"], false);
+        assert!(reply["error"].as_str().unwrap().contains("does.not.exist"));
+    }
+
+    /// A host bug must not become a dereference of null.
+    #[test]
+    fn null_arguments_to_the_core_are_an_error_not_a_crash() {
+        let method = CString::new("game.list").unwrap();
+
+        for (m, a) in [
+            (ptr::null(), ptr::null()),
+            (method.as_ptr(), ptr::null()),
+            (ptr::null(), method.as_ptr()),
+        ] {
+            let reply = take(unsafe { homerun_core_call(m, a) });
+            assert_eq!(reply["ok"], false, "null input must be an error envelope");
+        }
     }
 
     #[test]

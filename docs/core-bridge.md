@@ -199,20 +199,25 @@ problem this exists to solve.
 
 ## iOS
 
-Not wired, and it needs more than wiring.
+**Wired.** `homerun_core_call(method, args)` is the C-ABI sibling of the JNI
+entry, and both call the *same* `core_dispatch::call` — so the platforms cannot
+disagree about what a method means, only about how a string crosses the
+boundary.
 
-`homerun-core` gets **compiled** into the staticlib iOS links, because the FFI
-crate depends on it — but it exports no `#[no_mangle] extern "C"` functions, so
-there is no C surface to call. `core_bridge` is the only way in and it is
-`#[cfg(target_os = "android")]`, because it speaks JNI.
+```c
+char *homerun_core_call(const char *method, const char *args);
+void  homerun_free_string(char *ptr);
+```
 
-So iOS needs a sibling to `core_bridge`: the same dispatch behind
-`extern "C" fn homerun_core_call(method, args) -> *mut c_char`, with the
-existing `homerun_free_string` releasing the reply. The dispatch function
-itself is platform-neutral and could be lifted out of `core_bridge.rs`
-unchanged — it is only the JNI string marshalling around it that is Android's.
+Declared in `ios/HomerunHost/homerun_ffi.h`; add it to the bridging header.
+`ios/HomerunHost/Core.swift` has typed wrappers mirroring `Core.kt` — prefer
+those to calling the C function directly, and note that the reply must be freed
+on every path, which `Core.call` does with a `defer`.
 
-That is a small piece of work, but it is work, and none of it is worth doing
-before iOS runs something real: it still uses `StubEngine`, and the Pumpkin
-fork has never been executed through the FFI by anyone. Designing the iOS
-surface around an engine nobody has run would be building on an assumption.
+What is *not* done: iOS still uses `StubEngine`, and the Pumpkin fork has never
+been executed through the FFI by anyone. The shared decisions are reachable;
+the engine underneath them is not yet real.
+
+Pumpkin also needs its own artifact resolution rather than borrowing
+`minecraft.jar.*` — see the note in `game.rs` about why artifact resolution is
+deliberately outside the `Game` trait.

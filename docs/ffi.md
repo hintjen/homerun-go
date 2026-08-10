@@ -31,9 +31,14 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `log_buffer.rs` | Bounded console buffer with monotonic cursors. |
 | `preflight.rs` | Port availability, checked before the engine can exit the process. |
 | `crash.rs` | Panic hook, crash reports, last-panic capture. |
+| `core_dispatch.rs` | `homerun-core`'s shared decisions, with no platform in it. |
+| `core_bridge.rs` | The JNI adapter around `core_dispatch` (Android only). |
 
 Everything except `Engine::run` is platform-independent and unit-tested on
-any machine — 36 tests, no device and no Pumpkin required.
+any machine — 50 tests, no device and no Pumpkin required.
+
+`core_dispatch` is deliberately built on every target, not just the two mobile
+ones, which is what lets its dispatch tests run under plain `cargo test`.
 
 ## Calling convention
 
@@ -45,6 +50,9 @@ the server's entire console over a long session.
 ```c
 uint32_t homerun_abi_version(void);
 void     homerun_free_string(char *ptr);
+
+/* The shared decisions. Method catalogue in docs/core-bridge.md. */
+char *homerun_core_call(const char *method, const char *args);
 
 char *homerun_server_start(const char *server_id, const char *data_dir, uint16_t port);
 char *homerun_server_stop(void);
