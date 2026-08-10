@@ -1,6 +1,7 @@
 package app.gethomerun.mobile
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -177,6 +178,177 @@ object Core {
             put("intentional", intentional)
             put("code", code)
         }).jsonPrimitive.content
+
+    /** One step of a launch, and whether a pending stop is honoured before it. */
+    data class Step(val name: String, val checkpoint: Boolean)
+
+    /**
+     * The order a launch runs in.
+     *
+     * The host performs the steps; it does not choose their order. Several are
+     * load-bearing in ways that only show up much later — the jar must land
+     * before the restore decides whether a world is on disk, the restore must
+     * precede the settings it would otherwise overwrite, and the tunnel must
+     * be up before `running` is announced or the API marks a service healthy
+     * that no player can reach. `homerun-core::launch` has the reasoning and
+     * the tests.
+     */
+    fun launchPlan(backups: Boolean, settings: Boolean, tunnel: Boolean): List<Step> =
+        (call("launch.plan", buildJsonObject {
+            put("backups", backups)
+            put("settings", settings)
+            put("tunnel", tunnel)
+        }) as JsonArray).map {
+            Step(
+                name = it.jsonObject["step"]!!.jsonPrimitive.content,
+                checkpoint = it.jsonObject["checkpoint"]?.jsonPrimitive?.boolean == true,
+            )
+        }
+
+    /**
+     * Who owns a server right now, and what its last exit meant.
+     *
+     * The host reports what only it can see — a call arrived, a process
+     * spawned, a process exited — and the core answers what any of it means.
+     * Nothing here decides anything; every branch below is the core's.
+     *
+     * # Why this is not a set of booleans in the backend any more
+     *
+     * It was, and the same bug was written three times in one week: a server
+     * that is *starting* or *stopping* is still this device's, and reporting
+     * otherwise makes the UI's reconcile loop take a launch for a remote start
+     * and reprovision the gateway underneath it — a tunnel that handshakes and
+     * carries nothing. `homerun-core::lifecycle` has that reasoning, and its
+     * tests; this is the wire to it.
+     *
+     * State is opaque and lives here, exactly as [Handshake] does: it goes in,
+     * a new one comes back, and there is no native handle to free. All access
+     * is synchronised because starts arrive on the bridge's coroutines while
+     * exits arrive on the process-watcher thread.
+     */
+    class Lifecycle(private val concurrency: String) {
+        private var state: JsonObject? = null
+
+        /** Everything the core answers about a server after an event. */
+        data class View(
+            val verdict: String?,
+            val serverId: String?,
+            val activeIds: List<String>,
+            val runningIds: List<String>,
+            val state: String,
+            val shouldAbandon: Boolean,
+            /** A previous engine is still alive; do not spawn until it is gone. */
+            val awaitPreviousExit: Boolean,
+            /** Starting cancels any on-stop backup of this server still running. */
+            val supersedesOnStopBackup: Boolean,
+            val intentional: Boolean,
+            val superseded: Boolean,
+            /** Only answered when a state was asked about; true otherwise. */
+            val mayAnnounce: Boolean,
+        )
+
+        @Synchronized
+        private fun apply(event: String, serverId: String, code: Int? = null): View {
+            val reply = call("lifecycle.apply", buildJsonObject {
+                state?.let { put("lifecycle", it) }
+                put("concurrency", concurrency)
+                put("event", event)
+                put("serverId", serverId)
+                code?.let { put("code", it) }
+            }).jsonObject
+            state = reply["lifecycle"]!!.jsonObject
+            return reply.toView()
+        }
+
+        private fun JsonObject.toView() = View(
+            verdict = this["verdict"]?.jsonPrimitive?.contentOrNull,
+            serverId = this["serverId"]?.jsonPrimitive?.contentOrNull,
+            activeIds = ids("activeIds"),
+            runningIds = ids("runningIds"),
+            state = this["state"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            shouldAbandon = this["shouldAbandon"]?.jsonPrimitive?.boolean == true,
+            awaitPreviousExit = this["awaitPreviousExit"]?.jsonPrimitive?.boolean == true,
+            supersedesOnStopBackup =
+                this["supersedesOnStopBackup"]?.jsonPrimitive?.boolean == true,
+            intentional = this["intentional"]?.jsonPrimitive?.boolean == true,
+            superseded = this["superseded"]?.jsonPrimitive?.boolean == true,
+            mayAnnounce = this["mayAnnounce"]?.jsonPrimitive?.boolean != false,
+        )
+
+        private fun JsonObject.ids(key: String): List<String> =
+            (this[key] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+
+        // --- events ---------------------------------------------------------
+
+        /**
+         * A start call arrived. Call this *first*, before the lookups a start
+         * needs: a server not yet counted active is one the reconcile loop
+         * will try to start for itself.
+         *
+         * Verdict is `proceed`, `alreadyRunning`, or `anotherServerRunning`
+         * (with [View.serverId] naming the one in the way).
+         */
+        fun startRequested(serverId: String): View = apply("startRequested", serverId)
+
+        /** `proceed`, `abandonLaunch` (nothing spawned yet), or `notRunning`. */
+        fun stopRequested(serverId: String): View = apply("stopRequested", serverId)
+
+        /** Always, in a `finally` — whatever the verdict was. */
+        fun callFinished(serverId: String) {
+            apply("callFinished", serverId)
+        }
+
+        fun spawned(serverId: String) {
+            apply("spawned", serverId)
+        }
+
+        fun consoleReady(serverId: String) {
+            apply("consoleReady", serverId)
+        }
+
+        fun abandoned(serverId: String) {
+            apply("abandoned", serverId)
+        }
+
+        /** What the exit meant: state, whether it was asked for, whether it
+         *  belongs to a launch that has since been replaced. */
+        fun exited(serverId: String, code: Int): View = apply("exited", serverId, code)
+
+        // --- queries --------------------------------------------------------
+
+        @Synchronized
+        private fun query(serverId: String, announcing: String? = null): View =
+            call("lifecycle.query", buildJsonObject {
+                state?.let { put("lifecycle", it) }
+                put("concurrency", concurrency)
+                put("serverId", serverId)
+                announcing?.let { put("state", it) }
+            }).jsonObject.toView()
+
+        /** `native-server-active-ids`: running, coming up, or winding down. */
+        fun activeIds(): List<String> = query("").activeIds
+
+        fun runningIds(): List<String> = query("").runningIds
+
+        /** True when a launch should give up at its next checkpoint. */
+        fun shouldAbandon(serverId: String): Boolean = query(serverId).shouldAbandon
+
+        /**
+         * True when a previous engine is still alive and this launch must wait
+         * before spawning. Asked immediately before spawning, not at
+         * admission: the outgoing engine usually exits during the new launch's
+         * preparation.
+         */
+        fun awaitPreviousExit(serverId: String): Boolean = query(serverId).awaitPreviousExit
+
+        /** True when starting must cancel an on-stop backup still running. */
+        fun supersedesOnStopBackup(serverId: String): Boolean =
+            query(serverId).supersedesOnStopBackup
+
+        /** False when announcing this would contradict a stop already in flight. */
+        fun mayAnnounce(serverId: String, state: String): Boolean =
+            query(serverId, state).mayAnnounce
+    }
 
     /**
      * One line of wireproxy output against a running count.

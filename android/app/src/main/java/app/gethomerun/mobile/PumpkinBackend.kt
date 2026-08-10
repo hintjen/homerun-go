@@ -99,11 +99,8 @@ class PumpkinBackend(
         if (!NativeServer.available) {
             throw ServerBackendException.Engine("The server engine failed to load on this device.")
         }
-        val running = runningServerIds
-        if (running.isNotEmpty()) {
-            if (running.contains(serverId)) throw ServerBackendException.AlreadyRunning(serverId)
-            throw ServerBackendException.AnotherServerRunning(running.first())
-        }
+        // Admission was decided by the core before this was called, in the
+        // bridge's start handler — see `homerun-core::lifecycle`.
 
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
         currentServerId = serverId
@@ -125,13 +122,22 @@ class PumpkinBackend(
             scope.launch {
                 drainLogs(serverId)
                 stopLogPump()
-                val end = if (ok) ServerState.STOPPED else ServerState.CRASHED
+                // Whether this was a stop or a fall-over is the core's call,
+                // from whether one was asked for — the engine's own `ok` says
+                // only that it unwound cleanly. Exit 0 stands in for a clean
+                // unwind; there is no process code to report here.
+                val verdict = ServerHost.lifecycle.exited(serverId, if (ok) 0 else 1)
                 if (!ok && error != null) Log.e(TAG, "engine exited: $error")
-                transition(serverId, end)
+                transition(
+                    serverId,
+                    if (verdict.state == "crashed") ServerState.CRASHED else ServerState.STOPPED,
+                )
                 currentServerId = null
                 currentPort = null
             }
         }
+        // The engine is up; from here its exit needs judging.
+        ServerHost.lifecycle.spawned(serverId)
 
         // `start` is contracted to return once the server accepts connections,
         // and the bridge has no timeout, so waiting here is correct. The cap
@@ -140,6 +146,7 @@ class PumpkinBackend(
         while (System.currentTimeMillis() < deadline) {
             when (status(serverId)) {
                 ServerState.RUNNING -> {
+                    ServerHost.lifecycle.consoleReady(serverId)
                     transition(serverId, ServerState.RUNNING)
                     return
                 }
@@ -152,7 +159,12 @@ class PumpkinBackend(
         throw ServerBackendException.Engine("The server did not finish starting in time.")
     }
 
-    override suspend fun stop(serverId: String) {
+    /**
+     * [graceful] is unused: the engine's own stop always saves before it
+     * unwinds, and there is no second, harsher way to ask it. The parameter
+     * stays so every backend answers the same question.
+     */
+    override suspend fun stop(serverId: String, graceful: Boolean) {
         if (currentServerId != serverId) throw ServerBackendException.NotRunning(serverId)
         transition(serverId, ServerState.STOPPING)
         // Blocking, and it waits for a world save — never on the main thread.
@@ -169,6 +181,7 @@ class PumpkinBackend(
             val id = currentServerId ?: return emptyList()
             return if (status(id) == ServerState.RUNNING) listOf(id) else emptyList()
         }
+
 
     // -----------------------------------------------------------------------
     // Introspection

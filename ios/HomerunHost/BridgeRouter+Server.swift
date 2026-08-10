@@ -27,6 +27,12 @@ extension BridgeRouter {
             return ["success": true, "alreadyRunning": true]
         }
 
+        // From here until this call returns, the host is bringing this server
+        // up and has to say so when asked for its active ids — see
+        // `BridgeRouter.inFlight` for what it costs when it doesn't.
+        beginTransition(serverId)
+        defer { endTransition(serverId) }
+
         let raw = payload["config"] as? [String: Any] ?? [:]
         var config = ServerConfig(
             name: raw["name"] as? String ?? serverId,
@@ -63,6 +69,14 @@ extension BridgeRouter {
         guard let serverId = (params as? [String: Any])?["serverId"] as? String else {
             return ["success": false, "error": "Homerun could not tell which server to stop."]
         }
+
+        // A stopping server is still this device's. The dashboard PATCHes
+        // `stopped` only after this call returns, so until then the API still
+        // reads `running` — and a host that reports itself idle in that window
+        // gets the server restarted underneath it. See `BridgeRouter.inFlight`.
+        beginTransition(serverId)
+        defer { endTransition(serverId) }
+
         do {
             try await backend.stop(serverId: serverId)
             return ["success": true]
@@ -102,8 +116,10 @@ extension BridgeRouter {
         }
     }
 
+    /// Running *or coming up*. The second half is not a nicety: see
+    /// `BridgeRouter.startsInFlight`.
     func nativeServerActiveIds(_ params: Any?) async throws -> Any? {
-        backend.runningServerIds
+        activeServerIds
     }
 
     // MARK: - Metrics (bare-string params)

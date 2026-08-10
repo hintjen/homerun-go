@@ -34,6 +34,17 @@ object ServerHost {
     lateinit var backend: ServerBackend
         private set
 
+    /**
+     * Who owns a server right now — the bookkeeping the bridge and the backend
+     * both consult, answered by `homerun-core::lifecycle`.
+     *
+     * Process-scoped like the backend, and for the same reason: a page reload
+     * must not lose track of a running server. `"one"` because this host runs
+     * a single server at a time, which is `multipleRunningServers: false` in
+     * the capabilities the UI reads.
+     */
+    val lifecycle = Core.Lifecycle("one")
+
     interface Listener {
         fun onLog(serverId: String, line: String) {}
         fun onStateChanged(serverId: String, state: ServerState, backupInProgress: Boolean = false) {}

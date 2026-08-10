@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{self, jar, settings};
-use homerun_core::{backup, game, link, properties, state, tunnel};
+use homerun_core::{backup, game, launch, lifecycle, link, properties, state, tunnel};
 
 /// Dispatch one call and render the reply envelope.
 ///
@@ -72,6 +72,50 @@ fn pairs(value: &Value, method: &str) -> Result<Vec<(String, String)>, String> {
             _ => Err(format!("\"{method}\": each entry must be [key, value]")),
         })
         .collect()
+}
+
+/// Fold `extra`'s keys into `into`. Both are always objects here — the callers
+/// build them — so a non-object is a bug in this file, not bad input.
+fn merge(into: &mut Value, extra: Value) {
+    if let (Some(target), Value::Object(source)) = (into.as_object_mut(), extra) {
+        target.extend(source);
+    }
+}
+
+/// The caller's lifecycle state, or a fresh one.
+///
+/// `concurrency` is only consulted when there is nothing to resume from: it
+/// belongs to the host's capabilities, not to a moment in time, and reading it
+/// on every call would let a host silently change the rules mid-flight.
+fn load_lifecycle(args: &Value) -> Result<lifecycle::Lifecycle, String> {
+    match args.get("lifecycle") {
+        Some(v) if !v.is_null() => {
+            serde_json::from_value(v.clone()).map_err(|e| format!("bad lifecycle: {e}"))
+        }
+        _ => {
+            let concurrency = match args.get("concurrency").and_then(|v| v.as_str()) {
+                Some("many") => lifecycle::Concurrency::Many,
+                // One is the safe default: a host that runs several servers
+                // and forgets to say so gets a refusal it will notice, where
+                // the reverse would be a second JVM on a phone.
+                _ => lifecycle::Concurrency::One,
+            };
+            Ok(lifecycle::Lifecycle::new(concurrency))
+        }
+    }
+}
+
+/// The state to carry forward, plus the questions every caller asks next.
+fn lifecycle_view(life: &lifecycle::Lifecycle, id: &str) -> Result<Value, String> {
+    Ok(json!({
+        "lifecycle": serde_json::to_value(life).map_err(|e| e.to_string())?,
+        "activeIds": life.active_ids(),
+        "runningIds": life.running_ids(),
+        "state": serde_json::to_value(life.state(id)).map_err(|e| e.to_string())?,
+        "shouldAbandon": life.should_abandon(id),
+        "awaitPreviousExit": life.await_previous_exit(id),
+        "supersedesOnStopBackup": life.supersedes_on_stop_backup(id),
+    }))
 }
 
 /// The game a call is about.
@@ -380,6 +424,89 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 "giveUp": give_up,
                 "recovered": watch.recovered(),
             }))
+        }
+
+        // --- the order a launch happens in --------------------------------
+        //
+        // Returns a list; the host runs it. Every step is something only a
+        // platform can do, but *which comes next* is not, and both hosts had
+        // the sequence written out longhand.
+        "launch.plan" => {
+            let inputs = launch::Inputs {
+                backups: args
+                    .get("backups")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                settings: args
+                    .get("settings")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                tunnel: args.get("tunnel").and_then(|v| v.as_bool()).unwrap_or(false),
+            };
+            let steps: Vec<Value> = launch::plan(inputs)
+                .into_iter()
+                .map(|step| {
+                    json!({
+                        "step": serde_json::to_value(step).unwrap_or(Value::Null),
+                        "checkpoint": step.is_checkpoint(),
+                    })
+                })
+                .collect();
+            Ok(Value::Array(steps))
+        }
+
+        // --- who owns a server right now ----------------------------------
+        //
+        // Stateful, and the state lives with the caller: `lifecycle` goes in,
+        // a new `lifecycle` comes back, exactly as `state.handshake` does with
+        // its watch. Nothing is retained here, so there is no handle to leak
+        // and no second copy to disagree with the host's.
+        "lifecycle.apply" => {
+            let mut life = load_lifecycle(&args)?;
+            let id = text("serverId")?;
+            let mut reply = json!({});
+
+            match text("event")?.as_str() {
+                "startRequested" => {
+                    reply =
+                        serde_json::to_value(life.start_requested(&id)).map_err(|e| e.to_string())?
+                }
+                "stopRequested" => {
+                    reply =
+                        serde_json::to_value(life.stop_requested(&id)).map_err(|e| e.to_string())?
+                }
+                "callFinished" => life.call_finished(&id),
+                "spawned" => life.spawned(&id),
+                "consoleReady" => life.console_ready(&id),
+                "abandoned" => life.abandoned(&id),
+                "exited" => {
+                    let code = args.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
+                    reply = serde_json::to_value(life.exited(&id, code))
+                        .map_err(|e| e.to_string())?
+                }
+                other => return Err(format!("\"{method}\": unknown event \"{other}\"")),
+            }
+
+            // The answer plus the queries a caller always wants next, in one
+            // round trip. A host that had to ask separately could act on a
+            // list from before its own event landed.
+            merge(&mut reply, lifecycle_view(&life, &id)?);
+            Ok(reply)
+        }
+
+        "lifecycle.query" => {
+            let life = load_lifecycle(&args)?;
+            let id = optional_text("serverId").unwrap_or_default();
+            let mut view = lifecycle_view(&life, &id)?;
+            if let Some(raw) = args.get("state") {
+                let state: state::State =
+                    serde_json::from_value(raw.clone()).map_err(|e| format!("bad state: {e}"))?;
+                merge(
+                    &mut view,
+                    json!({ "mayAnnounce": life.may_announce(&id, state) }),
+                );
+            }
+            Ok(view)
         }
 
         // --- settings -----------------------------------------------------
@@ -750,5 +877,194 @@ mod tests {
     #[test]
     fn an_unknown_backup_operation_is_refused() {
         assert!(err("backup.stateReport", json!({ "operation": "sync" })).contains("sync"));
+    }
+
+    // --- lifecycle --------------------------------------------------------
+
+    /// Drive one event and hand back the whole reply, carrying the state
+    /// forward exactly as a host does.
+    fn step(life: &Value, event: &str, id: &str, extra: Option<Value>) -> Value {
+        let mut args = json!({ "lifecycle": life, "event": event, "serverId": id });
+        if let Some(Value::Object(more)) = extra {
+            args.as_object_mut().unwrap().extend(more);
+        }
+        ok("lifecycle.apply", args)
+    }
+
+    /// The whole point of the module, across the boundary: a server is this
+    /// device's from the moment a start arrives until its process is gone.
+    #[test]
+    fn a_server_is_active_across_the_ffi_from_start_to_exit() {
+        // No lifecycle yet — the first call creates one.
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "s" }),
+        );
+        assert_eq!(r["verdict"], "proceed");
+        assert_eq!(r["activeIds"], json!(["s"]));
+        assert_eq!(r["runningIds"], json!([]), "active is not running");
+
+        let r = step(&r["lifecycle"], "spawned", "s", None);
+        let r = step(&r["lifecycle"], "consoleReady", "s", None);
+        // The start call returns once the server is up — this is the host's
+        // `finally`, and the server stays active on the strength of its live
+        // engine alone.
+        let r = step(&r["lifecycle"], "callFinished", "s", None);
+        assert_eq!(r["runningIds"], json!(["s"]));
+        assert_eq!(r["state"], "running");
+        assert_eq!(r["activeIds"], json!(["s"]));
+
+        // A stop, and the whole graceful shutdown that follows. The console
+        // is up, so it can be asked to save rather than terminated.
+        let r = step(&r["lifecycle"], "stopRequested", "s", None);
+        assert_eq!(r["verdict"], "graceful");
+        assert_eq!(
+            r["activeIds"],
+            json!(["s"]),
+            "still ours while the world saves"
+        );
+
+        let r = step(&r["lifecycle"], "exited", "s", Some(json!({ "code": 0 })));
+        assert_eq!(r["state"], "stopped");
+        assert_eq!(r["intentional"], true);
+        assert_eq!(r["superseded"], false);
+
+        let r = step(&r["lifecycle"], "callFinished", "s", None);
+        assert_eq!(r["activeIds"], json!([]));
+    }
+
+    #[test]
+    fn a_termination_after_a_stop_request_is_not_a_crash() {
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "s" }),
+        );
+        let r = step(&r["lifecycle"], "spawned", "s", None);
+        // Still generating terrain — no console to hear `stop`, so it is
+        // terminated rather than waited on.
+        let r = step(&r["lifecycle"], "stopRequested", "s", None);
+        assert_eq!(r["verdict"], "terminate");
+
+        let r = step(&r["lifecycle"], "exited", "s", Some(json!({ "code": 143 })));
+        assert_eq!(r["state"], "stopped");
+        assert_eq!(r["intentional"], true);
+    }
+
+    #[test]
+    fn a_stop_before_the_engine_exists_tells_the_launch_to_abandon() {
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "s" }),
+        );
+        let r = step(&r["lifecycle"], "stopRequested", "s", None);
+        assert_eq!(r["verdict"], "abandonLaunch");
+        assert_eq!(r["shouldAbandon"], true);
+    }
+
+    #[test]
+    fn one_server_at_a_time_names_the_one_in_the_way() {
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "first" }),
+        );
+        let r = step(&r["lifecycle"], "startRequested", "second", None);
+        assert_eq!(r["verdict"], "anotherServerRunning");
+        assert_eq!(r["serverId"], "first");
+    }
+
+    /// `concurrency` is read only when there is no state to resume, so a host
+    /// cannot change the rules halfway through a server's life.
+    #[test]
+    fn a_many_host_runs_several_at_once() {
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "a", "concurrency": "many" }),
+        );
+        let r = step(&r["lifecycle"], "startRequested", "b", None);
+        assert_eq!(r["verdict"], "proceed");
+        assert_eq!(r["activeIds"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn a_query_answers_without_changing_anything() {
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "s" }),
+        );
+        let r = step(&r["lifecycle"], "spawned", "s", None);
+        let r = step(&r["lifecycle"], "stopRequested", "s", None);
+
+        let view = ok(
+            "lifecycle.query",
+            json!({ "lifecycle": r["lifecycle"], "serverId": "s", "state": "running" }),
+        );
+        assert_eq!(
+            view["mayAnnounce"], false,
+            "a stopping server is never announced running"
+        );
+        assert_eq!(view["activeIds"], json!(["s"]));
+        assert_eq!(view["lifecycle"], r["lifecycle"], "a query mutates nothing");
+    }
+
+    /// The order the Android host actually runs, pinned against the core's.
+    ///
+    /// This is the point of the module: the host may add platform detail
+    /// around a step, but if it reorders one relative to another, this fails
+    /// rather than the reordering surfacing months later as a world that
+    /// downloaded itself again or a green card for an unreachable server.
+    #[test]
+    fn the_plan_is_the_order_the_hosts_run() {
+        let steps = ok(
+            "launch.plan",
+            json!({ "backups": true, "settings": true, "tunnel": true }),
+        );
+        let names: Vec<&str> = steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["step"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "cancelOnStopBackup",
+                "announceStarting",
+                "beginResolveTunnel",
+                "ensureRuntime",
+                "ensureJar",
+                "acceptEula",
+                "resolveMainClass",
+                "awaitPreviousExit",
+                "restoreWorld",
+                "writeSettings",
+                "spawn",
+                "awaitConsole",
+                "openTunnel",
+                "announceRunning",
+            ]
+        );
+
+        // And the checkpoints travel with the steps, so a host does not have
+        // to remember which ones a stop must be honoured before.
+        let checkpoints: Vec<&str> = steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["checkpoint"] == true)
+            .map(|s| s["step"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            checkpoints,
+            vec!["restoreWorld", "spawn", "openTunnel", "announceRunning"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_lifecycle_event_is_refused_by_name() {
+        let message = err(
+            "lifecycle.apply",
+            json!({ "event": "restarted", "serverId": "s" }),
+        );
+        assert!(message.contains("restarted"), "{message}");
     }
 }

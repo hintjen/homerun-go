@@ -173,7 +173,7 @@
       "channel": "native-server-active-ids",
       "kind": "invoke",
       "tier": "core",
-      "note": "One-running-server hosts return 0 or 1 id."
+      "note": "Running OR coming up: a start the host has accepted and not finished counts, from the moment the call arrives. The UI's reconcile loop reads a missing id as a start issued from another device and asks the API to force_link_up, which regenerates the gateway keys under a launch that already resolved its tunnel config — the tunnel then connects and delivers nothing. One-running-server hosts return 0 or 1 id."
     },
     {
       "channel": "native-server-get-uptime",

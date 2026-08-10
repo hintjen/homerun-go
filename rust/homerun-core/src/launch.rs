@@ -1,0 +1,273 @@
+//! The order a launch happens in.
+//!
+//! # Why an order needs owning
+//!
+//! [`crate::lifecycle`] settled *who owns a server* and *what an exit meant*.
+//! This settles the other half: the sequence a launch runs, and which points
+//! in it are safe to abandon at. Both hosts had that sequence written out
+//! longhand, and the order is not arbitrary — several steps are load-bearing
+//! in ways that are invisible until they are wrong:
+//!
+//!  - **[`Step::EnsureJar`] precedes [`Step::RestoreWorld`].** A restore
+//!    decides what to do by asking whether a world is on disk, so it must not
+//!    run before the directory has been populated. Getting this backwards
+//!    reads as "no local world" on a device that has one.
+//!  - **[`Step::RestoreWorld`] precedes [`Step::WriteSettings`].** Settings
+//!    are written into files inside the server directory; a restore that
+//!    landed afterwards would overwrite them with the snapshot's copies.
+//!  - **[`Step::OpenTunnel`] precedes [`Step::AnnounceRunning`].** A server
+//!    accepting connections on loopback is not a server anyone can join.
+//!    Announcing first makes the API mark the service healthy and the UI show
+//!    a green card for a server no player can reach — the desktop learned this
+//!    the same way.
+//!  - **[`Step::AwaitPreviousExit`] precedes everything that writes the server
+//!    directory.** A restart is admitted while the outgoing JVM is still
+//!    saving its world. The desktop waits immediately before spawning, which
+//!    suffices for it — but a mobile launch *restores a world* first, and
+//!    writing that directory while the previous process still holds it is the
+//!    corruption the wait exists to prevent. So it sits ahead of
+//!    [`Step::RestoreWorld`], not merely ahead of [`Step::Spawn`].
+//!
+//!    Found by making a host walk this plan: the Android launch already waited
+//!    in the right place, and the plan disagreed with it.
+//!
+//! # What this is not
+//!
+//! Not an executor. It returns a list; the host runs it, because every step is
+//! something only a platform can do — unpack a runtime, download a jar, spawn
+//! a process. What the host stops doing is *deciding what comes next*.
+
+use serde::{Deserialize, Serialize};
+
+/// What a launch needs to know before it can be planned.
+///
+/// Deliberately three booleans rather than the whole config: the plan turns on
+/// what is *present*, not on what anything is set to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Inputs {
+    /// This server has a backup repository and this device is registered.
+    pub backups: bool,
+    /// The API returned environment variables to write into the world's files.
+    pub settings: bool,
+    /// This host can build a tunnel — false leaves a loopback-only server,
+    /// which is what a desktop with no gateway link has.
+    pub tunnel: bool,
+}
+
+/// One thing a host does, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Step {
+    /// Cancel an on-stop backup of this server that is still running.
+    CancelOnStopBackup,
+    /// Announce `starting`, so the console exists before the slow work — a
+    /// download is minutes, and its progress lines are all the UI can show.
+    AnnounceStarting,
+    /// Begin resolving the tunnel, *without waiting*. The gateway provisions
+    /// asynchronously and the poll runs up to a minute, so it overlaps the
+    /// download and world generation instead of preceding them.
+    BeginResolveTunnel,
+    /// Unpack the bundled runtime if it is not already unpacked.
+    EnsureRuntime,
+    /// Download and verify the server jar.
+    EnsureJar,
+    /// Write `eula=true`, on every launch. There is no acceptance step
+    /// anywhere in the product and the server will not boot without it.
+    AcceptEula,
+    /// Read the jar's `Main-Class`.
+    ResolveMainClass,
+    /// Restore the world if another device holds a newer snapshot.
+    RestoreWorld,
+    /// Write `server.properties` and friends from the API's settings.
+    WriteSettings,
+    /// Wait out a previous engine that has not finished exiting.
+    AwaitPreviousExit,
+    /// Start the process.
+    Spawn,
+    /// Wait for the console to report it is accepting connections.
+    AwaitConsole,
+    /// Await the tunnel begun above and bring wireproxy up. Fatal: a server
+    /// nobody can reach is not a working server, so a failure here stops it.
+    OpenTunnel,
+    /// Only now.
+    AnnounceRunning,
+}
+
+impl Step {
+    /// True when a stop that arrived during the launch must be honoured
+    /// *before* this step rather than after it.
+    ///
+    /// Every step that is expensive or irreversible is a checkpoint. The two
+    /// that matter most are [`Step::Spawn`] — nothing exists yet, so
+    /// abandoning is free — and [`Step::OpenTunnel`], which is the first point
+    /// after a process exists, so a stop landing mid-boot is carried out
+    /// against something rather than forgotten.
+    pub fn is_checkpoint(self) -> bool {
+        matches!(
+            self,
+            Step::RestoreWorld | Step::Spawn | Step::OpenTunnel | Step::AnnounceRunning
+        )
+    }
+}
+
+/// The steps this launch runs, in order.
+pub fn plan(inputs: Inputs) -> Vec<Step> {
+    let mut steps = vec![Step::CancelOnStopBackup, Step::AnnounceStarting];
+
+    // Started early, awaited late — see the module docs.
+    if inputs.tunnel {
+        steps.push(Step::BeginResolveTunnel);
+    }
+
+    steps.extend([
+        Step::EnsureRuntime,
+        Step::EnsureJar,
+        Step::AcceptEula,
+        Step::ResolveMainClass,
+    ]);
+
+    // Before anything writes the server directory — the outgoing JVM may
+    // still be saving into it.
+    steps.push(Step::AwaitPreviousExit);
+
+    // After the jar, because the restore decision asks whether a world is on
+    // disk; before the settings, because a restore would overwrite them.
+    if inputs.backups {
+        steps.push(Step::RestoreWorld);
+    }
+    if inputs.settings {
+        steps.push(Step::WriteSettings);
+    }
+
+    steps.extend([Step::Spawn, Step::AwaitConsole]);
+
+    if inputs.tunnel {
+        steps.push(Step::OpenTunnel);
+    }
+
+    steps.push(Step::AnnounceRunning);
+    steps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full() -> Inputs {
+        Inputs {
+            backups: true,
+            settings: true,
+            tunnel: true,
+        }
+    }
+
+    fn index(steps: &[Step], step: Step) -> usize {
+        steps.iter().position(|s| *s == step).expect("step missing")
+    }
+
+    /// The restore asks whether a world is on disk, so the directory has to be
+    /// populated first. Reversed, a device with a world reports having none
+    /// and pulls the whole thing down again.
+    #[test]
+    fn the_jar_lands_before_the_world_is_restored() {
+        let steps = plan(full());
+        assert!(index(&steps, Step::EnsureJar) < index(&steps, Step::RestoreWorld));
+    }
+
+    /// Settings are files inside the server directory; a restore afterwards
+    /// would replace them with the snapshot's.
+    #[test]
+    fn the_world_is_restored_before_settings_are_written() {
+        let steps = plan(full());
+        assert!(index(&steps, Step::RestoreWorld) < index(&steps, Step::WriteSettings));
+    }
+
+    /// Both must be finished before anything reads them.
+    #[test]
+    fn nothing_is_spawned_until_the_directory_is_final() {
+        let steps = plan(full());
+        let spawn = index(&steps, Step::Spawn);
+        assert!(index(&steps, Step::RestoreWorld) < spawn);
+        assert!(index(&steps, Step::WriteSettings) < spawn);
+    }
+
+    /// A server accepting connections on loopback is not one anyone can join.
+    /// Announcing first shows a green card for a server no player can reach.
+    #[test]
+    fn running_is_announced_only_after_the_tunnel_is_up() {
+        let steps = plan(full());
+        assert!(index(&steps, Step::OpenTunnel) < index(&steps, Step::AnnounceRunning));
+        assert_eq!(*steps.last().unwrap(), Step::AnnounceRunning);
+    }
+
+    /// The tunnel resolve is started early and awaited late, so a gateway that
+    /// takes a minute to provision costs nothing.
+    #[test]
+    fn the_tunnel_is_resolved_alongside_the_download_not_before_it() {
+        let steps = plan(full());
+        let begin = index(&steps, Step::BeginResolveTunnel);
+        assert!(begin < index(&steps, Step::EnsureJar));
+        assert!(begin < index(&steps, Step::OpenTunnel));
+    }
+
+    /// Waited out before anything writes the directory, not merely before
+    /// spawning: a restore into a world the previous process still holds is
+    /// the corruption this exists to prevent.
+    #[test]
+    fn the_previous_engine_is_awaited_before_the_directory_is_written() {
+        let steps = plan(full());
+        let wait = index(&steps, Step::AwaitPreviousExit);
+        assert!(wait < index(&steps, Step::RestoreWorld));
+        assert!(wait < index(&steps, Step::WriteSettings));
+        assert!(wait < index(&steps, Step::Spawn));
+    }
+
+    /// A host without backups, settings or a tunnel still has a valid launch —
+    /// it just does less. This is the desktop's loopback-only case.
+    #[test]
+    fn the_optional_steps_drop_out_cleanly() {
+        let steps = plan(Inputs {
+            backups: false,
+            settings: false,
+            tunnel: false,
+        });
+        assert!(!steps.contains(&Step::RestoreWorld));
+        assert!(!steps.contains(&Step::WriteSettings));
+        assert!(!steps.contains(&Step::BeginResolveTunnel));
+        assert!(!steps.contains(&Step::OpenTunnel));
+        // And the spine is unchanged.
+        assert!(index(&steps, Step::EnsureJar) < index(&steps, Step::Spawn));
+        assert_eq!(*steps.last().unwrap(), Step::AnnounceRunning);
+    }
+
+    /// The cheapest place to notice a stop is before anything was spawned.
+    #[test]
+    fn a_stop_is_checked_before_anything_irreversible() {
+        assert!(Step::Spawn.is_checkpoint());
+        assert!(Step::OpenTunnel.is_checkpoint());
+        assert!(Step::RestoreWorld.is_checkpoint());
+        assert!(!Step::AcceptEula.is_checkpoint());
+    }
+
+    /// A plan with no steps, or one that could spawn twice, is a bug.
+    #[test]
+    fn a_plan_spawns_exactly_once() {
+        for backups in [true, false] {
+            for settings in [true, false] {
+                for tunnel in [true, false] {
+                    let steps = plan(Inputs {
+                        backups,
+                        settings,
+                        tunnel,
+                    });
+                    assert_eq!(
+                        steps.iter().filter(|s| **s == Step::Spawn).count(),
+                        1,
+                        "{backups} {settings} {tunnel}"
+                    );
+                }
+            }
+        }
+    }
+}

@@ -40,6 +40,19 @@ protocol ServerBackend: AnyObject {
     /// Ids currently running. One-running-server hosts return 0 or 1.
     var runningServerIds: [String] { get }
 
+    /// Ids with an engine behind them — running, or on their way down.
+    ///
+    /// Not the same question as `runningServerIds`. A graceful stop saves the
+    /// world before it exits; for that whole window the server is no longer
+    /// *running* but still very much *here*. Report it gone and the UI's
+    /// reconcile loop sees "nothing active locally" against an API
+    /// `target_state` that still reads `running` — the dashboard PATCHes
+    /// `stopped` only once the stop call returns — decides another device
+    /// started it, and `force_link_up`s. That regenerates the gateway keys and
+    /// relaunches the server the user just stopped. Android shipped that bug;
+    /// do not inherit it.
+    var activeServerIds: [String] { get }
+
     // MARK: Introspection
 
     func status(serverId: String) -> ServerState
@@ -70,6 +83,14 @@ protocol ServerBackend: AnyObject {
     /// path, so without this event the UI cannot tell it apart from the player
     /// pressing Stop. Emitted *before* the stop, for the same reason.
     var onNetworkError: ((String, NetworkErrorKind) -> Void)? { get set }
+}
+
+extension ServerBackend {
+    /// A backend whose "running" set already holds an id until its engine is
+    /// genuinely gone needs nothing more. One that drops the id the moment a
+    /// stop begins must override this — read the doc above before deciding
+    /// which you are.
+    var activeServerIds: [String] { runningServerIds }
 }
 
 /// Why a server became unreachable. The shared UI words each one differently.

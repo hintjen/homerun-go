@@ -5,7 +5,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Serialised in the host's own vocabulary — `"running"`, `"stopping"` — so a
+/// state crossing the FFI reads the same as [`State::wire`] and as the bridge
+/// contract. The two must not disagree: a host matching `"Running"` in one
+/// place and `"running"` in another is a rename waiting to break something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum State {
     Stopped,
     Starting,

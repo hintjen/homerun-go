@@ -194,17 +194,56 @@ function launch() {
   adb(["shell", "am", "start", "-n", LAUNCH_ACTIVITY], { stdio: "inherit" });
 }
 
+/**
+ * Every `Homerun*` logcat tag the host declares, read from the source.
+ *
+ * Hardcoding three of them cost real debugging time: `logcat`'s `*:S` silences
+ * everything not named, so the tunnel (HomerunTunnel), the backups
+ * (HomerunBackup) and the server itself (HomerunJava) were invisible while a
+ * tunnel bug was being chased through this very command. A list derived from
+ * the code cannot drift from it — a new `TAG = "HomerunFoo"` is followed the
+ * moment it exists.
+ */
+function hostLogTags() {
+  const dir = path.join(ANDROID_DIR, "app", "src", "main", "java", "app", "gethomerun", "mobile");
+  const tags = new Set();
+  const walk = (at) => {
+    for (const entry of fs.readdirSync(at, { withFileTypes: true })) {
+      const full = path.join(at, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".kt")) {
+        // `TAG\w*` deliberately: MainActivity declares a second one as
+        // TAG_WEB, and that is the WebView console — the last tag you want to
+        // drop.
+        for (const m of fs.readFileSync(full, "utf8").matchAll(/TAG\w*\s*=\s*"(Homerun\w*)"/g)) {
+          tags.add(m[1]);
+        }
+      }
+    }
+  };
+  try {
+    walk(dir);
+  } catch {
+    // Running from a packaged checkout without sources: fall back rather than
+    // leaving the user with no logs at all.
+  }
+  if (tags.size === 0) ["HomerunHost", "HomerunBridge", "HomerunWeb"].forEach((t) => tags.add(t));
+  return [...tags].sort();
+}
+
 function logs() {
   requireDevice();
   adb(["logcat", "-c"], { stdio: "ignore" });
-  console.log("Following HomerunHost / HomerunBridge / HomerunWeb — Ctrl-C to stop.\n");
+  const tags = hostLogTags();
+  console.log(`Following ${tags.join(" / ")} — Ctrl-C to stop.\n`);
   const serial = process.env.ANDROID_SERIAL;
   spawn(
     adbPath(),
     [
       ...(serial ? ["-s", serial] : []),
       "logcat",
-      "HomerunHost:V", "HomerunBridge:V", "HomerunWeb:V", "chromium:E", "AndroidRuntime:E",
+      ...tags.map((t) => `${t}:V`),
+      "chromium:E", "AndroidRuntime:E",
       "*:S",
     ],
     { stdio: "inherit" }

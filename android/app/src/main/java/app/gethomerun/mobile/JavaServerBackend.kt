@@ -56,6 +56,15 @@ class JavaServerBackend(
      */
     private val backupOnStop = java.util.concurrent.ConcurrentHashMap<String, BackupContext>()
 
+    /**
+     * On-stop backups still running, so a relaunch can cancel one.
+     *
+     * A backup outlives the server it backs up — restic reads `world/` long
+     * after the JVM is gone — and the user is entitled to press Start during
+     * it. See [cancelOnStopBackup] for why cancelling is safe.
+     */
+    private val backupJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+
     /** The tunnel lookup, resolved alongside the JVM booting rather than before it. */
     private var tunnelJob: Deferred<WireProxy.Link?>? = null
 
@@ -67,32 +76,25 @@ class JavaServerBackend(
     private var consoleReady = false
 
     /**
-     * A stop has been asked for and has not yet been carried out.
+     * Who owns a server right now, and what its last exit meant.
      *
-     * Deliberately separate from [lastState], which the launch overwrites as
-     * it progresses: a stop arriving mid-startup used to set STOPPING, then
-     * the launch reached RUNNING ten seconds later and clobbered it, so the
-     * exit was classified `intentional=false` and reported as a **crash** —
-     * for a stop the user explicitly asked for. That also skipped the on-stop
-     * backup, which is gated on not-crashed.
+     * Held by [ServerHost] so the bridge and this backend consult one answer,
+     * and computed by `homerun-core::lifecycle` so iOS cannot answer
+     * differently. Everything this backend used to track by hand — a stop
+     * asked for but not yet carried out, which launch a dying process belongs
+     * to, whether an exit was a crash — lives there now, with the tests.
      */
-    @Volatile
-    private var stopRequested = false
+    private val lifecycle: Core.Lifecycle get() = ServerHost.lifecycle
 
     /**
-     * The server whose launch is in flight, claimed before this coroutine can
-     * suspend.
+     * The server whose JVM this backend is holding.
      *
-     * [currentServerId] is not enough on its own: it is only set once the JVM
-     * has been spawned, which is a download and a runtime unpack later. The
-     * UI's reconcile loop calls `native-server-start` on every poll until the
-     * server reports running, so that window used to admit a fresh launch on
-     * each tick — five of them, in the case that found this, all downloading
-     * into the same directory until one renamed the partial file out from
-     * under the others.
+     * Set once the process is spawned, which is a download and a runtime
+     * unpack after the start call arrived — so it is not, and never was, the
+     * answer to "does this device own this server". That question is
+     * [lifecycle]'s, and answering it from this field is what let the reconcile
+     * loop start a second launch on every poll.
      */
-    private var startingId: String? = null
-
     private var currentServerId: String? = null
     private var startedAt: Instant? = null
     private var currentPort: Int? = null
@@ -144,39 +146,13 @@ class JavaServerBackend(
     )
 
     /**
-     * Take the one launch slot this host has, or say who holds it.
-     *
-     * `@Synchronized` and called before the first `suspend` point in [start],
-     * which is the entire point — a check that can suspend between testing and
-     * claiming is not a guard. The desktop marks `pendingStartup` the same way
-     * and for the same reason.
+     * Admission — is this a duplicate, is another server in the way — is
+     * decided by the core before this is ever called, in the bridge's start
+     * handler. Two places asking the same question is how they come to
+     * disagree.
      */
-    @Synchronized
-    private fun claimStart(serverId: String) {
-        val busy = startingId ?: currentServerId
-        if (busy != null) {
-            // The router turns this into { success: true, alreadyRunning: true },
-            // which is what the reconcile loop expects to hear.
-            if (busy == serverId) throw ServerBackendException.AlreadyRunning(serverId)
-            throw ServerBackendException.AnotherServerRunning(busy)
-        }
-        startingId = serverId
-    }
-
-    @Synchronized
-    private fun releaseStart(serverId: String) {
-        if (startingId == serverId) startingId = null
-    }
-
     override suspend fun start(serverId: String, config: ServerConfig) {
-        claimStart(serverId)
-        try {
-            launch(serverId, config)
-        } finally {
-            // By now either the JVM is up and currentServerId holds the slot,
-            // or the launch failed and nothing does.
-            releaseStart(serverId)
-        }
+        launch(serverId, config)
     }
 
     private suspend fun launch(serverId: String, config: ServerConfig) {
@@ -187,12 +163,27 @@ class JavaServerBackend(
 
         val dir = dataDir(serverId)
 
-        // A fresh run: whatever was asked of the previous one is finished.
-        stopRequested = false
+        // The order below is the core's, not this file's. `order.at(...)`
+        // refuses a step that arrives before one the plan puts ahead of it,
+        // and honours a pending stop at the checkpoints the core marks — so a
+        // reordering fails here rather than surfacing months later as a
+        // re-downloaded world or a green card for an unreachable server.
+        val order = LaunchOrder(
+            serverId,
+            Core.launchPlan(
+                backups = config.backupContext != null,
+                settings = config.settingsEnv != null,
+                tunnel = config.resolveTunnel != null,
+            ),
+        )
+
+        order.at("cancelOnStopBackup")
+        if (lifecycle.supersedesOnStopBackup(serverId)) cancelOnStopBackup(serverId)
 
         // Open the console before the slow work, not after: unpacking the
         // runtime and downloading a jar are minutes of a launch, and their
         // progress lines are the only thing the UI can show meanwhile.
+        order.at("announceStarting")
         transition(serverId, ServerState.STARTING)
         reset()
 
@@ -200,6 +191,7 @@ class JavaServerBackend(
         // the peer asynchronously and the poll runs up to a minute, so doing
         // it here overlaps that with the download and the world generating,
         // exactly as the desktop provisions in parallel with Java booting.
+        if (config.resolveTunnel != null) order.at("beginResolveTunnel")
         tunnelJob = config.resolveTunnel?.let { resolve ->
             scope.async { runCatching { resolve() }.getOrNull() }
         }
@@ -207,6 +199,7 @@ class JavaServerBackend(
         // Nothing below has started a process, so a failure here is a launch
         // that did not happen — reported as stopped, with the reason on the
         // call. `crashed` is reserved for a JVM that ran and died.
+        order.at("ensureJar")
         val prepared = runCatching {
             // Blocking the first time — a hundred megabytes out of the APK —
             // and the first start on a device pays for it. The bridge has no
@@ -253,6 +246,13 @@ class JavaServerBackend(
         // nothing to tear down.
         if (abandonIfStopped(serverId)) return
 
+        // A start admitted *during* a stop is a restart, and the core says
+        // whether an outgoing engine still has to be waited for. Asked here,
+        // immediately before spawning, because the old JVM usually exits while
+        // this launch was preparing.
+        order.at("awaitPreviousExit")
+        if (lifecycle.awaitPreviousExit(serverId)) awaitPreviousExit(serverId)
+
         val (javaHome, libjvm, jar, mainClass) = prepared
         val heap = heapMb(config.memoryMb)
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
@@ -268,6 +268,7 @@ class JavaServerBackend(
         // failure here stops the launch rather than starting a server on a
         // world we were told is out of date — quietly diverging two devices is
         // the failure this exists to prevent.
+        if (config.backupContext != null && order.at("restoreWorld")) return
         config.backupContext?.let { backup ->
             backups.restoreBeforeLaunch(
                 serverId = serverId,
@@ -278,6 +279,7 @@ class JavaServerBackend(
             )
         }
 
+        if (config.settingsEnv != null) order.at("writeSettings")
         config.settingsEnv?.let { env ->
             ServerSettingsWriter.apply(
                 serverId = serverId,
@@ -289,6 +291,7 @@ class JavaServerBackend(
             )
         }
 
+        if (order.at("spawn")) return
         val started = withContext(Dispatchers.IO) {
             runCatching {
                 ProcessBuilder(
@@ -362,11 +365,16 @@ class JavaServerBackend(
         process = started
         currentServerId = serverId
         currentPort = port
+        // There is now something to stop, and something whose exit will need
+        // judging. The core pins this launch's generation here, so a process
+        // that outlives a stop-then-restart is recognised as the old one's.
+        lifecycle.spawned(serverId)
         startLogPump(serverId, started)
 
         // "Done" is the JVM telling us it is accepting connections. Waiting
         // for the process to merely exist would report a server that cannot
         // be joined yet; the bridge has no timeout so waiting is correct.
+        order.at("awaitConsole")
         val ready = withTimeoutOrNull(START_TIMEOUT_MS) {
             while (true) {
                 if (!started.isAlive) return@withTimeoutOrNull false
@@ -390,7 +398,7 @@ class JavaServerBackend(
         // now, so it can be asked politely rather than killed. Reached when
         // the stop arrived before `process` was assigned — after that, `stop`
         // waits for the console itself.
-        if (stopRequested) {
+        if (lifecycle.shouldAbandon(serverId)) {
             Log.i(TAG, "$serverId: honouring a stop that arrived during startup")
             tunnelJob?.cancel()
             tunnelJob = null
@@ -401,12 +409,14 @@ class JavaServerBackend(
             return
         }
 
+        if (config.resolveTunnel != null) order.at("openTunnel")
         openTunnel(serverId, dir, port)
 
         // Only now. The server accepting connections on loopback is not the
         // same as players being able to reach it, and reporting `running`
         // before the tunnel is up is how a server looks healthy to everyone
         // except the people trying to join. The desktop learned this too.
+        order.at("announceRunning")
         startedAt = Instant.now()
         transition(serverId, ServerState.RUNNING)
     }
@@ -462,13 +472,81 @@ class JavaServerBackend(
     }
 
     /**
+     * Walks the core's launch plan alongside the launch.
+     *
+     * Enforces *relative* order rather than announcing every step: a step may
+     * be reached without the host narrating the ones the core folds into it,
+     * but never before something the plan puts ahead of it. That is exactly
+     * the property `homerun-core::launch`'s tests pin.
+     *
+     * Also honours a pending stop at the checkpoints the core marks, which is
+     * what the scattered `abandonIfStopped` calls were doing by hand and less
+     * reliably.
+     */
+    private inner class LaunchOrder(
+        private val serverId: String,
+        private val steps: List<Core.Step>,
+    ) {
+        private var next = 0
+
+        /** True when the caller should give up: a stop is waiting. */
+        fun at(name: String): Boolean {
+            val index = steps.indexOfFirst { it.name == name }
+            require(index >= 0) { "launch step \"$name\" is not in the plan" }
+            require(index >= next) {
+                "launch step out of order: $name comes after ${steps[next - 1].name}"
+            }
+            next = index + 1
+            return if (steps[index].checkpoint) abandonIfStopped(serverId) else false
+        }
+    }
+
+    /**
+     * Carry out the core's decision to supersede an on-stop backup: cancel the
+     * coroutine, which kills restic's child process on its way out.
+     *
+     * The reasoning — why this is safe, and why no backup state is reported —
+     * is `homerun-core::lifecycle::supersedes_on_stop_backup`.
+     */
+    private fun cancelOnStopBackup(serverId: String) {
+        val job = backupJobs.remove(serverId) ?: return
+        if (!job.isActive) return
+        Log.i(TAG, "$serverId: cancelling the on-stop backup — this device is relaunching")
+        note(serverId, "[Backup] Starting again — the backup in progress was cancelled.")
+        job.cancel()
+    }
+
+    /**
+     * Wait out the JVM a previous launch left behind, having been told by the
+     * core that there is one. Bounded, because a wedged process must not block
+     * a start for ever; refusing is better than spawning a second server into
+     * one directory.
+     */
+    private suspend fun awaitPreviousExit(serverId: String) {
+        val previous = process ?: return
+        if (!previous.isAlive) return
+        Log.i(TAG, "$serverId: waiting for the previous server to finish stopping")
+        val gone = withTimeoutOrNull(PREVIOUS_EXIT_WAIT_MS) {
+            while (previous.isAlive) delay(POLL_MS)
+            true
+        } == true
+        if (!gone) {
+            Log.w(TAG, "$serverId: the previous server has not exited — refusing to start a second")
+            throw ServerBackendException.Engine(
+                "The previous server is still shutting down. Try again in a moment."
+            )
+        }
+    }
+
+    /**
      * Give up a launch that was stopped while it was still preparing.
      *
      * Returns true when the caller should return without starting anything.
      * Reported as `stopped` rather than `crashed`: the user asked for this.
      */
     private fun abandonIfStopped(serverId: String): Boolean {
-        if (!stopRequested) return false
+        if (!lifecycle.shouldAbandon(serverId)) return false
+        lifecycle.abandoned(serverId)
         Log.i(TAG, "$serverId: launch abandoned — a stop arrived while it was preparing")
         tunnelJob?.cancel()
         tunnelJob = null
@@ -493,82 +571,55 @@ class JavaServerBackend(
     private suspend fun stopForNetworkError(serverId: String, kind: String) {
         Log.w(TAG, "$serverId: tunnel failed ($kind) — stopping")
         onNetworkError?.invoke(serverId, kind)
-        runCatching { stop(serverId) }
+
+        // Through the core, exactly as a stop from the bridge would be. This
+        // is a stop somebody asked for — Homerun did, on the player's behalf —
+        // and recording the intent is what keeps the exit from being reported
+        // as a crash, which would also skip the on-stop backup.
+        val verdict = lifecycle.stopRequested(serverId)
+        try {
+            if (verdict.verdict != "notRunning") {
+                runCatching { stop(serverId, graceful = verdict.verdict == "graceful") }
+            }
+        } finally {
+            lifecycle.callFinished(serverId)
+        }
     }
 
-    override suspend fun stop(serverId: String) {
+    override suspend fun stop(serverId: String, graceful: Boolean) {
         val running = process
         if (running == null) {
             // A launch can be minutes long before there is a process to talk
-            // to — a jar downloading, a world restoring. Answering
-            // `NotRunning` used to leave that launch to finish and start a
-            // server nobody wanted any more. Record the intent instead; the
-            // launch checks it and gives up.
-            if (startingId == serverId) {
-                stopRequested = true
-                transition(serverId, ServerState.STOPPING)
-                Log.i(TAG, "$serverId: stop arrived before the JVM existed — the launch will abandon")
-                return
-            }
-            throw ServerBackendException.NotRunning(serverId)
+            // to — a jar downloading, a world restoring. The core recorded the
+            // intent when the call arrived, so the launch will see it at its
+            // next checkpoint and give up; there is nothing to do here.
+            Log.i(TAG, "$serverId: stop arrived before the JVM existed — the launch will abandon")
+            return
         }
         if (currentServerId != serverId) {
             throw ServerBackendException.NotRunning(serverId)
         }
 
-        stopRequested = true
         transition(serverId, ServerState.STOPPING)
 
-        // A server that has not reached its console cannot hear `stop`.
-        //
-        // This used to write the command anyway, into a JVM still generating
-        // terrain, and then escalate on a 30-second timer — which killed a
-        // server that had come up healthy in the meantime and was accepting
-        // players. Waiting is also the safe choice for the world: SIGTERM
-        // during "Preparing spawn area" interrupts a write nothing has
-        // finished.
-        if (!awaitConsole(running)) {
-            // It never got there. Nothing has a world worth protecting yet,
-            // so end it directly rather than talking to a console that will
-            // never exist.
-            Log.w(TAG, "$serverId: stop requested before the console was ready — terminating")
-            withContext(Dispatchers.IO) {
-                wireProxy.stop()
+        // *How* to stop is the core's call — graceful only when there is a
+        // console that can hear it — and it is carried out now, never deferred
+        // until the server has finished starting. This method only performs
+        // the verdict it was given when the call arrived.
+        withContext(Dispatchers.IO) {
+            // Before the JVM, so the gateway's peer slot is free by the time
+            // the next start asks for one.
+            wireProxy.stop()
+            if (graceful) {
+                stopProcess(running)
+            } else {
+                Log.i(TAG, "$serverId: stopping before the console was ready — terminating")
                 runCatching { running.destroy() }
                 if (!running.waitFor(FORCE_STOP_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
                     runCatching { running.destroyForcibly() }
                 }
             }
-            return
         }
-
-        withContext(Dispatchers.IO) {
-            // Before the JVM, so the gateway's peer slot is free by the time
-            // the next start asks for one.
-            wireProxy.stop()
-            stopProcess(running)
-        }
-    }
-
-    /**
-     * Wait until the server is listening, or has died trying.
-     *
-     * Returns true when the console is up and `stop` will be understood.
-     * Bounded by the same budget a launch gets, because a stop must not hang
-     * for ever on a server that is wedged — the bridge has no timeout of its
-     * own, so this is the only thing that ends the wait.
-     */
-    private suspend fun awaitConsole(running: Process): Boolean {
-        if (consoleReady) return true
-        Log.i(TAG, "stop is waiting for the server to finish starting")
-        return withTimeoutOrNull(STOP_WAIT_FOR_CONSOLE_MS) {
-            while (true) {
-                if (!running.isAlive) return@withTimeoutOrNull false
-                if (consoleReady) return@withTimeoutOrNull true
-                delay(POLL_MS)
-            }
-            @Suppress("UNREACHABLE_CODE") false
-        } == true
     }
 
     /**
@@ -597,6 +648,7 @@ class JavaServerBackend(
             ?.takeIf { process?.isAlive == true && lastState == ServerState.RUNNING }
             ?.let(::listOf)
             ?: emptyList()
+
 
     // -----------------------------------------------------------------------
     // Console
@@ -627,12 +679,14 @@ class JavaServerBackend(
             }
             // The stream ends when the process does.
             val code = runCatching { running.waitFor() }.getOrDefault(-1)
-            // `stopRequested` rather than the state: a stop that arrives
-            // mid-startup sets STOPPING, and a launch still in flight can
-            // move it on again before the process actually exits.
-            val intentional = stopRequested || lastState == ServerState.STOPPING
+            // The verdict is the core's: intent, not the exit code and not
+            // a state a still-running launch can overwrite. A stop carried out
+            // by terminating a starting JVM exits 143, and calling that a
+            // crash skips the on-stop backup and loses the session's play.
+            val verdict = lifecycle.exited(serverId, code)
+            val intentional = verdict.intentional
             Log.i(TAG, "server exited (code $code, intentional=$intentional)")
-            val outcome = runCatching { Core.exitState(intentional, code) }.getOrDefault("stopped")
+            val outcome = verdict.state
             // However the JVM went — stopped, crashed, killed — the tunnel
             // outliving it would hold the gateway's peer slot against the
             // next start. The desktop kills it on java exit for the same
@@ -658,7 +712,7 @@ class JavaServerBackend(
             currentPort = null
 
             if (backup != null) {
-                scope.launch {
+                val job = scope.launch {
                     runCatching {
                         backups.backupAfterStop(
                             serverId = serverId,
@@ -667,8 +721,13 @@ class JavaServerBackend(
                             deviceId = backup.deviceId,
                             onLog = { note(serverId, it) },
                         )
-                    }.onFailure { Log.w(TAG, "on-stop backup failed for $serverId: ${it.message}") }
+                    }.onFailure {
+                        if (it is CancellationException) throw it
+                        Log.w(TAG, "on-stop backup failed for $serverId: ${it.message}")
+                    }
                 }
+                backupJobs[serverId] = job
+                job.invokeOnCompletion { backupJobs.remove(serverId, job) }
             }
         }
     }
@@ -687,7 +746,10 @@ class JavaServerBackend(
 
         // Records that the JVM is up; `running` is announced by start(), after
         // the tunnel, so the two are not the same thing.
-        if (meaning.ready) consoleReady = true
+        if (meaning.ready) {
+            consoleReady = true
+            lifecycle.consoleReady(serverId)
+        }
         meaning.joined?.let { if (roster.add(it)) onPlayersChanged?.invoke(serverId) }
         meaning.left?.let { if (roster.remove(it)) onPlayersChanged?.invoke(serverId) }
 
@@ -807,11 +869,11 @@ class JavaServerBackend(
         state: ServerState,
         backupInProgress: Boolean = false,
     ) {
-        // A launch still catching up must not announce `running` for a server
-        // already on its way down. The UI would flip the card to running and
-        // the API would mark the service healthy, moments before it exits —
-        // the opposite of what is about to happen.
-        if (stopRequested && state == ServerState.RUNNING) return
+        // A launch still catching up must not announce `running` for a
+        // server already on its way down: the UI would flip the card to
+        // running and the API would mark the service healthy, moments before
+        // it exits. The core decides that.
+        if (!lifecycle.mayAnnounce(serverId, state.wire)) return
         if (lastState == state) return
         lastState = state
         onStateChanged?.invoke(serverId, state, backupInProgress)
@@ -824,12 +886,14 @@ class JavaServerBackend(
         const val START_TIMEOUT_MS = 300_000L
 
         /**
-         * How long a stop will wait for a starting server to reach its
-         * console. Generous, because world generation on a phone is slow and
-         * killing it mid-write is the thing being avoided — but finite, so a
-         * wedged JVM cannot block a stop for ever.
+         * How long a *restart* waits for the outgoing JVM to exit before
+         * refusing, rather than spawning a second server into one directory.
+         *
+         * Nothing else waits on a stop: a stop is carried out immediately,
+         * gracefully when the console can hear it and by termination when it
+         * cannot.
          */
-        const val STOP_WAIT_FOR_CONSOLE_MS = 120_000L
+        const val PREVIOUS_EXIT_WAIT_MS = 120_000L
         const val GRACEFUL_STOP_SECONDS = 30L
         const val FORCE_STOP_SECONDS = 8L
         const val MAX_BUFFERED_LINES = 2000

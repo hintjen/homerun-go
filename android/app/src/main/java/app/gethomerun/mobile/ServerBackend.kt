@@ -41,12 +41,27 @@ interface ServerBackend {
     suspend fun start(serverId: String, config: ServerConfig)
 
     /**
-     * Stop gracefully: save the world, then exit. Send the console `stop`
-     * command and wait — killing the process risks the world save.
+     * Stop the server, now.
+     *
+     * [graceful] is the core's verdict, not a preference: true when the engine
+     * has reached a console that can hear `stop` and save its world, false
+     * when it has not — a server still generating terrain has nothing saved to
+     * protect, and waiting for it to finish starting so it can be asked
+     * politely is not a stop. See `homerun-core::lifecycle::StopVerdict`.
      */
-    suspend fun stop(serverId: String)
+    suspend fun stop(serverId: String, graceful: Boolean)
 
-    /** Ids currently running. One-running-server hosts return 0 or 1. */
+    /**
+     * Ids currently running. One-running-server hosts return 0 or 1.
+     *
+     * **Not** the answer to "does this device own this server" — a server
+     * that is still downloading a jar, or still saving its world on the way
+     * down, is this device's and is not running. That question belongs to
+     * `homerun-core::lifecycle` (reached through [Core.Lifecycle], held by
+     * [ServerHost]), and answering it from here is what let the UI's reconcile
+     * loop reprovision the gateway underneath a live launch. A backend reports
+     * what its engine is doing; it does not adjudicate ownership.
+     */
     val runningServerIds: List<String>
 
     // --- Introspection ---

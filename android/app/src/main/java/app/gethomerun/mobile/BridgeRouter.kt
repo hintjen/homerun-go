@@ -116,6 +116,19 @@ class BridgeRouter(
     private val backend: ServerBackend get() = ServerHost.backend
 
     /**
+     * Who owns a server right now: running, coming up, or winding down.
+     *
+     * Every judgement here is `homerun-core::lifecycle`'s — this router only
+     * reports what it sees. The window it closes opens when the *call*
+     * arrives, not when the backend starts work: the settings lookup and the
+     * backup-lease check in the start handler are both network round-trips,
+     * and a server not yet counted active is one the UI's reconcile loop will
+     * try to start for itself, reprovisioning the gateway underneath a launch
+     * that has already resolved its tunnel config.
+     */
+    private val lifecycle: Core.Lifecycle get() = ServerHost.lifecycle
+
+    /**
      * Console output and state changes reach the UI only through these.
      * Registered for the life of the router; `ServerHost` fans them out so the
      * bridge and (from M4) the foreground service can both listen.
@@ -653,8 +666,10 @@ class BridgeRouter(
         "get-system-memory" to { _ -> systemMemory() },
         "get-native-system-memory" to { _ -> systemMemory() },
 
+        // Running, coming up, OR winding down. The core keeps that list and
+        // this host does not get a second opinion — see [lifecycle].
         "native-server-active-ids" to { _ ->
-            buildJsonArray { backend.runningServerIds.forEach { add(JsonPrimitive(it)) } }
+            buildJsonArray { lifecycle.activeIds().forEach { add(JsonPrimitive(it)) } }
         },
 
         // The `native-server-*` family IS the local-server interface. The name
@@ -662,93 +677,148 @@ class BridgeRouter(
         "native-server-start" to { params ->
             val obj = params as? JsonObject ?: throw IllegalArgumentException("start needs an object")
             val serverId = obj.serverId()
-            val config = obj["config"] as? JsonObject
-            backend.create(serverId)
 
-            // The UI sends only a name and a memory ceiling; which Minecraft
-            // version and which loader live on the backend. Fetched here
-            // rather than in the backend so the access token never reaches
-            // the server process's environment. Null means the lookup failed
-            // — vanilla latest, the same fallback the desktop takes.
-            val token = obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            val api = apiUrl()
-            val settings = HomerunApi.serverSettings(api, serverId, token)
-
-            // The device id restic records as the snapshot hostname, and the
-            // one the API resolves `pushed_by` from. Registration is already
-            // done by now in any normal flow; null just means no backups.
-            val deviceId = DeviceRegistry.currentDeviceId()
-
+            // Before anything else, including the two lookups below. Whether
+            // this is a duplicate, and whether another server holds this
+            // host's single slot, are the core's calls — the backend is never
+            // asked to re-decide them.
+            val admission = lifecycle.startRequested(serverId)
             try {
-                if (settings?.gameType == "bedrock") {
-                    throw ServerBackendException.Engine(
-                        "Homerun for Android cannot host Bedrock servers yet."
-                    )
-                }
+                when (admission.verdict) {
+                    // What the reconcile loop expects to hear when it races
+                    // the user's own start. Not an error a player ever sees.
+                    "alreadyRunning" -> buildJsonObject {
+                        put("success", true)
+                        put("alreadyRunning", true)
+                    }
 
-                // Refuse to launch while another device is finishing its
-                // backup: starting now would build a second world from a
-                // snapshot that is still being written. `force` is the UI's
-                // data-loss-warning takeover.
-                if (settings != null && deviceId != null) {
-                    val force = obj["force"]?.jsonPrimitive?.booleanOrNull == true
-                    BackupManager(context).leaseBlockedReason(settings, deviceId, force)?.let {
-                        throw ServerBackendException.Engine(it)
+                    "anotherServerRunning" -> buildJsonObject {
+                        put("success", false)
+                        put(
+                            "error",
+                            "Another server is already running. Stop it first — " +
+                                "this device can host one at a time.",
+                        )
+                    }
+
+                    else -> {
+                        val config = obj["config"] as? JsonObject
+                        backend.create(serverId)
+
+                        // The UI sends only a name and a memory ceiling; which Minecraft
+                        // version and which loader live on the backend. Fetched here
+                        // rather than in the backend so the access token never reaches
+                        // the server process's environment. Null means the lookup failed
+                        // — vanilla latest, the same fallback the desktop takes.
+                        val token = obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        val api = apiUrl()
+                        val settings = HomerunApi.serverSettings(api, serverId, token)
+
+                        // The device id restic records as the snapshot hostname, and the
+                        // one the API resolves `pushed_by` from. Registration is already
+                        // done by now in any normal flow; null just means no backups.
+                        val deviceId = DeviceRegistry.currentDeviceId()
+
+                        try {
+                            if (settings?.gameType == "bedrock") {
+                                throw ServerBackendException.Engine(
+                                    "Homerun for Android cannot host Bedrock servers yet."
+                                )
+                            }
+
+                            // Refuse to launch while another device is finishing its
+                            // backup: starting now would build a second world from a
+                            // snapshot that is still being written. `force` is the UI's
+                            // data-loss-warning takeover.
+                            if (settings != null && deviceId != null) {
+                                val force = obj["force"]?.jsonPrimitive?.booleanOrNull == true
+                                BackupManager(context).leaseBlockedReason(settings, deviceId, force)?.let {
+                                    throw ServerBackendException.Engine(it)
+                                }
+                            }
+                            backend.start(
+                                serverId,
+                                ServerConfig(
+                                    name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
+                                    memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
+                                    version = settings?.version,
+                                    loader = settings?.loader ?: "vanilla",
+                                    // Read and written to files by the backend, never
+                                    // forwarded into the server's environment.
+                                    settingsEnv = settings?.env,
+                                    gameType = settings?.rawGameType ?: "java",
+                                    // Null when the server has no repository, backups are
+                                    // off for it, or this device is not registered — all
+                                    // of which mean "host without backups" rather than
+                                    // "refuse to host".
+                                    backupContext = if (settings?.backup != null && deviceId != null) {
+                                        BackupContext(settings, deviceId)
+                                    } else null,
+                                    // A closure, so the token stays here. The backend
+                                    // gets the ability to resolve a tunnel, never the
+                                    // credential that resolves it — `ServerConfig.extra`
+                                    // is forwarded into the server process's environment
+                                    // and this must never be able to end up there.
+                                    resolveTunnel = {
+                                        HomerunApi.awaitTunnel(
+                                            api, serverId, token, stale = settings?.tunnelBefore,
+                                        )
+                                    },
+                                ),
+                            )
+                            buildJsonObject { put("success", true) }
+                        } catch (already: ServerBackendException.AlreadyRunning) {
+                            buildJsonObject {
+                                put("success", true)
+                                put("alreadyRunning", true)
+                            }
+                        } catch (err: ServerBackendException) {
+                            buildJsonObject {
+                                put("success", false)
+                                put("error", err.message)
+                            }
+                        }
                     }
                 }
-                backend.start(
-                    serverId,
-                    ServerConfig(
-                        name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
-                        memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
-                        version = settings?.version,
-                        loader = settings?.loader ?: "vanilla",
-                        // Read and written to files by the backend, never
-                        // forwarded into the server's environment.
-                        settingsEnv = settings?.env,
-                        gameType = settings?.rawGameType ?: "java",
-                        // Null when the server has no repository, backups are
-                        // off for it, or this device is not registered — all
-                        // of which mean "host without backups" rather than
-                        // "refuse to host".
-                        backupContext = if (settings?.backup != null && deviceId != null) {
-                            BackupContext(settings, deviceId)
-                        } else null,
-                        // A closure, so the token stays here. The backend
-                        // gets the ability to resolve a tunnel, never the
-                        // credential that resolves it — `ServerConfig.extra`
-                        // is forwarded into the server process's environment
-                        // and this must never be able to end up there.
-                        resolveTunnel = {
-                            HomerunApi.awaitTunnel(
-                                api, serverId, token, stale = settings?.tunnelBefore,
-                            )
-                        },
-                    ),
-                )
-                buildJsonObject { put("success", true) }
-            } catch (already: ServerBackendException.AlreadyRunning) {
-                buildJsonObject {
-                    put("success", true)
-                    put("alreadyRunning", true)
-                }
-            } catch (err: ServerBackendException) {
-                buildJsonObject {
-                    put("success", false)
-                    put("error", err.message)
-                }
+            } finally {
+                // Always, whatever the verdict was: the core counts every
+                // call that arrived, so an unconditional finally balances.
+                lifecycle.callFinished(serverId)
             }
         },
 
         "native-server-stop" to { params ->
+            val serverId = (params as JsonObject).serverId()
+
+            // A stopping server is still this device's. The dashboard PATCHes
+            // `stopped` only after this call returns, so for the whole
+            // graceful shutdown the API still reads `running` — and a host
+            // that reports itself idle in that window gets the server it just
+            // stopped restarted underneath it.
+            //
+            // `abandonLaunch` needs no branch of its own: the intent is
+            // recorded either way, and a launch with nothing spawned yet gives
+            // up at its next checkpoint.
+            val verdict = lifecycle.stopRequested(serverId).verdict
             try {
-                backend.stop((params as JsonObject).serverId())
-                buildJsonObject { put("success", true) }
-            } catch (err: ServerBackendException) {
-                buildJsonObject {
-                    put("success", false)
-                    put("error", err.message)
+                if (verdict == "notRunning") {
+                    buildJsonObject {
+                        put("success", false)
+                        put("error", "That server is not running.")
+                    }
+                } else {
+                    try {
+                        backend.stop(serverId, graceful = verdict == "graceful")
+                        buildJsonObject { put("success", true) }
+                    } catch (err: ServerBackendException) {
+                        buildJsonObject {
+                            put("success", false)
+                            put("error", err.message)
+                        }
+                    }
                 }
+            } finally {
+                lifecycle.callFinished(serverId)
             }
         },
 

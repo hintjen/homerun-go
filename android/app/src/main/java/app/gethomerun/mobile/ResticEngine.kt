@@ -108,6 +108,16 @@ class ResticEngine(private val context: Context) {
             }
             .start()
 
+        // A relaunch cancels the on-stop backup, and cancelling a coroutine
+        // does nothing to a child process — `waitFor` below would block until
+        // restic finished anyway, which is the opposite of cancelling. Killing
+        // it is what makes `waitFor` return. Safe at any point: restic commits
+        // a snapshot atomically, so an interrupted run leaves none rather than
+        // a partial one.
+        val kill = coroutineContext[kotlinx.coroutines.Job]?.invokeOnCompletion { cause ->
+            if (cause != null) runCatching { process.destroyForcibly() }
+        }
+
         // Both streams are drained concurrently. restic's --json progress can
         // fill a pipe buffer, and a full pipe blocks the process forever.
         val out = StringBuilder()
@@ -125,6 +135,7 @@ class ResticEngine(private val context: Context) {
         }
         stderr.join()
         val code = process.waitFor()
+        kill?.dispose()
         Triple(code, out.toString(), err.toString())
     }
 
