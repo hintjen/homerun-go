@@ -128,8 +128,8 @@ ignores half the arguments of.
 
 ## The tests are the deliverable
 
-54 tests, and they are checked for teeth rather than counted. Three deliberate
-regressions were introduced and all three were caught:
+237 tests, and they are checked for teeth rather than counted. Deliberate
+regressions are introduced and each must be caught by its own test:
 
 | Regression | Caught by |
 |---|---|
@@ -139,6 +139,9 @@ regressions were introduced and all three were caught:
 
 If you change behaviour here, do the same: break it on purpose first and check
 something fails. A test that cannot fail is documentation with a runtime cost.
+The `tests-that-bite` skill has the failure modes this keeps catching — most
+often a test that performs the very step it is meant to be testing, and so
+passes right through the step being removed.
 
 `the_desktop_expression_would_pick_an_alpha` is worth knowing about — it writes
 out the desktop's algorithm and asserts we disagree with it. If PaperMC ever
