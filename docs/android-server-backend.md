@@ -570,8 +570,10 @@ second and re-emits each line as a `native-server-log` event. When the buffer
 has overflowed, the drain reports the gap rather than letting the console look
 like it merely skipped ahead.
 
-The same tick samples memory and player count into a bounded history for
-`native-server-get-perf-history`, matching the desktop sampler's window.
+The same tick watches the roster, so a join reaches the UI within a second.
+Performance sampling is a **separate** job on the interval the core asks for —
+the history crosses JNI by value, and offering it every second would ship up to
+360 samples in each direction thirty times over for one kept point.
 
 **One server at a time.** Enforced in the crate and again here. The engine
 distinguishes worlds by process CWD, so a second concurrent run would quietly
@@ -580,8 +582,10 @@ whose message is written for players because they are the ones who see it.
 
 ## What the metrics actually measure
 
-Be careful reading these — the in-process design makes some of them
-approximations, and the UI presents them as facts.
+Both backends now read counters and let `homerun_core::metrics` decide what
+they mean, so the two graphs — and the desktop's — cover the same span. What
+still differs between them is *which process* is being measured, and that is
+the one thing worth reading carefully here: the UI presents all of it as fact.
 
 ### The JVM backend — real numbers, from `/proc`
 
@@ -613,12 +617,18 @@ Two things worth knowing:
   `homerun-java-launcher` prints `[launcher] pid=<n>` as its first console
   line, before the VM exists, and the backend reads it from there.
 
-### The Pumpkin backend — approximations
+### The Pumpkin backend — the same numbers, from this process
+
+The engine is linked in, so there is no child to point at and `Process.myPid()`
+is the right pid: while a world is up this app *is* the server. That makes an
+app-wide number the honest one here, where on the JVM path it would be a
+near-miss.
 
 | Channel | Source | Caveat |
 |---|---|---|
-| `native-server-get-mem-usage` | `Debug.getNativeHeapAllocatedSize()` | Process-wide native heap, not the server alone. The engine is Rust, so JVM heap would be the wrong number entirely. |
-| `native-server-get-cpu-usage` | not reported | Returns null. The engine runs *in this process*, so `/proc/self` would measure the app and the WebView too; null renders as "unavailable", which is true. |
+| `native-server-get-mem-usage` | `VmRSS` from `/proc/self/status`, against `largeMemoryClass` | RSS against a heap-shaped ceiling can read over 100 %. Same on the JVM path; see the `memMaxMb` note in [ios-server-backend.md](./ios-server-backend.md). |
+| `native-server-get-cpu-usage` | the rate of the last two samples, worked out by the core | Was null until this backend adopted `metrics`. |
+| `native-server-get-perf-history` | `homerun_core::metrics`, sampled every 30 s | Was a local 1 s × 1800 deque whose comment claimed the desktop's window — the desktop's is three hours, that was thirty minutes. |
 | `native-server-get-uptime` | engine `startedAtMs` | Real. |
 | `native-server-get-ops` | empty | The engine does not expose an op list yet. |
 

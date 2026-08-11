@@ -26,6 +26,15 @@ import java.io.File
  * no `<queries>` entry, on every API this app supports. What SELinux blocks is
  * *other apps'* processes, which is not what this asks for.
  *
+ * # When the server has no process of its own
+ *
+ * Pumpkin is linked in, so there is no child to point at and `Process.myPid()`
+ * is the right pid: while a world is up this app *is* the server, and an
+ * app-wide number is the honest one rather than a near-miss. `Debug`'s figures
+ * are still the wrong answer, for a different reason — they report the
+ * allocator's own bookkeeping, where RSS is what the OS accounts against the
+ * app and what it kills on.
+ *
  * Every reader returns null rather than a guess. A phone that will not answer
  * renders "unavailable", which is true; a zero would be a lie on a graph.
  */

@@ -194,6 +194,7 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
   one this device already has
 - Why `start` polls for *running* instead of waiting on the call
 - The log pump, the perf sampler, and one-server-at-a-time
+- What each backend's memory and CPU numbers actually measure
 - What the memory and CPU numbers actually measure
 - Triage, symptom first
 
