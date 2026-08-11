@@ -70,17 +70,18 @@ game.rs        the capability surface every game exposes
 launch.rs      the order a launch runs in, as data
 lifecycle.rs   who owns a server right now, and what an exit meant
 link.rs        gateway credentials and the staleness rule
+metrics.rs     what a run is costing, and how much of it to remember
 properties.rs  key=value config merging, comments preserved
 state.rs       handshake supervision, exit classification
 tunnel.rs      WireGuard config from a list of forwards
 minecraft/     jar, jvm, console, settings — one implementation of game.rs
 ```
 
-`lifecycle` and `launch` are the only two that hold state or describe a
-sequence, and both stay pure by refusing to own either. `lifecycle` is
-serialised and handed back to the caller on every event — the host holds it,
-the same way it holds a `HandshakeWatch` — so there is no native handle to leak
-and no second copy to disagree with the host's. `launch` returns a list of
+`lifecycle`, `launch` and `metrics` are the only three that hold state or
+describe a sequence, and each stays pure by refusing to own either. `lifecycle`
+and `metrics` are serialised and handed back to the caller on every call — the
+host holds them, the same way it holds a `HandshakeWatch` — so there is no
+native handle to leak and no second copy to disagree with the host's. `launch` returns a list of
 steps and executes none of them, because every step is something only a
 platform can do; what stops being the platform's is *which comes next*.
 
@@ -91,6 +92,7 @@ Minecraft is what names them.
 | Module | Reference implementation |
 |---|---|
 | `lifecycle` | `nativeServerManager.ts` — `runningServers` ∪ `pendingStartup`, and `waitForSupervisorIdle` |
+| `metrics` | `nativeServerManager.ts` — `takePerfSample`, `schedulePerfSample`, `stopPerfSampling` |
 | `launch` | `nativeServerManager.startServer`, read top to bottom |
 | `minecraft::jar` | `src/electron/mod-installer.ts` |
 | `minecraft::jvm` | `supervisor.js` — its spawn arguments and `stopServer` |
@@ -210,11 +212,12 @@ not as a side effect.
 exists and is tested, but the cursor is read on a hot path and moving it means
 either a handle to free or a JSON round trip per line. Worth doing, not urgent.
 
-**iOS has adopted one thing so far.** `Core.swift` and the C surface are in
-place, and `WireProxy.swift` renders its tunnel config through the core rather
-than the hand-written copy it carried. `DeviceRegistrar` and `HomerunAPI` are
-the obvious next candidates, and Pumpkin will need its own artifact resolution
-rather than borrowing `minecraft.jar.*`.
+**iOS reaches most of this now.** `Core.swift` and the C surface are in place,
+and the host goes through them for tunnel rendering, handshake supervision,
+lifecycle, launch order, server settings, backup decisions and the performance
+graph — the last of which replaced the arithmetic half of `DeviceMetrics`.
+`DeviceRegistrar` and `HomerunAPI` are the obvious next candidates, and Pumpkin
+will need its own artifact resolution rather than borrowing `minecraft.jar.*`.
 
 **Nothing here has run on arm64.** Every verification so far is x86_64 on an
 emulator. That gap needs a physical device, not more code.

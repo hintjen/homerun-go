@@ -183,6 +183,54 @@ a success resets it still live in one tested place.
 
 `giveUp` is returned **once** per watch, so a caller cannot stop a server twice.
 
+### What a run is costing
+
+| Method | Arguments | Returns |
+|---|---|---|
+| `metrics.record` | `history?`, `policy?`, `reading` | `{ history, appended, intervalMs }` |
+| `metrics.query` | `history?`, `policy?`, `nowMs?` | `{ samples, intervalMs, due? }` |
+
+**Stateless across the boundary**, like `state.handshake` above: `history` goes
+in, a new one comes back, and there is nothing to free.
+
+`reading` is `{ atMs, memUsedKb?, cpuSeconds?, playerCount? }` — **counters, and
+never a percentage**. `cpuSeconds` is cumulative since the process started; a
+host that pre-divides has taken a decision this module exists to own, and one
+it cannot take correctly because it does not know when the previous reading
+was. A missing counter means "the platform would not say", which reaches the
+graph as a gap rather than as a zero nobody measured.
+
+A `Sample` is `{ t, memUsedMb?, cpuPercent?, playerCount? }`. `cpuPercent` may
+exceed 100 — a server uses more than one core, and clamping would hide exactly
+the moment worth looking at. It is absent on the first sample of a run, because
+a rate needs two readings.
+
+`policy` is `{ intervalMs, maxIntervalMs, maxSamples }`, read **only when there
+is no `history` to resume**, so the retention rule cannot change mid-session.
+The default is the desktop's — 30 s, capped at 30 min, 360 points — so a
+phone's graph of a server and a PC's graph of the same server cover the same
+span.
+
+Two things a host gets wrong otherwise:
+
+- **Re-read `intervalMs` after every `record`.** It doubles when the buffer
+  fills: a full graph drops every other point and halves its own resolution
+  rather than sliding the window and forgetting the launch. A sampler still
+  scheduling on the original value keeps paying to read `/proc` at a resolution
+  the core has stopped keeping.
+- **Offering more often than the interval is fine, and sometimes better.** A
+  reading that is not due is dropped, but it is still kept as the anchor for the
+  next rate — so a five-second pump feeding a thirty-second graph measures CPU
+  over the last five seconds rather than averaging a spike away.
+
+`due` is answered only when `nowMs` is given, so a host can ask whether a
+reading is worth taking before paying to read it. Worth asking only where the
+counter is the expensive half; where the history is (iOS holds it across the C
+ABI by value) offering unconditionally is cheaper than asking.
+
+One history per **run**, not per server: a graph covers a session, and a restart
+starts a new one.
+
 ### Config files, generically
 
 | Method | Arguments | Returns |

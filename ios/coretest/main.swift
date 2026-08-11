@@ -18,7 +18,7 @@
 //     node scripts/build-rust.js host
 //     swiftc -O -import-objc-header ios/HomerunHost/FFI/HomerunFFI.h \
 //         ios/HomerunHost/FFI/Core.swift ios/HomerunHost/FFI/StartRequest.swift \
-//         ios/HomerunHost/HostLog.swift \
+//         ios/HomerunHost/HostLog.swift ios/HomerunHost/DeviceMetrics.swift \
 //         ios/HomerunHost/ServerBackendError.swift ios/HomerunHost/LaunchOrder.swift \
 //         ios/coretest/main.swift \
 //         rust/homerun-pumpkin-ffi/target/release/libhomerun_pumpkin_ffi.a \
@@ -1113,6 +1113,131 @@ check("awaitPreviousExit is false with nothing to wait for") {
     return "nothing to wait for"
 }
 
+print("\nmetrics")
+// The host reads counters and the core does every piece of arithmetic. These
+// drive `Core.Metrics` with a synthetic clock, which is the only way to check
+// a three-hour graph without waiting for one.
+
+check("the first point on a graph has no rate to report") {
+    let metrics = Core.Metrics()
+    // 2 GiB, so a wrong divisor is unmistakable rather than plausible.
+    try expect(metrics.record(atMs: 0, memUsedKb: 2_097_152, cpuSeconds: 1.0, playerCount: 3),
+        "the first reading was not kept")
+
+    let samples = metrics.samples()
+    try expect(samples.count == 1, "expected one point, got \(samples.count)")
+    try expect(samples[0].memUsedMb == 2048, "memUsedMb: \(String(describing: samples[0].memUsedMb))")
+    try expect(samples[0].playerCount == 3, "playerCount lost")
+    // A rate needs two readings. Inventing one for the first point would put a
+    // number on the graph that nothing measured.
+    try expect(samples[0].cpuPercent == nil, "invented a rate from one reading")
+    return "2048 MB, no rate yet"
+}
+
+/// The likeliest regression in the whole wrapper: `NSNull` decoding as a
+/// measured zero. A graph that says 0% is a claim; a gap is the truth.
+check("a counter the platform would not report stays absent, not zero") {
+    let metrics = Core.Metrics()
+    _ = metrics.record(atMs: 0, memUsedKb: nil, cpuSeconds: nil, playerCount: nil)
+
+    let sample = metrics.samples().first
+    try expect(sample != nil, "no point recorded")
+    try expect(sample?.memUsedMb == nil, "memUsedMb became \(String(describing: sample?.memUsedMb))")
+    try expect(sample?.cpuPercent == nil, "cpuPercent became \(String(describing: sample?.cpuPercent))")
+    try expect(
+        sample?.playerCount == nil, "playerCount became \(String(describing: sample?.playerCount))")
+    return "three nulls stayed null"
+}
+
+check("a reading the core drops still anchors the next rate") {
+    let metrics = Core.Metrics()
+    try expect(metrics.record(atMs: 0, memUsedKb: nil, cpuSeconds: 0, playerCount: nil), "first")
+    // Offered inside the interval, so it is not kept — but it must still become
+    // the anchor, or the rate below is measured over 30s instead of 5s.
+    try expect(
+        !metrics.record(atMs: 25_000, memUsedKb: nil, cpuSeconds: 0, playerCount: nil),
+        "a reading offered early was kept")
+    try expect(
+        metrics.record(atMs: 30_000, memUsedKb: nil, cpuSeconds: 5.0, playerCount: nil), "third")
+
+    // 5 CPU-seconds over the 5s since the anchor is 100%. Anchored at 0s
+    // instead it would read 16.7%, which is why those numbers were chosen.
+    guard let rate = metrics.samples().last?.cpuPercent else {
+        throw Wrong(what: "no rate on the second point")
+    }
+    try expect(abs(rate - 100) < 0.5, "expected ~100%, got \(rate)")
+    return "100% over the last 5s, not 16.7% over 30s"
+}
+
+/// iOS's own bug, before this: `perfHistory` was cleared per run and the CPU
+/// sampler was not, so every relaunch opened with a rate measured against the
+/// previous run's counter.
+check("a new run does not measure its first rate against the last run's counter") {
+    let metrics = Core.Metrics()
+    _ = metrics.record(atMs: 0, memUsedKb: nil, cpuSeconds: 100.0, playerCount: nil)
+    _ = metrics.record(atMs: 30_000, memUsedKb: nil, cpuSeconds: 130.0, playerCount: nil)
+
+    metrics.reset()
+    _ = metrics.record(atMs: 60_000, memUsedKb: nil, cpuSeconds: 160.0, playerCount: nil)
+
+    let samples = metrics.samples()
+    try expect(samples.count == 1, "reset kept \(samples.count) points from the old run")
+    try expect(samples[0].cpuPercent == nil, "the new run inherited a rate")
+
+    // Negative control: the same three readings without the reset must produce
+    // a rate. Otherwise this test would pass against a wrapper that returns nil
+    // for everything.
+    let control = Core.Metrics()
+    _ = control.record(atMs: 0, memUsedKb: nil, cpuSeconds: 100.0, playerCount: nil)
+    _ = control.record(atMs: 30_000, memUsedKb: nil, cpuSeconds: 130.0, playerCount: nil)
+    _ = control.record(atMs: 60_000, memUsedKb: nil, cpuSeconds: 160.0, playerCount: nil)
+    try expect(
+        control.samples().last?.cpuPercent != nil,
+        "the control found no rate either — this test proves nothing")
+    return "reset drops the anchor; without it the rate is still there"
+}
+
+check("a full graph halves its resolution rather than forgetting the launch") {
+    let metrics = Core.Metrics()
+    // 400 points at the default 30s spacing: past the 360 the policy keeps.
+    for i in 0..<400 {
+        _ = metrics.record(atMs: i * 30_000, memUsedKb: 1024, cpuSeconds: Double(i), playerCount: 0)
+    }
+
+    let samples = metrics.samples()
+    try expect(samples.count <= 360, "kept \(samples.count) points, over the cap")
+    // The interesting minutes are the first ones — a world generating, a memory
+    // curve settling — so the window loses resolution, not its beginning.
+    try expect(samples.first?.t == 0, "the launch scrolled off the graph")
+    try expect(samples[1].t - samples[0].t == 60_000, "spacing did not double")
+    try expect(metrics.intervalMs == 60_000, "intervalMs: \(String(describing: metrics.intervalMs))")
+    return "\(samples.count) points, one per 60s, launch intact"
+}
+
+/// The contract the whole split rests on: this host reports counters that only
+/// ever climb, and never a rate. If someone ever "simplifies" `cpuSeconds` into
+/// a delta, this is what fails.
+check("the counters this host reads are cumulative, not rates") {
+    guard let first = DeviceMetrics.cpuSeconds() else {
+        throw Wrong(what: "cpuSeconds() reported nothing")
+    }
+    var sink = 0.0
+    for i in 0..<2_000_000 { sink += Double(i).squareRoot() }
+    guard let second = DeviceMetrics.cpuSeconds() else {
+        throw Wrong(what: "cpuSeconds() reported nothing the second time")
+    }
+
+    try expect(sink > 0, "the busy loop was optimised away")
+    try expect(first >= 0 && second >= 0, "negative CPU seconds: \(first), \(second)")
+    try expect(second > first, "the counter did not climb: \(first) then \(second)")
+
+    guard let footprint = DeviceMetrics.footprintKb() else {
+        throw Wrong(what: "footprintKb() reported nothing")
+    }
+    try expect(footprint > 0, "footprint of \(footprint) KB")
+    return "cpu \(first)s → \(second)s, footprint \(footprint) KB"
+}
+
 print("\nlaunch order")
 
 /// A plan with the shape iOS actually gets, so the tests below walk the real
@@ -1228,6 +1353,15 @@ check("a missing required argument is an error, not a crash") {
     do {
         _ = try Core.call("game.classify", ["game": Core.minecraft])  // no `line`
         throw Wrong(what: "missing argument did not throw")
+    } catch let e as Core.CoreError {
+        return "threw: \(e.message)"
+    }
+}
+
+check("a reading with no counters at all is an error, not a crash") {
+    do {
+        _ = try Core.call("metrics.record", [:])  // no `reading`
+        throw Wrong(what: "a record with no reading did not throw")
     } catch let e as Core.CoreError {
         return "threw: \(e.message)"
     }
