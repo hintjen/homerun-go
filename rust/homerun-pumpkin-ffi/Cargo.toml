@@ -98,6 +98,14 @@ android_logger = "0.14"
 # published backend matches, so it comes straight from crates.io and the fork
 # covers one crate instead of two.
 #
+# **`hintjen/rustic-fork`'s own `main` is a clean mirror of upstream, on
+# purpose. Do not merge the patch branch into it.** The branch is cut from the
+# release, and upstream's main has moved past it — merging would give that fork
+# a main that is neither upstream nor what we ship, and would put the drift
+# above back into the thing next year's reader takes for the source of truth.
+# Picking up a future release is: fetch upstream, cut a new branch from the new
+# release tag, re-apply five lines, repin the rev here.
+#
 # `[patch]` is not feature-gated, so an Android or host build resolves this too
 # and warns that the patch went unused. That is expected, not a problem.
 [patch.crates-io]
