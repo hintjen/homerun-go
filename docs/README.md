@@ -231,6 +231,23 @@ open questions on backups.
 
 ---
 
+### 🔁 [iOS — the server lifecycle into the core](../plans/ios-core-lifecycle.md)
+
+The port that gives iOS the same answers Android already gets from
+`homerun-core::lifecycle` and `launch`: who owns a server, what an exit meant,
+and what order a launch runs in.
+
+**Contains**:
+- What iOS decides for itself today, mapped to the core call that replaces it
+- Five phases, each verifiable on its own, with Android's code as the reference
+- The two reorderings iOS is currently wrong about, and the regression that is
+  easiest to introduce — `stopForNetworkError` losing the stop intent
+- Two open decisions, and one thing this port deliberately does not fix
+
+**Read this for**: Doing that port, or deciding whether to.
+
+---
+
 *Add an entry here whenever you add a doc. A doc nobody can find is not
 written.*
 
