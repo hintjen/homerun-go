@@ -78,20 +78,26 @@ android_logger = "0.14"
 
 # rustic_core 0.12.0 does not compile for aarch64-apple-ios: the dev_t cfg
 # gates in backend/local_destination.rs list macos and openbsd but not ios, so
-# `device` stays u64 where nix::mknod wants i32. Five lines; the branch is
-# `fix/ios-dev-t-cfg` and is meant for upstream. Delete this when it lands.
+# `device` stays u64 where nix::mknod wants i32. Five lines, on branch
+# `fix/ios-dev-t-cfg` in hintjen/rustic-fork, written to go upstream. Delete
+# this block when it lands and a release carries it.
 #
-# **Both crates must come from the same tree.** The checkout is byte-identical
-# to published 0.12.0 for the file being patched but has moved on elsewhere —
-# `write_bytes` changed shape — so patching only the core and letting
-# rustic_backend 0.6.2 come from crates.io fails to compile against its own
-# trait.
+# **Cut from the 0.12.0 release commit, not from the fork's main.** That is the
+# difference between shipping a published version plus a known patch and
+# shipping whatever main happened to be that day — which for a subsystem that
+# writes and restores worlds is not a distinction to leave to chance. `main`
+# was eight commits past the release with 22 files changed under crates/core.
+#
+# It is also why only the core is patched. Against main, `rustic_backend` 0.6.2
+# from crates.io failed to compile — `write_bytes` had changed shape after the
+# release — which forced patching both crates. From the release base the
+# published backend matches, so it comes straight from crates.io and the fork
+# covers one crate instead of two.
 #
 # `[patch]` is not feature-gated, so an Android or host build resolves this too
 # and warns that the patch went unused. That is expected, not a problem.
 [patch.crates-io]
-rustic_core = { path = "../../../rustic-fork/crates/core" }
-rustic_backend = { path = "../../../rustic-fork/crates/backend" }
+rustic_core = { git = "https://github.com/hintjen/rustic-fork", rev = "6473fab1bc1add99ebb55b1b65caf9378d6142bd" }
 
 [profile.release]
 # The debug build of the server is ~1.8 GB, which is impractical on device.
