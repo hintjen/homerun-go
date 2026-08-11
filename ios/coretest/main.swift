@@ -310,24 +310,13 @@ check("link.fromServerBody returns nil when there is none") {
     return "nil, as expected"
 }
 
-print("\nlifecycle")
-check("state.exit calls a clean stop stopped") {
-    let s = try Core.exitState(intentional: true, code: 0)
-    try expect(s == "stopped", "got \(s)")
-    return s
-}
+// The three `state.exit` checks that used to open this section are gone with
+// the wrapper they exercised. What they pinned is pinned better elsewhere: the
+// `lifecycle` section below drives the same verdicts through `lifecycle.exited`,
+// which is the path the app actually takes, and Rust covers `exit_state`
+// directly in `state.rs`.
 
-check("state.exit calls an unexpected exit crashed") {
-    let s = try Core.exitState(intentional: false, code: 1)
-    try expect(s == "crashed", "got \(s)")
-    return s
-}
-
-check("state.exit calls exit 0 we did not ask for crashed") {
-    let s = try Core.exitState(intentional: false, code: 0)
-    return "exit 0, unintentional -> \(s)"
-}
-
+print("\nhandshake")
 check("state.handshake gives up after enough failures") {
     var watch: [String: Any]? = nil
     var gaveUpAfter = -1
@@ -789,14 +778,31 @@ check("the plan iOS actually gets is in the order the core says") {
     // backups on, settings off (this host writes none yet), tunnel on.
     let steps = try Core.launchPlan(backups: true, settings: false, tunnel: true)
     let names = steps.map(\.name)
+    // No `ensureJar` and no `resolveMainClass`: this host asks for a linked
+    // plan and the core leaves out the two steps that are about a jar.
+    // `ensureRuntime` and `acceptEula` are still here — neither is about the
+    // jar — and this host skips them by not asking.
     let expected = [
         "cancelOnStopBackup", "announceStarting", "beginResolveTunnel",
-        "ensureRuntime", "ensureJar", "acceptEula", "resolveMainClass",
+        "ensureRuntime", "acceptEula",
         "awaitPreviousExit", "restoreWorld", "spawn", "awaitConsole",
         "openTunnel", "announceRunning",
     ]
     try expect(names == expected, "got:\n  \(names.joined(separator: ", "))")
     return "\(steps.count) steps"
+}
+
+check("the spawned plan still carries the jar steps") {
+    // The guard on the default. Android sends no engine and must keep the plan
+    // it has always had — its launch order throws on a step that is missing,
+    // so getting this wrong crashes it on the first start rather than here.
+    let names = try Core.launchPlan(
+        backups: true, settings: true, tunnel: true, engine: "spawned"
+    ).map(\.name)
+    try expect(names.contains("ensureJar"), "the spawned plan lost ensureJar: \(names)")
+    try expect(names.contains("resolveMainClass"), "the spawned plan lost resolveMainClass")
+    try expect(names.count == 14, "expected 14 steps, got \(names.count)")
+    return "14 steps, jar steps intact"
 }
 
 check("the checkpoints are the four the core marks") {
@@ -990,21 +996,20 @@ func iosOrder(_ life: Core.Lifecycle, _ serverId: String) throws -> LaunchOrder 
         serverId: serverId, lifecycle: life)
 }
 
-check("a host may jump over steps it cannot perform") {
+check("a host may jump over steps it does not perform") {
     let life = Core.Lifecycle()
     life.startRequested("a")
     var order = try iosOrder(life, "a")
 
-    // The plan hands every host the four JVM steps — unpacking a runtime,
-    // fetching a jar, accepting an EULA, resolving a main class — because
-    // `launch::Inputs` has no way to say the engine is linked rather than
-    // spawned. This host simply never asks for them, and the next step it does
-    // ask for must be accepted rather than read as going backwards.
+    // `ensureRuntime` and `acceptEula` are in this host's plan and it does
+    // neither — Pumpkin unpacks nothing and reads no eula.txt. Jumping them
+    // must be accepted rather than read as going backwards, because that is
+    // what "monotonicity, not exhaustiveness" buys.
     try expect(try order.at("announceStarting"), "announceStarting was not in the plan")
     try expect(
         try order.at("awaitPreviousExit"),
-        "jumping the four JVM steps was refused — skipping must stay legal")
-    return "jumped ensureRuntime/ensureJar/acceptEula/resolveMainClass"
+        "jumping ensureRuntime and acceptEula was refused — skipping must stay legal")
+    return "jumped ensureRuntime and acceptEula"
 }
 
 check("a step absent from the plan is reported absent, not run") {
@@ -1111,9 +1116,11 @@ check("a wrong-typed argument is an error, not a crash") {
 
 check("ten thousand calls do not leak the reply") {
     // Core.call frees with a defer; if that defer were wrong this would grow
-    // without bound. Crude, but it catches a missing free.
+    // without bound. Crude, but it catches a missing free. Any cheap wrapper
+    // that returns a fresh reply will do — this one takes no allocation of its
+    // own, so what it measures is the boundary rather than the work.
     for _ in 0..<10_000 {
-        _ = try Core.exitState(intentional: true, code: 0)
+        _ = try Core.shouldBackUp(hasLocalWorld: true)
     }
     return "10k calls completed"
 }

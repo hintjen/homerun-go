@@ -234,10 +234,10 @@ enum Core {
 
     // MARK: - Lifecycle
 
-    /// `stopped` or `crashed`. A server exits 0 on `stop`, so intent decides.
-    static func exitState(intentional: Bool, code: Int) throws -> String {
-        try string("state.exit", ["intentional": intentional, "code": code])
-    }
+    // `state.exit` had a wrapper here and no caller. The backend classified
+    // exits itself, which was the drift the lifecycle port ended — it now asks
+    // `Lifecycle.exited`, and the core reaches `exit_state` on its own behalf.
+    // The dispatch method stays; only this host's unused door onto it is gone.
 
     /// One line of tunnel output against a running count.
     ///
@@ -273,11 +273,22 @@ enum Core {
 
     /// The steps this launch runs, given what it has to work with.
     ///
-    /// A host may skip a step it structurally cannot perform — this one skips
-    /// the four JVM steps, since Pumpkin is linked and there is no jar — but it
-    /// may never reorder them. `LaunchOrder` enforces that.
-    static func launchPlan(backups: Bool, settings: Bool, tunnel: Bool) throws -> [Step] {
-        try array("launch.plan", ["backups": backups, "settings": settings, "tunnel": tunnel])
+    /// `engine: "linked"` is what this host is — Pumpkin is compiled in, so
+    /// there is no jar to fetch and no `Main-Class` to read, and the core
+    /// leaves those two out rather than handing over steps that have no
+    /// meaning here.
+    ///
+    /// Two JVM-sounding steps stay in the plan regardless: `ensureRuntime`
+    /// unpacks a bundled payload and `acceptEula` writes a file into the server
+    /// directory, and neither is about the jar. This host skips both by not
+    /// asking for them, which is allowed — `LaunchOrder` requires
+    /// monotonicity, not exhaustiveness.
+    static func launchPlan(
+        backups: Bool, settings: Bool, tunnel: Bool, engine: String = "linked"
+    ) throws -> [Step] {
+        try array(
+            "launch.plan",
+            ["backups": backups, "settings": settings, "tunnel": tunnel, "engine": engine])
             .compactMap { entry in
                 guard let entry = entry as? [String: Any], let name = entry["step"] as? String
                 else { return nil }

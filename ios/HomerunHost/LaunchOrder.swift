@@ -15,10 +15,11 @@ import Foundation
 /// # What this enforces
 ///
 /// **Monotonicity, not exhaustiveness.** A host may skip a step it cannot
-/// perform — this one links Pumpkin, so it never unpacks a runtime, fetches a
-/// jar, accepts an EULA or resolves a main class — but it may not run one
-/// before a step the plan puts ahead of it. Arriving out of order is a
-/// programming error and throws rather than quietly doing the wrong thing.
+/// perform — this one asks for a linked plan, so the jar steps are not in it,
+/// and it skips `ensureRuntime` and `acceptEula` by never arriving at them —
+/// but it may not run one before a step the plan puts ahead of it. Arriving
+/// out of order is a programming error and throws rather than quietly doing
+/// the wrong thing.
 ///
 /// **Checkpoints.** A stop that arrives mid-launch is honoured *before* the
 /// next expensive or irreversible step rather than after it. Which steps those

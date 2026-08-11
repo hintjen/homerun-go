@@ -52,6 +52,24 @@ final class PumpkinBackend: ServerBackend {
     /// the repository credentials and this device's id.
     private var backupContext: BackupContext?
 
+    /// Where a backup's `[Backup] …` lines go: the player's console, and the
+    /// device log.
+    ///
+    /// Both, because they answer different questions. The console is what a
+    /// player watches while a world uploads. The device log is the only record
+    /// left once the page is gone — and the on-stop backup outlives the screen
+    /// that started it, so "did the backup run, and what did it say" is
+    /// otherwise unanswerable after the fact.
+    ///
+    /// Safe to log: these are the player-facing strings, and nothing about the
+    /// repository — no URL, no passphrase — is ever in them.
+    private func backupLog(serverId: String) -> (String) -> Void {
+        { [weak self] line in
+            HostLog.host.info("\(line, privacy: .public)")
+            self?.onLog?(serverId, line)
+        }
+    }
+
     // MARK: - Lifecycle
 
     func create(serverId: String) throws {
@@ -79,9 +97,10 @@ final class PumpkinBackend: ServerBackend {
     /// with `LaunchOrder` refusing to take them out of sequence and honouring
     /// a stop at every checkpoint.
     ///
-    /// Four of the plan's steps are for a host that spawns a JVM — unpacking a
-    /// runtime, fetching a jar, accepting the EULA, reading a main class. This
-    /// host links Pumpkin, so it simply never arrives at them; skipping is
+    /// The plan is asked for as a linked engine, so the two steps that are
+    /// about a jar are not in it at all. Two others that sound like a JVM's
+    /// are — `ensureRuntime` unpacks a bundled payload, `acceptEula` writes a
+    /// file — and this host skips those by not arriving at them. Skipping is
     /// allowed, reordering is not.
     func start(serverId: String, config: ServerConfig) async throws {
         try create(serverId: serverId)
@@ -110,13 +129,23 @@ final class PumpkinBackend: ServerBackend {
                 // This device is relaunching this server, so its own on-stop
                 // backup is now pointless work holding the world open. The
                 // cancel is cooperative and lands at the engine's next phase
-                // boundary.
+                // boundary, and is a documented no-op when nothing is running.
                 //
                 // The cancelled backup files no `backup-state`, and that is
                 // deliberate — the lease looks leaked and is not. This launch's
                 // own `running` ack closes it, and reporting a failure here
                 // would race that ack.
-                onLog?(serverId, "[Backup] Cancelling the backup still running for this server…")
+                //
+                // The *message* is gated separately, on there actually being a
+                // job. `supersedesOnStopBackup` is true on every start — the
+                // core counts a server active from the moment the call arrives,
+                // so `is_active()` holds — and telling a player their backup is
+                // being cancelled when they have never taken one is a small lie
+                // told on every single launch.
+                if BackupFFI.progress(since: 0).running {
+                    backupLog(serverId: serverId)(
+                        "[Backup] Cancelling the backup still running for this server…")
+                }
                 BackupFFI.cancel()
             }
 
@@ -147,7 +176,7 @@ final class PumpkinBackend: ServerBackend {
                 try await backups.restoreBeforeLaunch(
                     serverId: serverId, dir: HostStore.serverDirectory(id: serverId),
                     context: backup,
-                    onLog: { [weak self] line in self?.onLog?(serverId, line) })
+                    onLog: backupLog(serverId: serverId))
             }
 
             let port = (config.extra["port"] as? Int).map(UInt16.init) ?? 25565
@@ -437,7 +466,7 @@ final class PumpkinBackend: ServerBackend {
             Task { [backups] in
                 await backups.backupAfterStop(
                     serverId: serverId, dir: dir, repo: repo, deviceId: context.deviceId,
-                    onLog: { [weak self] line in self?.onLog?(serverId, line) })
+                    onLog: backupLog(serverId: serverId))
             }
         }
     }
