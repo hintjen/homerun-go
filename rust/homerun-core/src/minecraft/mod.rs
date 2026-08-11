@@ -12,6 +12,7 @@
 
 pub mod console;
 pub mod jar;
+pub mod jvm;
 pub mod settings;
 
 use crate::game::{

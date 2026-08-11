@@ -13,6 +13,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
@@ -653,6 +654,95 @@ object Core {
             releasesLease = reply["releasesLease"]?.jsonPrimitive?.boolean == true,
         )
     }
+
+    // -----------------------------------------------------------------------
+    // Running the JVM
+    // -----------------------------------------------------------------------
+
+    /** The portable half of a Java server's command line. */
+    data class Launch(
+        val heapMb: Int,
+        /** `-Xmx` and `-Xms`, in order. */
+        val options: List<String>,
+        /** What Minecraft's own main takes. */
+        val programArgs: List<String>,
+        val eulaFile: String,
+        val eulaContents: String,
+    )
+
+    /**
+     * How much heap, and the flags that carry it.
+     *
+     * [deviceTotalMb] is the ceiling this device can afford to give away —
+     * null on a machine with no such limit. The core decides what fraction of
+     * it is safe; this host only measures it.
+     */
+    fun jvmLaunch(memoryMb: Int, deviceTotalMb: Int?): Launch =
+        call("minecraft.jvm.launch", buildJsonObject {
+            put("memoryMb", memoryMb)
+            deviceTotalMb?.let { put("deviceTotalMb", it) }
+        }).jsonObject.let { obj ->
+            fun strings(key: String) =
+                (obj[key] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull }
+            Launch(
+                heapMb = obj["heapMb"]?.jsonPrimitive?.intOrNull ?: 1024,
+                options = strings("options"),
+                programArgs = strings("programArgs"),
+                eulaFile = obj["eulaFile"]?.jsonPrimitive?.contentOrNull ?: "eula.txt",
+                eulaContents = obj["eulaContents"]?.jsonPrimitive?.contentOrNull ?: "eula=true\n",
+            )
+        }
+
+    /** One rung of the stop ladder: do this, then wait this long. */
+    data class Rung(
+        /** `console`, `terminate` or `kill`. */
+        val action: String,
+        val waitMs: Long,
+    )
+
+    /**
+     * How to stop a running JVM, in the order to try it.
+     *
+     * [console] is false when nothing is listening on stdin yet — a server
+     * stopped while it was still booting. Why the first rung is not a
+     * terminate, and why the waits are what they are, is
+     * `homerun_core::minecraft::jvm::stop_ladder`.
+     */
+    fun stopLadder(console: Boolean): Pair<String, List<Rung>> =
+        call("minecraft.jvm.stopLadder", buildJsonObject {
+            put("console", console)
+        }).jsonObject.let { obj ->
+            val command = obj["command"]?.jsonPrimitive?.contentOrNull ?: "stop"
+            val rungs = (obj["rungs"] as? JsonArray).orEmpty().map {
+                Rung(
+                    action = it.jsonObject["action"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    waitMs = it.jsonObject["waitMs"]?.jsonPrimitive?.longOrNull ?: 0L,
+                )
+            }
+            command to rungs
+        }
+
+    /** How long a launch waits for the things it cannot hurry. */
+    data class Limits(val startTimeoutMs: Long, val previousExitWaitMs: Long)
+
+    fun jvmLimits(): Limits =
+        call("minecraft.jvm.limits", buildJsonObject {}).jsonObject.let {
+            Limits(
+                startTimeoutMs = it["startTimeoutMs"]?.jsonPrimitive?.longOrNull ?: 300_000L,
+                previousExitWaitMs =
+                    it["previousExitWaitMs"]?.jsonPrimitive?.longOrNull ?: 120_000L,
+            )
+        }
+
+    /**
+     * The wording for something this host could not do.
+     *
+     * One sentence per refusal, shared with every other Homerun app. Do not
+     * reword at the call site — change it in `jvm::Refusal`.
+     */
+    fun refusal(kind: String): String =
+        call("minecraft.jvm.refusal", buildJsonObject { put("kind", kind) })
+            .jsonPrimitive.content
 
     // -----------------------------------------------------------------------
     // What a run is costing

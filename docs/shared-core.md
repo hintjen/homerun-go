@@ -73,7 +73,7 @@ link.rs        gateway credentials and the staleness rule
 properties.rs  key=value config merging, comments preserved
 state.rs       handshake supervision, exit classification
 tunnel.rs      WireGuard config from a list of forwards
-minecraft/     jar, console, settings — one implementation of game.rs
+minecraft/     jar, jvm, console, settings — one implementation of game.rs
 ```
 
 `lifecycle` and `launch` are the only two that hold state or describe a
@@ -93,6 +93,7 @@ Minecraft is what names them.
 | `lifecycle` | `nativeServerManager.ts` — `runningServers` ∪ `pendingStartup`, and `waitForSupervisorIdle` |
 | `launch` | `nativeServerManager.startServer`, read top to bottom |
 | `minecraft::jar` | `src/electron/mod-installer.ts` |
+| `minecraft::jvm` | `supervisor.js` — its spawn arguments and `stopServer` |
 | `minecraft::console` | `JavaServerBackend` (Android) + supervisor log handling |
 | `minecraft::settings` | `writeServerProperties`, `writeOpsAndWhitelistFiles` |
 | `tunnel` | `src/electron/wireproxyConfig.ts` |
@@ -163,6 +164,10 @@ These moved out of Kotlin entirely:
 | `JavaServerBackend`'s `stopRequested`, `startingId`, `claimStart` | `lifecycle`, via `lifecycle.apply` / `lifecycle.query` |
 | `BridgeRouter`'s active-id bookkeeping | `lifecycle::active_ids` |
 | the order of `JavaServerBackend.launch`, written out longhand | `launch::plan` |
+| `heapMb`, the `-Xmx`/`-Xms`/`nogui` args, `eula.txt` | `minecraft::jvm::heap_mb`, `heap_options`, `PROGRAM_ARGS`, `EULA_CONTENTS` |
+| the stop escalation and its 30 s / 8 s waits | `minecraft::jvm::stop_ladder` |
+| `START_TIMEOUT_MS`, `PREVIOUS_EXIT_WAIT_MS` | `minecraft::jvm::Limits` |
+| six player-facing refusals, worded per host | `minecraft::jvm::Refusal` |
 | — (Android wrote no config at all) | `minecraft::settings`, via `game.configFiles` |
 
 That last row is the largest: every setting a player chose was silently

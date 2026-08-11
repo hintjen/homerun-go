@@ -347,10 +347,9 @@ mod tests {
     /// host that omits `engine` must get the plan it has always had.
     #[test]
     fn omitting_the_engine_means_spawned() {
-        let implied: Inputs = serde_json::from_str(
-            r#"{"backups":true,"settings":true,"tunnel":true}"#,
-        )
-        .expect("inputs without an engine should deserialize");
+        let implied: Inputs =
+            serde_json::from_str(r#"{"backups":true,"settings":true,"tunnel":true}"#)
+                .expect("inputs without an engine should deserialize");
         assert_eq!(implied.engine, Engine::Spawned);
         assert_eq!(plan(implied), plan(full()));
     }

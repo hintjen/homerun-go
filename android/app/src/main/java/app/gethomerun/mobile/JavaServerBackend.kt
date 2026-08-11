@@ -155,8 +155,8 @@ class JavaServerBackend(
      * Server jars, shared by every server on this device and named after their
      * digests — see [ServerJar.ensure]. A sibling of `servers/`, not a child of
      * one, and in `filesDir` rather than `cacheDir`: Android may delete
-     * `cacheDir` under a running app, and the jars here are hard-linked into
-     * server directories that are very much in use.
+     * `cacheDir` under a running app, and losing an entry there would cost a
+     * download the next server on that version was counting on.
      */
     private fun jarCacheDir(): File = File(context.filesDir, "jars").apply { mkdirs() }
 
@@ -206,7 +206,7 @@ class JavaServerBackend(
     private suspend fun launch(serverId: String, config: ServerConfig) {
         val launcher = JavaRuntime.launcher(context)
             ?: throw ServerBackendException.Engine(
-                "This build has no Java launcher, so it cannot host a Java server."
+                Core.refusal("noJavaRuntime")
             )
 
         val dir = dataDir(serverId)
@@ -248,6 +248,12 @@ class JavaServerBackend(
         // that did not happen — reported as stopped, with the reason on the
         // call. `crashed` is reserved for a JVM that ran and died.
         order.at("ensureJar")
+        // Heap size, the flags that carry it, what Minecraft's own main takes
+        // and the EULA file — all the core's. This file supplies the one
+        // thing only it can know, which is how much RAM the device has.
+        val jvm = Core.jvmLaunch(config.memoryMb, deviceTotalMb())
+        lastHeapMb = jvm.heapMb
+
         val prepared = runCatching {
             // Blocking the first time — a hundred megabytes out of the APK —
             // and the first start on a device pays for it. The bridge has no
@@ -255,7 +261,7 @@ class JavaServerBackend(
             // takes.
             val javaHome = withContext(Dispatchers.IO) { JavaRuntime.ensure(context) }
             val libjvm = JavaRuntime.libjvm(context)
-                ?: throw ServerBackendException.Engine("The Java runtime is incomplete.")
+                ?: throw ServerBackendException.Engine(Core.refusal("brokenJavaRuntime"))
 
             val jar = ServerJar.ensure(
                 dir = dir,
@@ -271,13 +277,13 @@ class JavaServerBackend(
             // `nativeServerManager.startServer`. The server will not boot
             // without it, and there is no acceptance step anywhere in the
             // product; `docs/android-server-backend.md` records that.
-            File(dir, "eula.txt").writeText("eula=true\n")
+            File(dir, jvm.eulaFile).writeText(jvm.eulaContents)
 
             // The jar names the class to run. Doing this here keeps the native
             // launcher free of zip parsing.
             val mainClass = mainClassOf(jar)
                 ?: throw ServerBackendException.Engine(
-                    "That server jar has no Main-Class, so it cannot be started."
+                    Core.refusal("noMainClass")
                 )
             Launch(javaHome, libjvm, jar, mainClass)
         }.getOrElse { err ->
@@ -303,7 +309,6 @@ class JavaServerBackend(
         if (lifecycle.awaitPreviousExit(serverId)) awaitPreviousExit(serverId)
 
         val (javaHome, libjvm, jar, mainClass) = prepared
-        val heap = heapMb(config.memoryMb)
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
 
         // Written on every launch, after the jar is in place and before the
@@ -368,11 +373,14 @@ class JavaServerBackend(
                         // crash reports.
                         "-Djava.io.tmpdir=${tmpDir(dir).absolutePath}",
                         "-Duser.dir=${dir.absolutePath}",
-                        "-Xmx${heap}M",
-                        "-Xms${heap}M",
-                        "--",
-                        "nogui",
                     )
+                        // Everything above is Android's — a path that only
+                        // exists here, or a workaround for a Termux-built
+                        // runtime. Everything below is what any host running
+                        // this server would pass, so the core says it.
+                        + jvm.options
+                        + "--"
+                        + jvm.programArgs
                 )
                     .directory(dir)
                     .redirectErrorStream(true)
@@ -425,7 +433,7 @@ class JavaServerBackend(
         // for the process to merely exist would report a server that cannot
         // be joined yet; the bridge has no timeout so waiting is correct.
         order.at("awaitConsole")
-        val ready = withTimeoutOrNull(START_TIMEOUT_MS) {
+        val ready = withTimeoutOrNull(Core.jvmLimits().startTimeoutMs) {
             while (true) {
                 if (!started.isAlive) return@withTimeoutOrNull false
                 if (consoleReady) return@withTimeoutOrNull true
@@ -436,10 +444,10 @@ class JavaServerBackend(
 
         if (ready != true) {
             tunnelJob?.cancel()
-            stopProcess(started)
+            climbStopLadder(started, console = true)
             transition(serverId, ServerState.CRASHED)
             throw ServerBackendException.Engine(
-                if (started.isAlive) "The server did not finish starting in time."
+                if (started.isAlive) Core.refusal("startTimedOut")
                 else "The server stopped unexpectedly while starting."
             )
         }
@@ -454,7 +462,7 @@ class JavaServerBackend(
             tunnelJob = null
             withContext(Dispatchers.IO) {
                 wireProxy.stop()
-                stopProcess(started)
+                climbStopLadder(started, console = true)
             }
             return
         }
@@ -576,14 +584,14 @@ class JavaServerBackend(
         val previous = process ?: return
         if (!previous.isAlive) return
         Log.i(TAG, "$serverId: waiting for the previous server to finish stopping")
-        val gone = withTimeoutOrNull(PREVIOUS_EXIT_WAIT_MS) {
+        val gone = withTimeoutOrNull(Core.jvmLimits().previousExitWaitMs) {
             while (previous.isAlive) delay(POLL_MS)
             true
         } == true
         if (!gone) {
             Log.w(TAG, "$serverId: the previous server has not exited — refusing to start a second")
             throw ServerBackendException.Engine(
-                "The previous server is still shutting down. Try again in a moment."
+                Core.refusal("previousServerBusy")
             )
         }
     }
@@ -660,36 +668,53 @@ class JavaServerBackend(
             // Before the JVM, so the gateway's peer slot is free by the time
             // the next start asks for one.
             wireProxy.stop()
-            if (graceful) {
-                stopProcess(running)
-            } else {
-                Log.i(TAG, "$serverId: stopping before the console was ready — terminating")
-                runCatching { running.destroy() }
-                if (!running.waitFor(FORCE_STOP_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
-                    runCatching { running.destroyForcibly() }
-                }
+            // `graceful` is the core's word for "there is a console that can
+            // hear a stop". The ladder itself, including what to do when there
+            // is not, is also the core's.
+            if (!graceful) {
+                Log.i(TAG, "$serverId: stopping before the console was ready")
             }
+            climbStopLadder(running, console = graceful)
         }
     }
 
     /**
-     * `stop` on stdin, then wait. Escalate only if it will not go — a killed
-     * JVM can lose the world it was mid-save on.
+     * Climb the core's stop ladder until the JVM is gone.
+     *
+     * Nothing about *what to try, in what order, waiting how long* is decided
+     * here — see `homerun_core::minecraft::jvm::stop_ladder`, which carries the
+     * reason the first rung is a console command and not a terminate. This
+     * carries the rungs out.
      */
-    private fun stopProcess(running: Process) {
-        runCatching {
-            running.outputStream.write("stop\n".toByteArray())
-            running.outputStream.flush()
-        }.onFailure {
-            // Broken pipe means it is already on its way out. Benign.
-            Log.d(TAG, "stdin closed before `stop` landed")
-        }
-        if (!running.waitFor(GRACEFUL_STOP_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
-            Log.w(TAG, "server ignored `stop` for ${GRACEFUL_STOP_SECONDS}s — terminating")
-            running.destroy()
-            if (!running.waitFor(FORCE_STOP_SECONDS, java.util.concurrent.TimeUnit.SECONDS)) {
-                running.destroyForcibly()
+    private fun climbStopLadder(running: Process, console: Boolean) {
+        val (command, rungs) = Core.stopLadder(console)
+
+        for (rung in rungs) {
+            when (rung.action) {
+                "console" -> runCatching {
+                    running.outputStream.write("$command\n".toByteArray())
+                    running.outputStream.flush()
+                }.onFailure {
+                    // Broken pipe means it is already on its way out. Benign,
+                    // and the next rung is harmless against a dead process.
+                    Log.d(TAG, "stdin closed before `$command` landed")
+                }
+
+                "terminate" -> {
+                    Log.w(TAG, "server has not gone — terminating")
+                    runCatching { running.destroy() }
+                }
+
+                "kill" -> {
+                    Log.w(TAG, "server ignored a terminate — killing")
+                    runCatching { running.destroyForcibly() }
+                }
+
+                else -> Log.w(TAG, "unknown stop rung \"${rung.action}\" — skipping")
             }
+
+            if (rung.waitMs <= 0L) return
+            if (running.waitFor(rung.waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return
         }
     }
 
@@ -914,7 +939,7 @@ class JavaServerBackend(
                 running.outputStream.write("$command\n".toByteArray())
                 running.outputStream.flush()
             }.getOrElse {
-                throw ServerBackendException.Engine("The server is not accepting commands.")
+                throw ServerBackendException.Engine(Core.refusal("notAcceptingCommands"))
             }
         }
     }
@@ -982,17 +1007,15 @@ class JavaServerBackend(
     private var lastHeapMb: Int = 0
 
     /**
-     * Android kills **the whole app** under memory pressure, not just the
-     * server, so this is deliberately conservative: never more than a third of
-     * total RAM, and never more than the caller asked for.
+     * How much RAM this device has, which is all this file gets to say about
+     * heap. What fraction of it is safe to hand a JVM is the core's — see
+     * `homerun_core::minecraft::jvm::heap_mb`, which carries the reason.
      */
-    private fun heapMb(requestedMb: Int): Int {
+    private fun deviceTotalMb(): Int? = runCatching {
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val info = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }
-        val totalMb = (info.totalMem / (1024 * 1024)).toInt()
-        val ceiling = (totalMb / 3).coerceAtLeast(MIN_HEAP_MB)
-        return requestedMb.coerceIn(MIN_HEAP_MB, ceiling).also { lastHeapMb = it }
-    }
+        (info.totalMem / (1024 * 1024)).toInt().takeIf { it > 0 }
+    }.getOrNull()
 
     /** `Main-Class` from the jar manifest, which is what `java -jar` reads. */
     private fun mainClassOf(jar: File): String? = runCatching {
@@ -1025,22 +1048,20 @@ class JavaServerBackend(
     private companion object {
         const val TAG = "HomerunJava"
         const val DEFAULT_PORT = 25565
-        const val POLL_MS = 250L
-        const val START_TIMEOUT_MS = 300_000L
 
         /**
-         * How long a *restart* waits for the outgoing JVM to exit before
-         * refusing, rather than spawning a second server into one directory.
+         * How often this file polls something it is waiting on. Its own
+         * business — it is the granularity of a loop, not a rule about
+         * servers.
          *
-         * Nothing else waits on a stop: a stop is carried out immediately,
-         * gracefully when the console can hear it and by termination when it
-         * cannot.
+         * The waits themselves are not here: how long a launch may take, how
+         * long a restart waits for its predecessor, and how long each rung of
+         * the stop ladder gets are `homerun_core::minecraft::jvm`'s, along with
+         * the heap ceiling and every refusal this file used to word for itself.
          */
-        const val PREVIOUS_EXIT_WAIT_MS = 120_000L
-        const val GRACEFUL_STOP_SECONDS = 30L
-        const val FORCE_STOP_SECONDS = 8L
+        const val POLL_MS = 250L
+
         const val MAX_BUFFERED_LINES = 2000
-        const val MIN_HEAP_MB = 512
 
         /** The two `native-server-network-error` kinds the contract defines. */
         const val PROVISIONING = "provisioning"

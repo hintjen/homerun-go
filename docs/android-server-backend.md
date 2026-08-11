@@ -42,8 +42,22 @@ java -Xmx<N>M -Xms<N>M -jar <server.jar> nogui     # cwd = the server directory
 ```
 
 **Stopping is `stop` on stdin, never a signal.** Killing the JVM risks the
-world it was mid-save on. This waits 30 s, then terminates, then forcibly —
-the same escalation the desktop uses, for the same reason.
+world it was mid-save on — on Windows a terminate is `TerminateProcess`, which
+ends the VM without running its shutdown hook, so the world is never flushed
+and the on-stop backup captures a stale auto-save.
+
+The escalation is `homerun_core::minecraft::jvm::stop_ladder`: console, wait
+30 s, terminate, wait 8 s, kill. This file climbs it and decides none of it. A
+server stopped before its console existed gets the same ladder minus its first
+rung, which is the core's answer to `console: false` rather than a branch here.
+
+**The heap ceiling is the core's too.** This file measures the device;
+`jvm::heap_mb` decides what fraction of it is safe to hand over — a third,
+because Android kills *the whole app* under memory pressure, so an
+over-generous heap costs you the app that was hosting, mid-save. Same call
+gives `-Xmx`/`-Xms`, `nogui`, and the EULA file, all of which any host running
+this server would pass. Only the Android-specific flags — `libjvm`,
+`java.io.tmpdir`, `LD_LIBRARY_PATH` — are built here.
 
 **Player tracking reads the console, not RCON.** Vanilla prints join and leave
 lines; parsing them costs nothing and avoids a port, a password and a second

@@ -35,7 +35,7 @@
 use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
-use homerun_core::minecraft::{self, jar, settings};
+use homerun_core::minecraft::{self, jar, jvm, settings};
 use homerun_core::{backup, game, launch, lifecycle, link, metrics, properties, state, tunnel};
 
 /// Dispatch one call and render the reply envelope.
@@ -284,6 +284,60 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 optional_text("version").as_deref(),
                 loader,
             )))
+        }
+
+        // --- running the JVM ----------------------------------------------
+        //
+        // The portable half of a Java server's command line, how to stop one,
+        // and how long to wait for it. A host adds its own platform flags
+        // around this; what it stops doing is deciding any of the numbers.
+        "minecraft.jvm.launch" => {
+            let requested = args
+                .get("memoryMb")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(1024) as u32;
+            // Absent means "no device ceiling", which is what a desktop has.
+            let total = args
+                .get("deviceTotalMb")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32);
+            let heap = jvm::heap_mb(requested, total);
+            Ok(json!({
+                "heapMb": heap,
+                "options": jvm::heap_options(heap),
+                "programArgs": jvm::PROGRAM_ARGS,
+                "eulaFile": jvm::EULA_FILE,
+                "eulaContents": jvm::EULA_CONTENTS,
+            }))
+        }
+
+        // Do this, wait this long, then climb. See `jvm::stop_ladder` for why
+        // the first rung is not a terminate.
+        "minecraft.jvm.stopLadder" => {
+            let console = args
+                .get("console")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok(json!({
+                "command": jvm::STOP_COMMAND,
+                "rungs": serde_json::to_value(jvm::stop_ladder(console))
+                    .map_err(|e| e.to_string())?,
+            }))
+        }
+
+        "minecraft.jvm.limits" => {
+            serde_json::to_value(jvm::Limits::default()).map_err(|e| e.to_string())
+        }
+
+        // One wording per refusal, so two apps turning down the same thing say
+        // the same sentence. An unknown kind is an error rather than a shrug:
+        // a host asking for wording that does not exist would otherwise show
+        // the player an empty string.
+        "minecraft.jvm.refusal" => {
+            let kind = text("kind")?;
+            let refusal: jvm::Refusal = serde_json::from_value(Value::String(kind.clone()))
+                .map_err(|_| format!("no refusal called \"{kind}\""))?;
+            Ok(Value::String(refusal.text().to_string()))
         }
 
         // --- the tunnel (game-agnostic) -----------------------------------
@@ -1115,6 +1169,48 @@ mod tests {
         );
         assert_eq!(view["activeIds"], json!(["s"]));
         assert_eq!(view["lifecycle"], r["lifecycle"], "a query mutates nothing");
+    }
+
+    /// The numbers a host used to hard-code, now asked for.
+    #[test]
+    fn the_jvm_command_line_and_the_stop_ladder_come_from_here() {
+        // A phone: a third of 6 GB, not the 4 GB asked for.
+        let phone = ok(
+            "minecraft.jvm.launch",
+            json!({ "memoryMb": 4096, "deviceTotalMb": 6144 }),
+        );
+        assert_eq!(phone["heapMb"], 2048);
+        assert_eq!(phone["options"][0], "-Xmx2048M");
+        assert_eq!(phone["options"][1], "-Xms2048M");
+        assert_eq!(phone["programArgs"][0], "nogui");
+        assert_eq!(phone["eulaContents"], "eula=true\n");
+
+        // No ceiling given: what was asked for.
+        let desktop = ok("minecraft.jvm.launch", json!({ "memoryMb": 4096 }));
+        assert_eq!(desktop["heapMb"], 4096);
+
+        let ladder = ok("minecraft.jvm.stopLadder", json!({ "console": true }));
+        assert_eq!(ladder["command"], "stop");
+        let rungs = ladder["rungs"].as_array().unwrap();
+        assert_eq!(rungs[0]["action"], "console");
+        assert_eq!(rungs[0]["waitMs"], 30_000);
+        assert_eq!(rungs.last().unwrap()["action"], "kill");
+
+        // Nothing listening on stdin: no point asking.
+        let blunt = ok("minecraft.jvm.stopLadder", json!({ "console": false }));
+        assert_eq!(blunt["rungs"][0]["action"], "terminate");
+
+        let limits = ok("minecraft.jvm.limits", json!({}));
+        assert_eq!(limits["startTimeoutMs"], 300_000);
+        assert_eq!(limits["previousExitWaitMs"], 120_000);
+
+        let text = ok("minecraft.jvm.refusal", json!({ "kind": "startTimedOut" }));
+        assert_eq!(text, "The server did not finish starting in time.");
+
+        // A wording that does not exist is an error, not an empty string the
+        // player would be shown.
+        assert!(call("minecraft.jvm.refusal", &json!({ "kind": "nope" }).to_string())
+            .contains("\"ok\":false"));
     }
 
     /// The loop a host implements, on the wire: ask, read, record, read back.
