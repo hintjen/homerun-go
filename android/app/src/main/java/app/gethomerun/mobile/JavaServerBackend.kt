@@ -20,6 +20,7 @@ import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -42,9 +43,10 @@ import java.time.Instant
  * **Graceful stop is `stop` on stdin, not a signal.** Killing the JVM risks
  * the world save. The desktop waits and then force-kills; so does this.
  *
- * Player tracking reads the console rather than RCON. Vanilla prints join and
- * leave lines, and parsing them costs nothing — no port, no password, no
- * second protocol to keep alive. RCON becomes worth adding when moderation
+ * Player tracking reads the console rather than RCON — vanilla prints join and
+ * leave lines, and parsing them costs nothing. That reading happens in the
+ * supervisor, which is already looking at every line as it arrives; this file
+ * asks it who is playing. RCON becomes worth adding when moderation
  * (kick/ban/op) lands.
  */
 class JavaServerBackend(
@@ -83,13 +85,6 @@ class JavaServerBackend(
 
     /** The tunnel lookup, resolved alongside the JVM booting rather than before it. */
     private var tunnelJob: Deferred<WireProxy.Link?>? = null
-
-    /**
-     * The console has printed `Done (…)!`. Distinct from [ServerState.RUNNING],
-     * which is only reported once the tunnel is up too.
-     */
-    @Volatile
-    private var consoleReady = false
 
     /**
      * Who owns a server right now, and what its last exit meant.
@@ -132,8 +127,8 @@ class JavaServerBackend(
     private val lines = ArrayDeque<String>()
     private var firstLineIndex = 0
 
-    private val roster = LinkedHashSet<String>()
-    private var maxPlayers: Int? = null
+    /** Last roster size announced, so the pump only reports actual changes. */
+    private var lastPlayerCount = -1
 
     override var onStateChanged: ((String, ServerState, Boolean) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
@@ -410,7 +405,6 @@ class JavaServerBackend(
 
         currentServerId = serverId
         currentPort = port
-        consoleReady = false
         startLogPump(serverId)
 
         // From here the supervisor in `homerun-pumpkin-ffi` owns the process:
@@ -433,11 +427,16 @@ class JavaServerBackend(
         // "Done" is the JVM telling us it is accepting connections. Waiting
         // for the process to merely exist would report a server that cannot
         // be joined yet; the bridge has no timeout so waiting is correct.
+        //
+        // The supervisor is the one watching for it: it reads every console
+        // line already, and `running` is what it calls having seen `Done (…)`.
+        // This host used to classify the same lines a second time to learn the
+        // same fact.
         order.at("awaitConsole")
         val ready = withTimeoutOrNull(Core.jvmLimits().startTimeoutMs) {
             while (true) {
                 if (engineThread?.isAlive != true) return@withTimeoutOrNull false
-                if (consoleReady) return@withTimeoutOrNull true
+                if (engineState() == ServerState.RUNNING) return@withTimeoutOrNull true
                 delay(POLL_MS)
             }
             @Suppress("UNREACHABLE_CODE") false
@@ -453,6 +452,10 @@ class JavaServerBackend(
                 else "The server stopped unexpectedly while starting."
             )
         }
+
+        // There is a console now, which is what makes a *graceful* stop
+        // possible — the core needs to know before it can say so.
+        lifecycle.consoleReady(serverId)
 
         // A stop that landed while the JVM was booting: the console exists
         // now, so it can be asked politely rather than killed. Reached when
@@ -731,6 +734,7 @@ class JavaServerBackend(
         pumpJob = scope.launch(Dispatchers.IO) {
             while (true) {
                 drainConsole(serverId)
+                pollPlayers(serverId)
                 delay(POLL_MS)
             }
         }
@@ -745,7 +749,20 @@ class JavaServerBackend(
             if (line.isEmpty()) continue
             record(line)
             onLog?.invoke(serverId, line)
-            interpret(serverId, line)
+        }
+    }
+
+    /**
+     * Notice the roster changing, so the UI is told rather than having to poll.
+     *
+     * A count rather than the names: the supervisor keeps the roster itself,
+     * and the event carries no payload — it is a nudge to come and ask.
+     */
+    private fun pollPlayers(serverId: String) {
+        val count = players(serverId)?.players?.size ?: return
+        if (count != lastPlayerCount) {
+            lastPlayerCount = count
+            onPlayersChanged?.invoke(serverId)
         }
     }
 
@@ -829,34 +846,6 @@ class JavaServerBackend(
     }
 
     /**
-     * Read state out of the console, the way every server wrapper does.
-     * These strings are vanilla's; a modded server may word them differently,
-     * which is why the roster is best-effort and never blocks anything.
-     */
-    private fun interpret(serverId: String, line: String) {
-
-        // What a console line means is decided in `homerun-core::console`,
-        // which knows the things a regex here kept having to relearn — that a
-        // loader may add its own prefix, and that anyone can type "Notch
-        // joined the game" into chat.
-        val meaning = runCatching { Core.classify(line) }.getOrNull() ?: return
-
-        // Records that the JVM is up; `running` is announced by start(), after
-        // the tunnel, so the two are not the same thing.
-        if (meaning.ready) {
-            consoleReady = true
-            lifecycle.consoleReady(serverId)
-        }
-        meaning.joined?.let { if (roster.add(it)) onPlayersChanged?.invoke(serverId) }
-        meaning.left?.let { if (roster.remove(it)) onPlayersChanged?.invoke(serverId) }
-
-        // The ceiling comes from the same classification as the rest — it is
-        // console parsing, and it belongs beside ready/joined/left rather than
-        // in a regex this file kept for itself.
-        meaning.maxPlayers?.let { maxPlayers = it }
-    }
-
-    /**
      * A line from Homerun rather than from the server — jar downloads, runtime
      * unpacking. Recorded as well as emitted so a console that mounts after
      * the fact still shows how the launch went; the log pump does not exist
@@ -886,11 +875,9 @@ class JavaServerBackend(
 
     @Synchronized
     private fun reset() {
-        consoleReady = false
         lines.clear()
         firstLineIndex = 0
-        roster.clear()
-        maxPlayers = null
+        lastPlayerCount = -1
     }
 
     override suspend fun command(serverId: String, command: String) {
@@ -916,11 +903,45 @@ class JavaServerBackend(
     override fun status(serverId: String): ServerState =
         if (currentServerId == serverId) lastAnnounced else ServerState.STOPPED
 
+    /**
+     * The supervisor's own view of the run, which is **not** [status].
+     *
+     * It reports `running` the moment the console says `Done (…)`; this host
+     * holds `running` back until the tunnel is up as well, because a server
+     * nobody can reach is not a running server. Both are right about different
+     * questions, and this one answers "is there a console yet".
+     */
+    private fun engineState(): ServerState {
+        val wire = runCatching {
+            Json.parseToJsonElement(NativeServer.nativeState())
+                .jsonObject["state"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
+        return ServerState.entries.firstOrNull { it.wire == wire } ?: ServerState.STOPPED
+    }
+
+    /**
+     * Who is playing, according to the supervisor that read the console.
+     *
+     * Built there rather than here: it sees every line as it arrives, and
+     * classifying them twice is how two answers to one question appear. The
+     * names carry no UUID — console lines have none to give, and the Pumpkin
+     * backend fills that field from a source this one does not have.
+     */
     override fun players(serverId: String): PlayerRoster? {
         // Running is the core's word, not this file's — the roster is only
         // meaningful once the server is accepting people.
         if (serverId !in lifecycle.runningIds()) return null
-        return PlayerRoster(roster.map { PlayerRoster.Player(it, null) }, maxPlayers)
+        val raw = NativeServer.nativePlayers()
+        if (raw.trim() == "null") return null
+        val obj = runCatching { Json.parseToJsonElement(raw).jsonObject }.getOrNull() ?: return null
+        val list = obj["players"]?.jsonArray?.map {
+            val player = it.jsonObject
+            PlayerRoster.Player(
+                name = player["name"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                uuid = player["uuid"]?.jsonPrimitive?.contentOrNull,
+            )
+        } ?: emptyList()
+        return PlayerRoster(list, obj["max"]?.jsonPrimitive?.intOrNull)
     }
 
     override fun uptime(serverId: String): Instant? =

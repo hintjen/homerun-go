@@ -47,9 +47,11 @@ ends the VM without running its shutdown hook, so the world is never flushed
 and the on-stop backup captures a stale auto-save.
 
 The escalation is `homerun_core::minecraft::jvm::stop_ladder`: console, wait
-30 s, terminate, wait 8 s, kill. This file climbs it and decides none of it. A
-server stopped before its console existed gets the same ladder minus its first
-rung, which is the core's answer to `console: false` rather than a branch here.
+30 s, terminate, wait 8 s, kill. The **supervisor** climbs it — it holds the
+process and its stdin, so every rung including the first is carried out there.
+A server stopped before its console existed gets the same ladder minus that
+first rung, which is the core's answer to `console: false` rather than a branch
+in either host. This file only asks for a stop.
 
 **The heap ceiling is the core's too.** This file measures the device;
 `jvm::heap_mb` decides what fraction of it is safe to hand over — a third,
@@ -61,9 +63,15 @@ this server would pass. Only the Android-specific flags — `libjvm`,
 
 **Player tracking reads the console, not RCON.** Vanilla prints join and leave
 lines; parsing them costs nothing and avoids a port, a password and a second
-protocol to keep alive. The regexes are vanilla's wording, so the roster is
-best-effort and never blocks anything. RCON becomes worth adding when
-moderation (kick/ban/op) lands.
+protocol to keep alive. The wording is vanilla's, so the roster is best-effort
+and never blocks anything. RCON becomes worth adding when moderation
+(kick/ban/op) lands.
+
+That reading happens **once, in the supervisor**, which is already looking at
+every line as it arrives. This host asks it who is playing (`nativePlayers`)
+and whether the console has said `Done (…)` yet (`nativeState`) rather than
+classifying the same lines a second time — two parses of one console is how
+two answers to one question appear, and only one of them can be right.
 
 **Heap is capped at a third of device RAM.** Android kills *the whole app*
 under memory pressure, not just the server, so an over-generous heap does not
@@ -710,3 +718,15 @@ initialiser.
 **Server appears to start twice.** Two `native-server-start` calls raced.
 The second gets `alreadyRunning: true` rather than an error, which is what
 the desktop contract expects.
+
+**The roster is empty, or a join never reaches the UI.** Both hosts read it
+from the supervisor now, so the question is whether the supervisor saw the
+line: check the console for the join, then `homerun_server_players`. It
+returns `null` — not an empty roster — until the run reaches *running*, so a
+roster that is empty during startup is correct rather than broken.
+
+**A start hangs at "starting" with a healthy console.** `start()` waits for
+the supervisor to report *running*, which happens on `Done (…)`. A server
+whose wording the core does not recognise boots fine and is never announced;
+the fix belongs in `homerun_core::minecraft::console`, where both platforms
+get it, and not in a host.
