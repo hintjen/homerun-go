@@ -77,6 +77,7 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeStart(
     server_id: JString,
     data_dir: JString,
     port: jint,
+    invocation: JString,
 ) -> jstring {
     let (Some(id), Some(dir)) = (
         from_jstring(&mut env, &server_id),
@@ -88,11 +89,19 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeStart(
         );
     };
 
+    // Absent runs the linked engine; present runs a child process. A Java
+    // server is the second, and composing its argv is the host's job.
+    let invocation = from_jstring(&mut env, &invocation);
+
     let json = unsafe {
         take_json(crate::homerun_server_start(
             id.as_ptr(),
             dir.as_ptr(),
             port as u16,
+            invocation
+                .as_ref()
+                .map(|c| c.as_ptr())
+                .unwrap_or(std::ptr::null()),
         ))
     };
     to_jstring(&env, json)

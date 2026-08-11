@@ -19,10 +19,15 @@ enum HomerunFFI {
     ///
     /// > Must run on a thread with at least a 16 MB stack. See
     /// > `PumpkinBackend.startServerThread`.
+    ///
+    /// The trailing `nil` is the invocation, and on this platform it is always
+    /// nil: an invocation names a *child process* to supervise, and iOS cannot
+    /// spawn one. Nil runs the engine linked into the app, which is the whole
+    /// reason that engine exists.
     static func serverStart(serverId: String, dataDir: String, port: UInt16) -> Reply {
         serverId.withCString { id in
             dataDir.withCString { dir in
-                decode(homerun_server_start(id, dir, port))
+                decode(homerun_server_start(id, dir, port, nil))
             }
         }
     }

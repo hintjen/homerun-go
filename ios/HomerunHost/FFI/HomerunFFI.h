@@ -40,8 +40,14 @@ char *homerun_core_call(const char *method, const char *args);
 
 /* Blocks for the server's entire lifetime. MUST run on a dedicated thread
  * with at least a 16 MB stack — the 512 KB default overflows inside the
- * engine and kills the app with no panic report. port 0 means the default. */
-char *homerun_server_start(const char *server_id, const char *data_dir, uint16_t port);
+ * engine and kills the app with no panic report. port 0 means the default.
+ *
+ * invocation_json chooses what to run: NULL runs the engine linked into this
+ * build, which is the only thing iOS can do — this platform cannot spawn a
+ * process. Android passes an invocation and gets a child process supervised
+ * by the same state machine. Pass NULL here. */
+char *homerun_server_start(const char *server_id, const char *data_dir, uint16_t port,
+                           const char *invocation_json);
 
 /*
  * Backups.

@@ -110,11 +110,14 @@ use serde_json::json;
 ///
 /// 2 added the `homerun_backup_*` calls.
 ///
+/// 3 gave `homerun_server_start` an invocation, so a host can ask for a
+/// child process instead of the linked engine.
+///
 /// Hosts *report* this at startup; neither of them currently compares it to
 /// anything, so a stale staged library is caught by the linker (a missing
 /// symbol) rather than by this. Worth wiring up properly — the failure it
 /// exists to catch is a `.a` that links but decodes garbage.
-pub const FFI_ABI_VERSION: u32 = 2;
+pub const FFI_ABI_VERSION: u32 = 3;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -222,16 +225,25 @@ fn err(message: impl Into<String>) -> String {
 /// Returns `{"ok":true}` on a clean shutdown, or `{"ok":false,"error":"..."}`
 /// if it could not start or crashed.
 ///
+/// `invocation_json` chooses **what to run**. Null or empty runs the engine
+/// linked into this build, which is what iOS wants and all it can have. A JSON
+/// [`process_engine::Invocation`] runs a child process instead — the program,
+/// arguments and environment a host composed, because composing them is the
+/// part that is genuinely platform-specific.
+///
 /// # Safety
-/// `server_id` and `data_dir` must be valid NUL-terminated UTF-8 strings.
+/// `server_id`, `data_dir` and `invocation_json` must each be either null or a
+/// valid NUL-terminated UTF-8 string.
 #[no_mangle]
 pub unsafe extern "C" fn homerun_server_start(
     server_id: *const c_char,
     data_dir: *const c_char,
     port: u16,
+    invocation_json: *const c_char,
 ) -> *mut c_char {
     let id = borrow(server_id).map(str::to_owned);
     let dir = borrow(data_dir).map(str::to_owned);
+    let invocation = borrow(invocation_json).map(str::to_owned);
 
     guarded(move || {
         let (Some(id), Some(dir)) = (id, dir) else {
@@ -243,11 +255,40 @@ pub unsafe extern "C" fn homerun_server_start(
             port
         };
 
-        match server::host().start(&id, &dir, port) {
+        let engine = match invocation.as_deref().map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(raw) => spawned_engine(raw),
+        };
+
+        let engine = match engine {
+            Ok(engine) => engine,
+            Err(message) => return err(message),
+        };
+
+        match server::host().start(&id, &dir, port, engine) {
             Ok(()) => json!({ "ok": true }).to_string(),
             Err(message) => err(message),
         }
     })
+}
+
+/// Build a child-process engine from a host's invocation.
+///
+/// Split by feature rather than answered at the call site so that a build
+/// which cannot spawn says so in a sentence, rather than silently running the
+/// linked engine against arguments meant for a JVM.
+#[cfg(feature = "process-engine")]
+fn spawned_engine(raw: &str) -> Result<Option<std::sync::Arc<dyn engine::Engine>>, String> {
+    let invocation: process_engine::Invocation =
+        serde_json::from_str(raw).map_err(|e| format!("bad invocation: {e}"))?;
+    Ok(Some(std::sync::Arc::new(
+        process_engine::ProcessEngine::new(invocation),
+    )))
+}
+
+#[cfg(not(feature = "process-engine"))]
+fn spawned_engine(_raw: &str) -> Result<Option<std::sync::Arc<dyn engine::Engine>>, String> {
+    Err("This build cannot run a server as a separate process.".to_string())
 }
 
 /// Ask the running server to stop and save. Returns once it has.
@@ -503,7 +544,7 @@ mod tests {
 
     #[test]
     fn null_input_is_an_error_not_a_crash() {
-        let v = take(unsafe { homerun_server_start(ptr::null(), ptr::null(), 0) });
+        let v = take(unsafe { homerun_server_start(ptr::null(), ptr::null(), 0, ptr::null()) });
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("UTF-8"));
     }

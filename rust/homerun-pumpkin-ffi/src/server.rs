@@ -5,7 +5,7 @@
 //! runs on its own (16 MB stack) thread while the UI polls stats and logs
 //! from the main one.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,11 +23,19 @@ struct Inner {
     status: ServerStatus,
     logs: LogBuffer,
     stop: StopSignal,
+    /// The engine running right now, if one is.
+    ///
+    /// Per-run rather than per-host because a device may host either kind:
+    /// a linked engine, or a child process. Which one is a property of the
+    /// server being started, not of the app that is starting it.
+    engine: Option<Arc<dyn Engine>>,
 }
 
 pub struct ServerHost {
     inner: Mutex<Inner>,
-    engine: Box<dyn Engine>,
+    /// The engine that is compiled in — Pumpkin, or the stub. Used when a
+    /// start names no other, which is every iOS launch.
+    linked: Arc<dyn Engine>,
 }
 
 static HOST: OnceLock<ServerHost> = OnceLock::new();
@@ -64,8 +72,9 @@ impl ServerHost {
                 status: ServerStatus::idle(),
                 logs: LogBuffer::default(),
                 stop: StopSignal::default(),
+                engine: None,
             }),
-            engine,
+            linked: Arc::from(engine),
         }
     }
 
@@ -104,12 +113,25 @@ impl ServerHost {
         if self.state() != ServerState::Running {
             return None;
         }
-        self.engine.players()
+        self.lock().engine.clone()?.players()
     }
 
     /// Start a server. Blocks for its whole lifetime — the host must call
     /// this on a dedicated thread with at least a 16 MB stack.
-    pub fn start(&self, server_id: &str, data_dir: &str, port: u16) -> Result<(), String> {
+    /// What to run for this launch.
+    ///
+    /// Absent means the engine linked into this build, which is what every
+    /// iOS launch wants and what the tests use. An [`Invocation`] means a
+    /// child process, which only a build with `process-engine` can honour.
+    ///
+    /// [`Invocation`]: crate::process_engine::Invocation
+    pub fn start(
+        &self,
+        server_id: &str,
+        data_dir: &str,
+        port: u16,
+        engine: Option<Arc<dyn Engine>>,
+    ) -> Result<(), String> {
         {
             let mut inner = self.lock();
             if inner.status.state.is_active() {
@@ -126,6 +148,7 @@ impl ServerHost {
             // A new run must not replay the previous one's console.
             inner.logs.clear();
             inner.stop.reset();
+            inner.engine = Some(engine.unwrap_or_else(|| Arc::clone(&self.linked)));
         }
 
         crash::set_crash_dir(data_dir);
@@ -166,11 +189,21 @@ impl ServerHost {
             }
         };
 
-        let outcome = self
+        // Cloned out of the lock: `run` blocks for the whole life of the
+        // server, and holding the mutex across that would freeze every getter
+        // the UI polls.
+        let engine = self
+            .lock()
             .engine
-            .run(&request, stop, &|line| self.push_log(line), &on_ready);
+            .clone()
+            .ok_or_else(|| "no engine for this run".to_string())?;
+
+        let outcome = engine.run(&request, stop, &|line| self.push_log(line), &on_ready);
 
         let mut inner = self.lock();
+        // The run is over; nothing should be able to reach its stdin or ask it
+        // who is playing.
+        inner.engine = None;
         match outcome {
             RunOutcome::Stopped => {
                 // The engine may have returned on its own, without a stop
@@ -226,7 +259,12 @@ impl ServerHost {
         if self.state() != ServerState::Running {
             return Err("Server is not running".to_string());
         }
-        self.engine.command(command)
+        let engine = self
+            .lock()
+            .engine
+            .clone()
+            .ok_or_else(|| "Server is not running".to_string())?;
+        engine.command(command)
     }
 }
 
@@ -291,6 +329,70 @@ mod tests {
     /// The bug this pins: the host used to flip to Running immediately before
     /// calling the engine, so the UI told players to join a world that was
     /// still generating. Only the engine knows when it is actually up.
+    /// The point of the whole exercise: a child process goes through the same
+    /// state machine, console buffer and crash handling as the linked engine,
+    /// because the supervisor cannot tell them apart.
+    #[cfg(feature = "process-engine")]
+    #[test]
+    fn a_child_process_is_supervised_by_the_same_host() {
+        use crate::process_engine::{Invocation, ProcessEngine};
+
+        let host = ServerHost::new(Box::new(StubEngine::healthy()));
+        let dir = temp_dir();
+        let port = free_port();
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("HOMERUN_FAKE_SERVER".to_string(), "ready".to_string());
+        let engine: Arc<dyn Engine> = Arc::new(ProcessEngine::new(Invocation {
+            program: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                "--exact".into(),
+                "process_engine::tests::i_am_the_fake_server".into(),
+                "--nocapture".into(),
+                "--ignored".into(),
+            ],
+            env,
+        }));
+
+        let host = Arc::new(host);
+        let runner = {
+            let (host, dir) = (Arc::clone(&host), dir.clone());
+            thread::spawn(move || host.start("s1", &dir, port, Some(engine)))
+        };
+
+        // Running is announced by the console, not by the process existing.
+        let mut waited = 0;
+        while host.state() != ServerState::Running && waited < 100 {
+            thread::sleep(Duration::from_millis(50));
+            waited += 1;
+        }
+        assert_eq!(host.state(), ServerState::Running, "never reached running");
+
+        // The roster the console built, through the supervisor rather than
+        // from the engine directly.
+        let (players, max) = host.players().expect("a running server has a roster");
+        assert_eq!(players.first().map(|p| p.0.as_str()), Some("Notch"));
+        assert_eq!(max, Some(7));
+
+        // And the console reached the buffer the UI pages through.
+        let slice = host.logs_since(0);
+        assert!(
+            slice.lines.iter().any(|l| l.contains("Done (")),
+            "the console did not reach the log buffer: {:?}",
+            slice.lines
+        );
+
+        host.command("stop").expect("stdin must be reachable");
+        host.stop(Duration::from_secs(30)).expect("it must stop");
+        runner
+            .join()
+            .unwrap()
+            .expect("a clean stop is not an error");
+        assert_eq!(host.state(), ServerState::Stopped);
+    }
     #[test]
     fn a_slow_start_stays_starting_until_the_engine_is_ready() {
         let host = Arc::new(ServerHost::new(Box::new(SlowEngine {
@@ -301,7 +403,7 @@ mod tests {
 
         let runner = {
             let host = host.clone();
-            std::thread::spawn(move || host.start("slow", &dir, port))
+            std::thread::spawn(move || host.start("slow", &dir, port, None))
         };
 
         // Well inside the engine's startup window.
@@ -333,7 +435,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
 
         // Wait for it to come up.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -367,7 +469,7 @@ mod tests {
         let held = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = held.local_addr().unwrap().port();
 
-        let err = host.start("s1", &dir, port).unwrap_err();
+        let err = host.start("s1", &dir, port, None).unwrap_err();
         assert!(err.contains(&port.to_string()));
         // Recoverable: the user stops the other server and retries.
         assert_eq!(host.state(), ServerState::Stopped);
@@ -388,7 +490,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
@@ -396,7 +498,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let err = host.start("s2", &dir, free_port()).unwrap_err();
+        let err = host.start("s2", &dir, free_port(), None).unwrap_err();
         assert!(err.contains("one at a time"), "got: {err}");
 
         host.stop(Duration::from_secs(5)).unwrap();
@@ -409,7 +511,7 @@ mod tests {
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
 
-        let err = host.start("s1", &dir, free_port()).unwrap_err();
+        let err = host.start("s1", &dir, free_port(), None).unwrap_err();
         assert!(err.contains("world corrupted"));
         assert_eq!(host.state(), ServerState::Crashed);
         assert!(host.state().can_transition_to(ServerState::Starting));
@@ -427,7 +529,7 @@ mod tests {
 
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
-        let err = host.start("s1", &dir, free_port()).unwrap_err();
+        let err = host.start("s1", &dir, free_port(), None).unwrap_err();
 
         assert!(err.contains("world corrupted"), "got: {err}");
         assert!(!err.contains("unrelated"), "stale panic leaked into: {err}");
@@ -456,7 +558,7 @@ mod tests {
             let port = free_port();
             let runner = host.clone();
             let run_dir = dir.clone();
-            let handle = thread::spawn(move || runner.start("s1", &run_dir, port));
+            let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
 
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while host.state() != ServerState::Running {
