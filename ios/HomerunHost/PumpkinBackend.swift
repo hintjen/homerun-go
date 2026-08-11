@@ -558,7 +558,9 @@ final class PumpkinBackend: ServerBackend {
         guard activeServerId == serverId else { return nil }
         return MemoryUsage(
             usedKb: DeviceMetrics.footprintKb(),
-            maxMb: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576))
+            // The limit this app is killed for exceeding, not the device's
+            // RAM — the same question Android's `largeMemoryClass` answers.
+            maxMb: DeviceMetrics.memoryLimitKb().map { $0 / 1024 })
     }
 
     /// The most recent rate the core worked out — the same number the graph's

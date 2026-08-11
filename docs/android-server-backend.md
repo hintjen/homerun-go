@@ -626,7 +626,7 @@ near-miss.
 
 | Channel | Source | Caveat |
 |---|---|---|
-| `native-server-get-mem-usage` | `VmRSS` from `/proc/self/status`, against `largeMemoryClass` | RSS against a heap-shaped ceiling can read over 100 %. Same on the JVM path; see the `memMaxMb` note in [ios-server-backend.md](./ios-server-backend.md). |
+| `native-server-get-mem-usage` | `VmRSS` from `/proc/self/status`, against `largeMemoryClass` | RSS against a heap-shaped ceiling can read over 100 %. Same on the JVM path. iOS reports the equivalent limit — what the app is killed for exceeding — so the two gauges now ask the same question. |
 | `native-server-get-cpu-usage` | the rate of the last two samples, worked out by the core | Was null until this backend adopted `metrics`. |
 | `native-server-get-perf-history` | `homerun_core::metrics`, sampled every 30 s | Was a local 1 s × 1800 deque whose comment claimed the desktop's window — the desktop's is three hours, that was thirty minutes. |
 | `native-server-get-uptime` | engine `startedAtMs` | Real. |

@@ -30,6 +30,38 @@ enum DeviceMetrics {
         return Int(info.phys_footprint / 1024)
     }
 
+    /// The ceiling `footprintKb` is measured against: the dirty-memory limit
+    /// this app is killed for exceeding, in KB.
+    ///
+    /// Not the device's RAM, which is what this used to report. A phone with
+    /// 16 GB does not let one app have 16 GB, so "67 MB of 16,384 MB" told a
+    /// player they had room they were never going to get. This is the same
+    /// question Android answers with `largeMemoryClass` — how much may I use
+    /// before I am killed — so the two platforms' gauges finally mean the same
+    /// thing.
+    ///
+    /// `os_proc_available_memory` reports what is *left*, so the limit is that
+    /// plus what is already used. iOS-only by declaration; a Mac has no jetsam
+    /// limit to report, which is why `ios/coretest` compiles this file without
+    /// it.
+    static func memoryLimitKb() -> Int? {
+        #if os(iOS)
+            // Zero means the caller is not an app, or is already **over** its
+            // limit. Neither is a ceiling to draw a bar against, and a made-up
+            // one would be worse than none — the UI simply omits the "of X"
+            // when this is absent.
+            //
+            // The **simulator** always answers zero: it is a macOS process
+            // with no jetsam limit, so there is genuinely no cap to report
+            // there. Measured — `footprintKb` reads normally beside it.
+            let remaining = os_proc_available_memory()
+            guard remaining > 0, let used = footprintKb() else { return nil }
+            return used + Int(remaining / 1024)
+        #else
+            return nil
+        #endif
+    }
+
     /// Total CPU time consumed by every thread in the process, in seconds.
     static func cpuSeconds() -> Double? {
         var threads: thread_act_array_t?

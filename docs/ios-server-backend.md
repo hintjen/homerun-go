@@ -207,13 +207,21 @@ Insights screen was changing the numbers it was reading. `CPUSampler` is gone.
 `memUsedMb` is whole MiB (the core divides KiB by 1024), matching the UI's
 `memUsedMb: number | null`.
 
-### `memMaxMb` is not comparable across platforms
+### `memMaxMb` is the limit this app is killed for exceeding
 
-iOS reports the device's **physical RAM**; Android reports the app's cap
-(`largeMemoryClass`). The core has no opinion on the ceiling, so adopting it
-did not settle this, and "used of max" means something different on each
-platform. Left as is deliberately — it is a product judgement about what a
-phone's ceiling should mean, not a metrics bug.
+Not the device's RAM, which is what it used to be. A phone with 16 GB does not
+let one app have 16 GB, so "67 MB of 16,384 MB" told a player they had room
+they were never going to get. It is now `os_proc_available_memory()` — what is
+left before the dirty-memory limit — plus what is already used, which is the
+same question Android answers with `largeMemoryClass`. The core has no opinion
+on the ceiling; this is the hosts agreeing on their own.
+
+**It is absent on the simulator.** A simulator process is a macOS process with
+no jetsam limit, so the call answers zero and the UI shows the used figure
+without an "of X". That is the honest rendering of "there is no cap here", and
+it means **the number itself has only been verified on a simulator by its
+absence** — on a device it should read the real limit, and nobody has looked
+yet.
 
 ## Storage
 

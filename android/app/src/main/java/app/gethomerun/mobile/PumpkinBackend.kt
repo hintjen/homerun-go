@@ -244,9 +244,11 @@ class PumpkinBackend(
      * drawn from, and a gauge that disagrees with the graph beside it is worse
      * than either number alone.
      *
-     * The ceiling is still `largeMemoryClass`, so RSS can read over 100% of
-     * it. Pre-existing on the JVM path and left alone deliberately — see the
-     * note on `memMaxMb` in docs/ios-server-backend.md.
+     * The ceiling is still `largeMemoryClass`, so RSS — which counts more
+     * than the heap — can read over 100% of it. Pre-existing on the JVM path.
+     * iOS reports its own equivalent, the limit the app is killed for
+     * exceeding, so the two platforms' gauges ask the same question even
+     * though neither number is directly comparable to the other's.
      */
     override fun memoryUsage(serverId: String): MemoryUsage? {
         if (currentServerId != serverId) return null
