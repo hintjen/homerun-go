@@ -33,6 +33,8 @@ pub mod log_buffer;
 pub mod preflight;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_engine;
+#[cfg(feature = "pumpkin-engine")]
+pub mod pumpkin_settings;
 pub mod server;
 pub mod state;
 

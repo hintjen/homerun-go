@@ -16,7 +16,14 @@ default = []
 # machine, console buffer, pre-flight, crash capture, the whole C surface —
 # builds and tests in seconds on any machine, with no Pumpkin and no device.
 # The iOS and Android builds turn it on; see scripts/build-rust.js.
-pumpkin-engine = ["dep:pumpkin", "dep:pumpkin-config", "dep:tokio"]
+pumpkin-engine = [
+    "dep:pumpkin",
+    "dep:pumpkin-config",
+    "dep:pumpkin-util",
+    "dep:tokio",
+    "dep:uuid",
+    "dep:time",
+]
 # Links a restic-compatible backup engine into the app. **iOS only.** Android
 # spawns the restic binary instead (scripts/build-restic.js), so turning this
 # on there would add ~5.6 MB for something it already has a better answer for.
@@ -40,7 +47,15 @@ backup-engine = ["dep:rustic_core", "dep:rustic_backend", "dep:jiff"]
 # releases, and that churn must not land in an app build uninvited.
 pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
 pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
+pumpkin-util = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true }
+
+# Both appear in Pumpkin's own public types — a `uuid::Uuid` in an operator
+# entry, a `time::OffsetDateTime` in a ban — so seeding those lists means
+# naming them. Versions match the workspace's, or Cargo would resolve two
+# copies and the types would not be the same type.
+uuid = { version = "1.24", optional = true }
+time = { version = "0.3", optional = true }
 
 serde_json = "1"
 # Derive, for the one struct worth deriving: `EngineSettings` has fifteen

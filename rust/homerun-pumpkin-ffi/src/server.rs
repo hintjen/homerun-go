@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crash;
-#[cfg(not(feature = "pumpkin-engine"))]
+// `test` as well as the ungated build: every test here drives the stub, so
+// without it a `--features pumpkin-engine` test run does not compile.
+#[cfg(any(test, not(feature = "pumpkin-engine")))]
 use crate::engine::StubEngine;
 use crate::engine::{Engine, Roster, RunOutcome, RunRequest, StopSignal};
 use crate::log_buffer::{LogBuffer, LogSlice};
@@ -319,6 +321,9 @@ mod tests {
     /// still generating. Only the engine knows when it is actually up.
     #[test]
     fn a_slow_start_stays_starting_until_the_engine_is_ready() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(SlowEngine {
             ready_after: Duration::from_millis(300),
         })));
@@ -351,6 +356,9 @@ mod tests {
 
     #[test]
     fn a_full_lifecycle_reports_the_expected_states() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
         let port = free_port();
@@ -390,6 +398,9 @@ mod tests {
     /// told is on the console before the engine starts.
     #[test]
     fn a_launch_records_the_settings_it_was_given() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
         let port = free_port();
@@ -430,6 +441,9 @@ mod tests {
     /// naming: the engine's own defaults are not the player's choices.
     #[test]
     fn a_launch_without_settings_says_so() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
         let port = free_port();
@@ -454,6 +468,9 @@ mod tests {
 
     #[test]
     fn a_taken_port_is_an_error_not_a_process_exit() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = ServerHost::new(Box::new(StubEngine::healthy()));
         let dir = temp_dir();
 
@@ -475,6 +492,9 @@ mod tests {
 
     #[test]
     fn a_second_server_is_refused_with_a_readable_message() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
         let port = free_port();
@@ -499,6 +519,9 @@ mod tests {
 
     #[test]
     fn a_crash_is_reported_and_leaves_the_host_restartable() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
 
@@ -542,6 +565,9 @@ mod tests {
 
     #[test]
     fn a_restart_does_not_replay_the_previous_console() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
 
