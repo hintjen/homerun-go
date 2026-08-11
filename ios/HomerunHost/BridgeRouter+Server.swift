@@ -230,7 +230,17 @@ extension BridgeRouter {
 
     func nativeServerGetPerfHistory(_ params: Any?) async throws -> Any? {
         guard let serverId = params as? String else { return [] }
-        return backend.perfSamples(serverId: serverId)
+        // The JSON encoding lives here rather than in the backend: `NSNull` is
+        // a bridge concern, and a backend that speaks it is one the engine
+        // interface cannot describe.
+        return backend.perfSamples(serverId: serverId).map { sample in
+            [
+                "t": sample.t,
+                "memUsedMb": orNull(sample.memUsedMb),
+                "cpuPercent": orNull(sample.cpuPercent),
+                "playerCount": orNull(sample.playerCount),
+            ]
+        }
     }
 
     func getNativeServerLogs(_ params: Any?) async throws -> Any? {

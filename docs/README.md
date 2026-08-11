@@ -136,6 +136,7 @@ how a friend actually joins.
 - Console cursors, and admitting to dropped output
 - Which states the UI is told about, and which are host-internal
 - Memory and CPU sampling for a server that is not its own process
+- What the Insights graph covers, and why the host computes none of it
 - World storage, iCloud exclusion, and LAN connectivity
 
 **Read this for**: Working on server lifecycle, or debugging a server that

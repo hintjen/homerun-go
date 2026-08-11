@@ -1,10 +1,16 @@
 import Foundation
 
-/// Process-level memory and CPU figures.
+/// Process-level memory and CPU **counters**.
 ///
 /// The server runs *inside* this process, so there is no per-server number to
 /// report — these describe the app as a whole, which while a world is up is
 /// dominated by the server anyway.
+///
+/// Counters only: nothing here computes a rate. A percentage is a difference
+/// between two moments, and which two is a decision `homerun-core::metrics`
+/// owns for every platform at once — the same split `ProcMetrics.kt` opens
+/// with on Android. This file's job is to read the numbers the OS keeps and
+/// hand them over unchanged.
 enum DeviceMetrics {
 
     /// Physical footprint in KB: the number iOS uses when deciding what to
@@ -63,32 +69,5 @@ enum DeviceMetrics {
             total += Double(info.system_time.seconds) + Double(info.system_time.microseconds) / 1e6
         }
         return total
-    }
-}
-
-/// Turns cumulative CPU time into a percentage.
-///
-/// CPU usage is a rate, so it only exists between two samples — the first call
-/// has nothing to compare against and reports nothing rather than inventing a
-/// number.
-final class CPUSampler {
-    private var lastCPUSeconds: Double?
-    private var lastSampledAt: Date?
-
-    func sample() -> Double? {
-        guard let cpu = DeviceMetrics.cpuSeconds() else { return nil }
-        let now = Date()
-
-        defer {
-            lastCPUSeconds = cpu
-            lastSampledAt = now
-        }
-
-        guard let previousCPU = lastCPUSeconds, let previousAt = lastSampledAt else { return nil }
-        let elapsed = now.timeIntervalSince(previousAt)
-        guard elapsed > 0 else { return nil }
-
-        // Can exceed 100% — several cores, and the server uses them.
-        return ((cpu - previousCPU) / elapsed) * 100.0
     }
 }

@@ -160,18 +160,60 @@ A run that ends after a stop request is `stopped`. A run that ends on its own
 is `crashed`, and carries the engine's message, which is already written for a
 player.
 
-## Metrics — `DeviceMetrics.swift`
+## Metrics — `DeviceMetrics.swift` and `Core.Metrics`
 
 The server is not a separate process, so there is no per-server figure to
 report: memory is the whole app's physical footprint (the number iOS uses when
 deciding what to jetsam) and CPU is the sum over the process's threads.
 
-CPU is a *rate*, so it only exists between two samples — `CPUSampler` reports
-nothing on the first call rather than inventing a number. It can legitimately
-exceed 100%: several cores, and the server uses them.
+**This host reads counters and computes nothing.** `DeviceMetrics` returns
+resident KiB and cumulative CPU seconds; `homerun-core::metrics` turns two of
+those into a rate, decides how much history to keep, and decides when a number
+cannot be trusted. That split is why the graph on a phone and the graph on a PC
+of the same server now cover the same span — there were four answers to that
+question and now there is one. See `docs/core-bridge.md`.
 
 `DeviceMetrics.cpuSeconds` deallocates the thread array the kernel hands it.
 Sampling every five seconds, leaking that would be a slow but real drain.
+
+### What the graph covers
+
+One point per **30 s**, 360 of them. When it fills it drops every other point
+and doubles its own interval, up to 30 min — losing resolution rather than the
+launch, because a session's first minutes are usually the interesting ones.
+Before this it was 5 s × 720 and the launch scrolled off after an hour.
+
+`PumpkinBackend` offers a reading every 5 s and lets the core keep what is due.
+A dropped reading is still the anchor for the next rate, so the CPU number
+describes the **last five seconds** before each point rather than the whole
+thirty. That is a real difference from the desktop and both Android backends,
+which average over the full interval, and it is the one place this migration
+does not fully converge. If it ever matters, the fix is a sampler of its own on
+the core's `intervalMs` — not arithmetic here.
+
+Two consequences worth recognising rather than reporting as bugs:
+
+- **The first point of every run has no CPU value.** A rate needs two readings,
+  and inventing one would put a number on the graph that nothing measured.
+- **A stopped server's graph is empty**, because `perfSamples` honours
+  `serverId` like every sibling getter. It used to ignore it, so a stopped
+  server kept drawing the last run's graph.
+
+`cpuUsage` reads the graph's last point rather than sampling. It used to call
+`CPUSampler`, which advanced its own baseline — so every poll of
+`native-server-get-cpu-usage` stole the anchor from the next point, and the
+Insights screen was changing the numbers it was reading. `CPUSampler` is gone.
+
+`memUsedMb` is whole MiB (the core divides KiB by 1024), matching the UI's
+`memUsedMb: number | null`.
+
+### `memMaxMb` is not comparable across platforms
+
+iOS reports the device's **physical RAM**; Android reports the app's cap
+(`largeMemoryClass`). The core has no opinion on the ceiling, so adopting it
+did not settle this, and "used of max" means something different on each
+platform. Left as is deliberately — it is a product judgement about what a
+phone's ceiling should mean, not a metrics bug.
 
 ## Storage
 
@@ -305,7 +347,8 @@ make — the device is on the player's Wi-Fi or it is not.
 | `ios/HomerunHost/MojangDirectory.swift` | Name → UUID. The only outbound call here that is not to Homerun's API |
 | `rust/homerun-pumpkin-ffi/src/engine_settings.rs` | What a setting *means* to an engine. No Pumpkin, so it is in the fast test suite |
 | `rust/homerun-pumpkin-ffi/src/pumpkin_settings.rs` | Assignment onto Pumpkin's own types |
-| `ios/HomerunHost/DeviceMetrics.swift` | Process memory and CPU sampling |
+| `ios/HomerunHost/DeviceMetrics.swift` | Process memory and CPU **counters**, from Mach. No arithmetic |
+| `ios/HomerunHost/FFI/Core.swift` | The shared decisions, including `Core.Metrics` — the run's graph |
 | `ios/HomerunHost/BridgeRouter+Server.swift` | The `native-server-*` channels |
 | `ios/HomerunHost/WireProxy.swift` | Tunnel config, lifecycle, handshake watchdog |
 | `ios/HomerunHost/HomerunAPI.swift` | Device registration; tunnel credential polling |
@@ -333,6 +376,15 @@ timeout. There is none by design — world generation takes minutes.
 **A metrics screen is blank with no error.** The handler read
 `params["serverId"]` on a channel whose params are a bare string. See the
 parameter-shapes note above.
+
+**The Insights graph looks coarse, or stopped moving.** Expected: one point per
+30 s, doubling to 60 s and beyond as a session runs long. The device log says
+`metrics now keep one point per Ns` at each change.
+
+**A graph reads 0% CPU rather than showing a gap.** The host sends counters and
+omits what it could not read, so a zero on the graph is a measured zero. If a
+missing reading is rendering as 0, suspect the `NSNull`/`NSNumber` decode in
+`Core.Metrics` — `ios/coretest` has a check for exactly that.
 
 **The server starts but no one can join.** Check the reported port against
 what the engine actually bound (`homerun_server_stats()` reports it), and that
