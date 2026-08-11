@@ -1882,11 +1882,13 @@ dependencies = [
  "homerun-core",
  "jiff",
  "jni 0.21.1",
+ "libc",
  "log",
  "pumpkin",
  "pumpkin-config",
  "rustic_backend",
  "rustic_core",
+ "serde",
  "serde_json",
  "tokio",
 ]

@@ -23,6 +23,13 @@ pumpkin-engine = ["dep:pumpkin", "dep:pumpkin-config", "dep:tokio"]
 # The C surface exists either way; without this it answers "no engine".
 backup-engine = ["dep:rustic_core", "dep:rustic_backend", "dep:jiff"]
 
+# Supervises the server as a **child process**. Android and any desktop host;
+# never iOS, which cannot spawn one at all — see scripts/targets.js for which
+# build turns it on. Off by default like the others, but `npm run test:rust`
+# enables it, because its tests are the only coverage process supervision has
+# ever had and they need no device.
+process-engine = ["dep:libc"]
+
 [dependencies]
 # Pumpkin stays an ordinary dependency at a pinned rev. Keeping our FFI in
 # this crate means upstream's Cargo.toml needs no crate-type change, which is
@@ -42,6 +49,7 @@ pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c
 pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true }
 
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # A facade, so it costs nothing when nothing logs. Declared unconditionally
@@ -49,6 +57,11 @@ serde_json = "1"
 # the backup engine's log sink — rustic reports skipped entries through
 # `log::warn!`, and without a sink there is no message to classify.
 log = "0.4"
+
+# Only for the two signals the stop ladder needs. Rust's `Child::kill` is
+# SIGKILL and nothing else, so a terminate rung — which is what lets a JVM run
+# its shutdown hook and flush the world — has no std spelling.
+libc = { version = "0.2", optional = true }
 
 # The backup engine. iOS cannot spawn a process, so restic-as-a-binary is not
 # available to it and the engine is linked instead. rustic is restic-format

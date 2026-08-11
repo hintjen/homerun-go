@@ -42,6 +42,7 @@ pub type PlayerEntry = (String, Option<String>);
 /// Who is connected, and the server's player cap.
 pub type Roster = (Vec<PlayerEntry>, Option<u32>);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunOutcome {
     /// Shut down cleanly after a stop request.
     Stopped,

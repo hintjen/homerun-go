@@ -30,7 +30,7 @@
     "test": "npm run test:core && npm run test:rust",
     "test:core": "cargo test --manifest-path rust/homerun-core/Cargo.toml",
     "test:core:lint": "cargo fmt --manifest-path rust/homerun-core/Cargo.toml --check && cargo clippy --manifest-path rust/homerun-core/Cargo.toml --all-targets -- -D warnings",
-    "test:rust": "cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml",
+    "test:rust": "cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml --features process-engine",
     "sync-contract": "node scripts/sync-contract.js",
     "conformance:ios": "node shared/conformance/check-coverage.js ios ios/HomerunHost/BridgeRouter.swift",
     "conformance:android": "node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt"

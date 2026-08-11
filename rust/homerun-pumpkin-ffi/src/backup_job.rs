@@ -239,11 +239,18 @@ mod tests {
         job.note("scanning");
 
         let first = job.progress_since(0);
-        assert_eq!(first.lines, vec!["backing up".to_string(), "scanning".to_string()]);
+        assert_eq!(
+            first.lines,
+            vec!["backing up".to_string(), "scanning".to_string()]
+        );
         assert_eq!(first.phase, "backing up");
 
         let second = job.progress_since(first.cursor);
-        assert!(second.lines.is_empty(), "lines were replayed: {:?}", second.lines);
+        assert!(
+            second.lines.is_empty(),
+            "lines were replayed: {:?}",
+            second.lines
+        );
     }
 
     #[test]

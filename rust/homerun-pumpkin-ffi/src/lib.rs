@@ -31,8 +31,12 @@ pub mod crash;
 pub mod engine;
 pub mod log_buffer;
 pub mod preflight;
+/// Supervising a server that runs as a child process. Not iOS, which cannot.
+#[cfg(feature = "process-engine")]
+pub mod process_engine;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_engine;
+
 pub mod server;
 pub mod state;
 

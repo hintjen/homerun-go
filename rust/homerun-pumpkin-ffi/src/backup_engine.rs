@@ -60,7 +60,13 @@ pub fn available() -> bool {
 pub fn latest_snapshot(request: &str) -> String {
     let request: Value = match serde_json::from_str(request) {
         Ok(v) => v,
-        Err(e) => return failure("The backup request could not be read.", e.to_string(), false),
+        Err(e) => {
+            return failure(
+                "The backup request could not be read.",
+                e.to_string(),
+                false,
+            )
+        }
     };
 
     let Some(_guard) = JobGuard::claim() else {
@@ -81,7 +87,13 @@ pub fn latest_snapshot(request: &str) -> String {
 pub fn run(request: &str) -> String {
     let request: Value = match serde_json::from_str(request) {
         Ok(v) => v,
-        Err(e) => return failure("The backup request could not be read.", e.to_string(), false),
+        Err(e) => {
+            return failure(
+                "The backup request could not be read.",
+                e.to_string(),
+                false,
+            )
+        }
     };
 
     let Some(_guard) = JobGuard::claim() else {
@@ -237,7 +249,12 @@ fn restore(request: &Value) -> Result<Done, String> {
         .ok_or_else(|| {
             format!(
                 "that backup does not contain this server (it holds: {})",
-                snapshot.paths.iter().cloned().collect::<Vec<_>>().join(", ")
+                snapshot
+                    .paths
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         })?;
     let selector = homerun_core::backup::internal_path(recorded);
@@ -251,8 +268,9 @@ fn restore(request: &Value) -> Result<Done, String> {
     let entries = repo.ls(&node, &LsOptions::default()).map_err(stringify)?;
 
     // The trailing slash is how LocalDestination is told this is a directory.
-    let destination = LocalDestination::new(&format!("{}/", target.trim_end_matches('/')), true, false)
-        .map_err(stringify)?;
+    let destination =
+        LocalDestination::new(&format!("{}/", target.trim_end_matches('/')), true, false)
+            .map_err(stringify)?;
 
     // `no_ownership` because an app sandbox cannot chown to the uid a desktop
     // recorded, and `delete: false` because a desktop-written snapshot has a

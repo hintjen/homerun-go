@@ -279,10 +279,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         // is nothing left to try. Null is what ends the loop — a host reading
         // a missing delay as zero would hammer a dead endpoint.
         "minecraft.jar.retryDelay" => {
-            let attempt = args
-                .get("attempt")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let attempt = args.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             Ok(match jar::retry_delay_ms(attempt) {
                 Some(ms) => Value::from(ms),
                 None => Value::Null,
@@ -574,7 +571,10 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     .get("settings")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
-                tunnel: args.get("tunnel").and_then(|v| v.as_bool()).unwrap_or(false),
+                tunnel: args
+                    .get("tunnel")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 // Defaults to spawned, and that is load-bearing rather than
                 // tidy. Android's launch order *throws* on a step missing from
                 // the plan, where iOS's returns false — so a host that omits
@@ -611,8 +611,8 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
 
             match text("event")?.as_str() {
                 "startRequested" => {
-                    reply =
-                        serde_json::to_value(life.start_requested(&id)).map_err(|e| e.to_string())?
+                    reply = serde_json::to_value(life.start_requested(&id))
+                        .map_err(|e| e.to_string())?
                 }
                 "stopRequested" => {
                     reply =
@@ -624,8 +624,8 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 "abandoned" => life.abandoned(&id),
                 "exited" => {
                     let code = args.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
-                    reply = serde_json::to_value(life.exited(&id, code))
-                        .map_err(|e| e.to_string())?
+                    reply =
+                        serde_json::to_value(life.exited(&id, code)).map_err(|e| e.to_string())?
                 }
                 other => return Err(format!("\"{method}\": unknown event \"{other}\"")),
             }
@@ -1238,8 +1238,11 @@ mod tests {
 
         // A wording that does not exist is an error, not an empty string the
         // player would be shown.
-        assert!(call("minecraft.jvm.refusal", &json!({ "kind": "nope" }).to_string())
-            .contains("\"ok\":false"));
+        assert!(call(
+            "minecraft.jvm.refusal",
+            &json!({ "kind": "nope" }).to_string()
+        )
+        .contains("\"ok\":false"));
     }
 
     /// The loop a host implements, on the wire: ask, read, record, read back.
@@ -1278,7 +1281,10 @@ mod tests {
         );
         assert_eq!(due["appended"], true);
 
-        let graph = ok("metrics.query", json!({ "history": due["history"].clone() }));
+        let graph = ok(
+            "metrics.query",
+            json!({ "history": due["history"].clone() }),
+        );
         let samples = graph["samples"].as_array().unwrap();
         assert_eq!(samples.len(), 2);
         assert_eq!(samples[0]["memUsedMb"], 2048);
@@ -1446,7 +1452,10 @@ mod tests {
                 .iter()
                 .map(|s| s["step"].as_str().unwrap())
                 .collect();
-            assert!(names.contains(&"ensureJar"), "{engine} dropped the jar step");
+            assert!(
+                names.contains(&"ensureJar"),
+                "{engine} dropped the jar step"
+            );
             assert_eq!(names.len(), 14, "{engine}");
         }
     }
