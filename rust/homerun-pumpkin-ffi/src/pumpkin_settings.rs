@@ -39,7 +39,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use pumpkin::data::banlist_serializer::BannedPlayerEntry;
-use pumpkin::data::VanillaData;
+use pumpkin::data::{SaveJSONConfiguration, VanillaData};
 use pumpkin_config::op::Op;
 use pumpkin_config::whitelist::WhitelistEntry;
 use pumpkin_config::{LoadConfiguration, PumpkinConfig};
@@ -199,6 +199,21 @@ pub fn apply_lists(settings: &EngineSettings, config: &PumpkinConfig, data: &mut
             reason: "Banned by an operator.".to_string(),
         });
     }
+
+    // Written back, not only held in memory.
+    //
+    // Pumpkin saves these files only when someone runs `/op` or `/ban` in
+    // game, so a launch that seeded them in memory alone leaves `ops.json`
+    // empty on disk — and the host reads that file to tell the dashboard who
+    // the operators are. Verified on a simulator: without this, a server with
+    // working operators reports none.
+    //
+    // The engine's own types do the writing, so the file is by construction
+    // the shape its loader expects — which is exactly what writing the core's
+    // `ops.json` here would not have been.
+    data.operator_config.get_mut().save();
+    data.whitelist_config.get_mut().save();
+    data.banned_player_list.get_mut().save();
 }
 
 /// A distance Pumpkin will accept. `engine_settings` clamps to `2..=64`; this
@@ -234,6 +249,51 @@ mod tests {
             operator_config: Default::default(),
             user_cache: Default::default(),
             whitelist_config: Default::default(),
+        }
+    }
+
+    /// `apply_lists` writes `data/*.json` relative to the process working
+    /// directory — the engine selects a world the same way. So a test that
+    /// calls it must own the working directory for its duration, or it writes
+    /// into the crate and races every other test that does the same.
+    struct InTempDir {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    }
+
+    impl InTempDir {
+        fn enter() -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+            let previous = std::env::current_dir().unwrap();
+            let dir = std::env::temp_dir().join(format!(
+                "homerun-settings-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::env::set_current_dir(&dir).unwrap();
+
+            Self {
+                _guard: guard,
+                previous,
+                dir,
+            }
+        }
+
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.dir.join("data").join(name)).unwrap_or_default()
+        }
+    }
+
+    impl Drop for InTempDir {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.previous).unwrap();
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
@@ -330,6 +390,7 @@ mod tests {
 
     #[test]
     fn operators_and_the_whitelist_are_replaced_not_merged() {
+        let _cwd = InTempDir::enter();
         let mut data = data();
         data.operator_config.get_mut().ops = vec![Op::new(
             Uuid::from_u128(1),
@@ -362,6 +423,7 @@ mod tests {
 
     #[test]
     fn a_ban_made_on_the_device_survives_a_launch() {
+        let _cwd = InTempDir::enter();
         let mut data = data();
         let local = Uuid::from_u128(7);
         data.banned_player_list
@@ -395,6 +457,7 @@ mod tests {
     /// is the test that fails rather than the next launch.
     #[test]
     fn a_written_ban_can_be_read_back() {
+        let _cwd = InTempDir::enter();
         let mut data = data();
         let config = PumpkinConfig::default();
         apply_lists(
@@ -408,10 +471,53 @@ mod tests {
         assert_eq!(round_tripped.len(), 1);
     }
 
+    /// The lists have to reach disk, not only memory.
+    ///
+    /// Pumpkin writes them only on `/op` and `/ban`, and the host reads
+    /// `data/ops.json` to tell the dashboard who the operators are — so a
+    /// launch that seeded them in memory alone reported a server with working
+    /// operators as having none. Found on a simulator, after the path bug it
+    /// was hiding behind was fixed.
+    #[test]
+    fn the_lists_are_written_where_the_engine_and_the_host_look() {
+        let cwd = InTempDir::enter();
+        let mut data = data();
+        apply_lists(
+            &settings(json!({
+                "ONLINE_MODE": "false",
+                "OPS": "Notch",
+                "WHITELIST": "jeb_",
+                "BANNED": "Herobrine",
+            })),
+            &PumpkinConfig::default(),
+            &mut data,
+        );
+
+        let ops = cwd.read("ops.json");
+        assert!(ops.contains("Notch"), "ops.json: {ops}");
+        // Pumpkin's own field name. The vanilla spelling — bypassesPlayerLimit
+        // — has no serde default in its loader and panics the *next* launch.
+        assert!(ops.contains("bypasses_player_limit"), "ops.json: {ops}");
+        assert!(cwd.read("whitelist.json").contains("jeb_"));
+        assert!(cwd.read("banned-players.json").contains("Herobrine"));
+
+        // And the engine reads back what we wrote, through its own loader,
+        // which is the assertion that matters: `load()` panics on a shape it
+        // does not recognise, so this failing here is the alternative to a
+        // server that will not start.
+        let reloaded = load_data(&|line| panic!("{line}"));
+        assert_eq!(reloaded.operator_config.blocking_read().ops.len(), 1);
+        assert_eq!(
+            reloaded.whitelist_config.blocking_read().whitelist.len(),
+            1
+        );
+    }
+
     /// An online-mode name nobody could resolve has no UUID to write, and that
     /// is not a reason to fail a launch.
     #[test]
     fn an_unresolvable_operator_is_dropped_rather_than_fatal() {
+        let _cwd = InTempDir::enter();
         let mut data = data();
         let config = PumpkinConfig::default();
         apply_lists(&settings(json!({ "OPS": "Ghost" })), &config, &mut data);

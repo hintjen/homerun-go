@@ -88,6 +88,13 @@ So settings are applied even when every lookup failed.
 | Seed | `basic.seed`, and **only when the player chose one** — `Seed::from("")` mints a fresh random seed, so assigning unconditionally gives a regenerated world a different world every launch. Read only when a level is created. |
 | Ops, whitelist | Replaced wholesale in `data/ops.json` and `data/whitelist.json`, so a de-opped player actually loses it |
 | Bans | **Appended** to `data/banned-players.json` — `/ban` in game writes the same file, and rewriting it would erase local bans |
+
+Those three files are seeded in memory **and written back**, through Pumpkin's
+own serde types so the shape is by construction the one its loader expects.
+The write is not redundant: Pumpkin saves them only when someone runs `/op` or
+`/ban` in game, and `PumpkinBackend.ops` reads `data/ops.json` to tell the
+dashboard who the operators are — so seeding memory alone reported a server
+with working operators as having none.
 | Difficulty | **Not honoured.** `basic.default_difficulty` exists and nothing reads it; difficulty lives in `level.dat`. |
 | World type, generate structures, spawn protection, spawn NPCs/animals/monsters, command blocks, cheats, allow flight | **Not honoured.** Pumpkin has no support for these at all. |
 | Level name | **Deliberately not managed.** It decides which directory the world lives in, and `hasLocalWorld`, the restore selector and every existing device assume `world`. |
@@ -342,9 +349,11 @@ fetch failed — check the token and `HomerunAPI.serverSettings`.
 are keyed by it, so an offline server cannot recognise players a previously
 online one knew.
 
-**The operator list on the dashboard is empty on a server that has ops.**
-`PumpkinBackend.ops` is reading the wrong path — Pumpkin's lists are under
-`<serverDir>/data/`.
+**The operator list on the dashboard is empty on a server that has ops.** Two
+causes, both fixed and both worth checking if it returns: `PumpkinBackend.ops`
+reading the wrong path (the lists are under `<serverDir>/data/`), and
+`apply_lists` seeding them in memory without writing them back. Compare the
+file's mtime against the launch — if it is older, the write did not run.
 
 **A world ends up in iCloud.** `isExcludedFromBackup` was not set on the
 directory — note it must be set on the URL, and it is set at create time.
