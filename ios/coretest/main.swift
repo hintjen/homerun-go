@@ -17,9 +17,16 @@
 //
 //     node scripts/build-rust.js host
 //     swiftc -O -import-objc-header ios/HomerunHost/FFI/HomerunFFI.h \
-//         ios/HomerunHost/FFI/Core.swift ios/coretest/main.swift \
+//         ios/HomerunHost/FFI/Core.swift ios/HomerunHost/HostLog.swift \
+//         ios/HomerunHost/ServerBackendError.swift ios/HomerunHost/LaunchOrder.swift \
+//         ios/coretest/main.swift \
 //         rust/homerun-pumpkin-ffi/target/release/libhomerun_pumpkin_ffi.a \
 //         -o /tmp/coretest && /tmp/coretest
+//
+// Deliberately short. Everything on that list is a leaf — decisions, an error
+// type, and the launch walker — with no WebView, no backend and no network
+// behind it. If it has to grow much, something has reached for a dependency it
+// should not have.
 //
 // Exits non-zero on the first failure, so it is CI-shaped if anyone wants it
 // there. It is not wired in yet: it needs a host Rust build, which the mobile
@@ -30,10 +37,15 @@ import Foundation
 var failures = 0
 var checks = 0
 
-func check(_ name: String, _ body: () throws -> String) {
+/// Bodies are `@MainActor` because `Core.Lifecycle` is — it stands in for
+/// backend state the app only ever touches from the main queue. This program
+/// is single-threaded and runs on the main thread, so asserting that is
+/// truthful rather than a workaround; top-level code in a plain `swiftc`
+/// build is not main-actor isolated on its own.
+func check(_ name: String, _ body: @MainActor () throws -> String) {
     checks += 1
     do {
-        let detail = try body()
+        let detail = try MainActor.assumeIsolated { try body() }
         print("  ok    \(name)\(detail.isEmpty ? "" : " — \(detail)")")
     } catch {
         failures += 1
@@ -298,24 +310,13 @@ check("link.fromServerBody returns nil when there is none") {
     return "nil, as expected"
 }
 
-print("\nlifecycle")
-check("state.exit calls a clean stop stopped") {
-    let s = try Core.exitState(intentional: true, code: 0)
-    try expect(s == "stopped", "got \(s)")
-    return s
-}
+// The three `state.exit` checks that used to open this section are gone with
+// the wrapper they exercised. What they pinned is pinned better elsewhere: the
+// `lifecycle` section below drives the same verdicts through `lifecycle.exited`,
+// which is the path the app actually takes, and Rust covers `exit_state`
+// directly in `state.rs`.
 
-check("state.exit calls an unexpected exit crashed") {
-    let s = try Core.exitState(intentional: false, code: 1)
-    try expect(s == "crashed", "got \(s)")
-    return s
-}
-
-check("state.exit calls exit 0 we did not ask for crashed") {
-    let s = try Core.exitState(intentional: false, code: 0)
-    return "exit 0, unintentional -> \(s)"
-}
-
+print("\nhandshake")
 check("state.handshake gives up after enough failures") {
     var watch: [String: Any]? = nil
     var gaveUpAfter = -1
@@ -771,6 +772,320 @@ if homerun_backup_available() == 1 {
     try? FileManager.default.removeItem(at: root)
 }
 
+print("\nlaunch plan")
+
+check("the plan iOS actually gets is in the order the core says") {
+    // backups on, settings off (this host writes none yet), tunnel on.
+    let steps = try Core.launchPlan(backups: true, settings: false, tunnel: true)
+    let names = steps.map(\.name)
+    // No `ensureJar` and no `resolveMainClass`: this host asks for a linked
+    // plan and the core leaves out the two steps that are about a jar.
+    // `ensureRuntime` and `acceptEula` are still here — neither is about the
+    // jar — and this host skips them by not asking.
+    let expected = [
+        "cancelOnStopBackup", "announceStarting", "beginResolveTunnel",
+        "ensureRuntime", "acceptEula",
+        "awaitPreviousExit", "restoreWorld", "spawn", "awaitConsole",
+        "openTunnel", "announceRunning",
+    ]
+    try expect(names == expected, "got:\n  \(names.joined(separator: ", "))")
+    return "\(steps.count) steps"
+}
+
+check("the spawned plan still carries the jar steps") {
+    // The guard on the default. Android sends no engine and must keep the plan
+    // it has always had — its launch order throws on a step that is missing,
+    // so getting this wrong crashes it on the first start rather than here.
+    let names = try Core.launchPlan(
+        backups: true, settings: true, tunnel: true, engine: "spawned"
+    ).map(\.name)
+    try expect(names.contains("ensureJar"), "the spawned plan lost ensureJar: \(names)")
+    try expect(names.contains("resolveMainClass"), "the spawned plan lost resolveMainClass")
+    try expect(names.count == 14, "expected 14 steps, got \(names.count)")
+    return "14 steps, jar steps intact"
+}
+
+check("the checkpoints are the four the core marks") {
+    let steps = try Core.launchPlan(backups: true, settings: false, tunnel: true)
+    let checkpoints = steps.filter(\.checkpoint).map(\.name)
+    // Pinned deliberately: if the core changes which steps a stop may
+    // interrupt, both hosts should have to notice rather than drift.
+    try expect(
+        checkpoints == ["restoreWorld", "spawn", "openTunnel", "announceRunning"],
+        "got \(checkpoints)")
+    return checkpoints.joined(separator: ", ")
+}
+
+check("a launch with no tunnel and no backups drops those steps, keeping order") {
+    let steps = try Core.launchPlan(backups: false, settings: false, tunnel: false).map(\.name)
+    try expect(!steps.contains("beginResolveTunnel"), "tunnel step survived: \(steps)")
+    try expect(!steps.contains("openTunnel"), "tunnel step survived: \(steps)")
+    try expect(!steps.contains("restoreWorld"), "restore survived: \(steps)")
+    try expect(steps.first == "cancelOnStopBackup" && steps.last == "announceRunning", "\(steps)")
+    return "\(steps.count) steps"
+}
+
+print("\nlifecycle")
+
+check("a start is counted active before anything slow happens") {
+    // The whole point: a server not yet counted is one the reconcile loop
+    // will try to start for itself, which reprovisions the gateway under us.
+    let life = Core.Lifecycle()
+    let admission = life.startRequested("a")
+    try expect(admission.verdict == "proceed", "verdict=\(admission.verdict ?? "nil")")
+    try expect(life.activeIds() == ["a"], "activeIds=\(life.activeIds())")
+    try expect(life.runningIds().isEmpty, "a starting server is not running yet")
+    return "proceed, active before spawn"
+}
+
+check("the same server twice is alreadyRunning, not an error") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    let again = life.startRequested("a")
+    try expect(again.verdict == "alreadyRunning", "verdict=\(again.verdict ?? "nil")")
+    return "alreadyRunning"
+}
+
+check("a second server is refused, and the reply names the one in the way") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    let other = life.startRequested("b")
+    try expect(other.verdict == "anotherServerRunning", "verdict=\(other.verdict ?? "nil")")
+    try expect(other.serverId == "a", "blamed \(other.serverId ?? "nil"), expected a")
+    return "anotherServerRunning(a)"
+}
+
+check("callFinished retires a call without retiring the winner's claim") {
+    // The bug Android wrote and caught: a duplicate that returns
+    // alreadyRunning still has to finish, and finishing must not drop the
+    // claim the first call is holding.
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.startRequested("a")
+    life.callFinished("a")
+    try expect(life.activeIds() == ["a"], "the winner's claim was retired: \(life.activeIds())")
+    return "still active after the duplicate finished"
+}
+
+check("a stop before anything spawned abandons the launch") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    let stop = life.stopRequested("a")
+    try expect(stop.verdict == "abandonLaunch", "verdict=\(stop.verdict ?? "nil")")
+    try expect(life.shouldAbandon("a"), "the launch was not told to give up")
+    return "abandonLaunch, and the launch sees it"
+}
+
+check("a stop before the console terminates rather than asking politely") {
+    // A server still generating terrain cannot hear `stop`, and has saved no
+    // world to protect.
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.spawned("a")
+    let stop = life.stopRequested("a")
+    try expect(stop.verdict == "terminate", "verdict=\(stop.verdict ?? "nil")")
+    return "terminate"
+}
+
+check("a stop after the console is graceful") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.spawned("a")
+    life.consoleReady("a")
+    let stop = life.stopRequested("a")
+    try expect(stop.verdict == "graceful", "verdict=\(stop.verdict ?? "nil")")
+    return "graceful"
+}
+
+check("stopping something that is not here says so") {
+    let life = Core.Lifecycle()
+    try expect(life.stopRequested("ghost").verdict == "notRunning", "wrong verdict")
+    return "notRunning"
+}
+
+check("an asked-for exit is intentional; an unasked-for one is a crash") {
+    let asked = Core.Lifecycle()
+    asked.startRequested("a")
+    asked.spawned("a")
+    asked.consoleReady("a")
+    asked.stopRequested("a")
+    let clean = asked.exited("a", code: 0)
+    try expect(clean.intentional, "a requested stop was not intentional")
+    try expect(clean.state == "stopped", "state=\(clean.state)")
+
+    let fell = Core.Lifecycle()
+    fell.startRequested("b")
+    fell.spawned("b")
+    fell.consoleReady("b")
+    let crash = fell.exited("b", code: 1)
+    try expect(!crash.intentional, "an unasked-for exit claimed to be intentional")
+    try expect(crash.state == "crashed", "state=\(crash.state)")
+    return "stopped/intentional and crashed/unintentional"
+}
+
+check("a terminated server that someone asked to stop is stopped, not crashed") {
+    // exit_state(true, 143): SIGTERM after a stop request. Android reported
+    // this as a crash and skipped the on-stop backup, losing the session.
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.spawned("a")
+    life.stopRequested("a")
+    let exit = life.exited("a", code: 143)
+    try expect(exit.state == "stopped" && exit.intentional, "state=\(exit.state)")
+    return "143 after a stop -> stopped"
+}
+
+check("an exit belonging to a superseded launch is ignored") {
+    // The one that bit Android: the old engine's exit must not tear down the
+    // launch that replaced it.
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.spawned("a")
+    life.consoleReady("a")
+    life.stopRequested("a")
+    life.callFinished("a")
+    life.startRequested("a")  // a restart, before the old one has exited
+    let exit = life.exited("a", code: 0)
+    try expect(exit.superseded, "the old exit was not marked superseded")
+    return "superseded — the new launch keeps its state"
+}
+
+check("starting supersedes an on-stop backup of the same server") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.spawned("a")
+    life.consoleReady("a")
+    life.stopRequested("a")
+    life.callFinished("a")
+    life.exited("a", code: 0)
+    let restart = life.startRequested("a")
+    try expect(
+        restart.supersedesOnStopBackup,
+        "a relaunch did not cancel the backup still running for it")
+    return "the on-stop backup is cancelled"
+}
+
+check("mayAnnounce does not veto a state merely for repeating") {
+    // Two clocks: the core's and the host's. The core must not suppress an
+    // announcement the host needs to make — that was "the server never comes
+    // online" on Android.
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    life.spawned("a")
+    life.consoleReady("a")
+    try expect(life.mayAnnounce("a", state: "running"), "running was vetoed")
+    try expect(life.mayAnnounce("a", state: "running"), "a repeat was vetoed")
+    return "running may be announced, twice"
+}
+
+check("awaitPreviousExit is false with nothing to wait for") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    try expect(!life.awaitPreviousExit("a"), "waiting for an engine that never existed")
+    return "nothing to wait for"
+}
+
+print("\nlaunch order")
+
+/// A plan with the shape iOS actually gets, so the tests below walk the real
+/// thing rather than a fixture.
+@MainActor
+func iosOrder(_ life: Core.Lifecycle, _ serverId: String) throws -> LaunchOrder {
+    LaunchOrder(
+        steps: try Core.launchPlan(backups: true, settings: false, tunnel: true),
+        serverId: serverId, lifecycle: life)
+}
+
+check("a host may jump over steps it does not perform") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    var order = try iosOrder(life, "a")
+
+    // `ensureRuntime` and `acceptEula` are in this host's plan and it does
+    // neither — Pumpkin unpacks nothing and reads no eula.txt. Jumping them
+    // must be accepted rather than read as going backwards, because that is
+    // what "monotonicity, not exhaustiveness" buys.
+    try expect(try order.at("announceStarting"), "announceStarting was not in the plan")
+    try expect(
+        try order.at("awaitPreviousExit"),
+        "jumping ensureRuntime and acceptEula was refused — skipping must stay legal")
+    return "jumped ensureRuntime and acceptEula"
+}
+
+check("a step absent from the plan is reported absent, not run") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    // No backups and no tunnel: those steps genuinely are not in this plan.
+    var order = LaunchOrder(
+        steps: try Core.launchPlan(backups: false, settings: false, tunnel: false),
+        serverId: "a", lifecycle: life)
+    try expect(try order.at("announceStarting"), "announceStarting missing")
+    try expect(!(try order.at("beginResolveTunnel")), "a tunnel step appeared in a tunnel-less plan")
+    try expect(!(try order.at("restoreWorld")), "a restore appeared with backups off")
+    try expect(try order.at("spawn"), "spawn was refused after two absent steps")
+    return "absent steps report false and do not disturb the order"
+}
+
+check("a step out of order is refused") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    var order = try iosOrder(life, "a")
+    _ = try order.at("spawn")
+    do {
+        // The plan puts the restore well before the spawn. Running it now
+        // would be a different launch from the one the other hosts run.
+        _ = try order.at("restoreWorld")
+        throw Wrong(what: "ran a step the plan puts earlier, with no complaint")
+    } catch let e as ServerBackendError {
+        return "refused: \(e.errorDescription ?? "")"
+    }
+}
+
+check("a stop that arrives mid-launch is honoured at the next checkpoint") {
+    // The path a device could not exercise: on a simulator the engine reaches
+    // its console in milliseconds, so a stop always lands after `running` and
+    // the core rightly answers `graceful`. Here the stop lands where it
+    // actually matters.
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    var order = try iosOrder(life, "a")
+
+    try expect(try order.at("cancelOnStopBackup"), "step missing")
+    try expect(try order.at("announceStarting"), "step missing")
+
+    // Stop pressed while the tunnel is being resolved and the world restored.
+    let stop = life.stopRequested("a")
+    try expect(stop.verdict == "abandonLaunch", "verdict=\(stop.verdict ?? "nil")")
+
+    // A non-checkpoint step still runs — abandoning is not immediate, it is
+    // "before the next thing that would be expensive to undo".
+    try expect(try order.at("beginResolveTunnel"), "a non-checkpoint step was blocked")
+
+    do {
+        _ = try order.at("restoreWorld")  // the first checkpoint after the stop
+        throw Wrong(what: "the launch carried on past a checkpoint with a stop pending")
+    } catch let e as ServerBackendError {
+        return "gave up at restoreWorld: \(e.errorDescription ?? "")"
+    }
+}
+
+check("a launch with no stop pending walks the whole plan") {
+    let life = Core.Lifecycle()
+    life.startRequested("a")
+    var order = try iosOrder(life, "a")
+    var ran: [String] = []
+    for name in [
+        "cancelOnStopBackup", "announceStarting", "beginResolveTunnel", "awaitPreviousExit",
+        "restoreWorld", "spawn", "awaitConsole", "openTunnel", "announceRunning",
+    ] {
+        if try order.at(name) { ran.append(name) }
+        if name == "spawn" { life.spawned("a") }
+        if name == "awaitConsole" { life.consoleReady("a") }
+    }
+    try expect(ran.count == 9, "only ran \(ran.count): \(ran)")
+    return "\(ran.count) steps, in order, no interruption"
+}
+
 print("\nerror paths")
 check("an unknown method is an error, not a crash") {
     do {
@@ -801,9 +1116,11 @@ check("a wrong-typed argument is an error, not a crash") {
 
 check("ten thousand calls do not leak the reply") {
     // Core.call frees with a defer; if that defer were wrong this would grow
-    // without bound. Crude, but it catches a missing free.
+    // without bound. Crude, but it catches a missing free. Any cheap wrapper
+    // that returns a fresh reply will do — this one takes no allocation of its
+    // own, so what it measures is the boundary rather than the work.
     for _ in 0..<10_000 {
-        _ = try Core.exitState(intentional: true, code: 0)
+        _ = try Core.shouldBackUp(hasLocalWorld: true)
     }
     return "10k calls completed"
 }

@@ -39,10 +39,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// How this host gets an engine.
+///
+/// The one thing about a host that changes which steps *exist*, rather than
+/// which are configured. A host that links its engine has no jar to fetch and
+/// no `Main-Class` to read — those steps are not merely skipped, they have no
+/// meaning for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Engine {
+    /// A separate process: the desktop and Android, which run a JVM.
+    #[default]
+    Spawned,
+    /// Compiled in: iOS, which cannot spawn anything.
+    Linked,
+}
+
 /// What a launch needs to know before it can be planned.
 ///
-/// Deliberately three booleans rather than the whole config: the plan turns on
-/// what is *present*, not on what anything is set to.
+/// Deliberately narrow: the plan turns on what is *present*, not on what
+/// anything is set to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inputs {
@@ -53,6 +69,10 @@ pub struct Inputs {
     /// This host can build a tunnel — false leaves a loopback-only server,
     /// which is what a desktop with no gateway link has.
     pub tunnel: bool,
+    /// Spawned or linked. Defaults to spawned, which is what every host that
+    /// does not say otherwise is.
+    #[serde(default)]
+    pub engine: Engine,
 }
 
 /// One thing a host does, in order.
@@ -120,12 +140,24 @@ pub fn plan(inputs: Inputs) -> Vec<Step> {
         steps.push(Step::BeginResolveTunnel);
     }
 
-    steps.extend([
-        Step::EnsureRuntime,
-        Step::EnsureJar,
-        Step::AcceptEula,
-        Step::ResolveMainClass,
-    ]);
+    // `EnsureRuntime` and `AcceptEula` are in every plan, and that is not an
+    // oversight. Neither is about the jar: one unpacks a bundled payload, the
+    // other writes `eula=true` into the server directory, which Android does
+    // as a plain file write. A linked host that happened to run a
+    // Mojang-derived engine would still need both, so gating them on `engine`
+    // would be encoding "linked implies not Mojang" — true of Pumpkin today,
+    // and not something the word "linked" says.
+    //
+    // The two below are jar-shaped by definition, so they are the ones that
+    // come out.
+    steps.push(Step::EnsureRuntime);
+    if inputs.engine == Engine::Spawned {
+        steps.push(Step::EnsureJar);
+    }
+    steps.push(Step::AcceptEula);
+    if inputs.engine == Engine::Spawned {
+        steps.push(Step::ResolveMainClass);
+    }
 
     // Before anything writes the server directory — the outgoing JVM may
     // still be saving into it.
@@ -154,11 +186,15 @@ pub fn plan(inputs: Inputs) -> Vec<Step> {
 mod tests {
     use super::*;
 
+    /// Everything on, and spawned — the desktop and Android. Kept as the
+    /// default subject so every assertion below means what it did before
+    /// `engine` existed.
     fn full() -> Inputs {
         Inputs {
             backups: true,
             settings: true,
             tunnel: true,
+            engine: Engine::Spawned,
         }
     }
 
@@ -231,6 +267,7 @@ mod tests {
             backups: false,
             settings: false,
             tunnel: false,
+            engine: Engine::Spawned,
         });
         assert!(!steps.contains(&Step::RestoreWorld));
         assert!(!steps.contains(&Step::WriteSettings));
@@ -256,18 +293,65 @@ mod tests {
         for backups in [true, false] {
             for settings in [true, false] {
                 for tunnel in [true, false] {
-                    let steps = plan(Inputs {
-                        backups,
-                        settings,
-                        tunnel,
-                    });
-                    assert_eq!(
-                        steps.iter().filter(|s| **s == Step::Spawn).count(),
-                        1,
-                        "{backups} {settings} {tunnel}"
-                    );
+                    for engine in [Engine::Spawned, Engine::Linked] {
+                        let steps = plan(Inputs {
+                            backups,
+                            settings,
+                            tunnel,
+                            engine,
+                        });
+                        assert_eq!(
+                            steps.iter().filter(|s| **s == Step::Spawn).count(),
+                            1,
+                            "{backups} {settings} {tunnel} {engine:?}"
+                        );
+                    }
                 }
             }
         }
+    }
+
+    /// A linked host loses the two steps that are about a jar, and nothing
+    /// else.
+    ///
+    /// The pair left in deliberately are `EnsureRuntime` and `AcceptEula`:
+    /// neither is about the jar, and a linked host running a Mojang-derived
+    /// engine would still need both. iOS skips them by not asking, which
+    /// `LaunchOrder` permits — that is a host's business, not the plan's.
+    #[test]
+    fn a_linked_engine_loses_the_jar_steps_and_keeps_the_rest() {
+        let linked = plan(Inputs {
+            engine: Engine::Linked,
+            ..full()
+        });
+
+        assert!(!linked.contains(&Step::EnsureJar));
+        assert!(!linked.contains(&Step::ResolveMainClass));
+        assert!(linked.contains(&Step::EnsureRuntime));
+        assert!(linked.contains(&Step::AcceptEula));
+
+        // The spine is untouched: everything the order guarantees still holds.
+        assert!(index(&linked, Step::AwaitPreviousExit) < index(&linked, Step::RestoreWorld));
+        assert!(index(&linked, Step::RestoreWorld) < index(&linked, Step::WriteSettings));
+        assert!(index(&linked, Step::WriteSettings) < index(&linked, Step::Spawn));
+        assert!(index(&linked, Step::OpenTunnel) < index(&linked, Step::AnnounceRunning));
+        assert_eq!(*linked.last().unwrap(), Step::AnnounceRunning);
+
+        // And it is exactly two steps shorter than the spawned plan, so a
+        // future step added to one is added to both.
+        assert_eq!(linked.len() + 2, plan(full()).len());
+    }
+
+    /// The default is `Spawned`, and that is load-bearing rather than tidy:
+    /// Android's launch order *throws* on a step missing from the plan, so a
+    /// host that omits `engine` must get the plan it has always had.
+    #[test]
+    fn omitting_the_engine_means_spawned() {
+        let implied: Inputs = serde_json::from_str(
+            r#"{"backups":true,"settings":true,"tunnel":true}"#,
+        )
+        .expect("inputs without an engine should deserialize");
+        assert_eq!(implied.engine, Engine::Spawned);
+        assert_eq!(plan(implied), plan(full()));
     }
 }

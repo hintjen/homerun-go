@@ -507,6 +507,16 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 tunnel: args.get("tunnel").and_then(|v| v.as_bool()).unwrap_or(false),
+                // Defaults to spawned, and that is load-bearing rather than
+                // tidy. Android's launch order *throws* on a step missing from
+                // the plan, where iOS's returns false — so a host that omits
+                // this must get the plan it has always had, or it crashes at
+                // `ensureJar` on the first start. Android sends no `engine`
+                // key and needs no change.
+                engine: match args.get("engine").and_then(|v| v.as_str()) {
+                    Some("linked") => launch::Engine::Linked,
+                    _ => launch::Engine::Spawned,
+                },
             };
             let steps: Vec<Value> = launch::plan(inputs)
                 .into_iter()
@@ -1253,6 +1263,67 @@ mod tests {
             checkpoints,
             vec!["restoreWorld", "spawn", "openTunnel", "announceRunning"]
         );
+    }
+
+    /// The order the iOS host runs: the same plan minus the two steps that are
+    /// about a jar.
+    ///
+    /// `ensureRuntime` and `acceptEula` are still here on purpose — neither is
+    /// about the jar, so neither is gated on how the engine arrives. iOS skips
+    /// them by not asking, which is a host's business.
+    #[test]
+    fn a_linked_host_is_planned_without_the_jar_steps() {
+        let steps = ok(
+            "launch.plan",
+            json!({ "backups": true, "settings": true, "tunnel": true, "engine": "linked" }),
+        );
+        let names: Vec<&str> = steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["step"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "cancelOnStopBackup",
+                "announceStarting",
+                "beginResolveTunnel",
+                "ensureRuntime",
+                "acceptEula",
+                "awaitPreviousExit",
+                "restoreWorld",
+                "writeSettings",
+                "spawn",
+                "awaitConsole",
+                "openTunnel",
+                "announceRunning",
+            ]
+        );
+    }
+
+    /// An unknown engine is spawned, not an error.
+    ///
+    /// The alternative is a host that fails to launch because it sent a word
+    /// this build has not heard of. Spawned is the plan every host had before
+    /// the field existed, so it is the safe answer — and Android, which sends
+    /// no `engine` at all, depends on it.
+    #[test]
+    fn an_unrecognised_engine_falls_back_to_the_plan_everyone_had() {
+        for engine in [json!("wasm"), json!(null), json!(7)] {
+            let steps = ok(
+                "launch.plan",
+                json!({ "backups": true, "settings": true, "tunnel": true, "engine": engine }),
+            );
+            let names: Vec<&str> = steps
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["step"].as_str().unwrap())
+                .collect();
+            assert!(names.contains(&"ensureJar"), "{engine} dropped the jar step");
+            assert_eq!(names.len(), 14, "{engine}");
+        }
     }
 
     #[test]

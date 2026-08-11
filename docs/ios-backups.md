@@ -175,3 +175,17 @@ hold.
 **Everything is slow and the screen keeps dimming.** `isIdleTimerDisabled` is
 only set for the duration of a backup. If a backup is not running, that is not
 this.
+
+**The console says nothing during a backup.** `[Backup]` lines go to the page
+*and* the device log, so `log stream --predicate 'subsystem ==
+"app.gethomerun.ios"'` will show them even after the screen that started the
+backup is gone. If they are absent there too, the backup never started — check
+the preconditions in `finish`, which are all evaluated before the ack.
+
+**A backup logs a warning for every single file.** iOS has no extended-attribute
+API `rustic_core` can reach, so it warns once per entry walked. Those are
+suppressed in the engine's log sink, narrowly — only
+`xattr … UnsupportedPlatformError`. If you are seeing them, that filter has
+drifted; if you are seeing a *different* per-file warning, do not widen the
+filter without reading what it says, because a genuine permission failure looks
+similar and matters.

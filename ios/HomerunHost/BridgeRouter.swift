@@ -52,49 +52,19 @@ final class BridgeRouter {
     /// backup belong to the backend, which is where a run's start and end are.
     let backups = BackupManager()
 
-    /// Servers with a stop call in flight.
-    ///
-    /// `native-server-active-ids` answers "is this server this device's right
-    /// now", not "is it running". The UI's reconcile loop compares that list
-    /// against the API's `target_state`, and an id missing from it while the
-    /// API still says `running` reads as a start issued from another device:
-    /// the loop asks the API to `force_link_up`, which regenerates the
-    /// gateway's keys. Both ends of a server's life open that window, and
-    /// Android fell into both — a launch long enough to restore a world, and
-    /// the whole of a graceful shutdown (the dashboard PATCHes `stopped` only
-    /// after the stop call returns).
-    ///
-    /// Only the second end is answered here. The launch window is held by
-    /// `PumpkinBackend.claimStart`, one layer down, because a claim that the
-    /// `runningServerIds` check can see also collapses a concurrent second
-    /// start into `alreadyRunning`. A stop has nothing to collapse, so this
-    /// stays.
-    ///
-    /// A count, not a set: concurrent calls for one id are normal — the
-    /// reconcile loop issues its own start and is told `alreadyRunning` — and
-    /// the loser's `defer` must not clear a marker the winner still needs.
-    /// Main-actor isolated, like all router bookkeeping.
-    private var inFlight: [String: Int] = [:]
-
-    func beginTransition(_ serverId: String) {
-        inFlight[serverId, default: 0] += 1
-    }
-
-    func endTransition(_ serverId: String) {
-        guard let count = inFlight[serverId] else { return }
-        if count <= 1 {
-            inFlight.removeValue(forKey: serverId)
-        } else {
-            inFlight[serverId] = count - 1
-        }
-    }
-
-    /// Everything the backend still owns, plus every call still in flight.
-    var activeServerIds: [String] {
-        var ids = backend.activeServerIds
-        for id in inFlight.keys where !ids.contains(id) { ids.append(id) }
-        return ids
-    }
+    // The router used to keep its own in-flight count, and the backend its own
+    // claimed/active ids, so that `native-server-active-ids` could answer "is
+    // this server this device's right now" rather than "is it running". Both
+    // are gone: `homerun-core::lifecycle` holds it, reached through
+    // `backend.lifecycle`, and a launch and a stop must see the same instance.
+    //
+    // Why it matters that this is one place and not three: the UI's reconcile
+    // loop compares that list against the API's `target_state`, and an id
+    // missing from it while the API still says `running` reads as a start
+    // issued from another device — the loop asks the API to `force_link_up`,
+    // which regenerates the gateway's keys underneath a launch that has
+    // already resolved its tunnel config. Both ends of a server's life open
+    // that window, and this host had bugs at both.
 
     init(deepLinks: DeepLinkManager, backend: PumpkinBackend) {
         self.deepLinks = deepLinks

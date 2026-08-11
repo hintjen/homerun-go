@@ -234,10 +234,10 @@ enum Core {
 
     // MARK: - Lifecycle
 
-    /// `stopped` or `crashed`. A server exits 0 on `stop`, so intent decides.
-    static func exitState(intentional: Bool, code: Int) throws -> String {
-        try string("state.exit", ["intentional": intentional, "code": code])
-    }
+    // `state.exit` had a wrapper here and no caller. The backend classified
+    // exits itself, which was the drift the lifecycle port ended — it now asks
+    // `Lifecycle.exited`, and the core reaches `exit_state` on its own behalf.
+    // The dispatch method stays; only this host's unused door onto it is gone.
 
     /// One line of tunnel output against a running count.
     ///
@@ -259,6 +259,202 @@ enum Core {
             giveUp: reply["giveUp"] as? Bool ?? false,
             recovered: reply["recovered"] as? Bool ?? false
         )
+    }
+
+    // MARK: - The launch order
+
+    /// One thing a host does during a launch, in order.
+    struct Step: Equatable {
+        let name: String
+        /// A stop that arrived during the launch must be honoured *before*
+        /// this step, not after it.
+        let checkpoint: Bool
+    }
+
+    /// The steps this launch runs, given what it has to work with.
+    ///
+    /// `engine: "linked"` is what this host is — Pumpkin is compiled in, so
+    /// there is no jar to fetch and no `Main-Class` to read, and the core
+    /// leaves those two out rather than handing over steps that have no
+    /// meaning here.
+    ///
+    /// Two JVM-sounding steps stay in the plan regardless: `ensureRuntime`
+    /// unpacks a bundled payload and `acceptEula` writes a file into the server
+    /// directory, and neither is about the jar. This host skips both by not
+    /// asking for them, which is allowed — `LaunchOrder` requires
+    /// monotonicity, not exhaustiveness.
+    static func launchPlan(
+        backups: Bool, settings: Bool, tunnel: Bool, engine: String = "linked"
+    ) throws -> [Step] {
+        try array(
+            "launch.plan",
+            ["backups": backups, "settings": settings, "tunnel": tunnel, "engine": engine])
+            .compactMap { entry in
+                guard let entry = entry as? [String: Any], let name = entry["step"] as? String
+                else { return nil }
+                return Step(name: name, checkpoint: entry["checkpoint"] as? Bool ?? false)
+            }
+    }
+
+    // MARK: - Who owns a server right now
+
+    /// The lifecycle of the servers this device hosts.
+    ///
+    /// The host reports what only it can see — a call arrived, a thread
+    /// spawned, a run ended — and the core answers what any of it means.
+    ///
+    /// # Why this is not a handful of flags on the backend any more
+    ///
+    /// It was: an `activeServerId`, a `claimedServerId`, a `stopRequested`
+    /// bool, and an `inFlight` count on the router. Four places that had to
+    /// agree about one question, and the same class of bug kept coming back —
+    /// a server that is *starting* or *stopping* is still this device's, and
+    /// reporting otherwise makes the UI's reconcile loop take a launch for a
+    /// remote start and reprovision the gateway underneath it. That is a
+    /// tunnel that handshakes and carries nothing.
+    ///
+    /// State is opaque and lives here, exactly as ``Handshake`` does: it goes
+    /// in, a new one comes back, and there is no native handle to free.
+    ///
+    /// `@MainActor` rather than a lock. Two clocks reach this — the bridge's
+    /// handlers and the engine thread's hop back to main — and both are
+    /// already main-actor by the rule `ServerBackend` states. Anything calling
+    /// from `BackupFFI`'s dedicated threads must hop first.
+    @MainActor
+    final class Lifecycle {
+        private let concurrency: String
+        private var state: [String: Any]?
+
+        /// `one` matches `multipleRunningServers: false` in the iOS profile.
+        init(concurrency: String = "one") {
+            self.concurrency = concurrency
+        }
+
+        /// Everything the core answers about a server after an event.
+        struct View {
+            let verdict: String?
+            /// On `anotherServerRunning`, the one in the way.
+            let serverId: String?
+            let activeIds: [String]
+            let runningIds: [String]
+            let state: String
+            let shouldAbandon: Bool
+            /// A previous engine is still alive; do not spawn until it is gone.
+            let awaitPreviousExit: Bool
+            /// Starting cancels any on-stop backup of this server still running.
+            let supersedesOnStopBackup: Bool
+            let intentional: Bool
+            let superseded: Bool
+            /// Only meaningful when a state was asked about; true otherwise.
+            let mayAnnounce: Bool
+        }
+
+        // MARK: Events
+
+        /// A start call arrived. Call this **first**, before the lookups a
+        /// start needs: a server not yet counted active is one the reconcile
+        /// loop will try to start for itself.
+        @discardableResult
+        func startRequested(_ serverId: String) -> View { apply("startRequested", serverId) }
+
+        /// `graceful`, `terminate`, `abandonLaunch`, or `notRunning`.
+        @discardableResult
+        func stopRequested(_ serverId: String) -> View { apply("stopRequested", serverId) }
+
+        /// Always, in a `defer`, whatever the verdict was — including the
+        /// verdicts that did nothing. A duplicate start that returns
+        /// `alreadyRunning` without finishing retires the winner's marker.
+        func callFinished(_ serverId: String) { apply("callFinished", serverId) }
+
+        func spawned(_ serverId: String) { apply("spawned", serverId) }
+        func consoleReady(_ serverId: String) { apply("consoleReady", serverId) }
+        func abandoned(_ serverId: String) { apply("abandoned", serverId) }
+
+        /// What the exit meant: the state, whether anyone asked for it, and
+        /// whether it belongs to a launch that has since been replaced.
+        @discardableResult
+        func exited(_ serverId: String, code: Int) -> View {
+            apply("exited", serverId, code: code)
+        }
+
+        // MARK: Queries
+
+        /// `native-server-active-ids`: running, coming up, or winding down.
+        func activeIds() -> [String] { query("").activeIds }
+        func runningIds() -> [String] { query("").runningIds }
+        func shouldAbandon(_ serverId: String) -> Bool { query(serverId).shouldAbandon }
+
+        /// Asked immediately before spawning rather than at admission: the
+        /// outgoing engine usually exits while the new launch is preparing.
+        func awaitPreviousExit(_ serverId: String) -> Bool { query(serverId).awaitPreviousExit }
+
+        func supersedesOnStopBackup(_ serverId: String) -> Bool {
+            query(serverId).supersedesOnStopBackup
+        }
+
+        /// False when announcing this would contradict a stop already in
+        /// flight.
+        ///
+        /// Takes the wire string rather than `ServerState` so this file stays
+        /// independent of the backend's types — it is the FFI layer, and the
+        /// core answers in the same strings.
+        func mayAnnounce(_ serverId: String, state: String) -> Bool {
+            query(serverId, announcing: state).mayAnnounce
+        }
+
+        // MARK: Plumbing
+
+        @discardableResult
+        private func apply(_ event: String, _ serverId: String, code: Int? = nil) -> View {
+            var args: [String: Any] = [
+                "concurrency": concurrency, "event": event, "serverId": serverId,
+            ]
+            if let state { args["lifecycle"] = state }
+            if let code { args["code"] = code }
+            return absorb(call: "lifecycle.apply", args, keepState: true)
+        }
+
+        private func query(_ serverId: String, announcing: String? = nil) -> View {
+            var args: [String: Any] = ["concurrency": concurrency, "serverId": serverId]
+            if let state { args["lifecycle"] = state }
+            if let announcing { args["state"] = announcing }
+            return absorb(call: "lifecycle.query", args, keepState: false)
+        }
+
+        /// Make the call and take the new state from it.
+        ///
+        /// Non-throwing on purpose. Every caller is on a path where there is
+        /// nothing useful to do with a failure — a start that cannot ask the
+        /// core is refused below, and an exit still has to tear the run down —
+        /// and a throw out of the engine thread's hop would be worse than a
+        /// conservative answer. A failure here is a bug in the arguments,
+        /// which `ios/coretest` is there to catch before a device does.
+        private func absorb(call method: String, _ args: [String: Any], keepState: Bool) -> View {
+            guard let reply = try? Core.object(method, args) else {
+                HostLog.host.error("lifecycle \(method, privacy: .public) failed")
+                return View(
+                    verdict: nil, serverId: nil, activeIds: [], runningIds: [], state: "stopped",
+                    shouldAbandon: false, awaitPreviousExit: false,
+                    supersedesOnStopBackup: false, intentional: false, superseded: false,
+                    mayAnnounce: true)
+            }
+            if keepState, let carried = reply["lifecycle"] as? [String: Any] {
+                state = carried
+            }
+            return View(
+                verdict: reply["verdict"] as? String,
+                serverId: reply["serverId"] as? String,
+                activeIds: reply["activeIds"] as? [String] ?? [],
+                runningIds: reply["runningIds"] as? [String] ?? [],
+                state: reply["state"] as? String ?? "stopped",
+                shouldAbandon: reply["shouldAbandon"] as? Bool ?? false,
+                awaitPreviousExit: reply["awaitPreviousExit"] as? Bool ?? false,
+                supersedesOnStopBackup: reply["supersedesOnStopBackup"] as? Bool ?? false,
+                intentional: reply["intentional"] as? Bool ?? false,
+                superseded: reply["superseded"] as? Bool ?? false,
+                // Absent means "not asked", which is not a veto.
+                mayAnnounce: reply["mayAnnounce"] as? Bool ?? true)
+        }
     }
 
     // MARK: - Console

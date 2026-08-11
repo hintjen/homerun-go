@@ -466,12 +466,37 @@ impl log::Log for JobLog {
     }
 
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            job().warn(record.args().to_string());
+        if !self.enabled(record.metadata()) {
+            return;
         }
+        let message = record.args().to_string();
+        if is_expected_on_ios(&message) {
+            return;
+        }
+        job().warn(message);
     }
 
     fn flush(&self) {}
+}
+
+/// Warnings that say nothing on this platform, and would otherwise say it once
+/// per file.
+///
+/// iOS has no extended-attribute API that rustic can reach, so every single
+/// entry it walks produces `Error getting xattrs … UnsupportedPlatformError`.
+/// A tiny world produced 78 of them; a real one would produce thousands, and
+/// they would land in the player's console and fill the reply's `warnings`
+/// list, pushing out anything that mattered.
+///
+/// This is the same shape as the problem restic has on Android — where it
+/// cannot read an xattr on `/data/data` and exits 3 on every backup. Android
+/// answers it with the exit-3 rule; a linked engine has no exit code, so it is
+/// answered here instead, by not reporting a platform limitation as news.
+///
+/// Deliberately narrow: only the unsupported-xattr case. A genuine permission
+/// or I/O failure still reaches the console.
+fn is_expected_on_ios(message: &str) -> bool {
+    message.contains("xattr") && message.contains("UnsupportedPlatformError")
 }
 
 /// Install the sink, once. Failing means something else already claimed the

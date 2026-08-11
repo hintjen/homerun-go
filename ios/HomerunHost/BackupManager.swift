@@ -261,7 +261,9 @@ final class BackupManager {
             return
         }
 
-        onLog("[Backup] Backing up the world…")
+        // No announcement here: the engine opens with its own phase lines, and
+        // one of them is this sentence. Saying it from both sides printed it
+        // twice, which reads as a stutter rather than progress.
         let reply = await runWatched(
             [
                 "operation": "backup",
@@ -379,9 +381,15 @@ final class BackupManager {
                 }
             }
         }
-        defer { pump.cancel() }
-
         let reply = await BackupFFI.run(request)
+
+        // Stop the pump and wait for it *before* the last read. Cancellation
+        // is cooperative, so a pump still mid-tick would otherwise emit its
+        // lines after this function's caller has already said "Backup
+        // complete." — which is how a phase announcement ended up printed
+        // twice, once out of order.
+        pump.cancel()
+        _ = await pump.result
 
         // Whatever the engine said on its way out, which is usually the
         // reason.
