@@ -33,25 +33,23 @@ protocol ServerBackend: AnyObject {
     /// Report progress through `onLog`, not by returning early.
     func start(serverId: String, config: ServerConfig) async throws
 
-    /// Stop gracefully: save the world, then exit. A forced kill risks the
-    /// world save, which on desktop also breaks the on-stop backup.
-    func stop(serverId: String) async throws
+    /// Stop a running server.
+    ///
+    /// `graceful` asks the engine to save and exit, and is what a stop after
+    /// the console is up must use — a forced end risks the world save, which
+    /// also breaks the on-stop backup. It is false only when the engine cannot
+    /// hear a console command yet, which the core decides: a server still
+    /// generating terrain has saved no world to protect, and waiting for it to
+    /// finish booting so it can be asked politely is not a stop.
+    func stop(serverId: String, graceful: Bool) async throws
 
     /// Ids currently running. One-running-server hosts return 0 or 1.
-    var runningServerIds: [String] { get }
-
-    /// Ids with an engine behind them — running, or on their way down.
     ///
-    /// Not the same question as `runningServerIds`. A graceful stop saves the
-    /// world before it exits; for that whole window the server is no longer
-    /// *running* but still very much *here*. Report it gone and the UI's
-    /// reconcile loop sees "nothing active locally" against an API
-    /// `target_state` that still reads `running` — the dashboard PATCHes
-    /// `stopped` only once the stop call returns — decides another device
-    /// started it, and `force_link_up`s. That regenerates the gateway keys and
-    /// relaunches the server the user just stopped. Android shipped that bug;
-    /// do not inherit it.
-    var activeServerIds: [String] { get }
+    /// Not what `native-server-active-ids` answers — that is
+    /// `Core.Lifecycle.activeIds()`, which also counts a server coming up or
+    /// winding down. This is only for the parts of the host that mean
+    /// "running", such as the instance report.
+    var runningServerIds: [String] { get }
 
     // MARK: Introspection
 
@@ -89,14 +87,6 @@ protocol ServerBackend: AnyObject {
     /// path, so without this event the UI cannot tell it apart from the player
     /// pressing Stop. Emitted *before* the stop, for the same reason.
     var onNetworkError: ((String, NetworkErrorKind) -> Void)? { get set }
-}
-
-extension ServerBackend {
-    /// A backend whose "running" set already holds an id until its engine is
-    /// genuinely gone needs nothing more. One that drops the id the moment a
-    /// stop begins must override this — read the doc above before deciding
-    /// which you are.
-    var activeServerIds: [String] { runningServerIds }
 }
 
 /// Why a server became unreachable. The shared UI words each one differently.
@@ -174,27 +164,4 @@ struct LogSlice {
     /// Lines were evicted before this read. Show the gap — a console that
     /// quietly skips output is worse than one that admits it.
     let dropped: Bool
-}
-
-enum ServerBackendError: LocalizedError {
-    case notFound(String)
-    case alreadyRunning(String)
-    case notRunning(String)
-    case portUnavailable(Int)
-    /// Only one server may run at a time on this host.
-    case anotherServerRunning(String)
-    case engine(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .notFound(let id): return "No server with id \(id)"
-        case .alreadyRunning(let id): return "Server \(id) is already running"
-        case .notRunning(let id): return "Server \(id) is not running"
-        case .portUnavailable(let p): return "Port \(p) is already in use"
-        case .anotherServerRunning:
-            // Surfaced to players, so phrase it for them.
-            return "Another server is already running. Stop it first — this device can host one at a time."
-        case .engine(let message): return message
-        }
-    }
 }

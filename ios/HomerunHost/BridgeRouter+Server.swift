@@ -21,27 +21,41 @@ extension BridgeRouter {
             let serverId = payload["serverId"] as? String
         else { return ["success": false, "error": "Homerun could not tell which server to start."] }
 
-        if backend.runningServerIds.contains(serverId) {
-            // Not an error the player needs to see — the server they asked for
-            // is already up (or on its way), which is the outcome they wanted.
-            return ["success": true, "alreadyRunning": true]
-        }
-
-        // Claimed here, synchronously, before the first `await`. From this
-        // point `native-server-active-ids` reports the server as coming up,
-        // which the contract requires "from the moment the call arrives" — and
-        // everything below this line, the settings fetch especially, is a
-        // network round trip during which this host has committed to a launch.
-        // Released on every path that does not reach `start`; a no-op once it
-        // has.
+        // Admission, before anything slow. The core counts the server active
+        // from here, which is what the contract means by "from the moment the
+        // call arrives": everything below — the settings fetch especially — is
+        // a round trip during which this host has committed to a launch, and a
+        // server not yet counted is one the reconcile loop starts for itself.
         //
-        // The claim rather than `beginTransition`, because it does one thing
-        // more: the `runningServerIds` check above sees it, so a second start
-        // arriving during the fetch is answered `alreadyRunning` instead of
-        // racing this one into the engine. The stop side has no such guard and
-        // uses `beginTransition`.
-        backend.claimStart(serverId: serverId)
-        defer { backend.releaseStart(serverId: serverId) }
+        // `callFinished` in a `defer` on **every** verdict, not just the one
+        // that launches. A duplicate that returns `alreadyRunning` still
+        // counted the call; leaving without finishing retires the winner's
+        // marker. Android wrote that bug and caught it.
+        let admission = backend.lifecycle.startRequested(serverId)
+        defer { backend.lifecycle.callFinished(serverId) }
+
+        switch admission.verdict {
+        case "proceed":
+            break
+        case "alreadyRunning":
+            // Not an error the player needs to see — the server they asked for
+            // is already up, or on its way, which is the outcome they wanted.
+            return ["success": true, "alreadyRunning": true]
+        case "anotherServerRunning":
+            return [
+                "success": false,
+                "error": "\(admission.serverId ?? "Another server") is already running. "
+                    + "Stop it before starting this one.",
+            ]
+        default:
+            // Only reached when the core could not answer at all. Refusing is
+            // the safe direction: proceeding would mean launching without the
+            // one thing that knows whether anything else holds the slot.
+            return [
+                "success": false,
+                "error": "Homerun could not work out whether this server can start.",
+            ]
+        }
 
         let raw = payload["config"] as? [String: Any] ?? [:]
         var config = ServerConfig(
@@ -109,15 +123,23 @@ extension BridgeRouter {
             return ["success": false, "error": "Homerun could not tell which server to stop."]
         }
 
-        // A stopping server is still this device's. The dashboard PATCHes
-        // `stopped` only after this call returns, so until then the API still
-        // reads `running` — and a host that reports itself idle in that window
-        // gets the server restarted underneath it. See `BridgeRouter.inFlight`.
-        beginTransition(serverId)
-        defer { endTransition(serverId) }
+        // The core records the intent and keeps the server counted active for
+        // the whole of the shutdown — the dashboard PATCHes `stopped` only
+        // after this call returns, so until then the API still reads `running`,
+        // and a host that reports itself idle in that window gets the server
+        // restarted underneath it.
+        let stop = backend.lifecycle.stopRequested(serverId)
+        defer { backend.lifecycle.callFinished(serverId) }
+
+        if stop.verdict == "notRunning" {
+            return ["success": false, "error": "That server is not running."]
+        }
 
         do {
-            try await backend.stop(serverId: serverId)
+            // `abandonLaunch` needs no branch: the intent is recorded either
+            // way, and a launch with nothing spawned yet gives up at its next
+            // checkpoint rather than being told to stop something.
+            try await backend.stop(serverId: serverId, graceful: stop.verdict == "graceful")
             return ["success": true]
         } catch {
             return ["success": false, "error": playerFacing(error)]
@@ -158,7 +180,7 @@ extension BridgeRouter {
     /// Running *or coming up*. The second half is not a nicety: see
     /// `BridgeRouter.startsInFlight`.
     func nativeServerActiveIds(_ params: Any?) async throws -> Any? {
-        activeServerIds
+        backend.lifecycle.activeIds()
     }
 
     // MARK: - Metrics (bare-string params)

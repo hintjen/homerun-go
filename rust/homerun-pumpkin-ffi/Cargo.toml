@@ -79,8 +79,12 @@ android_logger = "0.14"
 # rustic_core 0.12.0 does not compile for aarch64-apple-ios: the dev_t cfg
 # gates in backend/local_destination.rs list macos and openbsd but not ios, so
 # `device` stays u64 where nix::mknod wants i32. Five lines, on branch
-# `fix/ios-dev-t-cfg` in hintjen/rustic-fork, written to go upstream. Delete
-# this block when it lands and a release carries it.
+# `fix/ios-dev-t-cfg` in hintjen/rustic-fork.
+#
+# Carried, not upstreamed — the same call `plans/ios.md` makes for the Pumpkin
+# fork. Rebasing five lines onto a new release is cheaper than depending on
+# someone else's review queue, and this repository already keeps two forks on
+# that footing.
 #
 # **Cut from the 0.12.0 release commit, not from the fork's main.** That is the
 # difference between shipping a published version plus a known patch and
