@@ -57,7 +57,13 @@ class PumpkinBackend(
 
     private var currentServerId: String? = null
     private var currentPort: Int? = null
-    private var lastState: ServerState = ServerState.STOPPED
+
+    /**
+     * The last state announced to the UI, not a second opinion about what the
+     * server is doing — `homerun-core::lifecycle` owns that. Kept because the
+     * core drops a finished run, so it cannot answer "what became of it".
+     */
+    private var lastAnnounced: ServerState = ServerState.STOPPED
 
     private val perf = ArrayDeque<PerfSample>()
 
@@ -85,7 +91,9 @@ class PumpkinBackend(
     }
 
     override fun delete(serverId: String) {
-        if (currentServerId == serverId && lastState != ServerState.STOPPED) {
+        // Running, coming up or winding down — the core's question, same as
+        // `native-server-active-ids` answers.
+        if (serverId in ServerHost.lifecycle.activeIds()) {
             throw ServerBackendException.AlreadyRunning(serverId)
         }
         dataDir(serverId).deleteRecursively()
@@ -176,11 +184,17 @@ class PumpkinBackend(
         }
     }
 
+    /**
+     * The core's list, not the engine's.
+     *
+     * [status] asks the engine directly, which is the right primary source for
+     * a launch waiting to see `running` — but it is a *third* answer to "what
+     * is this device hosting", after the core's and the last announced state.
+     * This one goes to the API as `instances` and to the UI on reconnect, so
+     * it has to be the same one everything else uses.
+     */
     override val runningServerIds: List<String>
-        get() {
-            val id = currentServerId ?: return emptyList()
-            return if (status(id) == ServerState.RUNNING) listOf(id) else emptyList()
-        }
+        get() = ServerHost.lifecycle.runningIds()
 
 
     // -----------------------------------------------------------------------
@@ -315,8 +329,16 @@ class PumpkinBackend(
     }
 
     private fun transition(serverId: String, state: ServerState) {
-        if (lastState == state) return
-        lastState = state
+        // The same guard the JVM backend has, and for the same reason: a
+        // launch still catching up must not announce `running` for a server
+        // already on its way down. This backend was missing it.
+        //
+        // The core answers *may this be said*; the check below answers *have
+        // we already said it*, which is about the event stream rather than the
+        // server, and is this file's own business.
+        if (!ServerHost.lifecycle.mayAnnounce(serverId, state.wire)) return
+        if (lastAnnounced == state) return
+        lastAnnounced = state
         onStateChanged?.invoke(serverId, state, false)
     }
 

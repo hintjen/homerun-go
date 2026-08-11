@@ -115,7 +115,19 @@ class JavaServerBackend(
     private var currentServerId: String? = null
     private var startedAt: Instant? = null
     private var currentPort: Int? = null
-    private var lastState: ServerState = ServerState.STOPPED
+
+    /**
+     * The last state **announced to the UI** — not a second opinion about what
+     * the server is doing. `homerun-core::lifecycle` owns that, and nothing
+     * here re-derives it.
+     *
+     * This exists because the core deliberately *forgets*: an entry with no
+     * engine and no call in flight is removed, so `lifecycle.state` answers
+     * `stopped` for a run that ended in a crash. That is right for the core —
+     * a finished run owns nothing — and wrong for [status], which is answering
+     * "what became of it".
+     */
+    private var lastAnnounced: ServerState = ServerState.STOPPED
 
     /** Console ring buffer. The bridge hands out slices by cursor. */
     private val lines = ArrayDeque<String>()
@@ -153,7 +165,11 @@ class JavaServerBackend(
     }
 
     override fun delete(serverId: String) {
-        if (currentServerId == serverId && lastState != ServerState.STOPPED) {
+        // "Is anything still holding this" is the core's question, and it is
+        // the same one `native-server-active-ids` answers — running, coming up
+        // or winding down. Asking it any other way here is how a directory
+        // gets deleted out from under a launch that is still preparing.
+        if (serverId in lifecycle.activeIds()) {
             throw ServerBackendException.AlreadyRunning(serverId)
         }
         dataDir(serverId).deleteRecursively()
@@ -677,11 +693,18 @@ class JavaServerBackend(
         }
     }
 
+    /**
+     * Straight from the core, which is the only place that knows.
+     *
+     * This used to re-derive it from `process.isAlive` and the last announced
+     * state, and the two could disagree: between the JVM dying and the console
+     * pump noticing, the host said "not running" while the core still said it
+     * was. That list goes to the API as this device's `instances` on every
+     * heartbeat, and to the UI on reconnect, so a second opinion is a device
+     * telling two stories about what it is hosting.
+     */
     override val runningServerIds: List<String>
-        get() = currentServerId
-            ?.takeIf { process?.isAlive == true && lastState == ServerState.RUNNING }
-            ?.let(::listOf)
-            ?: emptyList()
+        get() = lifecycle.runningIds()
 
 
     // -----------------------------------------------------------------------
@@ -900,11 +923,18 @@ class JavaServerBackend(
     // Introspection
     // -----------------------------------------------------------------------
 
+    /**
+     * What became of this server, which is [lastAnnounced] and deliberately
+     * not `lifecycle.state`. See that field: the core drops a finished run, so
+     * asking it would turn every crash into a `stopped`.
+     */
     override fun status(serverId: String): ServerState =
-        if (currentServerId == serverId) lastState else ServerState.STOPPED
+        if (currentServerId == serverId) lastAnnounced else ServerState.STOPPED
 
     override fun players(serverId: String): PlayerRoster? {
-        if (currentServerId != serverId || lastState != ServerState.RUNNING) return null
+        // Running is the core's word, not this file's — the roster is only
+        // meaningful once the server is accepting people.
+        if (serverId !in lifecycle.runningIds()) return null
         return PlayerRoster(roster.map { PlayerRoster.Player(it, null) }, maxPlayers)
     }
 
@@ -974,13 +1004,21 @@ class JavaServerBackend(
         state: ServerState,
         backupInProgress: Boolean = false,
     ) {
-        // A launch still catching up must not announce `running` for a
-        // server already on its way down: the UI would flip the card to
-        // running and the API would mark the service healthy, moments before
-        // it exits. The core decides that.
+        // Two different questions, and it is worth being clear which is which.
+        //
+        // The core answers *may this be said at all* — a launch still catching
+        // up must not announce `running` for a server already on its way down,
+        // or the UI flips the card to running and the API marks the service
+        // healthy moments before it exits. It deliberately does not also
+        // suppress an unchanged state: the core's clock and the host's are not
+        // the same one, and letting it veto on "no change" is what once left a
+        // running server showing as offline for ever.
+        //
+        // This file answers *have we already said it* — which is about the
+        // event stream, not about the server, and is the host's own business.
         if (!lifecycle.mayAnnounce(serverId, state.wire)) return
-        if (lastState == state) return
-        lastState = state
+        if (lastAnnounced == state) return
+        lastAnnounced = state
         onStateChanged?.invoke(serverId, state, backupInProgress)
     }
 
