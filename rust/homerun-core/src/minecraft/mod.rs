@@ -14,9 +14,7 @@ pub mod console;
 pub mod jar;
 pub mod settings;
 
-use crate::game::{
-    BuildContext, ConfigInput, Encoding, FileWrite, Game, Identity, LineMeaning, Lookup,
-};
+use crate::game::{BuildContext, ConfigInput, Encoding, FileWrite, Game, LineMeaning, Lookup};
 use crate::tunnel::Forward;
 use crate::{Error, Result};
 use serde_json::Value;
@@ -116,26 +114,12 @@ impl Game for Minecraft {
             encoding: Encoding::Latin1,
         }];
 
-        // Offline UUIDs are derived here rather than asked of the host — see
-        // `Lookup`. Online ones must come from Mojang, and a name the host
-        // could not resolve is skipped rather than written with a bogus id,
-        // which would sit in the file looking correct and never match.
+        // See `settings::resolve_players` for the rule. It lives there rather
+        // than here because a host driving a linked engine needs the same
+        // answer without producing a file.
         let online = resolved.online_mode;
         let players = |names: &[String]| -> Vec<settings::Player> {
-            names
-                .iter()
-                .filter_map(|name| match ctx.identity(name) {
-                    Some(Identity { name, id }) => Some(settings::Player {
-                        name: name.clone(),
-                        uuid: id.clone(),
-                    }),
-                    None if !online => Some(settings::Player {
-                        name: name.clone(),
-                        uuid: settings::offline_uuid(name),
-                    }),
-                    None => None,
-                })
-                .collect()
+            settings::resolve_players(names, &ctx.resolved, online)
         };
 
         files.push(FileWrite {
@@ -199,7 +183,12 @@ impl Game for Minecraft {
 }
 
 /// The loader named in the environment, normalised the way `TYPE` is.
-fn loader_of(env: &Value) -> &'static str {
+///
+/// Public because a host that configures a **linked** engine needs the same
+/// answer and must not re-derive it: the loader is half of the online-mode
+/// rule, and a second copy of "TYPE absent or vanilla means vanilla" is how a
+/// crossplay server ends up authenticating when it should not.
+pub fn loader_of(env: &Value) -> &'static str {
     match env.get("TYPE").and_then(|v| v.as_str()) {
         Some(t) if t.eq_ignore_ascii_case("vanilla") || t.is_empty() => "vanilla",
         None => "vanilla",
@@ -210,6 +199,7 @@ fn loader_of(env: &Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::Identity;
     use serde_json::json;
 
     fn ctx(env: Value) -> BuildContext {

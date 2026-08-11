@@ -43,6 +43,11 @@ pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6
 tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true }
 
 serde_json = "1"
+# Derive, for the one struct worth deriving: `EngineSettings` has fifteen
+# fields and is rendered straight back over the C ABI. Everything else in this
+# crate still parses `Value` by hand, which is the right call for a handful of
+# arguments and the wrong one for this.
+serde = { version = "1", features = ["derive"] }
 
 # A facade, so it costs nothing when nothing logs. Declared unconditionally
 # because two things need it on different platforms: android_logger below, and

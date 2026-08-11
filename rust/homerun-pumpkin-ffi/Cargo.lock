@@ -1887,6 +1887,7 @@ dependencies = [
  "pumpkin-config",
  "rustic_backend",
  "rustic_core",
+ "serde",
  "serde_json",
  "tokio",
 ]

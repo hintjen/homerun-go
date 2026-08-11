@@ -40,6 +40,11 @@ pub mod state;
 ///
 /// Built on every platform, engine or not: the host polls and cancels through
 /// the same C surface whatever is underneath.
+/// What the API's settings mean to a linked engine — clamps, fallbacks and
+/// player resolution, with no engine types in sight so it stays in the fast
+/// test suite.
+pub mod engine_settings;
+
 pub mod backup_job;
 
 /// The linked backup engine. iOS only — see the `backup-engine` feature.
