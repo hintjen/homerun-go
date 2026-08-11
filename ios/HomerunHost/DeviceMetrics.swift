@@ -1,10 +1,16 @@
 import Foundation
 
-/// Process-level memory and CPU figures.
+/// Process-level memory and CPU **counters**.
 ///
 /// The server runs *inside* this process, so there is no per-server number to
 /// report — these describe the app as a whole, which while a world is up is
 /// dominated by the server anyway.
+///
+/// Counters only: nothing here computes a rate. A percentage is a difference
+/// between two moments, and which two is a decision `homerun-core::metrics`
+/// owns for every platform at once — the same split `ProcMetrics.kt` opens
+/// with on Android. This file's job is to read the numbers the OS keeps and
+/// hand them over unchanged.
 enum DeviceMetrics {
 
     /// Physical footprint in KB: the number iOS uses when deciding what to
@@ -22,6 +28,38 @@ enum DeviceMetrics {
 
         guard result == KERN_SUCCESS else { return nil }
         return Int(info.phys_footprint / 1024)
+    }
+
+    /// The ceiling `footprintKb` is measured against: the dirty-memory limit
+    /// this app is killed for exceeding, in KB.
+    ///
+    /// Not the device's RAM, which is what this used to report. A phone with
+    /// 16 GB does not let one app have 16 GB, so "67 MB of 16,384 MB" told a
+    /// player they had room they were never going to get. This is the same
+    /// question Android answers with `largeMemoryClass` — how much may I use
+    /// before I am killed — so the two platforms' gauges finally mean the same
+    /// thing.
+    ///
+    /// `os_proc_available_memory` reports what is *left*, so the limit is that
+    /// plus what is already used. iOS-only by declaration; a Mac has no jetsam
+    /// limit to report, which is why `ios/coretest` compiles this file without
+    /// it.
+    static func memoryLimitKb() -> Int? {
+        #if os(iOS)
+            // Zero means the caller is not an app, or is already **over** its
+            // limit. Neither is a ceiling to draw a bar against, and a made-up
+            // one would be worse than none — the UI simply omits the "of X"
+            // when this is absent.
+            //
+            // The **simulator** always answers zero: it is a macOS process
+            // with no jetsam limit, so there is genuinely no cap to report
+            // there. Measured — `footprintKb` reads normally beside it.
+            let remaining = os_proc_available_memory()
+            guard remaining > 0, let used = footprintKb() else { return nil }
+            return used + Int(remaining / 1024)
+        #else
+            return nil
+        #endif
     }
 
     /// Total CPU time consumed by every thread in the process, in seconds.
@@ -63,32 +101,5 @@ enum DeviceMetrics {
             total += Double(info.system_time.seconds) + Double(info.system_time.microseconds) / 1e6
         }
         return total
-    }
-}
-
-/// Turns cumulative CPU time into a percentage.
-///
-/// CPU usage is a rate, so it only exists between two samples — the first call
-/// has nothing to compare against and reports nothing rather than inventing a
-/// number.
-final class CPUSampler {
-    private var lastCPUSeconds: Double?
-    private var lastSampledAt: Date?
-
-    func sample() -> Double? {
-        guard let cpu = DeviceMetrics.cpuSeconds() else { return nil }
-        let now = Date()
-
-        defer {
-            lastCPUSeconds = cpu
-            lastSampledAt = now
-        }
-
-        guard let previousCPU = lastCPUSeconds, let previousAt = lastSampledAt else { return nil }
-        let elapsed = now.timeIntervalSince(previousAt)
-        guard elapsed > 0 else { return nil }
-
-        // Can exceed 100% — several cores, and the server uses them.
-        return ((cpu - previousCPU) / elapsed) * 100.0
     }
 }

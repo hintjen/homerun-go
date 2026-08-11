@@ -93,6 +93,17 @@ enum Core {
         return value
     }
 
+    /// A JSON number, or nil for a JSON null and for anything that is not one.
+    ///
+    /// Through `NSNumber` on purpose. Swift's conditional bridge is *exact*, so
+    /// `0.6 as? Int` is nil rather than 0 — and a field like `cpuPercent` is
+    /// fractional by design, because an idle server sits well under one
+    /// percent. `NSNull as? NSNumber` is nil, which is what keeps "the platform
+    /// would not say" from decoding as a measured zero.
+    private static func number(_ raw: Any?) -> NSNumber? {
+        raw as? NSNumber
+    }
+
     // MARK: - Config, through the game capability surface
 
     /// How a config file must be read and written.
@@ -463,6 +474,126 @@ enum Core {
                 superseded: reply["superseded"] as? Bool ?? false,
                 // Absent means "not asked", which is not a veto.
                 mayAnnounce: reply["mayAnnounce"] as? Bool ?? true)
+        }
+    }
+
+    // MARK: - What a run is costing
+
+    /// One run's performance graph, kept by `homerun-core::metrics`.
+    ///
+    /// The host reads **counters** — resident KiB, cumulative CPU seconds — and
+    /// offers them here. It never computes a percentage: that is a difference
+    /// between two moments, and it is where wrong graphs come from. The core
+    /// decides what a reading means, whether it is due, and how much history to
+    /// keep, so a phone's graph of a server covers the same span as the
+    /// desktop's graph of the same server.
+    ///
+    /// One instance per **run**. A graph covers a session; a restart starts a
+    /// new one, so ``reset()`` is called from `start`, not from a constructor.
+    ///
+    /// State is opaque and lives here, exactly as ``Lifecycle``'s does.
+    ///
+    /// `@MainActor` where the Kotlin twin is `@Synchronized`: its sampler runs
+    /// on its own coroutine while the bridge reads the graph from another,
+    /// where every caller on this side is already main-actor. The asymmetry is
+    /// deliberate — do not "fix" it by inventing a concurrency story this host
+    /// does not have.
+    @MainActor
+    final class Metrics {
+        private var state: [String: Any]?
+
+        /// The interval the core is currently keeping, from the last
+        /// ``record(atMs:memUsedKb:cpuSeconds:playerCount:)``.
+        ///
+        /// Diagnostics only — nothing on iOS schedules off it, because the
+        /// sampler offers a reading every tick and lets the core drop what it
+        /// does not want. Nil until the first reading rather than defaulting to
+        /// a number this host has not been told.
+        private(set) var intervalMs: Int?
+
+        /// Start a fresh session. Everything sampled so far is dropped.
+        func reset() {
+            state = nil
+            intervalMs = nil
+        }
+
+        /// Offer a reading. Returns whether it became a point on the graph.
+        ///
+        /// Offering more often than the core keeps is fine: the extra readings
+        /// still anchor the next rate, so a five-second pump feeding a
+        /// thirty-second graph measures CPU over the last five seconds rather
+        /// than averaging a spike away.
+        ///
+        /// `atMs` is a parameter rather than a `Date()` taken in here because
+        /// the clock belongs to the host — the core deliberately has none — and
+        /// because it is what lets `ios/coretest` drive three hours of history
+        /// without waiting for it.
+        @discardableResult
+        func record(atMs: Int, memUsedKb: Int?, cpuSeconds: Double?, playerCount: Int?) -> Bool {
+            var reading: [String: Any] = ["atMs": atMs]
+            // Omitted rather than sent as null, matching the Kotlin twin. The
+            // core defaults each one to `None`, which is "the platform would
+            // not say" — never a zero it did not measure.
+            if let memUsedKb { reading["memUsedKb"] = memUsedKb }
+            if let cpuSeconds { reading["cpuSeconds"] = cpuSeconds }
+            if let playerCount { reading["playerCount"] = playerCount }
+
+            var args: [String: Any] = ["reading": reading]
+            if let state { args["history"] = state }
+
+            guard let reply = try? Core.object("metrics.record", args) else {
+                // The state is deliberately left alone: dropping the history
+                // over one failed call would silently restart the graph, which
+                // reads as a server that just launched.
+                HostLog.host.error("metrics.record failed — this reading is lost")
+                return false
+            }
+
+            state = reply["history"] as? [String: Any] ?? state
+
+            let interval = Core.number(reply["intervalMs"])?.intValue
+            if let interval, interval != intervalMs {
+                // The one moment a graph visibly changes meaning. Otherwise
+                // invisible, and "why did my graph get chunky" is a support
+                // conversation without it.
+                HostLog.host.info("metrics now keep one point per \(interval / 1000)s")
+            }
+            intervalMs = interval
+
+            return reply["appended"] as? Bool ?? false
+        }
+
+        /// The graph, oldest first.
+        func samples() -> [Sample] {
+            var args: [String: Any] = [:]
+            if let state { args["history"] = state }
+
+            guard let reply = try? Core.object("metrics.query", args),
+                let entries = reply["samples"] as? [Any]
+            else {
+                HostLog.host.error("metrics.query failed")
+                return []
+            }
+
+            return entries.compactMap { entry in
+                guard let entry = entry as? [String: Any] else { return nil }
+                return Sample(
+                    t: Core.number(entry["t"])?.intValue ?? 0,
+                    memUsedMb: Core.number(entry["memUsedMb"])?.intValue,
+                    // Not rounded here: an idle server is a fraction of a
+                    // percent, and the graph is the only thing entitled to
+                    // decide how to show that.
+                    cpuPercent: Core.number(entry["cpuPercent"])?.doubleValue,
+                    playerCount: Core.number(entry["playerCount"])?.intValue)
+            }
+        }
+
+        /// One point on a graph. Nulls render as "unavailable", not as zero.
+        struct Sample {
+            let t: Int
+            let memUsedMb: Int?
+            let cpuPercent: Double?
+            let playerCount: Int?
         }
     }
 

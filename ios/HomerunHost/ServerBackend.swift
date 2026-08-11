@@ -60,6 +60,13 @@ protocol ServerBackend: AnyObject {
     func cpuUsage(serverId: String) -> Double?
     func port(serverId: String) -> Int?
 
+    /// Points for the Insights graphs, oldest first.
+    ///
+    /// Empty when this is not the running server, and empty for a backend that
+    /// cannot sample — an empty graph is honest, and a fabricated one is a
+    /// claim about the past that a player reads as fact.
+    func perfSamples(serverId: String) -> [PerfSample]
+
     /// Console lines since `cursor`, with a cursor for the next call.
     func logs(serverId: String, since cursor: Int) -> LogSlice
 
@@ -87,6 +94,11 @@ protocol ServerBackend: AnyObject {
     /// path, so without this event the UI cannot tell it apart from the player
     /// pressing Stop. Emitted *before* the stop, for the same reason.
     var onNetworkError: ((String, NetworkErrorKind) -> Void)? { get set }
+}
+
+extension ServerBackend {
+    /// A backend that does not sample says so by saying nothing.
+    func perfSamples(serverId: String) -> [PerfSample] { [] }
 }
 
 /// Why a server became unreachable. The shared UI words each one differently.
@@ -164,6 +176,18 @@ struct PlayerRoster {
 struct MemoryUsage {
     let usedKb: Int?
     let maxMb: Int?
+}
+
+/// One point on the Insights graphs. Every field is optional, and a nil means
+/// "not measured" — which the UI draws as a gap, not as a zero.
+struct PerfSample {
+    /// Epoch milliseconds. The host's clock, because only the host has one.
+    let t: Int
+    let memUsedMb: Int?
+    /// May exceed 100: a server uses more than one core. Absent on the first
+    /// point of a run, because a rate needs two readings.
+    let cpuPercent: Double?
+    let playerCount: Int?
 }
 
 struct LogSlice {

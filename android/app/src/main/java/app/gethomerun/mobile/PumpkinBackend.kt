@@ -2,7 +2,7 @@ package app.gethomerun.mobile
 
 import android.app.ActivityManager
 import android.content.Context
-import android.os.Debug
+import android.os.Process
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -65,7 +65,12 @@ class PumpkinBackend(
      */
     private var lastAnnounced: ServerState = ServerState.STOPPED
 
-    private val perf = ArrayDeque<PerfSample>()
+    /**
+     * This run's graph, kept by `homerun-core::metrics`. One per run: a graph
+     * covers a session, so [start] resets it rather than this being reused.
+     */
+    private val metrics = Core.Metrics()
+    private var perfJob: Job? = null
 
     override var onStateChanged: ((String, ServerState, Boolean) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
@@ -114,9 +119,9 @@ class PumpkinBackend(
         currentServerId = serverId
         currentPort = port
         logCursor = 0
-        perf.clear()
 
         startLogPump(serverId)
+        startPerfSampler(serverId)
 
         engineThread = NativeServer.startBlocking(
             serverId,
@@ -130,6 +135,7 @@ class PumpkinBackend(
             scope.launch {
                 drainLogs(serverId)
                 stopLogPump()
+                stopPerfSampler()
                 // Whether this was a stop or a fall-over is the core's call,
                 // from whether one was asked for — the engine's own `ok` says
                 // only that it unwound cleanly. Exit 0 stands in for a clean
@@ -230,24 +236,41 @@ class PumpkinBackend(
 
     /**
      * The engine runs in this process, so process memory is the honest figure
-     * — there is no separate server process to measure. Native heap rather
-     * than JVM heap: the server is Rust.
+     * — there is no separate server process to measure.
+     *
+     * Resident set, not `Debug.getNativeHeapAllocatedSize()`: the heap figure
+     * is the allocator's own bookkeeping, where RSS is what the OS accounts
+     * against this app and what it kills on. It is also what the graph is now
+     * drawn from, and a gauge that disagrees with the graph beside it is worse
+     * than either number alone.
+     *
+     * The ceiling is still `largeMemoryClass`, so RSS — which counts more
+     * than the heap — can read over 100% of it. Pre-existing on the JVM path.
+     * iOS reports its own equivalent, the limit the app is killed for
+     * exceeding, so the two platforms' gauges ask the same question even
+     * though neither number is directly comparable to the other's.
      */
     override fun memoryUsage(serverId: String): MemoryUsage? {
         if (currentServerId != serverId) return null
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         return MemoryUsage(
-            usedKb = (Debug.getNativeHeapAllocatedSize() / 1024).toInt(),
+            usedKb = ProcMetrics.residentKb(Process.myPid().toLong())?.toInt(),
             maxMb = manager.largeMemoryClass,
         )
     }
 
     /**
-     * Not reported. Per-process CPU needs sampling `/proc/self/stat` over an
-     * interval, and a wrong number here becomes a wrong graph in the UI —
-     * null renders as "unavailable", which is true.
+     * The most recent rate the core worked out, which is the graph's last
+     * point. Never measured on demand: a percentage is a difference between
+     * two moments, and letting a UI poll choose those two is how the graph and
+     * the gauge end up disagreeing.
+     *
+     * Null until two readings exist, which renders as "unavailable".
      */
-    override fun cpuUsage(serverId: String): Double? = null
+    override fun cpuUsage(serverId: String): Double? {
+        if (currentServerId != serverId) return null
+        return metrics.samples().lastOrNull()?.cpuPercent
+    }
 
     override fun port(serverId: String): Int? =
         if (currentServerId == serverId) currentPort else null
@@ -272,7 +295,10 @@ class PumpkinBackend(
     }
 
     override fun perfHistory(serverId: String): List<PerfSample> =
-        if (currentServerId == serverId) perf.toList() else emptyList()
+        if (currentServerId != serverId) emptyList()
+        else metrics.samples().map {
+            PerfSample(it.t, it.memUsedMb, it.cpuPercent, it.playerCount)
+        }
 
     // -----------------------------------------------------------------------
     // Log pump
@@ -283,7 +309,7 @@ class PumpkinBackend(
         pumpJob = scope.launch(Dispatchers.IO) {
             while (true) {
                 drainLogs(serverId)
-                sample(serverId)
+                pollPlayers(serverId)
                 delay(POLL_MS)
             }
         }
@@ -309,23 +335,52 @@ class PumpkinBackend(
 
     private var lastPlayerCount = -1
 
-    private fun sample(serverId: String) {
-        val roster = players(serverId)
-        val count = roster?.players?.size ?: 0
+    private fun pollPlayers(serverId: String) {
+        val count = players(serverId)?.players?.size ?: 0
         if (count != lastPlayerCount) {
             lastPlayerCount = count
             onPlayersChanged?.invoke(serverId)
         }
-        perf.addLast(
-            PerfSample(
-                t = System.currentTimeMillis(),
-                memUsedMb = memoryUsage(serverId)?.usedKb?.div(1024),
-                cpuPercent = null,
-                playerCount = count,
-            )
-        )
-        // Same 30-minute window the desktop sampler keeps.
-        while (perf.size > PERF_SAMPLES) perf.removeFirst()
+    }
+
+    // -----------------------------------------------------------------------
+    // Perf sampler
+    // -----------------------------------------------------------------------
+
+    /**
+     * Feed the core a reading for as long as this run lasts.
+     *
+     * Its own job rather than a second passenger on the log pump, which ticks
+     * every second: the history crosses JNI *by value*, so offering there
+     * would ship up to 360 samples in each direction thirty times over for one
+     * kept point. The pump keeps the roster watch, which does need to be
+     * prompt. Same shape as [JavaServerBackend]'s sampler, so the two Android
+     * backends' numbers describe the same window.
+     *
+     * The engine runs **in this process**, so the process to measure is the
+     * app itself — unlike the JVM backend, which has a child to point at.
+     */
+    private fun startPerfSampler(serverId: String) {
+        stopPerfSampler()
+        metrics.reset()
+        perfJob = scope.launch(Dispatchers.IO) {
+            val pid = Process.myPid().toLong()
+            while (true) {
+                metrics.record(
+                    atMs = System.currentTimeMillis(),
+                    memUsedKb = ProcMetrics.residentKb(pid),
+                    cpuSeconds = ProcMetrics.cpuSeconds(pid),
+                    playerCount = players(serverId)?.players?.size,
+                )
+                // Re-read every pass: it doubles once the graph fills.
+                delay(metrics.intervalMs())
+            }
+        }
+    }
+
+    private fun stopPerfSampler() {
+        perfJob?.cancel()
+        perfJob = null
     }
 
     private fun transition(serverId: String, state: ServerState) {
@@ -350,6 +405,5 @@ class PumpkinBackend(
         const val DEFAULT_PORT = 25565
         const val POLL_MS = 1000L
         const val START_TIMEOUT_MS = 120_000L
-        const val PERF_SAMPLES = 1800
     }
 }

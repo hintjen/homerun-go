@@ -42,8 +42,13 @@ final class PumpkinBackend: ServerBackend {
     private var pollTimer: Timer?
     private var lastPlayerSignature = ""
 
-    private var perfHistory: [(t: Date, memUsedMb: Double?, cpuPercent: Double?, players: Int?)] = []
-    private let cpuSampler = CPUSampler()
+    /// This run's graph, kept by `homerun-core::metrics`.
+    ///
+    /// One per run: a graph covers a session, so `start` resets it rather than
+    /// this being reused across launches. The host reads counters and offers
+    /// them; every decision about them — the rate, the retention, whether a
+    /// number can be trusted at all — is the core's.
+    private let metrics = Core.Metrics()
 
     private let backups = BackupManager()
 
@@ -110,7 +115,12 @@ final class PumpkinBackend: ServerBackend {
         runFailure = nil
         threadFinished = false
         logCursor = 0
-        perfHistory.removeAll()
+        // A graph covers one session. This also drops the rate anchor, which
+        // is what stops the first point of this run being measured against the
+        // last run's CPU counter — a fabricated spike the old `CPUSampler`,
+        // which nothing reset, produced on every relaunch.
+        metrics.reset()
+        lastPlayerSignature = ""
         backupContext = config.backupContext
 
         var order = LaunchOrder(
@@ -548,12 +558,22 @@ final class PumpkinBackend: ServerBackend {
         guard activeServerId == serverId else { return nil }
         return MemoryUsage(
             usedKb: DeviceMetrics.footprintKb(),
-            maxMb: Int(ProcessInfo.processInfo.physicalMemory / 1_048_576))
+            // The limit this app is killed for exceeding, not the device's
+            // RAM — the same question Android's `largeMemoryClass` answers.
+            maxMb: DeviceMetrics.memoryLimitKb().map { $0 / 1024 })
     }
 
+    /// The most recent rate the core worked out — the same number the graph's
+    /// last point shows.
+    ///
+    /// Deliberately not measured on demand. This used to call `CPUSampler`,
+    /// which advanced its own baseline, so every UI poll of this channel stole
+    /// the anchor from the next point on the graph: the Insights screen was
+    /// changing the numbers it was reading. Nil until two readings exist,
+    /// which the UI renders as "unavailable".
     func cpuUsage(serverId: String) -> Double? {
         guard activeServerId == serverId else { return nil }
-        return cpuSampler.sample()
+        return metrics.samples().last?.cpuPercent
     }
 
     func port(serverId: String) -> Int? {
@@ -592,14 +612,15 @@ final class PumpkinBackend: ServerBackend {
         return entries.compactMap { $0["name"] as? String }
     }
 
-    func perfSamples(serverId: String) -> [[String: Any]] {
-        perfHistory.map { sample in
-            [
-                "t": Int(sample.t.timeIntervalSince1970 * 1000),
-                "memUsedMb": sample.memUsedMb ?? NSNull(),
-                "cpuPercent": sample.cpuPercent ?? NSNull(),
-                "playerCount": sample.players ?? NSNull(),
-            ]
+    /// Empty when this is not the running server — the rule every sibling
+    /// getter follows, and one this method used to ignore, so a stopped
+    /// server still drew the previous run's graph.
+    func perfSamples(serverId: String) -> [PerfSample] {
+        guard activeServerId == serverId else { return [] }
+        return metrics.samples().map {
+            PerfSample(
+                t: $0.t, memUsedMb: $0.memUsedMb, cpuPercent: $0.cpuPercent,
+                playerCount: $0.playerCount)
         }
     }
 
@@ -643,6 +664,9 @@ final class PumpkinBackend: ServerBackend {
         pollTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.sample(serverId: serverId) }
         }
+        // A repeating timer does not fire on creation, so without this the
+        // graph starts five seconds late and the rate anchor with it.
+        sample(serverId: serverId)
     }
 
     private func drainLogs(serverId: String) {
@@ -664,15 +688,22 @@ final class PumpkinBackend: ServerBackend {
         guard activeServerId == serverId else { return }
 
         let roster = HomerunFFI.players()
-        perfHistory.append(
-            (
-                t: Date(),
-                memUsedMb: DeviceMetrics.footprintKb().map { Double($0) / 1024.0 },
-                cpuPercent: cpuSampler.sample(),
-                players: roster?.players.count
-            ))
-        // Roughly an hour at one sample per five seconds.
-        if perfHistory.count > 720 { perfHistory.removeFirst(perfHistory.count - 720) }
+
+        // Offered every tick, not once per interval. The core keeps what is due
+        // and remembers the rest as the anchor for the next rate, so a
+        // five-second pump feeding a thirty-second graph measures CPU over the
+        // last five seconds rather than averaging a spike away.
+        //
+        // Deliberately not gated on `metrics.query`'s `due`: the history
+        // crosses the C ABI *by value*, so once the graph is full, asking
+        // whether a reading is wanted ships 360 samples in each direction to
+        // save two Mach calls. `due` is for hosts where reading the counter is
+        // the expensive half; here that is inverted.
+        metrics.record(
+            atMs: Int(Date().timeIntervalSince1970 * 1000),
+            memUsedKb: DeviceMetrics.footprintKb(),
+            cpuSeconds: DeviceMetrics.cpuSeconds(),
+            playerCount: roster?.players.count)
 
         // The UI redraws the roster on this, so only fire when it changed.
         let signature = (roster?.players ?? []).map(\.name).sorted().joined(separator: ",")

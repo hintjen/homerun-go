@@ -136,6 +136,7 @@ how a friend actually joins.
 - Console cursors, and admitting to dropped output
 - Which states the UI is told about, and which are host-internal
 - Memory and CPU sampling for a server that is not its own process
+- What the Insights graph covers, and why the host computes none of it
 - World storage, iCloud exclusion, and LAN connectivity
 
 **Read this for**: Working on server lifecycle, or debugging a server that
@@ -193,6 +194,7 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
   one this device already has
 - Why `start` polls for *running* instead of waiting on the call
 - The log pump, the perf sampler, and one-server-at-a-time
+- What each backend's memory and CPU numbers actually measure
 - What the memory and CPU numbers actually measure
 - Triage, symptom first
 

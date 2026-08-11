@@ -755,7 +755,22 @@ object Core {
             .jsonPrimitive.content
 
     // -----------------------------------------------------------------------
-    // What a run is costing
+    // What a run is costing — for a host that must sample itself
+    //
+    // Two paths reach `homerun-core::metrics`, and which one a backend takes
+    // follows from whether the server is a separate process.
+    //
+    //  - A **child process** is sampled by the supervisor that owns it, in
+    //    Rust, and the host only reads the finished graph. That is
+    //    `JavaServerBackend`, and it uses none of this.
+    //  - A **linked engine** *is* this app. There is no separate process to
+    //    measure, so only the host can report anything at all — which is why
+    //    `Engine::usage` answers None for one. `PumpkinBackend` takes its own
+    //    readings and records them through the class below.
+    //
+    // The core is the same either way, so the retention rule and the rate
+    // arithmetic stay one implementation. Only who holds the tape measure
+    // differs.
     // -----------------------------------------------------------------------
 
     /**
