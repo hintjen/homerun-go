@@ -46,6 +46,7 @@ impl Game for Minecraft {
             ready: console::is_ready(line),
             joined: console::joined(line).map(str::to_string),
             left: console::left(line).map(str::to_string),
+            max_players: console::max_players(line),
         }
     }
 

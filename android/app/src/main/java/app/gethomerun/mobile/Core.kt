@@ -168,6 +168,16 @@ object Core {
             put("artifact", artifact)
         }).jsonPrimitive.contentOrNull
 
+    /**
+     * How long to wait before retrying a download, or null when there is
+     * nothing left to try.
+     *
+     * Null is what ends the loop. Treating a missing delay as zero would
+     * retry a dead endpoint as fast as it can refuse.
+     */
+    fun jarRetryDelayMs(attempt: Int): Long? =
+        call("minecraft.jar.retryDelay", buildJsonObject { put("attempt", attempt) })
+            .jsonPrimitive.longOrNull
     fun jarCouldSatisfy(onDisk: JsonObject, version: String?, loader: String): Boolean =
         call("minecraft.jar.couldSatisfy", buildJsonObject {
             put("onDisk", onDisk)
@@ -848,7 +858,13 @@ object Core {
     // -----------------------------------------------------------------------
 
     /** What one console line means, if anything. */
-    data class Line(val ready: Boolean, val joined: String?, val left: String?)
+    data class Line(
+        val ready: Boolean,
+        val joined: String?,
+        val left: String?,
+        /** The player ceiling, when the line announced one. */
+        val maxPlayers: Int?,
+    )
 
     fun classify(line: String): Line {
         val reply = call("game.classify", buildJsonObject { put("line", line) }).jsonObject
@@ -859,6 +875,7 @@ object Core {
             ready = reply["ready"]?.jsonPrimitive?.boolean == true,
             joined = name("joined"),
             left = name("left"),
+            maxPlayers = reply["maxPlayers"]?.jsonPrimitive?.intOrNull,
         )
     }
 }

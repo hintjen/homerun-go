@@ -32,6 +32,33 @@ pub fn left(line: &str) -> Option<&str> {
     player_before(line, " left the game")
 }
 
+/// The player ceiling, if this line announces one.
+///
+/// The denominator in "3 / 20", and the console is where a host learns it,
+/// because what the player *asked for* and what the server is **running with**
+/// are not always the same — a rejected `server.properties` value, or a plugin
+/// overriding it, and the file no longer says.
+///
+/// Several spellings, because the source varies: a properties dump prints
+/// `max-players=20`, some loaders log `maxPlayers: 20` on boot. Same fact,
+/// not worth a second parser.
+///
+/// Best-effort like everything else here — an unrecognised line yields None,
+/// which renders as unknown rather than as a ceiling of zero.
+pub fn max_players(line: &str) -> Option<u32> {
+    let lower = line.to_ascii_lowercase();
+    let after = ["max-players", "maxplayers"]
+        .iter()
+        .find_map(|key| lower.find(key).map(|at| at + key.len()))?;
+
+    let digits: String = line[after..]
+        .trim_start_matches([':', '=', ' '])
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    digits.parse().ok()
+}
+
 /// Pull the name immediately before a marker, after the log prefix.
 ///
 /// Vanilla prints `[HH:MM:SS] [Server thread/INFO]: Name joined the game`.
@@ -219,5 +246,28 @@ mod tests {
         let slice = console.since(0);
         assert_eq!(slice.lines, vec!["new run"]);
         assert_eq!(slice.cursor, 1);
+    }
+
+    #[test]
+    fn the_player_ceiling_is_read_from_either_spelling() {
+        assert_eq!(max_players("max-players=20"), Some(20));
+        assert_eq!(
+            max_players("[12:00:00] [main/INFO]: maxPlayers: 8"),
+            Some(8)
+        );
+        // The properties dump prints it among everything else.
+        assert_eq!(
+            max_players("[Server thread/INFO]: Loaded max-players = 100 from file"),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_ceiling_in_it_says_so() {
+        // Not a number, not a ceiling, and not this parser's business.
+        assert_eq!(max_players("max-players="), None);
+        assert_eq!(max_players("max-players=lots"), None);
+        assert_eq!(max_players("Notch joined the game"), None);
+        assert_eq!(max_players(""), None);
     }
 }

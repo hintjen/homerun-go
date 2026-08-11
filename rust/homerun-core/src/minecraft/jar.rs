@@ -346,6 +346,26 @@ pub fn cache_key(artifact: &Artifact) -> Option<String> {
     Some(format!("{}.jar", hex.to_ascii_lowercase()))
 }
 
+/// How long to wait before retrying a download, in order.
+///
+/// Short, because a resumed download picks up where it left off rather than
+/// starting again — the cost of an early retry is a round trip, not a
+/// re-transfer. A phone walking out of Wi-Fi coverage gets three chances
+/// across seventeen seconds, which covers a handover without leaving someone
+/// staring at a progress bar that has quietly given up.
+pub const RETRY_DELAYS_MS: &[u64] = &[2_000, 5_000, 10_000];
+
+/// What a failed download attempt means.
+///
+/// **Only a transport failure is retryable.** A digest that does not match is
+/// corruption or substitution, not a blip: trying again fetches the same wrong
+/// bytes from the same place, and the desktop draws this line in the same
+/// spot. A refusal from the version endpoints is likewise an answer, not an
+/// outage.
+pub fn retry_delay_ms(attempt: usize) -> Option<u64> {
+    RETRY_DELAYS_MS.get(attempt).copied()
+}
+
 /// Decide what the jar on disk is worth.
 ///
 /// `present` is whether the jar file exists at all, `on_disk` is the marker
@@ -807,6 +827,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_backoff_runs_out_rather_than_going_for_ever() {
+        assert_eq!(retry_delay_ms(0), Some(2_000));
+        assert_eq!(retry_delay_ms(1), Some(5_000));
+        assert_eq!(retry_delay_ms(2), Some(10_000));
+        // None is what stops the loop. A host that treated a missing delay as
+        // zero would retry a dead endpoint as fast as it could answer.
+        assert_eq!(retry_delay_ms(3), None);
+    }
+
+    #[test]
+    fn the_whole_backoff_fits_inside_a_network_handover() {
+        let total: u64 = RETRY_DELAYS_MS.iter().sum();
+        assert!(total <= 20_000, "{total}ms is long enough to look broken");
+    }
     #[test]
     fn a_different_version_is_never_adopted() {
         let artifact = cached_artifact();

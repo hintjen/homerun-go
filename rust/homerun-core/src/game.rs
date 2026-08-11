@@ -32,7 +32,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// What one line of a server's output means, if anything.
+///
+/// `rename_all` was added alongside `max_players` and is safe despite the
+/// freeze: the three fields that predate it are single words, so camelCase
+/// leaves their wire names untouched. It exists so the first multi-word field
+/// here reads like every other multi-word field a host parses.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LineMeaning {
     /// The server has finished starting and is accepting connections.
     ///
@@ -42,6 +48,12 @@ pub struct LineMeaning {
     pub ready: bool,
     pub joined: Option<String>,
     pub left: Option<String>,
+    /// The player ceiling this line announced, if it announced one.
+    ///
+    /// Additive, per the freeze rule, so a host built against the older
+    /// shape still deserialises — it simply never learns a ceiling.
+    #[serde(default)]
+    pub max_players: Option<u32>,
 }
 
 /// How a config file must be written.
@@ -273,11 +285,23 @@ mod tests {
             ready: true,
             joined: Some("Notch".into()),
             left: None,
+            max_players: Some(20),
         })
         .unwrap();
         assert_eq!(json["ready"], true);
         assert_eq!(json["joined"], "Notch");
         assert!(json.get("left").is_some(), "absent is null, not missing");
+        assert_eq!(json["maxPlayers"], 20);
+    }
+
+    /// The freeze rule in practice: a host built before `max_players` existed
+    /// sends JSON without it, and that must still parse rather than becoming
+    /// an error someone sees on a device.
+    #[test]
+    fn a_line_meaning_from_before_the_ceiling_existed_still_parses() {
+        let old: LineMeaning = serde_json::from_str(r#"{"ready":false,"joined":null,"left":null}"#)
+            .expect("an older host's shape must still deserialize");
+        assert_eq!(old.max_players, None);
     }
 
     #[test]

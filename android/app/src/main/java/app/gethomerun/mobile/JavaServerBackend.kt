@@ -887,9 +887,10 @@ class JavaServerBackend(
         meaning.joined?.let { if (roster.add(it)) onPlayersChanged?.invoke(serverId) }
         meaning.left?.let { if (roster.remove(it)) onPlayersChanged?.invoke(serverId) }
 
-        // Still local: the core has no opinion about server.properties, which
-        // is where this actually belongs once settings move across.
-        MAX_PLAYERS.find(line)?.let { maxPlayers = it.groupValues[1].toIntOrNull() }
+        // The ceiling comes from the same classification as the rest — it is
+        // console parsing, and it belongs beside ready/joined/left rather than
+        // in a regex this file kept for itself.
+        meaning.maxPlayers?.let { maxPlayers = it }
     }
 
     /**
@@ -1067,7 +1068,6 @@ class JavaServerBackend(
         const val PROVISIONING = "provisioning"
         const val HANDSHAKE = "handshake"
 
-        val MAX_PLAYERS = Regex("""max(?:-players|Players)[=: ]+(\d+)""", RegexOption.IGNORE_CASE)
 
         /** `homerun-java-launcher` naming itself, ahead of the VM's own output. */
         val LAUNCHER_PID = Regex("""^\[launcher] pid=(\d+)$""")

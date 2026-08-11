@@ -8,13 +8,15 @@
  *   node scripts/android-app.js emulator   start the AVD and wait for boot
  *   node scripts/android-app.js logs       follow the app's logcat
  *
- * Gradle does the real work; this exists for the two things it cannot do
- * for itself — pick a JDK it can actually run on, and make sure the shared
- * UI bundle has been staged first.
+ * Gradle does the real work; this exists for the three things it cannot do
+ * for itself — pick a JDK it can actually run on, make sure the shared UI
+ * bundle has been staged, and rebuild the Rust in `jniLibs`, which gradle
+ * treats as a checked-in binary and will happily package stale.
  *
- *   HOMERUN_JAVA_HOME  a JDK to use, ahead of JAVA_HOME
- *   HOMERUN_AVD        which AVD `emulator` starts (default: homerun_api35)
- *   ANDROID_SERIAL     which device adb targets, when several are attached
+ *   HOMERUN_JAVA_HOME   a JDK to use, ahead of JAVA_HOME
+ *   HOMERUN_AVD         which AVD `emulator` starts (default: homerun_api35)
+ *   ANDROID_SERIAL      which device adb targets, when several are attached
+ *   HOMERUN_SKIP_NATIVE do not refresh jniLibs (Kotlin-only iteration)
  */
 const { execFileSync, spawn, spawnSync } = require("child_process");
 const fs = require("fs");
@@ -84,6 +86,81 @@ function resolveJdk() {
   );
 }
 
+// --- native libraries ------------------------------------------------------
+
+const JNI_LIBS = path.join(ANDROID_DIR, "app", "src", "main", "jniLibs");
+
+/** ABI directory -> the `build-rust.js` targets that fill it. */
+const ABI_TARGETS = {
+  "arm64-v8a": ["android", "java-launcher"],
+  x86_64: ["android-x86_64", "java-launcher-x86_64"],
+};
+
+/**
+ * Which ABIs to refresh before gradle packages them.
+ *
+ * A connected device narrows it to the one that will actually run, which is
+ * what keeps the emulator loop fast — otherwise a change to the core would
+ * rebuild arm64 too, for minutes, to produce a library nothing here can load.
+ */
+function abisToBuild() {
+  const staged = Object.keys(ABI_TARGETS).filter((abi) =>
+    fs.existsSync(path.join(JNI_LIBS, abi))
+  );
+  const fallback = staged.length ? staged : Object.keys(ABI_TARGETS);
+
+  try {
+    const abi = adb(["shell", "getprop", "ro.product.cpu.abi"]).trim();
+    if (ABI_TARGETS[abi]) return [abi];
+  } catch (_) {
+    // No device attached, or more than one. Refresh what is already staged.
+  }
+  return fallback;
+}
+
+/**
+ * Rebuild the Rust the APK is about to package.
+ *
+ * **Not a convenience.** Gradle has no idea `jniLibs` is generated, so it will
+ * happily package a library built before your last change to
+ * `core_dispatch.rs` — and the app then fails at run time with `the native
+ * core has no method "…"`, which reads like a bug in Kotlin that has just
+ * compiled cleanly. That cost real time once. It should not cost it twice.
+ *
+ * Cargo makes the unchanged case about a second and a half, so there is
+ * nothing to save by skipping it. `HOMERUN_SKIP_NATIVE=1` is there for
+ * iterating on Kotlin alone, when you know the libraries are current.
+ */
+function stageNative() {
+  if (process.env.HOMERUN_SKIP_NATIVE) {
+    console.log("Native: skipped — HOMERUN_SKIP_NATIVE is set\n");
+    return;
+  }
+
+  const abis = abisToBuild();
+  console.log(`Native: refreshing ${abis.join(", ")}`);
+
+  for (const abi of abis) {
+    for (const target of ABI_TARGETS[abi]) {
+      const result = spawnSync(
+        process.execPath,
+        [path.join(__dirname, "build-rust.js"), target],
+        { cwd: ROOT, stdio: "inherit" }
+      );
+      if (result.status !== 0) {
+        die(
+          `Could not build the native library for "${target}".\n\n` +
+            "Stopping here on purpose: the APK would otherwise package whatever\n" +
+            "was staged before, and the app would fail at run time with\n" +
+            '`the native core has no method "…"` — a long way from this cause.\n\n' +
+            "Fix the build, or set HOMERUN_SKIP_NATIVE=1 if you are certain the\n" +
+            "staged libraries are already current."
+        );
+      }
+    }
+  }
+}
+
 // --- Gradle ----------------------------------------------------------------
 
 function gradle(tasks) {
@@ -94,6 +171,8 @@ function gradle(tasks) {
         "Run:  npm run ui:android"
     );
   }
+
+  stageNative();
 
   const wrapper = path.join(ANDROID_DIR, process.platform === "win32" ? "gradlew.bat" : "gradlew");
   const jdk = resolveJdk();

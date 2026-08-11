@@ -275,6 +275,20 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             })
         }
 
+        // How long to wait before trying a download again, or null when there
+        // is nothing left to try. Null is what ends the loop — a host reading
+        // a missing delay as zero would hammer a dead endpoint.
+        "minecraft.jar.retryDelay" => {
+            let attempt = args
+                .get("attempt")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            Ok(match jar::retry_delay_ms(attempt) {
+                Some(ms) => Value::from(ms),
+                None => Value::Null,
+            })
+        }
+
         "minecraft.jar.couldSatisfy" => {
             let on_disk: jar::OnDisk = serde_json::from_value(field("onDisk")?.clone())
                 .map_err(|e| format!("bad on-disk record: {e}"))?;
@@ -741,7 +755,15 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         #[cfg(test)]
         m if m == PANIC_PROBE => panic!("deliberate panic, to prove the guard catches one"),
 
-        other => Err(format!("the native core has no method \"{other}\"")),
+        // Naming the method is not enough on its own. Every time this fires in
+        // practice it is not a typo, it is a *stale library* — a host built
+        // after a method was added, loading a `.so` or `.a` from before it. The
+        // Kotlin or Swift compiled cleanly, so the message has to say where to
+        // look, or the search starts in entirely the wrong file.
+        other => Err(format!(
+            "the native core has no method \"{other}\" — this library was built \
+             before the host calling it, so rebuild the native library"
+        )),
     }
 }
 
@@ -792,14 +814,21 @@ mod tests {
         assert!(bad.get("value").is_none());
     }
 
-    /// An unknown method names itself, so a host that forgot to rebuild the
-    /// native library learns why rather than seeing a blank failure.
+    /// An unknown method names itself *and* the reason it is usually unknown.
+    ///
+    /// This has fired for real exactly once, and the cause was a rebuilt APK
+    /// packaging a library from before the method existed. The message is what
+    /// stands between that and an hour spent in the Kotlin that just compiled.
     #[test]
-    fn an_unknown_method_names_itself() {
+    fn an_unknown_method_names_itself_and_says_to_rebuild() {
         let message = err("settings.fromEnv", json!({}));
         assert!(
             message.contains("settings.fromEnv"),
             "the message must name the method: {message}"
+        );
+        assert!(
+            message.contains("rebuild"),
+            "the message must say what to do about it: {message}"
         );
     }
 

@@ -93,9 +93,6 @@ object ServerJar {
     private const val CONNECT_TIMEOUT_MS = 30_000
     private const val READ_TIMEOUT_MS = 60_000
 
-    /** Resume makes a retry cheap, so the backoff can stay short. */
-    private val RETRY_DELAYS_MS = listOf(2_000L, 5_000L, 10_000L)
-
     private val json = Json { ignoreUnknownKeys = true }
 
     /** A digest the publisher gave us, and the algorithm that produced it. */
@@ -403,21 +400,29 @@ object ServerJar {
         return md.digest().joinToString("") { "%02x".format(it) }
     }
 
-    /** Retry transient failures only; a [ServerBackendException] is a verdict. */
+    /**
+     * Retry transient failures only; a [ServerBackendException] is a verdict.
+     *
+     * How many attempts and how long between them is the core's — see
+     * `jar::retry_delay_ms`. A null delay is what ends the loop, so this cannot
+     * accidentally retry for ever by mistaking "no more attempts" for "no
+     * wait".
+     */
     private suspend fun withRetries(block: suspend (attempt: Int) -> Unit) {
-        for (attempt in 0..RETRY_DELAYS_MS.size) {
+        var attempt = 0
+        while (true) {
             try {
                 return block(attempt)
             } catch (err: ServerBackendException) {
                 throw err
             } catch (err: IOException) {
-                if (attempt == RETRY_DELAYS_MS.size) {
-                    throw ServerBackendException.Engine(
+                val wait = Core.jarRetryDelayMs(attempt)
+                    ?: throw ServerBackendException.Engine(
                         "The server jar could not be downloaded: ${err.message ?: "no connection"}"
                     )
-                }
                 Log.w(TAG, "download attempt ${attempt + 1} failed: ${err.message}")
-                delay(RETRY_DELAYS_MS[attempt])
+                delay(wait)
+                attempt++
             }
         }
     }
