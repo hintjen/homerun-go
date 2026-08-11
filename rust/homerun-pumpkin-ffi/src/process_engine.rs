@@ -50,7 +50,7 @@ pub struct ProcessEngine {
     invocation: Invocation,
     /// The live run. Held so `command` can reach stdin and `players` can read
     /// the roster the console pump is building.
-    run: Mutex<Option<Live>>,
+    run: Arc<Mutex<Option<Live>>>,
     /// How to climb out of a stop. Always the core's in production — the
     /// override exists so the tests do not sit through the real 30-second
     /// save grace on every `cargo test`, which would be thirty seconds added
@@ -76,7 +76,7 @@ impl ProcessEngine {
     pub fn new(invocation: Invocation) -> Self {
         Self {
             invocation,
-            run: Mutex::new(None),
+            run: Arc::new(Mutex::new(None)),
             ladder: jvm::stop_ladder(true),
         }
     }
@@ -87,7 +87,7 @@ impl ProcessEngine {
     fn with_ladder(invocation: Invocation, ladder: Vec<jvm::Rung>) -> Self {
         Self {
             invocation,
-            run: Mutex::new(None),
+            run: Arc::new(Mutex::new(None)),
             ladder,
         }
     }
@@ -156,7 +156,12 @@ impl Engine for ProcessEngine {
         // the server, so climbing the ladder has to happen from somewhere
         // else. It takes the child's pid rather than the child itself, because
         // waiting on the child belongs to this thread alone.
-        let watcher = spawn_stop_watcher(&child, stop.clone(), self.ladder.clone());
+        let watcher = spawn_stop_watcher(
+            &child,
+            stop.clone(),
+            self.ladder.clone(),
+            Arc::clone(&self.run),
+        );
 
         let mut ready = false;
         if let Some(stdout) = child.stdout.take() {
@@ -325,7 +330,12 @@ impl StopWatcher {
     }
 }
 
-fn spawn_stop_watcher(child: &Child, stop: StopSignal, ladder: Vec<jvm::Rung>) -> StopWatcher {
+fn spawn_stop_watcher(
+    child: &Child,
+    stop: StopSignal,
+    ladder: Vec<jvm::Rung>,
+    run: Arc<Mutex<Option<Live>>>,
+) -> StopWatcher {
     let pid = child.id();
     let done = Arc::new(StopSignal::default());
     let finished = Arc::clone(&done);
@@ -346,11 +356,23 @@ fn spawn_stop_watcher(child: &Child, stop: StopSignal, ladder: Vec<jvm::Rung>) -
                 return;
             }
             match rung.action {
-                // The console rung is the host's: it writes `stop` on stdin
-                // through `Engine::command`, because that is the same path a
-                // player's console command takes. Waiting for it is this
-                // watcher's job.
-                jvm::Action::Console => {}
+                // **This rung has to be carried out here.** It was briefly a
+                // no-op, on the theory that the host would write `stop`
+                // through `Engine::command` — which was true only while the
+                // host still ran its own ladder. Once stopping became "set the
+                // signal and let the supervisor climb", nothing wrote it at
+                // all, and every stop sat through the full save grace in
+                // silence and then took a SIGTERM. The rung that exists to
+                // save the world was the one being skipped.
+                jvm::Action::Console => {
+                    let mut live = run.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(stdin) = live.as_mut().and_then(|r| r.stdin.as_mut()) {
+                        // A broken pipe means it is already on its way out,
+                        // which the next rung handles harmlessly.
+                        let _ = writeln!(stdin, "{}", jvm::STOP_COMMAND);
+                        let _ = stdin.flush();
+                    }
+                }
                 jvm::Action::Terminate => terminate(pid),
                 jvm::Action::Kill => kill(pid),
             }
@@ -512,14 +534,30 @@ mod tests {
         outcome
     }
 
+    /// A stop is a signal and nothing else — the supervisor carries out every
+    /// rung, including the console one.
+    ///
+    /// This test used to write `stop` itself, "as the host does", and that
+    /// assumption outlived the host doing it: once stopping became a signal,
+    /// nothing wrote the command, and every stop sat through the full 30
+    /// second save grace in silence before being terminated. The test passed
+    /// throughout, because it was supplying the missing piece.
+    ///
+    /// So it no longer supplies it, and the elapsed time is the assertion: on
+    /// the real ladder a console stop ends the run in milliseconds, and a
+    /// console rung that does nothing cannot finish inside thirty seconds.
     #[test]
-    fn a_server_that_is_asked_to_stop_stops() {
-        let outcome = drive("ready", |engine, stop| {
-            // What the host does: the console rung, then record the intent.
-            engine.command("stop").expect("stdin must be reachable");
+    fn a_stop_is_carried_out_by_the_supervisor_not_the_caller() {
+        let started = Instant::now();
+        let outcome = drive("ready", |_engine, stop| {
             stop.request_stop();
         });
         assert_eq!(outcome, RunOutcome::Stopped);
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the console rung was skipped — this took {:?}, so the server was              terminated rather than asked to save",
+            started.elapsed()
+        );
     }
 
     #[test]
