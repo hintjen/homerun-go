@@ -54,6 +54,7 @@ the JVM, spawning the tunnel, sampling CPU, talking to the UI.
 | wireproxy config generation | process spawn/kill |
 | link parsing and the staleness rule | JVM launch |
 | server state machine, exit classification | RCON transport |
+| who owns a server, and the order a launch runs in | doing each step |
 | handshake supervision and its threshold | CPU/memory sampling |
 | console ring buffer, join/leave/ready parsing | bridge IPC |
 | which config files a server needs, and their contents | writing them |
@@ -66,6 +67,8 @@ implementation, not the core.**
 
 ```
 game.rs        the capability surface every game exposes
+launch.rs      the order a launch runs in, as data
+lifecycle.rs   who owns a server right now, and what an exit meant
 link.rs        gateway credentials and the staleness rule
 properties.rs  key=value config merging, comments preserved
 state.rs       handshake supervision, exit classification
@@ -73,12 +76,22 @@ tunnel.rs      WireGuard config from a list of forwards
 minecraft/     jar, console, settings — one implementation of game.rs
 ```
 
+`lifecycle` and `launch` are the only two that hold state or describe a
+sequence, and both stay pure by refusing to own either. `lifecycle` is
+serialised and handed back to the caller on every event — the host holds it,
+the same way it holds a `HandshakeWatch` — so there is no native handle to leak
+and no second copy to disagree with the host's. `launch` returns a list of
+steps and executes none of them, because every step is something only a
+platform can do; what stops being the platform's is *which comes next*.
+
 Nothing above `minecraft/` knows that a Java server listens on 25565 or what
 `Done (12.431s)!` means. `tunnel` renders whatever `Forward`s it is given;
 Minecraft is what names them.
 
 | Module | Reference implementation |
 |---|---|
+| `lifecycle` | `nativeServerManager.ts` — `runningServers` ∪ `pendingStartup`, and `waitForSupervisorIdle` |
+| `launch` | `nativeServerManager.startServer`, read top to bottom |
 | `minecraft::jar` | `src/electron/mod-installer.ts` |
 | `minecraft::console` | `JavaServerBackend` (Android) + supervisor log handling |
 | `minecraft::settings` | `writeServerProperties`, `writeOpsAndWhitelistFiles` |
@@ -141,16 +154,31 @@ These moved out of Kotlin entirely:
 |---|---|
 | `ServerJar.resolveVanilla` / `resolvePaper` | `minecraft::jar::resolve_version`, `vanilla`, `paper` |
 | `ServerJar`'s Java-version check and on-disk comparison | `minecraft::jar::check_java`, `OnDisk::satisfies` |
+| whether the jar already on disk can be kept | `minecraft::jar::cache_decision` |
+| what to call a jar in the device-wide cache | `minecraft::jar::cache_key` |
 | `WireProxy.render`'s string list | `tunnel::Config::render` |
 | `WireProxy`'s handshake counter and threshold | `state::HandshakeWatch` |
 | `JavaServerBackend`'s `DONE`/`JOINED`/`LEFT` regexes | `minecraft::console::is_ready`, `joined`, `left` |
 | the exit-code-to-state rule | `state::exit_state` |
+| `JavaServerBackend`'s `stopRequested`, `startingId`, `claimStart` | `lifecycle`, via `lifecycle.apply` / `lifecycle.query` |
+| `BridgeRouter`'s active-id bookkeeping | `lifecycle::active_ids` |
+| the order of `JavaServerBackend.launch`, written out longhand | `launch::plan` |
 | — (Android wrote no config at all) | `minecraft::settings`, via `game.configFiles` |
 
 That last row is the largest: every setting a player chose was silently
 discarded before it existed. `ServerSettingsWriter.kt` now asks the core which
 files to read, whose identity to fetch, and what to write — it knows no
 property keys, no encoding, and no UUID derivation.
+
+The two jar-cache rows are worth a note on shape, because they are the first
+core call that answers *in two steps*. `cache_decision` can need a digest the
+caller has not paid for — hashing 58 MB to settle a question a marker file
+usually settles is the wrong default — so it replies `verify`, naming the
+algorithm, and the host asks again with the answer. Same pattern as
+`launch::plan`: the core decides, and what it decides includes *what it needs
+to know next*. See
+[`android-server-backend.md`](./android-server-backend.md#never-downloading-a-jar-this-device-already-has)
+for what the host does with each verdict.
 
 Verified end to end on an emulator against the dev backend after the swap: jar
 resolved and downloaded, tunnel config rendered, handshake completed, `Done`

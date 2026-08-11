@@ -124,6 +124,48 @@ object Core {
             put("artifact", artifact)
         }).jsonPrimitive.boolean
 
+    /** What the core decided about the jar already in a server's directory. */
+    data class Cached(
+        /** `use`, `verify`, `adopt` or `download`. */
+        val action: String,
+        /** Only on `verify`: `Sha1` or `Sha256`, in the core's spelling. */
+        val algorithm: String?,
+    )
+
+    /**
+     * Whether the jar on disk can be kept.
+     *
+     * Two steps, because the answer sometimes needs a digest and hashing tens
+     * of megabytes to settle a question a marker file usually answers is the
+     * wrong default. Call with [digest] null; if the reply is `verify`, hash
+     * the file with the algorithm it names and call again.
+     */
+    fun jarCacheDecision(
+        onDisk: JsonObject?,
+        present: Boolean,
+        digest: String?,
+        artifact: JsonObject,
+    ): Cached = call("minecraft.jar.cacheDecision", buildJsonObject {
+        onDisk?.let { put("onDisk", it) }
+        put("present", present)
+        digest?.let { put("digest", it) }
+        put("artifact", artifact)
+    }).jsonObject.let {
+        Cached(
+            action = it["action"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+            algorithm = it["algorithm"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
+    /**
+     * What to call this jar in the shared cache, or null if it cannot be
+     * cached. Content-addressed, so two servers on one version name one file.
+     */
+    fun jarCacheKey(artifact: JsonObject): String? =
+        call("minecraft.jar.cacheKey", buildJsonObject {
+            put("artifact", artifact)
+        }).jsonPrimitive.contentOrNull
+
     fun jarCouldSatisfy(onDisk: JsonObject, version: String?, loader: String): Boolean =
         call("minecraft.jar.couldSatisfy", buildJsonObject {
             put("onDisk", onDisk)

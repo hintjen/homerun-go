@@ -122,6 +122,15 @@ class JavaServerBackend(
     /** Scratch space for the JVM, inside the server's own directory. */
     private fun tmpDir(dir: File): File = File(dir, "tmp").apply { mkdirs() }
 
+    /**
+     * Server jars, shared by every server on this device and named after their
+     * digests — see [ServerJar.ensure]. A sibling of `servers/`, not a child of
+     * one, and in `filesDir` rather than `cacheDir`: Android may delete
+     * `cacheDir` under a running app, and the jars here are hard-linked into
+     * server directories that are very much in use.
+     */
+    private fun jarCacheDir(): File = File(context.filesDir, "jars").apply { mkdirs() }
+
     override fun create(serverId: String) {
         dataDir(serverId)
     }
@@ -131,6 +140,12 @@ class JavaServerBackend(
             throw ServerBackendException.AlreadyRunning(serverId)
         }
         dataDir(serverId).deleteRecursively()
+
+        // The jar this server was using may now be shared with nobody. Its
+        // bytes live in the cache entry as well as in the directory just
+        // removed, so without this the space is not actually given back until
+        // some other server happens to download something.
+        ServerJar.dropUnusedCacheEntries(jarCacheDir(), File(context.filesDir, "servers"))
     }
 
     // -----------------------------------------------------------------------
@@ -211,6 +226,7 @@ class JavaServerBackend(
 
             val jar = ServerJar.ensure(
                 dir = dir,
+                cacheDir = jarCacheDir(),
                 version = config.version,
                 loader = config.loader,
                 bundledJava = JavaRuntime.javaMajor(context),

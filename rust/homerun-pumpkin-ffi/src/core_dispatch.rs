@@ -210,6 +210,44 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             Ok(Value::Bool(on_disk.satisfies(&artifact)))
         }
 
+        // Whether the jar already in the server directory can be kept.
+        //
+        // Answers in two steps — `verify` asks for a digest the caller has not
+        // paid for yet — because hashing 55 MB to answer a question a marker
+        // file usually settles is the wrong default. Call once with no digest,
+        // and again with one only if asked.
+        "minecraft.jar.cacheDecision" => {
+            let on_disk: Option<jar::OnDisk> = match args.get("onDisk") {
+                Some(v) if !v.is_null() => Some(
+                    serde_json::from_value(v.clone())
+                        .map_err(|e| format!("bad on-disk record: {e}"))?,
+                ),
+                _ => None,
+            };
+            let artifact: jar::Artifact = serde_json::from_value(field("artifact")?.clone())
+                .map_err(|e| format!("bad artifact: {e}"))?;
+            let present = args
+                .get("present")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let digest = optional_text("digest");
+            let decision =
+                jar::cache_decision(on_disk.as_ref(), present, digest.as_deref(), &artifact);
+            serde_json::to_value(decision).map_err(|e| e.to_string())
+        }
+
+        // The shared cache's file name for an artifact, or null when it cannot
+        // be cached. Null is a normal answer, not an error — a jar with no
+        // published digest has nothing to be named after.
+        "minecraft.jar.cacheKey" => {
+            let artifact: jar::Artifact = serde_json::from_value(field("artifact")?.clone())
+                .map_err(|e| format!("bad artifact: {e}"))?;
+            Ok(match jar::cache_key(&artifact) {
+                Some(name) => Value::String(name),
+                None => Value::Null,
+            })
+        }
+
         "minecraft.jar.couldSatisfy" => {
             let on_disk: jar::OnDisk = serde_json::from_value(field("onDisk")?.clone())
                 .map_err(|e| format!("bad on-disk record: {e}"))?;
@@ -1004,6 +1042,54 @@ mod tests {
         );
         assert_eq!(view["activeIds"], json!(["s"]));
         assert_eq!(view["lifecycle"], r["lifecycle"], "a query mutates nothing");
+    }
+
+    /// The two-step shape the host has to implement, pinned on the wire.
+    ///
+    /// `verify` naming its own algorithm is what lets the host hash without
+    /// knowing whether it is holding a Mojang sha1 or a PaperMC sha256.
+    #[test]
+    fn the_cache_decision_asks_for_a_digest_before_it_gives_a_verdict() {
+        let artifact = json!({
+            "url": "https://example/server.jar",
+            "loader": "vanilla",
+            "version": "1.21.4",
+            "required_java": 21,
+            "checksum": { "algorithm": "Sha1", "hex": "abc123" },
+        });
+
+        // No marker, but a jar is there: hash it.
+        let ask = ok(
+            "minecraft.jar.cacheDecision",
+            json!({ "artifact": artifact, "present": true }),
+        );
+        assert_eq!(ask["action"], "verify");
+        assert_eq!(ask["algorithm"], "Sha1");
+
+        // Asked again with the answer.
+        let verdict = ok(
+            "minecraft.jar.cacheDecision",
+            json!({ "artifact": artifact, "present": true, "digest": "abc123" }),
+        );
+        assert_eq!(verdict["action"], "adopt");
+
+        // A marker that already agrees never reaches the hashing at all.
+        let cheap = ok(
+            "minecraft.jar.cacheDecision",
+            json!({
+                "artifact": artifact,
+                "present": true,
+                "onDisk": { "loader": "vanilla", "version": "1.21.4", "checksum": "abc123" },
+            }),
+        );
+        assert_eq!(cheap["action"], "use");
+
+        // And nothing on disk is a download without asking anything.
+        let absent = ok(
+            "minecraft.jar.cacheDecision",
+            json!({ "artifact": artifact, "present": false }),
+        );
+        assert_eq!(absent["action"], "download");
     }
 
     /// The order the Android host actually runs, pinned against the core's.

@@ -55,6 +55,45 @@ moderation (kick/ban/op) lands.
 under memory pressure, not just the server, so an over-generous heap does not
 lose you a server — it loses you the app that was hosting it.
 
+### Who owns a server, and in what order — `homerun-core`
+
+Neither question is answered in Kotlin any more. `ServerHost.lifecycle` is a
+`Core.Lifecycle`, and this backend reports only what it can see — a call
+arrived, a process spawned, a process exited — while `homerun_core::lifecycle`
+answers what any of it meant.
+
+It matters because the same bug was written three times in one week: a server
+that is *starting* or *stopping* is still this device's. Report it idle in
+either window and the UI's reconcile loop reads a missing id as a start issued
+from another device, asks the API to `force_link_up`, and regenerates the
+gateway's keys underneath a launch that already resolved its tunnel config —
+a tunnel that handshakes and carries nothing.
+
+| Question | Core call |
+|---|---|
+| may this start proceed, or is it a duplicate | `startRequested` |
+| may this stop proceed, and is anything spawned yet | `stopRequested` |
+| what did that exit mean — crash, stop, or a launch since replaced | `exited` |
+| which ids does `native-server-active-ids` return | `activeIds` |
+| may this state change be announced | `mayAnnounce` |
+| must this launch wait for a previous engine | `awaitPreviousExit` |
+| must starting cancel an on-stop backup | `supersedesOnStopBackup` |
+
+State is opaque and lives in the host — it goes in, a new one comes back, like
+a `HandshakeWatch` — so there is no native handle to free. Access is
+synchronised because starts arrive on the bridge's coroutines while exits
+arrive on the process-watcher thread.
+
+The **order** of a launch comes from `Core.launchPlan`, and `LaunchOrder`
+enforces it: a step that arrives before one the plan puts ahead of it throws
+here rather than surfacing months later as a re-downloaded world or a green
+card for an unreachable server. The plan also marks which steps are
+checkpoints, so a stop that arrived mid-launch is honoured at the right
+moments without this file remembering which those are. Writing that plan out
+found a real disagreement: the launch waits for a previous engine *before*
+restoring a world, because a mobile launch writes the server directory before
+it spawns, and the core's first draft had the wait later.
+
 ### Getting a JVM onto the device
 
 The runtime **ships inside the app**. It is not downloaded, and that is a
@@ -201,6 +240,61 @@ Three deliberate differences from the desktop, all because this is a phone:
 
 `homerun-jar.json` in the server directory records loader, version and digest.
 It is what makes a restart free and a version change re-download.
+
+#### Never downloading a jar this device already has
+
+A 58 MB pull over mobile data is the most expensive thing a launch can do, so
+there are three ways out of one before it starts. All three verdicts come from
+`homerun_core::minecraft::jar` — this host gathers facts and carries out
+answers.
+
+**1. The marker agrees.** `cache_decision` returns `use`, and nothing is
+hashed. The common case: restarting a server whose version has not changed.
+
+**2. The marker is missing or stale, but the jar is right.** The marker is a
+*cache* of something the file itself proves, and it can be wrong in two ways
+that would cost a re-download for nothing:
+
+- the finished download is renamed into place and the marker is written after
+  the retry loop returns, so a process death in between leaves a perfect jar
+  that nothing remembers;
+- a world restore rewrites the server directory and can land an older
+  snapshot's marker beside a newer jar.
+
+So `cache_decision` answers `verify`, naming the algorithm; the host hashes the
+file and asks again; `adopt` rewrites the marker and launches. This is what the
+desktop's `verifyExistingJar` does. The difference is that the marker lets the
+common case skip hashing entirely, where the desktop pays for it every launch.
+
+**3. Another server on this device has it.** `files/jars/<digest>.jar`, a
+sibling of `servers/`, content-addressed by `jar::cache_key` so two servers on
+one Minecraft version name one file. Before this existed, four servers on
+Minecraft 26.2 meant four copies of one 58 MB jar — 232 MB on the device that
+can least afford it — and creating a fifth downloaded it again.
+
+Servers get a **hard link** into that entry, not a copy, which is what actually
+collapses the four into one. Nothing writes a server jar in place — a download
+lands in `.part` and is renamed over the top, which replaces the link rather
+than writing through it — so servers cannot corrupt each other through the
+shared inode. A filesystem that will not link falls back to copying: that costs
+the space this exists to save, but it keeps working.
+
+A cache hit is **verified, not trusted**. The entry is hashed and put through
+the same `cache_decision`, because a corrupt entry would be handed to every
+server that asks for that version, which is far worse than one bad download.
+An entry that disagrees with its own name is deleted.
+
+`cache_key` refuses a digest that is not hex. That string arrives in a
+publisher's JSON and is about to become a path, and `..` in that position
+writes outside the directory.
+
+**Eviction is by reference.** An entry no server's marker names is dropped —
+after a download, and when a server is deleted, which is the moment that
+actually orphans one. Deleting an entry can never cost a server its jar: the
+server's own link (or copy) keeps the data alive. That is why an unreadable
+marker is allowed to prune rather than having to abort the sweep, and why
+`.part` files are skipped — one of those is a download someone may still be
+resuming, and by definition no marker names it.
 
 **Which version and loader comes from the backend, not the UI.** The UI sends
 only a name and a memory ceiling, so `BridgeRouter` reads the rest from

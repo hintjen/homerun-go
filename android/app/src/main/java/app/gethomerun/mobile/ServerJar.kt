@@ -23,6 +23,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.nio.file.Files
 import java.security.MessageDigest
 
 /**
@@ -49,6 +50,11 @@ import java.security.MessageDigest
  *  - **Every download is checksum-verified.** The desktop verifies vanilla
  *    only, and Paper publishes a SHA-256 it was already fetching and
  *    discarding.
+ *
+ * Whether a jar already here can be kept is `homerun-core`'s call, not this
+ * file's — [Core.jarCacheDecision], which reaches the same answer the
+ * desktop's `verifyExistingJar` does. This host adds the marker file that lets
+ * the common case skip hashing entirely.
  */
 object ServerJar {
 
@@ -114,12 +120,7 @@ object ServerJar {
                 version = json["version"]!!.jsonPrimitive.content,
                 checksum = json["checksum"]?.takeIf { it !is JsonNull }?.jsonObject?.let {
                     Checksum(
-                        // Rust names the variant; MessageDigest wants the JCA
-                        // spelling, and getInstance throws on anything else.
-                        algorithm = when (it["algorithm"]?.jsonPrimitive?.contentOrNull) {
-                            "Sha256" -> "SHA-256"
-                            else -> "SHA-1"
-                        },
+                        algorithm = jcaName(it["algorithm"]?.jsonPrimitive?.contentOrNull),
                         hex = it["hex"]!!.jsonPrimitive.content,
                     )
                 },
@@ -150,6 +151,7 @@ object ServerJar {
      */
     suspend fun ensure(
         dir: File,
+        cacheDir: File,
         version: String?,
         loader: String,
         bundledJava: Int?,
@@ -182,8 +184,36 @@ object ServerJar {
         runCatching { Core.checkJava(artifact.toJson(), bundledJava) }
             .onFailure { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
 
-        if (jar.isFile && onDisk != null && onDisk.satisfies(artifact)) {
-            Log.i(TAG, "${artifact.loader} ${artifact.version} already downloaded")
+        // Whether the jar already here can be kept is the core's call, and it
+        // answers in two steps: the marker beside the jar usually settles it,
+        // and when it cannot the core asks for a digest rather than assuming
+        // one has been paid for. See `jar::cache_decision` for the two ways a
+        // marker goes wrong while the jar beside it is perfect.
+        when (cached(dir, jar, onDisk, artifact).action) {
+            "use" -> {
+                Log.i(TAG, "${artifact.loader} ${artifact.version} already downloaded")
+                return@withContext jar
+            }
+
+            "adopt" -> {
+                // The file proved what it is; the marker was the thing that was
+                // wrong. Rewrite it so the next launch takes the cheap path.
+                Log.i(TAG, "${artifact.loader} ${artifact.version} is already on disk — adopting it")
+                onLog("[Homerun] ${label(artifact)} is already downloaded.")
+                writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
+                return@withContext jar
+            }
+        }
+
+        // Not in this server's directory. It may still be on the device: every
+        // server that has ever downloaded this jar left it in the shared cache,
+        // named after its digest. Four servers on one Minecraft version was
+        // four copies of one 58 MB file before this existed.
+        val entry = Core.jarCacheKey(artifact.toJson())?.let { File(cacheDir, it) }
+        if (entry != null && entry.isFile && adoptFromCache(entry, jar, artifact)) {
+            Log.i(TAG, "${artifact.loader} ${artifact.version} came from the shared cache")
+            onLog("[Homerun] ${label(artifact)} is already downloaded.")
+            writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
             return@withContext jar
         }
 
@@ -196,10 +226,17 @@ object ServerJar {
         if (jar.exists()) jar.delete()
         File(dir, META_NAME).delete()
 
+        // Downloaded into the cache and linked from there, so the next server
+        // asking for this version pays nothing. An artifact with no digest is
+        // not cacheable and lands straight in the server directory, exactly as
+        // it always did.
+        val target = entry ?: jar
+        entry?.parentFile?.mkdirs()
+
         var lastReported = -1
         withRetries { attempt ->
             if (attempt > 0) onLog("[Homerun] Download interrupted — resuming...")
-            download(artifact, jar) { done, total ->
+            download(artifact, target) { done, total ->
                 val percent = if (total > 0) ((done * 100) / total).toInt() else -1
                 // Every percent would be 100 lines through the bridge and into
                 // a console the user is reading. Every fifth is enough to show
@@ -211,8 +248,11 @@ object ServerJar {
             }
         }
 
+        if (entry != null) link(entry, jar)
+
         writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
         onLog("[Homerun] ${label(artifact)} ready.")
+        dropUnusedCacheEntries(cacheDir, dir.parentFile)
         jar
     }
 
@@ -398,6 +438,115 @@ object ServerJar {
 
     private fun JarMeta.satisfies(artifact: Artifact): Boolean =
         Core.jarSatisfies(toJson(), artifact.toJson())
+
+    /**
+     * Ask the core whether the jar in [dir] can be kept, hashing it only if it
+     * asks. At most two calls: the marker settles the common case, and the
+     * digest is paid for only when it cannot.
+     */
+    private fun cached(
+        dir: File,
+        jar: File,
+        onDisk: JarMeta?,
+        artifact: Artifact,
+    ): Core.Cached {
+        val present = jar.isFile
+        val meta = onDisk?.toJson()
+        val first = Core.jarCacheDecision(meta, present, null, artifact.toJson())
+        if (first.action != "verify") return first
+
+        // The core names the algorithm, so this never has to know whether it
+        // is holding a Mojang sha1 or a PaperMC sha256.
+        val actual = runCatching { digest(jar, jcaName(first.algorithm)) }.getOrNull()
+            // Not a verdict — a jar we cannot read is one we cannot vouch for,
+            // and the only honest answer left is to fetch it again.
+            ?: return Core.Cached("download", null)
+
+        Log.i(TAG, "verifying the jar already in ${dir.name} before downloading it again")
+        return Core.jarCacheDecision(meta, present, actual, artifact.toJson())
+    }
+
+    /** Rust names the variant; `MessageDigest.getInstance` wants JCA's spelling. */
+    private fun jcaName(coreAlgorithm: String?): String =
+        if (coreAlgorithm == "Sha256") "SHA-256" else "SHA-1"
+
+    // -----------------------------------------------------------------------
+    // The shared cache
+    // -----------------------------------------------------------------------
+
+    /**
+     * Put a cached jar into a server's directory, if it really is that jar.
+     *
+     * Verified rather than trusted. The cache is content-addressed, so an
+     * entry whose digest disagrees with its own name is corrupt — and a wrong
+     * hit here would be handed to *every* server that asks for that version,
+     * which is a much worse failure than one bad download.
+     */
+    private fun adoptFromCache(entry: File, jar: File, artifact: Artifact): Boolean {
+        val algorithm = artifact.checksum?.algorithm ?: return false
+        val actual = runCatching { digest(entry, algorithm) }.getOrNull()
+        val verdict = actual?.let {
+            Core.jarCacheDecision(null, present = true, digest = it, artifact = artifact.toJson())
+        }
+
+        if (verdict?.action != "adopt") {
+            Log.w(TAG, "shared cache entry ${entry.name} did not match its own name — discarding it")
+            entry.delete()
+            return false
+        }
+
+        return runCatching { link(entry, jar) }.isSuccess
+    }
+
+    /**
+     * Give [jar] the cache entry's contents without a second copy of them.
+     *
+     * A hard link, so four servers on one Minecraft version cost one 58 MB
+     * file rather than four. Nothing writes a server jar in place — a download
+     * lands in `.part` and is renamed over the top, which replaces the link
+     * rather than writing through it — so the servers cannot corrupt each
+     * other through this.
+     *
+     * Copying is the fallback for a filesystem that will not link. It costs
+     * the space this exists to save but keeps the app working.
+     */
+    private fun link(entry: File, jar: File) {
+        if (jar.exists()) jar.delete()
+        try {
+            Files.createLink(jar.toPath(), entry.toPath())
+        } catch (err: Exception) {
+            Log.w(TAG, "could not link the cached jar (${err.message}) — copying it")
+            entry.copyTo(jar, overwrite = true)
+        }
+    }
+
+    /**
+     * Drop cache entries no server is using.
+     *
+     * Referenced-ness comes from each server's own marker, not from a link
+     * count, because the copy fallback above leaves no link to count.
+     *
+     * **Deleting here cannot cost a server its jar.** With a hard link the
+     * server's own directory entry keeps the data alive; with a copy it has
+     * its own. The worst a mistake here can do is make one future launch
+     * download again, which is why an unreadable marker is allowed to prune
+     * rather than having to abort the sweep.
+     *
+     * Partials are left alone: a `.part` is a download someone may still be
+     * resuming, and it has no marker naming it by definition.
+     */
+    fun dropUnusedCacheEntries(cacheDir: File, serversRoot: File?) {
+        val entries = cacheDir.listFiles { f -> f.isFile && f.name.endsWith(".jar") } ?: return
+        val referenced = (serversRoot?.listFiles() ?: emptyArray())
+            .mapNotNull { readMeta(it)?.checksum?.lowercase() }
+            .toSet()
+
+        for (entry in entries) {
+            if (entry.nameWithoutExtension.lowercase() in referenced) continue
+            Log.i(TAG, "dropping unused cache entry ${entry.name}")
+            entry.delete()
+        }
+    }
 
     /** Loose enough for the offline fallback: any build of the right thing. */
     private fun JarMeta.couldSatisfy(version: String?, loader: String): Boolean =

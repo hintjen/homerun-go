@@ -188,6 +188,9 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
 **Contains**:
 - Why a JNI layer exists at all, and why it calls the C ABI rather than bypassing it
 - The 16 MB engine stack, and the crash you get without it
+- Who owns a server and what order a launch runs in — both answered by the core
+- Getting a server jar onto the device, and the three ways to avoid downloading
+  one this device already has
 - Why `start` polls for *running* instead of waiting on the call
 - The log pump, the perf sampler, and one-server-at-a-time
 - What the memory and CPU numbers actually measure

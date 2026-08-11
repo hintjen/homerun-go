@@ -289,6 +289,106 @@ pub fn check_java(artifact: &Artifact, bundled_java: Option<u16>) -> Result<()> 
     }
 }
 
+/// What to do about the jar already sitting in the server directory.
+///
+/// Two questions the marker beside the jar cannot always answer, and a
+/// download is the expensive way to be wrong about either:
+///
+///  - the marker can be **missing** while the jar is perfect. The host renames
+///    a finished download into place and writes the marker afterwards, so a
+///    process death in between leaves exactly that.
+///  - the marker can be **stale** while the jar is perfect. A world restore
+///    rewrites the server directory and can land an older snapshot's marker
+///    beside a newer jar.
+///
+/// So identity comes from the file when it has to. The digest is not computed
+/// up front — it is tens of megabytes of hashing — which is why this answers
+/// in two steps: [`Cached::Verify`] asks for it, and the caller asks again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum Cached {
+    /// The jar is the one asked for and the marker already says so.
+    Use,
+    /// Hash the jar with this algorithm and ask again with the result.
+    Verify { algorithm: Algorithm },
+    /// The digest matches: use the jar, and rewrite the marker to match it.
+    Adopt,
+    /// Fetch it.
+    Download,
+}
+
+/// What to call this artifact in a host's shared jar cache, or `None` when it
+/// cannot be cached.
+///
+/// # Why a cache, and why content-addressed
+///
+/// A phone with four servers on the same Minecraft version keeps four
+/// identical 58 MB jars, and creating the fifth downloads it again. The digest
+/// *is* the identity — [`cache_decision`] already treats it that way — so
+/// naming the file after it makes those four one file that four servers link
+/// to, and makes the fifth server free.
+///
+/// A jar with no published digest is deliberately not cacheable. There would
+/// be nothing to name it by and nothing to prove a hit was the right file, and
+/// a wrong hit here is served to every server that asks.
+///
+/// The hex is validated rather than trusted: it arrives from a publisher's
+/// JSON and is about to become a path. `..` in that position is how a cache
+/// key writes outside its directory.
+pub fn cache_key(artifact: &Artifact) -> Option<String> {
+    let hex = &artifact.checksum.as_ref()?.hex;
+    if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    // No algorithm in the name: the two this supports have different digest
+    // lengths, so a sha1 and a sha256 can never collide, and the marker file
+    // the host keeps beside a jar records only the hex.
+    Some(format!("{}.jar", hex.to_ascii_lowercase()))
+}
+
+/// Decide what the jar on disk is worth.
+///
+/// `present` is whether the jar file exists at all, `on_disk` is the marker
+/// beside it if one could be read, and `digest` is the file's computed hash —
+/// but only on the second call. Pass `None` first and let this ask.
+///
+/// Reference: `verifyExistingJar` in the desktop's `mod-installer.ts`, which
+/// reaches the same answer by hashing an existing jar rather than trusting a
+/// record of one. The desktop keeps no marker, so it pays for the hash on
+/// every launch; this skips it whenever the marker already agrees.
+pub fn cache_decision(
+    on_disk: Option<&OnDisk>,
+    present: bool,
+    digest: Option<&str>,
+    artifact: &Artifact,
+) -> Cached {
+    if !present {
+        return Cached::Download;
+    }
+
+    // The cheap path, and the common one: restarting a server whose version
+    // has not changed.
+    if on_disk.is_some_and(|meta| meta.satisfies(artifact)) {
+        return Cached::Use;
+    }
+
+    // Nothing published a digest, so the file cannot prove what it is and the
+    // marker was all there was. Refetching is the only way left to be sure.
+    let Some(checksum) = artifact.checksum.as_ref() else {
+        return Cached::Download;
+    };
+
+    match digest {
+        None => Cached::Verify {
+            algorithm: checksum.algorithm,
+        },
+        // Case-insensitively: publishers are not consistent about it, and two
+        // spellings of one hash are one jar.
+        Some(actual) if actual.eq_ignore_ascii_case(&checksum.hex) => Cached::Adopt,
+        Some(_) => Cached::Download,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +648,189 @@ mod tests {
         assert!(on_disk.could_satisfy(Some("1.21.4"), Loader::Vanilla));
         assert!(!on_disk.could_satisfy(Some("1.20.4"), Loader::Vanilla));
         assert!(!on_disk.could_satisfy(None, Loader::Paper));
+    }
+
+    // --- the cache decision ------------------------------------------------
+
+    fn cached_artifact() -> Artifact {
+        Artifact {
+            url: "https://example/server.jar".into(),
+            loader: "vanilla".into(),
+            version: "1.21.4".into(),
+            checksum: Some(Checksum {
+                algorithm: Algorithm::Sha1,
+                hex: "abc123".into(),
+            }),
+            required_java: 21,
+            size_bytes: Some(55_000_000),
+        }
+    }
+
+    fn marker(checksum: Option<&str>) -> OnDisk {
+        OnDisk {
+            loader: "vanilla".into(),
+            version: "1.21.4".into(),
+            checksum: checksum.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn no_jar_on_disk_is_a_download_whatever_the_marker_says() {
+        let artifact = cached_artifact();
+        // A marker with no jar beside it is a lie, not a hint.
+        assert_eq!(
+            cache_decision(Some(&marker(Some("abc123"))), false, None, &artifact),
+            Cached::Download
+        );
+    }
+
+    #[test]
+    fn a_marker_that_already_agrees_costs_no_hashing() {
+        let artifact = cached_artifact();
+        assert_eq!(
+            cache_decision(Some(&marker(Some("abc123"))), true, None, &artifact),
+            Cached::Use
+        );
+    }
+
+    #[test]
+    fn a_missing_or_stale_marker_asks_the_file_before_downloading() {
+        let artifact = cached_artifact();
+        let ask = Cached::Verify {
+            algorithm: Algorithm::Sha1,
+        };
+
+        // Killed between the rename and the marker write.
+        assert_eq!(cache_decision(None, true, None, &artifact), ask);
+        // A restore landed an older snapshot's marker beside a newer jar.
+        assert_eq!(
+            cache_decision(Some(&marker(Some("older"))), true, None, &artifact),
+            ask
+        );
+    }
+
+    #[test]
+    fn a_matching_digest_adopts_the_jar_instead_of_refetching_it() {
+        let artifact = cached_artifact();
+        assert_eq!(
+            cache_decision(None, true, Some("abc123"), &artifact),
+            Cached::Adopt
+        );
+    }
+
+    #[test]
+    fn the_digest_comparison_ignores_hex_case() {
+        let artifact = cached_artifact();
+        assert_eq!(
+            cache_decision(None, true, Some("ABC123"), &artifact),
+            Cached::Adopt
+        );
+    }
+
+    #[test]
+    fn a_digest_that_does_not_match_downloads() {
+        let artifact = cached_artifact();
+        assert_eq!(
+            cache_decision(None, true, Some("deadbeef"), &artifact),
+            Cached::Download
+        );
+    }
+
+    #[test]
+    fn a_jar_that_cannot_prove_itself_is_refetched() {
+        // No published checksum, so hashing the file proves nothing — there is
+        // nothing to compare it against.
+        let artifact = Artifact {
+            checksum: None,
+            ..cached_artifact()
+        };
+        assert_eq!(
+            cache_decision(Some(&marker(Some("abc123"))), true, None, &artifact),
+            Cached::Download
+        );
+        assert_eq!(
+            cache_decision(None, true, Some("abc123"), &artifact),
+            Cached::Download
+        );
+    }
+
+    // --- the shared cache key ----------------------------------------------
+
+    #[test]
+    fn the_cache_key_is_the_digest_so_two_servers_name_one_file() {
+        let artifact = cached_artifact();
+        assert_eq!(cache_key(&artifact).as_deref(), Some("abc123.jar"));
+
+        // Same jar, different case from the publisher, same entry.
+        let shouty = Artifact {
+            checksum: Some(Checksum {
+                algorithm: Algorithm::Sha1,
+                hex: "ABC123".into(),
+            }),
+            ..cached_artifact()
+        };
+        assert_eq!(cache_key(&shouty), cache_key(&artifact));
+
+        // A different build of the same version is a different entry, which is
+        // what stops a cache hit serving the wrong jar.
+        let other = Artifact {
+            checksum: Some(Checksum {
+                algorithm: Algorithm::Sha1,
+                hex: "def456".into(),
+            }),
+            ..cached_artifact()
+        };
+        assert_ne!(cache_key(&other), cache_key(&artifact));
+    }
+
+    #[test]
+    fn a_jar_with_no_digest_is_not_cacheable() {
+        let artifact = Artifact {
+            checksum: None,
+            ..cached_artifact()
+        };
+        assert_eq!(cache_key(&artifact), None);
+    }
+
+    #[test]
+    fn a_digest_that_is_not_hex_cannot_name_a_file() {
+        // The hex comes from a publisher's JSON and is about to become a path.
+        for hex in ["", "../../etc/passwd", "abc/123", "abc 123", "zzz"] {
+            let artifact = Artifact {
+                checksum: Some(Checksum {
+                    algorithm: Algorithm::Sha1,
+                    hex: hex.into(),
+                }),
+                ..cached_artifact()
+            };
+            assert_eq!(cache_key(&artifact), None, "{hex:?} must not name a file");
+        }
+    }
+
+    #[test]
+    fn a_different_version_is_never_adopted() {
+        let artifact = cached_artifact();
+        let other = OnDisk {
+            version: "1.20.4".into(),
+            ..marker(Some("abc123"))
+        };
+        // The marker disagrees, so it goes to the digest — and the digest is
+        // the same file, so it is the same jar. The version in the marker was
+        // simply wrong, which is exactly the case a restore creates.
+        assert_eq!(
+            cache_decision(Some(&other), true, None, &artifact),
+            Cached::Verify {
+                algorithm: Algorithm::Sha1
+            }
+        );
+        assert_eq!(
+            cache_decision(Some(&other), true, Some("abc123"), &artifact),
+            Cached::Adopt
+        );
+        // A genuinely different jar still downloads.
+        assert_eq!(
+            cache_decision(Some(&other), true, Some("0ther"), &artifact),
+            Cached::Download
+        );
     }
 }
