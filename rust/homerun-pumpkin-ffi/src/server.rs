@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crash;
-#[cfg(not(feature = "pumpkin-engine"))]
+// `test` as well as the ungated build: every test here drives the stub, so
+// without it a `--features pumpkin-engine` test run does not compile.
+#[cfg(any(test, not(feature = "pumpkin-engine")))]
 use crate::engine::StubEngine;
 use crate::engine::{Engine, Roster, RunOutcome, RunRequest, StopSignal};
 use crate::log_buffer::{LogBuffer, LogSlice};
@@ -109,7 +111,13 @@ impl ServerHost {
 
     /// Start a server. Blocks for its whole lifetime — the host must call
     /// this on a dedicated thread with at least a 16 MB stack.
-    pub fn start(&self, server_id: &str, data_dir: &str, port: u16) -> Result<(), String> {
+    pub fn start(
+        &self,
+        server_id: &str,
+        data_dir: &str,
+        port: u16,
+        settings: Option<crate::engine_settings::EngineSettings>,
+    ) -> Result<(), String> {
         {
             let mut inner = self.lock();
             if inner.status.state.is_active() {
@@ -143,10 +151,30 @@ impl ServerHost {
             return Err(message);
         }
 
+        // On the console before the engine starts, because this is the only
+        // record of what a launch was told. A server whose game mode is wrong
+        // is otherwise a conversation; with this line it is a glance.
+        {
+            let mut inner = self.lock();
+            match &settings {
+                Some(resolved) => {
+                    inner.logs.push(resolved.summary());
+                    for line in resolved.advisories() {
+                        inner.logs.push(line);
+                    }
+                }
+                None => inner.logs.push(
+                    "[Homerun] No settings were supplied — the engine's own configuration applies."
+                        .to_string(),
+                ),
+            }
+        }
+
         let request = RunRequest {
             server_id: server_id.to_string(),
             data_dir: data_dir.to_string(),
             java_port: port,
+            settings,
         };
 
         let stop = self.lock().stop.clone();
@@ -293,6 +321,9 @@ mod tests {
     /// still generating. Only the engine knows when it is actually up.
     #[test]
     fn a_slow_start_stays_starting_until_the_engine_is_ready() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(SlowEngine {
             ready_after: Duration::from_millis(300),
         })));
@@ -301,7 +332,7 @@ mod tests {
 
         let runner = {
             let host = host.clone();
-            std::thread::spawn(move || host.start("slow", &dir, port))
+            std::thread::spawn(move || host.start("slow", &dir, port, None))
         };
 
         // Well inside the engine's startup window.
@@ -325,6 +356,9 @@ mod tests {
 
     #[test]
     fn a_full_lifecycle_reports_the_expected_states() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
         let port = free_port();
@@ -333,7 +367,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
 
         // Wait for it to come up.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -359,15 +393,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Every bug report includes the console. "It says survival and my server
+    /// is creative" has to be a two-second diagnosis, so what a launch was
+    /// told is on the console before the engine starts.
+    #[test]
+    fn a_launch_records_the_settings_it_was_given() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
+        let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
+        let dir = temp_dir();
+        let port = free_port();
+
+        let settings = crate::engine_settings::resolve(
+            &serde_json::json!({
+                "GAMEMODE": "creative",
+                "MAX_PLAYERS": "8",
+                "DIFFICULTY": "hard",
+            }),
+            "java",
+            &[],
+        );
+
+        let runner = host.clone();
+        let run_dir = dir.clone();
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, Some(settings)));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.state() != ServerState::Running {
+            assert!(std::time::Instant::now() < deadline, "never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let console = host.logs_since(0).lines.join("\n");
+        assert!(console.contains("creative"), "{console}");
+        assert!(console.contains("8 players"), "{console}");
+        // And what it could not honour, which is the only place a player is
+        // told that a setting they chose went nowhere.
+        assert!(console.contains("difficulty"), "{console}");
+
+        host.stop(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A host that has not been taught to send settings is the state worth
+    /// naming: the engine's own defaults are not the player's choices.
+    #[test]
+    fn a_launch_without_settings_says_so() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
+        let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
+        let dir = temp_dir();
+        let port = free_port();
+
+        let runner = host.clone();
+        let run_dir = dir.clone();
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.state() != ServerState::Running {
+            assert!(std::time::Instant::now() < deadline, "never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let console = host.logs_since(0).lines.join("\n");
+        assert!(console.contains("No settings were supplied"), "{console}");
+
+        host.stop(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_taken_port_is_an_error_not_a_process_exit() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = ServerHost::new(Box::new(StubEngine::healthy()));
         let dir = temp_dir();
 
         let held = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = held.local_addr().unwrap().port();
 
-        let err = host.start("s1", &dir, port).unwrap_err();
+        let err = host.start("s1", &dir, port, None).unwrap_err();
         assert!(err.contains(&port.to_string()));
         // Recoverable: the user stops the other server and retries.
         assert_eq!(host.state(), ServerState::Stopped);
@@ -382,13 +492,16 @@ mod tests {
 
     #[test]
     fn a_second_server_is_refused_with_a_readable_message() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
         let port = free_port();
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
@@ -396,7 +509,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let err = host.start("s2", &dir, free_port()).unwrap_err();
+        let err = host.start("s2", &dir, free_port(), None).unwrap_err();
         assert!(err.contains("one at a time"), "got: {err}");
 
         host.stop(Duration::from_secs(5)).unwrap();
@@ -406,10 +519,13 @@ mod tests {
 
     #[test]
     fn a_crash_is_reported_and_leaves_the_host_restartable() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
 
-        let err = host.start("s1", &dir, free_port()).unwrap_err();
+        let err = host.start("s1", &dir, free_port(), None).unwrap_err();
         assert!(err.contains("world corrupted"));
         assert_eq!(host.state(), ServerState::Crashed);
         assert!(host.state().can_transition_to(ServerState::Starting));
@@ -427,7 +543,7 @@ mod tests {
 
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
-        let err = host.start("s1", &dir, free_port()).unwrap_err();
+        let err = host.start("s1", &dir, free_port(), None).unwrap_err();
 
         assert!(err.contains("world corrupted"), "got: {err}");
         assert!(!err.contains("unrelated"), "stale panic leaked into: {err}");
@@ -449,6 +565,9 @@ mod tests {
 
     #[test]
     fn a_restart_does_not_replay_the_previous_console() {
+        // `start` clears the process-global last-panic slot, so any test
+        // that starts a server races `crash`'s tests for it.
+        let _guard = crash::test_guard();
         let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
         let dir = temp_dir();
 
@@ -456,7 +575,7 @@ mod tests {
             let port = free_port();
             let runner = host.clone();
             let run_dir = dir.clone();
-            let handle = thread::spawn(move || runner.start("s1", &run_dir, port));
+            let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None));
 
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while host.state() != ServerState::Running {

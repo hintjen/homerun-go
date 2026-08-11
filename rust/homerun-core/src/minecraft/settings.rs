@@ -40,6 +40,7 @@
 //! `NaN` into `server.properties`. Here a value that cannot be read falls back
 //! to the documented default.
 
+use crate::game::Identity;
 use crate::md5;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -322,11 +323,53 @@ fn dash(hex: &str) -> String {
     )
 }
 
+/// Turn a list of names into players the server can match.
+///
+/// The rule, in one place because two hosts and two engines need it:
+///
+/// - an identity the host resolved wins;
+/// - on an **offline** server an unresolved name is derived with
+///   [`offline_uuid`], which needs no network and therefore never fails;
+/// - on an **online** server an unresolved name is *skipped*. Writing a
+///   derived id there would sit in the file looking perfectly correct and
+///   never match the player it names.
+///
+/// `resolved` is what the host got back from whatever directory it asked —
+/// Mojang, for Minecraft. A name missing from it means the lookup failed or
+/// was never made, and the caller does not need to know which.
+///
+/// Used by [`crate::game::Game::config_files`] for hosts that write files, and
+/// directly by hosts that configure a linked engine in process. Those two must
+/// not disagree about who is an operator.
+pub fn resolve_players(names: &[String], resolved: &[Identity], online: bool) -> Vec<Player> {
+    names
+        .iter()
+        .filter_map(
+            |name| match resolved.iter().find(|entry| entry.name == *name) {
+                Some(Identity { name, id }) => Some(Player {
+                    name: name.clone(),
+                    uuid: id.clone(),
+                }),
+                None if !online => Some(Player {
+                    name: name.clone(),
+                    uuid: offline_uuid(name),
+                }),
+                None => None,
+            },
+        )
+        .collect()
+}
+
 /// `ops.json`, rewritten wholesale on every launch.
 ///
 /// Wholesale is the point: the file is the source of truth the server reads
 /// before it accepts anyone, so a player removed from the list stops being an
 /// operator on the next start. An add-only pass would leave them op forever.
+///
+/// > **Not for Pumpkin.** Its `ops.json` field is `bypasses_player_limit` and
+/// > its loader has no serde default, so a file written from here panics it at
+/// > startup. A host driving Pumpkin seeds its structs instead — see
+/// > `homerun-pumpkin-ffi::pumpkin_settings`.
 pub fn ops_json(players: &[Player]) -> Value {
     Value::Array(
         players
@@ -414,6 +457,57 @@ pub fn merge_banned(existing: &str, additions: &[Player], created: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn identity(name: &str, id: &str) -> Identity {
+        Identity {
+            name: name.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    /// A resolved identity is used verbatim, whatever the mode.
+    #[test]
+    fn a_resolved_name_keeps_the_id_the_host_fetched() {
+        let names = vec!["Notch".to_string()];
+        let resolved = vec![identity("Notch", "069a79f4-44e9-4726-a5be-fca90e38aaf5")];
+
+        for online in [true, false] {
+            let players = resolve_players(&names, &resolved, online);
+            assert_eq!(players.len(), 1, "online={online}");
+            assert_eq!(players[0].uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        }
+    }
+
+    /// Offline derives; online skips. This is the asymmetry the whole function
+    /// exists for — a derived id on an online server never matches the player
+    /// it names, and looks perfectly correct sitting in the file.
+    #[test]
+    fn an_unresolved_name_is_derived_offline_and_dropped_online() {
+        let names = vec!["Ghost".to_string()];
+
+        let offline = resolve_players(&names, &[], false);
+        assert_eq!(offline.len(), 1);
+        assert_eq!(offline[0].uuid, offline_uuid("Ghost"));
+
+        assert!(
+            resolve_players(&names, &[], true).is_empty(),
+            "an online server wrote an id it could not have known"
+        );
+    }
+
+    /// Order is the caller's, and a partially resolved list keeps the ones it
+    /// could resolve rather than failing whole.
+    #[test]
+    fn resolution_is_per_name_not_all_or_nothing() {
+        let names = vec!["Notch".to_string(), "Ghost".to_string(), "Alex".to_string()];
+        let resolved = vec![identity("Notch", "aaa"), identity("Alex", "ccc")];
+
+        let players = resolve_players(&names, &resolved, true);
+        assert_eq!(
+            players.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec!["Notch", "Alex"]
+        );
+    }
 
     fn env(pairs: &[(&str, Value)]) -> Value {
         let mut map = serde_json::Map::new();

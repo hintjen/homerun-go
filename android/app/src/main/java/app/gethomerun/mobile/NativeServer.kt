@@ -13,8 +13,14 @@ import android.util.Log
  */
 object NativeServer {
 
-    /** Matches `FFI_ABI_VERSION` in the crate. A mismatch is a build error. */
-    private const val EXPECTED_ABI = 1
+    /**
+     * Matches `FFI_ABI_VERSION` in the crate. A mismatch is a build error.
+     *
+     * Update this in the same commit that bumps the crate: the check below is
+     * not fatal, so a stale value here does not break the build — it silently
+     * costs the app its server backend until someone reads the log.
+     */
+    private const val EXPECTED_ABI = 3
 
     /**
      * The engine overflows a default thread stack and takes the process down

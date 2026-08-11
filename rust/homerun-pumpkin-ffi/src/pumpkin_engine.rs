@@ -13,12 +13,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pumpkin::command::CommandSender;
-use pumpkin::data::VanillaData;
 use pumpkin::server::Server;
 use pumpkin::{init_logger, reset_server_state, stop_server, PumpkinServer};
-use pumpkin_config::{LoadConfiguration, PumpkinConfig};
 
 use crate::engine::{Engine, PlayerEntry, Roster, RunOutcome, RunRequest, StopSignal};
+use crate::pumpkin_settings;
 
 /// The running server, reachable while `run` is blocked inside the runtime.
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
@@ -110,8 +109,10 @@ impl Engine for PumpkinEngine {
                 }
             };
 
-            // Creates the default configuration on first run.
-            let mut config = PumpkinConfig::load(&exec_dir);
+            // Creates the default configuration on first run, and is where a
+            // restored `pumpkin.toml` from another device arrives. The managed
+            // settings are overridden below; everything else is the player's.
+            let mut config = pumpkin_settings::load_config(&exec_dir, on_line);
             config
                 .advanced
                 .networking
@@ -123,12 +124,21 @@ impl Engine for PumpkinEngine {
             // `start()` block waiting for a readline that can never arrive.
             config.advanced.commands.use_console = false;
 
+            let mut vanilla_data = pumpkin_settings::load_data(on_line);
+
+            // After the config is loaded and before the server is built:
+            // `PumpkinServer::new` snapshots the MOTD and the player cap into
+            // its status response, so a setting applied after this point would
+            // be live but invisible to the server list.
+            if let Some(settings) = &request.settings {
+                pumpkin_settings::apply(settings, &mut config);
+                pumpkin_settings::apply_lists(settings, &config, &mut vanilla_data);
+            }
+
             MAX_PLAYERS.store(
                 config.advanced.networking.java.max_players,
                 Ordering::Relaxed,
             );
-
-            let vanilla_data = VanillaData::load();
             init_logger(&config.advanced);
 
             let server = match PumpkinServer::new(config.basic, config.advanced, vanilla_data).await
@@ -278,15 +288,14 @@ mod capture {
             }
             // CSI: ESC '[' … final byte in @-~. Anything else after ESC is a
             // shorter sequence whose next character is the whole of it.
-            match chars.next() {
-                Some('[') => {
-                    for tail in chars.by_ref() {
-                        if ('\u{40}'..='\u{7e}').contains(&tail) {
-                            break;
-                        }
+            // Anything else after ESC is a shorter sequence whose next
+            // character is the whole of it, and `next()` has consumed it.
+            if chars.next() == Some('[') {
+                for tail in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&tail) {
+                        break;
                     }
                 }
-                Some(_) | None => {}
             }
         }
         out

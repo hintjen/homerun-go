@@ -17,7 +17,8 @@
 //
 //     node scripts/build-rust.js host
 //     swiftc -O -import-objc-header ios/HomerunHost/FFI/HomerunFFI.h \
-//         ios/HomerunHost/FFI/Core.swift ios/HomerunHost/HostLog.swift \
+//         ios/HomerunHost/FFI/Core.swift ios/HomerunHost/FFI/StartRequest.swift \
+//         ios/HomerunHost/HostLog.swift \
 //         ios/HomerunHost/ServerBackendError.swift ios/HomerunHost/LaunchOrder.swift \
 //         ios/coretest/main.swift \
 //         rust/homerun-pumpkin-ffi/target/release/libhomerun_pumpkin_ffi.a \
@@ -83,7 +84,7 @@ check("homerun_abi_version matches what this source expects") {
     // it is that the staged .a is the one this source was written against —
     // a mismatch otherwise shows up as garbage decoded out of a reply much
     // later, or as a symbol that links and does something else.
-    let expected: UInt32 = 2
+    let expected: UInt32 = 3
     let v = homerun_abi_version()
     try expect(v == expected, "expected \(expected), got \(v) — is the staged .a stale?")
     return "v\(v)"
@@ -543,14 +544,6 @@ check("backupReport refuses an unknown operation") {
     }
 }
 
-// MARK: - The engine, end to end
-//
-// Runs only where an engine is linked, which today means an iOS build. The
-// repository is a local directory rather than the `rest:` URL the API hands
-// out — rustic compiles the local backend unconditionally, and the format is
-// the same one either way, so this exercises init, backup, snapshot listing
-// and restore without needing a server.
-
 func callEngine(_ fn: (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?, _ request: [String: Any])
     throws -> [String: Any]
 {
@@ -565,6 +558,141 @@ func callEngine(_ fn: (UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?, _
     else { throw Wrong(what: "the engine answered with nonsense: \(text)") }
     return object
 }
+
+print("\nstart request")
+// The one encoding in this host that is checked by nobody else. `Core.swift`
+// goes through `homerun_core_call`, which names its method in the payload and
+// fails loudly on a typo; a start request is a bare JSON object parsed by
+// field name, so a misspelling is a server quietly running on defaults.
+//
+// `homerun_server_settings_preview` exists for exactly this: it reports what a
+// start *would* apply, without starting anything.
+
+func preview(_ request: [String: Any]) throws -> [String: Any] {
+    try callEngine({ homerun_server_settings_preview($0) }, request)
+}
+
+check("a start request encodes the settings the engine then resolves") {
+    let reply = try preview(
+        StartRequest.encode(
+            serverId: "s1", dataDir: "/tmp/homerun-coretest", port: 25565,
+            settings: StartRequest.Settings(
+                env: env, gameType: "java",
+                resolved: ["Notch": "069a79f4-44e9-4726-a5be-fca90e38aaf5"])))
+
+    try expect(reply["ok"] as? Bool == true, "refused: \(reply)")
+    guard let settings = reply["settings"] as? [String: Any] else {
+        throw Wrong(what: "no settings in \(reply) — did a key name drift?")
+    }
+
+    // Each of these is a separate key crossing the boundary. Distinct values
+    // in `env` on purpose: equal ones are what let two fields be swapped.
+    try expect(settings["motd"] as? String == "§aHomerun §fserver", "motd: \(settings)")
+    try expect(settings["maxPlayers"] as? Int == 8, "maxPlayers: \(settings)")
+    try expect(settings["viewDistance"] as? Int == 10, "viewDistance: \(settings)")
+    try expect(settings["gameMode"] as? String == "survival", "gameMode: \(settings)")
+    try expect(settings["onlineMode"] as? Bool == true, "onlineMode: \(settings)")
+    try expect(settings["seed"] as? String == "12345", "seed: \(settings)")
+
+    // And the identity the host resolved actually arrived — the check that
+    // `resolved` is a list of `{name, id}` and not something else.
+    let ops = settings["ops"] as? [[String: Any]] ?? []
+    try expect(ops.first?["name"] as? String == "Notch", "ops: \(settings["ops"] ?? "nil")")
+    try expect(
+        (ops.first?["uuid"] as? String)?.hasPrefix("069a79f4") == true,
+        "the resolved uuid did not reach the engine: \(ops)")
+
+    return "\(settings.count) settings resolved"
+}
+
+check("game type reaches the engine, not just the name of the key") {
+    // If `gameType` were misspelled this still answers ok, with online mode
+    // left at the API's value — which is the whole failure mode being guarded
+    // against, so it needs a case where the two differ.
+    var crossplay = env
+    crossplay["ONLINE_MODE"] = "true"
+    let reply = try preview(
+        StartRequest.encode(
+            serverId: "s1", dataDir: "/tmp/homerun-coretest", port: 25565,
+            settings: StartRequest.Settings(
+                env: crossplay, gameType: "native-crossplay", resolved: [:])))
+
+    let settings = reply["settings"] as? [String: Any] ?? [:]
+    try expect(
+        settings["onlineMode"] as? Bool == false,
+        "a crossplay server must be offline whatever the API says: \(settings)")
+    return "native-crossplay forced offline mode"
+}
+
+check("a launch with no settings is valid, and says nothing was applied") {
+    let reply = try preview(
+        StartRequest.encode(
+            serverId: "s1", dataDir: "/tmp/homerun-coretest", port: 25565, settings: nil))
+    try expect(reply["ok"] as? Bool == true, "refused a settings-free start: \(reply)")
+    try expect(reply["settings"] is NSNull, "expected null settings, got \(reply)")
+    return "starts on the engine's own configuration"
+}
+
+check("settings the engine cannot honour are reported, not swallowed") {
+    let reply = try preview(
+        StartRequest.encode(
+            serverId: "s1", dataDir: "/tmp/homerun-coretest", port: 25565,
+            settings: StartRequest.Settings(
+                env: env, gameType: "java", resolved: [:])))
+    let settings = reply["settings"] as? [String: Any] ?? [:]
+    let unsupported = settings["unsupported"] as? [String] ?? []
+    // `env` asks for a difficulty, which lives in level.dat and cannot be set
+    // from config. A player who chose it deserves to be told.
+    try expect(unsupported.contains("difficulty"), "difficulty not reported: \(unsupported)")
+    let advisories = reply["advisories"] as? [String] ?? []
+    try expect(!advisories.isEmpty, "no console line for the ignored settings")
+    return advisories.joined(separator: " / ")
+}
+
+check("a malformed request is refused rather than started on defaults") {
+    let reply = try callEngine({ homerun_server_settings_preview($0) }, ["dataDir": "/tmp"])
+    try expect(reply["ok"] as? Bool == false, "a request with no serverId was accepted: \(reply)")
+    return "refused: \(reply["error"] as? String ?? "?")"
+}
+
+print("\nmojang ids")
+check("minecraft.settings.dashUuid dashes Mojang's form") {
+    let dashed = try Core.dashUuid("069a79f444e94726a5befca90e38aaf5")
+    try expect(dashed == "069a79f4-44e9-4726-a5be-fca90e38aaf5", "got \(dashed)")
+    return dashed
+}
+
+check("minecraft.settings.dashUuid refuses garbage") {
+    // A short id is the one that matters: it would dash into something
+    // uuid-shaped and never match a real player.
+    for bad in ["", "not-a-uuid", "069a79f444e94726a5befca90e38aaf", "zz9a79f444e94726a5befca90e38aaf5"] {
+        do {
+            let out = try Core.dashUuid(bad)
+            throw Wrong(what: "accepted \"\(bad)\" and answered \(out)")
+        } catch is Core.CoreError {
+            continue
+        }
+    }
+    return "three bad ids and an empty string refused"
+}
+
+check("minecraft.settings.dashUuid is idempotent") {
+    // Deliberate, not an accident of the implementation: it strips dashes
+    // before checking, so a host that dashes twice gets the same id rather
+    // than an error it would have to special-case.
+    let once = try Core.dashUuid("069a79f444e94726a5befca90e38aaf5")
+    try expect(try Core.dashUuid(once) == once, "dashing an already-dashed id changed it")
+    return once
+}
+
+// MARK: - The engine, end to end
+//
+// Runs only where an engine is linked, which today means an iOS build. The
+// repository is a local directory rather than the `rest:` URL the API hands
+// out — rustic compiles the local backend unconditionally, and the format is
+// the same one either way, so this exercises init, backup, snapshot listing
+// and restore without needing a server.
+
 
 if homerun_backup_available() == 1 {
     print("\nengine — a real backup and restore")
