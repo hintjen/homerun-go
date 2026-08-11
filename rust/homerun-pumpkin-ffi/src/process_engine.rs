@@ -423,6 +423,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
+            settings: None,
         };
 
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -475,6 +476,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
+            settings: None,
         };
         let ready = Arc::new(Mutex::new(false));
 
@@ -520,6 +522,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
+            settings: None,
         };
         engine.run(
             &request,
@@ -563,6 +566,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
+            settings: None,
         };
 
         let started = Instant::now();

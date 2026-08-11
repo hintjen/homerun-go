@@ -116,10 +116,12 @@ final class PumpkinBackend: ServerBackend {
         var order = LaunchOrder(
             steps: (try? Core.launchPlan(
                 backups: config.backupContext != nil,
-                // This host writes no server.properties yet — see the gap
-                // noted in plans/ios-core-lifecycle.md. Saying so here is what
-                // keeps that visible rather than merely absent.
-                settings: false,
+                // True even though nothing here writes a file: the step's
+                // ordering constraints hold verbatim for a linked engine —
+                // after `restoreWorld` because a restore can replace
+                // `pumpkin.toml`, before `spawn` because the server snapshots
+                // its MOTD and player cap while it is being constructed.
+                settings: true,
                 tunnel: config.resolveTunnel != nil)) ?? [],
             serverId: serverId,
             lifecycle: lifecycle)
@@ -181,8 +183,13 @@ final class PumpkinBackend: ServerBackend {
 
             let port = (config.extra["port"] as? Int).map(UInt16.init) ?? 25565
 
+            var settings: StartRequest.Settings?
+            if try order.at("writeSettings") {
+                settings = await resolveSettings(serverId: serverId, config: config)
+            }
+
             if try order.at("spawn") {
-                startServerThread(serverId: serverId, port: port)
+                startServerThread(serverId: serverId, port: port, settings: settings)
                 lifecycle.spawned(serverId)
                 startPumps(serverId: serverId)
             }
@@ -271,12 +278,48 @@ final class PumpkinBackend: ServerBackend {
     /// > crash log — the single most confusing failure this code can produce.
     /// > `Task` and `Thread.detachNewThread` both give you the default; only
     /// > a configured `Thread` lets you set it.
-    private func startServerThread(serverId: String, port: UInt16) {
+    /// Turn the API's settings into what the engine can be told.
+    ///
+    /// **Never fails a launch.** A name Mojang would not resolve is dropped and
+    /// said out loud on the console; settings that could not be read at all
+    /// mean the engine's own configuration applies. That last case is worse
+    /// here than it is on Android, and worth naming: there, "defaults" means
+    /// vanilla's, written into a file we control. Here it means *Pumpkin's*,
+    /// which includes `online_mode = true` — a server nobody with a cracked
+    /// client can join. Which is why settings are applied even when every
+    /// lookup failed, rather than skipped as a set.
+    private func resolveSettings(
+        serverId: String, config: ServerConfig
+    ) async -> StartRequest.Settings? {
+        guard !config.settingsEnv.isEmpty else {
+            HostLog.host.info("\(serverId, privacy: .public): no settings to apply")
+            return nil
+        }
+
+        // Nothing at all for an offline server: its UUIDs are a function of
+        // the name and the core derives them itself. That is the difference
+        // between a launch with no signal costing nothing and costing one
+        // ten-second timeout per operator.
+        let names =
+            (try? Core.requiredLookups(env: config.settingsEnv, gameType: config.gameType)) ?? []
+        let resolved = await MojangDirectory.identities(for: names)
+
+        for name in names where resolved[name] == nil {
+            onLog?(serverId, "[Homerun] Could not look up \"\(name)\" — skipping.")
+        }
+
+        return StartRequest.Settings(
+            env: config.settingsEnv, gameType: config.gameType, resolved: resolved)
+    }
+
+    private func startServerThread(
+        serverId: String, port: UInt16, settings: StartRequest.Settings?
+    ) {
         let directory = HostStore.serverDirectory(id: serverId).path
 
         let thread = Thread { [weak self] in
             let reply = HomerunFFI.serverStart(
-                serverId: serverId, dataDir: directory, port: port)
+                serverId: serverId, dataDir: directory, port: port, settings: settings)
 
             // Hop back: every property here is main-actor state, and the UI
             // reads it.
@@ -534,8 +577,15 @@ final class PumpkinBackend: ServerBackend {
 
     /// Operator names, read from the engine's own `ops.json`. Absent before
     /// the first op is added, which is not an error.
+    ///
+    /// Under `data/`, not the server directory: Pumpkin's `LoadJSONConfiguration`
+    /// puts every one of these lists there. Read from the wrong path this
+    /// returned an empty list for every server, forever, and looked like a
+    /// server that simply had no operators.
     func ops(serverId: String) -> [String] {
-        let url = HostStore.serverDirectory(id: serverId).appendingPathComponent("ops.json")
+        let url = HostStore.serverDirectory(id: serverId)
+            .appendingPathComponent("data")
+            .appendingPathComponent("ops.json")
         guard let data = try? Data(contentsOf: url),
             let entries = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return [] }

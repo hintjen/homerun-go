@@ -177,6 +177,10 @@ enum HomerunAPI {
         /// The server's settings as the API expressed them, verbatim. Fed to
         /// `Core.configInputs`/`configFiles`, which know what the keys mean.
         let env: [String: Any]
+        /// The API's `game_type`, **verbatim**. Not reduced to java/bedrock:
+        /// `native-crossplay` is what forces a vanilla server offline, and a
+        /// reduced value cannot answer that. Rust decides what it means.
+        let gameType: String
         /// `get_backup`: `{repo, restic_password, keep}`, or nil for a server
         /// with backups switched off. Opaque here — it is handed to the engine
         /// and to `homerun-core`, and it carries the repository password, so it
@@ -223,8 +227,16 @@ enum HomerunAPI {
             (value as? String).flatMap { $0.isEmpty ? nil : $0 }
         }
 
+        // Top level first, then `config` — the API has carried it in both
+        // places, and Android reads it the same way.
+        let gameType =
+            nonEmpty(body["game_type"])
+            ?? nonEmpty((body["config"] as? [String: Any])?["game_type"])
+            ?? "java"
+
         return ServerSettings(
             env: env ?? [:],
+            gameType: gameType,
             backup: body["backup"] as? [String: Any],
             backupLeaseDevice: nonEmpty(body["backup_lease_device"]),
             restoreFromSnapshot: nonEmpty(env?["RESTORE_FROM_SNAPSHOT"]),

@@ -85,15 +85,35 @@ fn main() {
     TERMINAL.set(unsafe { dup(1) }).ok();
     say(&format!("data dir: {}", dir.display()));
 
-    let id = CString::new("boot-test").unwrap();
-    let path = CString::new(dir.to_string_lossy().as_bytes()).unwrap();
+    // The same request shape the hosts send, with settings — so this example
+    // exercises the mapping onto Pumpkin's config, which is the part a unit
+    // test can check but not observe on a running server.
+    let request = CString::new(
+        serde_json::json!({
+            "serverId": "boot-test",
+            "dataDir": dir.to_string_lossy(),
+            "port": 25565,
+            "settings": {
+                "gameType": "java",
+                "env": {
+                    "MOTD": "boot_engine",
+                    "MAX_PLAYERS": "7",
+                    "ONLINE_MODE": "false",
+                    "GAMEMODE": "creative",
+                },
+                "resolved": [],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
 
     // The same 16 MB stack the iOS host uses. The default overflows inside the
     // engine and dies with no panic report.
     let runner = std::thread::Builder::new()
         .name("homerun-server".into())
         .stack_size(16 * 1024 * 1024)
-        .spawn(move || take(unsafe { homerun_server_start(id.as_ptr(), path.as_ptr(), 25565) }))
+        .spawn(move || take(unsafe { homerun_server_start(request.as_ptr()) }))
         .expect("spawn server thread");
 
     let mut cursor = 0u64;

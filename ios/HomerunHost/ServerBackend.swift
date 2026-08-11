@@ -125,6 +125,18 @@ struct ServerConfig {
     /// config dict and is forwarded into the server's environment, and this
     /// carries the repository password.
     var backupContext: BackupContext?
+
+    /// The API's `environment_variables` — what the player chose in the
+    /// creation wizard. Empty when the settings could not be read, which is a
+    /// server on the engine's defaults rather than a refused launch.
+    ///
+    /// Its own field rather than a key in `extra` for the same reason as
+    /// `backupContext`: `extra` is forwarded into the server's environment,
+    /// and these are the host's inputs, not the server's.
+    var settingsEnv: [String: Any] = [:]
+
+    /// The API's `game_type`, verbatim. See `HomerunAPI.ServerSettings`.
+    var gameType: String = "java"
 }
 
 /// The settings and identity one launch needs to back itself up.

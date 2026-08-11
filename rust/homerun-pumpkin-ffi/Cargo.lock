@@ -1886,11 +1886,14 @@ dependencies = [
  "log",
  "pumpkin",
  "pumpkin-config",
+ "pumpkin-util",
  "rustic_backend",
  "rustic_core",
  "serde",
  "serde_json",
+ "time",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

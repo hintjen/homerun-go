@@ -89,21 +89,33 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeStart(
         );
     };
 
-    // Absent runs the linked engine; present runs a child process. A Java
-    // server is the second, and composing its argv is the host's job.
-    let invocation = from_jstring(&mut env, &invocation);
+    // The C surface takes one JSON request so a launch can carry both the
+    // player's settings and what to run. Android's Kotlin signature stays
+    // scalar and the request is assembled here.
+    //
+    // `invocation` is what makes this a *child process* rather than the
+    // linked engine: the argv and environment the host composed, which is the
+    // one part of running a JVM that is genuinely Android's. Absent — the
+    // Pumpkin backend — runs the linked engine, exactly as before.
+    let invocation = from_jstring(&mut env, &invocation)
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw.to_string_lossy()).ok());
 
-    let json = unsafe {
-        take_json(crate::homerun_server_start(
-            id.as_ptr(),
-            dir.as_ptr(),
-            port as u16,
-            invocation
-                .as_ref()
-                .map(|c| c.as_ptr())
-                .unwrap_or(std::ptr::null()),
-        ))
+    let Ok(request) = CString::new(
+        serde_json::json!({
+            "serverId": id.to_string_lossy(),
+            "dataDir": dir.to_string_lossy(),
+            "port": port as u16,
+            "invocation": invocation,
+        })
+        .to_string(),
+    ) else {
+        return to_jstring(
+            &env,
+            r#"{"ok":false,"error":"server_id and data_dir must not contain NUL"}"#.to_string(),
+        );
     };
+
+    let json = unsafe { take_json(crate::homerun_server_start(request.as_ptr())) };
     to_jstring(&env, json)
 }
 

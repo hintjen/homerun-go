@@ -20,16 +20,30 @@ enum HomerunFFI {
     /// > Must run on a thread with at least a 16 MB stack. See
     /// > `PumpkinBackend.startServerThread`.
     ///
-    /// The trailing `nil` is the invocation, and on this platform it is always
-    /// nil: an invocation names a *child process* to supervise, and iOS cannot
-    /// spawn one. Nil runs the engine linked into the app, which is the whole
-    /// reason that engine exists.
-    static func serverStart(serverId: String, dataDir: String, port: UInt16) -> Reply {
-        serverId.withCString { id in
-            dataDir.withCString { dir in
-                decode(homerun_server_start(id, dir, port, nil))
-            }
-        }
+    /// `settings` is optional and its absence is not an error — it starts the
+    /// server on the engine's own configuration and says so on the console.
+    static func serverStart(
+        serverId: String, dataDir: String, port: UInt16, settings: StartRequest.Settings? = nil
+    ) -> Reply {
+        withRequest(
+            StartRequest.encode(
+                serverId: serverId, dataDir: dataDir, port: port, settings: settings),
+            "The server could not be started."
+        ) { homerun_server_start($0) }
+    }
+
+    /// What `serverStart` would apply, without starting anything.
+    ///
+    /// Pure — for tests, and for a host that wants to log the effective
+    /// settings without waiting for a server to come up.
+    static func settingsPreview(
+        serverId: String, dataDir: String, port: UInt16, settings: StartRequest.Settings?
+    ) -> Reply {
+        withRequest(
+            StartRequest.encode(
+                serverId: serverId, dataDir: dataDir, port: port, settings: settings),
+            "The server settings could not be read."
+        ) { homerun_server_settings_preview($0) }
     }
 
     static func serverStop() -> Reply {
@@ -88,6 +102,25 @@ enum HomerunFFI {
         /// Player-facing already — the Rust side has a test asserting these
         /// messages contain no `errno`, `unwrap`, or `panicked at`.
         var error: String? { object?["error"] as? String }
+    }
+
+    /// Encode a request and hand it to a C entry point.
+    ///
+    /// `JSONSerialization` can only fail here on a value it cannot encode, so
+    /// this path is unreachable in practice — but the alternative to answering
+    /// it is a force-unwrap in the launch path, and the C surface's whole
+    /// premise is that no input crashes the app.
+    private static func withRequest(
+        _ request: [String: Any],
+        _ failure: String,
+        _ call: (UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>?
+    ) -> Reply {
+        guard let data = try? JSONSerialization.data(withJSONObject: request),
+            let json = String(data: data, encoding: .utf8)
+        else {
+            return Reply(object: ["ok": false, "error": failure])
+        }
+        return json.withCString { decode(call($0)) }
     }
 
     /// Internal rather than private because `BackupFFI` decodes the same way:

@@ -21,6 +21,13 @@ use serde::{Deserialize, Serialize};
 /// that it reads as a hang.
 pub const MIN_HEAP_MB: u32 = 512;
 
+/// What a host means by asking for no particular heap.
+///
+/// Only reachable where there is no device ceiling either — a desktop that
+/// said nothing. A phone that says nothing gets what its RAM allows, which is
+/// a better answer than a fixed number.
+const DEFAULT_HEAP_MB: u32 = 1024;
+
 /// How much heap the JVM actually gets.
 ///
 /// `device_total_mb` is `None` where there is no device ceiling to apply — a
@@ -30,10 +37,20 @@ pub const MIN_HEAP_MB: u32 = 512;
 /// performance tuning: **Android kills the whole app under memory pressure,
 /// not just the server**, so an over-generous heap does not cost you a server,
 /// it costs you the app that was hosting it, mid-save.
+///
+/// **A `requested_mb` of zero means the host did not say**, the same
+/// convention `port` uses across this crate's C surface — and it is not a
+/// request for no memory at all. Read literally it clamps to [`MIN_HEAP_MB`],
+/// which is how a 2.4 GB device ended up running a server on 512 MB while
+/// 824 was available and safe. Silence gets the ceiling instead.
 pub fn heap_mb(requested_mb: u32, device_total_mb: Option<u32>) -> u32 {
     let ceiling = device_total_mb
         .map(|total| (total / 3).max(MIN_HEAP_MB))
         .unwrap_or(u32::MAX);
+
+    if requested_mb == 0 {
+        return ceiling.min(device_total_mb.map_or(DEFAULT_HEAP_MB, |_| ceiling));
+    }
     requested_mb.clamp(MIN_HEAP_MB, ceiling)
 }
 
@@ -215,6 +232,19 @@ mod tests {
         // Better to try and be killed than to refuse to start at all.
         assert_eq!(heap_mb(256, Some(1024)), MIN_HEAP_MB);
         assert_eq!(heap_mb(4096, Some(1024)), MIN_HEAP_MB);
+    }
+
+    /// The bug this convention exists to prevent: a host that sends nothing
+    /// is not asking for as little as possible.
+    #[test]
+    fn asking_for_nothing_gets_what_the_device_can_afford() {
+        // 2472 MB device: a third is 824, and 824 is what it should run on —
+        // not the 512 floor a literal reading of zero produces.
+        assert_eq!(heap_mb(0, Some(2472)), 824);
+        // No ceiling to work from, so a fixed default rather than everything.
+        assert_eq!(heap_mb(0, None), DEFAULT_HEAP_MB);
+        // And a genuinely tiny device still cannot go below the floor.
+        assert_eq!(heap_mb(0, Some(1024)), MIN_HEAP_MB);
     }
 
     #[test]

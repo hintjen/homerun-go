@@ -16,12 +16,16 @@ object NativeServer {
     /**
      * Matches `FFI_ABI_VERSION` in the crate.
      *
-     * Kept honest by `scripts/check-abi.js`, which `npm test` runs. It has to
-     * be: this sat at 1 while the crate went to 2 and then 3, and nothing
-     * noticed, because the check below only runs when something first touches
-     * this object — and for a while nothing did.
-     */
-    private const val EXPECTED_ABI = 3
+     * Update it in the same commit that bumps the crate. The check below is
+     * not fatal, so a stale value here does not break the build — it silently
+     * costs the app its server backend until someone reads the log. Worse, it
+     * only runs when something first touches this object, and for a while
+     * nothing did: this sat at 1 while the crate went to 2 and then 3, and
+     * the first thing to look would have been disabled for it.
+     *
+     * So `scripts/check-abi.js` compares the two at build time, and `npm test`
+     * runs it. Forgetting is now loud and free.     */
+    private const val EXPECTED_ABI = 4
 
     /**
      * The engine overflows a default thread stack and takes the process down

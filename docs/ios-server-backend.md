@@ -47,6 +47,74 @@ ending.
 This is the same rule as the bridge's no-call-timeout (PROTOCOL.md §5), for
 the same reason, and it is why `native-server-start` must never be given one.
 
+## Settings — what a player chose, and what the engine gets
+
+A player's choices arrive as the API's `environment_variables`. **Pumpkin does
+not read `server.properties`** — zero references in the whole fork — so this
+host does not write one. The settings are applied in memory, by assignment onto
+the config structs the FFI already mutates for the port.
+
+Do **not** write the core's `ops.json` here either. Pumpkin's field is
+`bypasses_player_limit` where vanilla's is `bypassesPlayerLimit`, and its
+loader has no serde default, so a vanilla-shaped file **panics it at startup**.
+Its lists live under `<serverDir>/data/`, not the server directory.
+
+The path is: `BridgeRouter+Server` puts the API's env and game type on
+`ServerConfig` → `PumpkinBackend.resolveSettings` looks up the names
+`Core.requiredLookups` asks for → `StartRequest.encode` puts them on the wire →
+Rust decides what every value means. Nothing on the Swift side interprets a
+setting, which is what stops iOS and Android drifting.
+
+An **offline** server costs no lookups at all: its UUIDs are a function of the
+name and the core derives them itself. That is why the host asks
+`requiredLookups` rather than resolving every name it sees — on a phone with no
+signal the difference is a launch that costs nothing against one that costs a
+ten-second timeout per operator.
+
+**A settings failure never fails a launch.** A name Mojang will not resolve is
+dropped and named on the console. This host's "defaults" are worse than
+Android's, though, and it is worth knowing why: there, a failed write means
+*vanilla's* defaults in a file we control. Here it means **Pumpkin's**, which
+include `online_mode = true` — a server nobody with a cracked client can join.
+So settings are applied even when every lookup failed.
+
+### What is honoured, and what is not
+
+| Setting | Where it lands |
+|---|---|
+| MOTD, max players, view and simulation distance, online mode | `networking.java` **and** `networking.bedrock` — one server, two listeners |
+| PVP | `advanced.pvp.enabled` |
+| Game mode, hardcore, whitelist on/off | `basic` |
+| Seed | `basic.seed`, and **only when the player chose one** — `Seed::from("")` mints a fresh random seed, so assigning unconditionally gives a regenerated world a different world every launch. Read only when a level is created. |
+| Ops, whitelist | Replaced wholesale in `data/ops.json` and `data/whitelist.json`, so a de-opped player actually loses it |
+| Bans | **Appended** to `data/banned-players.json` — `/ban` in game writes the same file, and rewriting it would erase local bans |
+
+Those three files are seeded in memory **and written back**, through Pumpkin's
+own serde types so the shape is by construction the one its loader expects.
+The write is not redundant: Pumpkin saves them only when someone runs `/op` or
+`/ban` in game, and `PumpkinBackend.ops` reads `data/ops.json` to tell the
+dashboard who the operators are — so seeding memory alone reported a server
+with working operators as having none.
+| Difficulty | **Not honoured.** `basic.default_difficulty` exists and nothing reads it; difficulty lives in `level.dat`. |
+| World type, generate structures, spawn protection, spawn NPCs/animals/monsters, command blocks, cheats, allow flight | **Not honoured.** Pumpkin has no support for these at all. |
+| Level name | **Deliberately not managed.** It decides which directory the world lives in, and `hasLocalWorld`, the restore selector and every existing device assume `world`. |
+| `enforce-whitelist` | **Deliberately not managed.** The core has only `whitelist_enabled`, and no other host manages vanilla's enforce flag; deriving it would make iOS kick connected players where the others do not. |
+
+Everything in that table's bottom half is reported on the console per launch —
+one line naming what was ignored — because "my server ignored the difficulty I
+picked" is otherwise a support conversation.
+
+### Two behaviours worth knowing
+
+**Online mode is now honoured**, where every iOS server previously ran
+`online_mode = true` via Pumpkin's default. Flipping it changes every player's
+UUID, so a world keyed by online UUIDs treats everyone as new.
+
+**The bind address is `0.0.0.0`**, where `settings::properties` writes
+`server-ip=127.0.0.1` for the other hosts — so anyone on the same Wi-Fi can
+join an iOS server directly, bypassing the gateway. Pre-existing rather than
+introduced with settings, and still open.
+
 ## FFI string ownership — `FFI/HomerunFFI.swift`
 
 > **Load-bearing: every string the Rust side returns must be freed, including
@@ -233,6 +301,10 @@ make — the device is on the player's Wi-Fi or it is not.
 | `ios/HomerunHost/PumpkinBackend.swift` | The iOS implementation: server thread, pumps, state |
 | `ios/HomerunHost/FFI/HomerunFFI.swift` | Typed FFI access; the one place strings are freed |
 | `ios/HomerunHost/FFI/HomerunFFI.h` | Hand-written C declarations |
+| `ios/HomerunHost/FFI/StartRequest.swift` | The start request's wire form. A leaf, so `ios/coretest` can check it against the real parser |
+| `ios/HomerunHost/MojangDirectory.swift` | Name → UUID. The only outbound call here that is not to Homerun's API |
+| `rust/homerun-pumpkin-ffi/src/engine_settings.rs` | What a setting *means* to an engine. No Pumpkin, so it is in the fast test suite |
+| `rust/homerun-pumpkin-ffi/src/pumpkin_settings.rs` | Assignment onto Pumpkin's own types |
 | `ios/HomerunHost/DeviceMetrics.swift` | Process memory and CPU sampling |
 | `ios/HomerunHost/BridgeRouter+Server.swift` | The `native-server-*` channels |
 | `ios/HomerunHost/WireProxy.swift` | Tunnel config, lifecycle, handshake watchdog |
@@ -266,6 +338,22 @@ parameter-shapes note above.
 what the engine actually bound (`homerun_server_stats()` reports it), and that
 both devices are on the same Wi-Fi. iOS shows the address rather than
 broadcasting to the LAN list.
+
+**The server ignores a setting the dashboard shows.** Read the console: one
+line per launch says what was applied, and another says what was ignored. If it
+says the right thing and the server does not, the mapping in
+`pumpkin_settings.rs` is wrong; if it says nothing was supplied, the settings
+fetch failed — check the token and `HomerunAPI.serverSettings`.
+
+**Every player is treated as new after an update.** Online mode changed. UUIDs
+are keyed by it, so an offline server cannot recognise players a previously
+online one knew.
+
+**The operator list on the dashboard is empty on a server that has ops.** Two
+causes, both fixed and both worth checking if it returns: `PumpkinBackend.ops`
+reading the wrong path (the lists are under `<serverDir>/data/`), and
+`apply_lists` seeding them in memory without writing them back. Compare the
+file's mtime against the launch — if it is older, the write did not run.
 
 **A world ends up in iCloud.** `isExcludedFromBackup` was not set on the
 directory — note it must be set on the URL, and it is set at create time.
