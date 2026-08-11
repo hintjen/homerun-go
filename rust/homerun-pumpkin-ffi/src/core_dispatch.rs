@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{self, jar, settings};
-use homerun_core::{backup, game, launch, lifecycle, link, properties, state, tunnel};
+use homerun_core::{backup, game, launch, lifecycle, link, metrics, properties, state, tunnel};
 
 /// Dispatch one call and render the reply envelope.
 ///
@@ -116,6 +116,33 @@ fn lifecycle_view(life: &lifecycle::Lifecycle, id: &str) -> Result<Value, String
         "awaitPreviousExit": life.await_previous_exit(id),
         "supersedesOnStopBackup": life.supersedes_on_stop_backup(id),
     }))
+}
+
+/// The caller's perf history, or a fresh one.
+///
+/// Like `load_lifecycle`, the policy is only consulted when there is nothing to
+/// resume from — it describes the graph a host wants, not a moment in time, and
+/// re-reading it every call would let the retention rule change mid-session.
+///
+/// One history per **run**, not per server: a graph covers a session, so the
+/// host starts a new one rather than carrying one across a restart.
+fn load_history(args: &Value) -> Result<metrics::History, String> {
+    match args.get("history") {
+        Some(v) if !v.is_null() => {
+            serde_json::from_value(v.clone()).map_err(|e| format!("bad history: {e}"))
+        }
+        _ => {
+            let policy = match args.get("policy") {
+                Some(v) if !v.is_null() => {
+                    serde_json::from_value(v.clone()).map_err(|e| format!("bad policy: {e}"))?
+                }
+                // The desktop's numbers, so a phone's graph of a server and a
+                // PC's graph of the same server cover the same span.
+                _ => metrics::Policy::default(),
+            };
+            Ok(metrics::History::new(policy))
+        }
+    }
 }
 
 /// The game a call is about.
@@ -530,6 +557,42 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             // list from before its own event landed.
             merge(&mut reply, lifecycle_view(&life, &id)?);
             Ok(reply)
+        }
+
+        // --- what a run is costing ----------------------------------------
+        //
+        // Same shape as `lifecycle.*`: state in, state out, nothing retained
+        // here. A host reads counters — resident bytes, cumulative CPU seconds
+        // — and this decides what they mean and how much to keep. It never
+        // takes a percentage from a host, because a percentage is a difference
+        // between two moments and that is where wrong graphs come from.
+        "metrics.record" => {
+            let mut history = load_history(&args)?;
+            let reading: metrics::Reading = serde_json::from_value(field("reading")?.clone())
+                .map_err(|e| format!("bad reading: {e}"))?;
+            let appended = history.record(reading);
+            Ok(json!({
+                "history": serde_json::to_value(&history).map_err(|e| e.to_string())?,
+                "appended": appended,
+                // Re-read every time: it doubles when the buffer fills, and a
+                // host still scheduling on the original keeps sampling at a
+                // resolution this has stopped keeping.
+                "intervalMs": history.interval_ms(),
+            }))
+        }
+
+        "metrics.query" => {
+            let history = load_history(&args)?;
+            let mut view = json!({
+                "samples": serde_json::to_value(history.samples()).map_err(|e| e.to_string())?,
+                "intervalMs": history.interval_ms(),
+            });
+            // Answered only when a clock is offered, so a host can ask whether
+            // a reading is worth taking before it pays to read /proc.
+            if let Some(now) = args.get("nowMs").and_then(|v| v.as_i64()) {
+                merge(&mut view, json!({ "due": history.due(now) }));
+            }
+            Ok(view)
         }
 
         "lifecycle.query" => {
@@ -1042,6 +1105,53 @@ mod tests {
         );
         assert_eq!(view["activeIds"], json!(["s"]));
         assert_eq!(view["lifecycle"], r["lifecycle"], "a query mutates nothing");
+    }
+
+    /// The loop a host implements, on the wire: ask, read, record, read back.
+    #[test]
+    fn a_host_can_sample_a_run_without_deciding_anything() {
+        // A fresh history wants a sample immediately.
+        let empty = ok("metrics.query", json!({ "nowMs": 0 }));
+        assert_eq!(empty["due"], true);
+        assert_eq!(empty["intervalMs"], 30_000);
+        assert_eq!(empty["samples"].as_array().unwrap().len(), 0);
+
+        let first = ok(
+            "metrics.record",
+            json!({ "reading": { "atMs": 0, "memUsedKb": 2_097_152, "cpuSeconds": 0.0 } }),
+        );
+        assert_eq!(first["appended"], true);
+        let history = first["history"].clone();
+
+        // Offered again a second later: kept as the anchor for the next rate,
+        // but not graphed.
+        let early = ok(
+            "metrics.record",
+            json!({
+                "history": history,
+                "reading": { "atMs": 1_000, "memUsedKb": 2_097_152, "cpuSeconds": 1.0 },
+            }),
+        );
+        assert_eq!(early["appended"], false);
+
+        let due = ok(
+            "metrics.record",
+            json!({
+                "history": early["history"].clone(),
+                "reading": { "atMs": 30_000, "memUsedKb": 3_145_728, "cpuSeconds": 30.0 },
+            }),
+        );
+        assert_eq!(due["appended"], true);
+
+        let graph = ok("metrics.query", json!({ "history": due["history"].clone() }));
+        let samples = graph["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 2);
+        assert_eq!(samples[0]["memUsedMb"], 2048);
+        // Nothing to measure the first against.
+        assert!(samples[0]["cpuPercent"].is_null());
+        // 29 s of CPU over the 29 s since the dropped reading — one core.
+        assert_eq!(samples[1]["cpuPercent"], 100.0);
+        assert_eq!(samples[1]["memUsedMb"], 3072);
     }
 
     /// The two-step shape the host has to implement, pinned on the wire.

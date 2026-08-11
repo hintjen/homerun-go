@@ -50,6 +50,7 @@ pub mod game;
 pub mod launch;
 pub mod lifecycle;
 pub mod link;
+pub mod metrics;
 pub mod properties;
 pub mod state;
 pub mod tunnel;
