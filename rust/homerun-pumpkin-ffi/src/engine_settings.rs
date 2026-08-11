@@ -148,7 +148,11 @@ impl EngineSettings {
             self.game_mode,
             self.max_players,
             self.view_distance,
-            if self.online_mode { "online" } else { "offline" },
+            if self.online_mode {
+                "online"
+            } else {
+                "offline"
+            },
             self.ops.len(),
             if self.ops.len() == 1 { "" } else { "s" },
         )
@@ -219,8 +223,14 @@ mod tests {
     fn a_view_distance_the_engine_would_reject_is_clamped() {
         // Pumpkin asserts 2..=64 and we bypass its validate(), so an
         // unclamped value is a panic on a device rather than an error.
-        assert_eq!(resolve_env(json!({ "VIEW_DISTANCE": "0" })).view_distance, 2);
-        assert_eq!(resolve_env(json!({ "VIEW_DISTANCE": "1" })).view_distance, 2);
+        assert_eq!(
+            resolve_env(json!({ "VIEW_DISTANCE": "0" })).view_distance,
+            2
+        );
+        assert_eq!(
+            resolve_env(json!({ "VIEW_DISTANCE": "1" })).view_distance,
+            2
+        );
         assert_eq!(
             resolve_env(json!({ "VIEW_DISTANCE": "200" })).view_distance,
             64
@@ -285,10 +295,14 @@ mod tests {
 
     #[test]
     fn an_online_server_drops_a_name_it_could_not_resolve() {
-        let resolved = resolve(&json!({ "OPS": "Notch,Ghost" }), "java", &[Identity {
-            name: "Notch".into(),
-            id: "069a79f4-44e9-4726-a5be-fca90e38aaf5".into(),
-        }]);
+        let resolved = resolve(
+            &json!({ "OPS": "Notch,Ghost" }),
+            "java",
+            &[Identity {
+                name: "Notch".into(),
+                id: "069a79f4-44e9-4726-a5be-fca90e38aaf5".into(),
+            }],
+        );
 
         assert_eq!(resolved.ops.len(), 1);
         assert_eq!(resolved.ops[0].name, "Notch");

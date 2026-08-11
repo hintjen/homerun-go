@@ -119,6 +119,16 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeStart(
     to_jstring(&env, json)
 }
 
+/// What this run has cost. See `homerun_server_metrics`.
+#[no_mangle]
+pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeMetrics(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = unsafe { take_json(crate::homerun_server_metrics()) };
+    to_jstring(&env, json)
+}
+
 #[no_mangle]
 pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeStop(
     env: JNIEnv,

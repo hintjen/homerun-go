@@ -31,13 +31,13 @@ pub mod crash;
 pub mod engine;
 pub mod log_buffer;
 pub mod preflight;
+/// Supervising a server that runs as a child process. Not iOS, which cannot.
+#[cfg(feature = "process-engine")]
+pub mod process_engine;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_engine;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_settings;
-/// Supervising a server that runs as a child process. Not iOS, which cannot.
-#[cfg(feature = "process-engine")]
-pub mod process_engine;
 
 pub mod server;
 pub mod state;
@@ -126,10 +126,13 @@ use serde_json::json;
 /// process** instead of the linked engine. Additive — a host that omits it
 /// gets exactly what 3 gave it.
 ///
+/// 5 added `homerun_server_metrics`, and with it the supervisor sampling its
+/// own run — hosts stopped keeping a graph each.
+///
 /// Hosts *report* this at startup; Android also compares it
 /// (`NativeServer.EXPECTED_ABI`), which is the check that catches a `.a` or
 /// `.so` that links but decodes garbage.
-pub const FFI_ABI_VERSION: u32 = 4;
+pub const FFI_ABI_VERSION: u32 = 5;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -349,9 +352,9 @@ fn spawned_engine(
 ) -> Result<Option<std::sync::Arc<dyn engine::Engine>>, String> {
     let invocation: process_engine::Invocation =
         serde_json::from_value(invocation).map_err(|e| format!("bad invocation: {e}"))?;
-    Ok(Some(std::sync::Arc::new(process_engine::ProcessEngine::new(
-        invocation,
-    ))))
+    Ok(Some(std::sync::Arc::new(
+        process_engine::ProcessEngine::new(invocation),
+    )))
 }
 
 #[cfg(not(feature = "process-engine"))]
@@ -359,6 +362,23 @@ fn spawned_engine(
     _invocation: serde_json::Value,
 ) -> Result<Option<std::sync::Arc<dyn engine::Engine>>, String> {
     Err("This build cannot run a server as a separate process.".to_string())
+}
+
+/// What this run has cost, oldest sample first.
+///
+/// Cheap — a lock and a clone — and safe from the main thread while
+/// [`homerun_server_start`] blocks another one. The sampling itself happens
+/// inside the supervisor for as long as a server runs, so a host does not
+/// poll to *cause* a reading, only to read what is already there.
+#[no_mangle]
+pub extern "C" fn homerun_server_metrics() -> *mut c_char {
+    guarded(|| {
+        json!({
+            "ok": true,
+            "samples": server::host().metrics(),
+        })
+        .to_string()
+    })
 }
 
 /// Ask the running server to stop and save. Returns once it has.

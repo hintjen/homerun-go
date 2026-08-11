@@ -220,6 +220,11 @@ impl Engine for ProcessEngine {
         self.live().as_ref().map(|run| run.pid)
     }
 
+    fn usage(&self) -> Option<(u64, f64)> {
+        let pid = self.pid()?;
+        Some((resident_kb(pid)?, cpu_seconds(pid)?))
+    }
+
     fn players(&self) -> Option<Roster> {
         let live = self.live();
         let roster = live.as_ref()?.roster.lock().ok()?;
@@ -233,6 +238,55 @@ impl Engine for ProcessEngine {
             .collect();
         Some((players, roster.max))
     }
+}
+
+/// Resident memory in KiB, from `/proc/<pid>/status`.
+///
+/// `status` rather than `statm` because it is already in KiB and labelled,
+/// where `statm` is in pages and needs the page size and a field index to be
+/// right.
+#[cfg(unix)]
+fn resident_kb(pid: u32) -> Option<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    text.lines()
+        .find(|line| line.starts_with("VmRSS:"))
+        .and_then(|line| {
+            line.chars()
+                .filter(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .ok()
+        })
+}
+
+/// Cumulative CPU seconds, user plus system, from `/proc/<pid>/stat`.
+#[cfg(unix)]
+fn cpu_seconds(pid: u32) -> Option<f64> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 2 is the executable name in parentheses and may contain both
+    // spaces and parentheses, so splitting the whole line is the classic bug
+    // here. Everything after the *last* `)` is unambiguous.
+    let fields: Vec<&str> = text.rsplit(')').next()?.split_whitespace().collect();
+    // `state` is field 3 and lands at index 0, so field N is at N - 3.
+    let utime: u64 = fields.get(11)?.parse().ok()?;
+    let stime: u64 = fields.get(12)?.parse().ok()?;
+
+    // The divisor is a property of the kernel rather than a constant. It is
+    // 100 everywhere seen so far, which is exactly why it is read: hard-coding
+    // it would be right until it silently was not.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let ticks = if ticks > 0 { ticks as f64 } else { 100.0 };
+    Some((utime + stime) as f64 / ticks)
+}
+
+#[cfg(not(unix))]
+fn resident_kb(_pid: u32) -> Option<u64> {
+    None
+}
+
+#[cfg(not(unix))]
+fn cpu_seconds(_pid: u32) -> Option<f64> {
+    None
 }
 
 /// Fold one console line into the roster.

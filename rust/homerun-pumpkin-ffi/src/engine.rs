@@ -89,6 +89,20 @@ pub trait Engine: Send + Sync {
     /// Currently connected players, if the engine can report them.
     fn players(&self) -> Option<Roster>;
 
+    /// What this server is costing right now: resident KiB, and cumulative
+    /// CPU seconds since it started.
+    ///
+    /// **Counters, never a rate.** A percentage is a difference between two
+    /// moments, and `homerun_core::metrics` is what turns two of these into
+    /// one — computing it here would put that arithmetic back in the place
+    /// this crate spent a day taking it out of.
+    ///
+    /// `None` from an engine that shares this process: measuring it would
+    /// measure the app, the WebView included, and report it as the server.
+    fn usage(&self) -> Option<(u64, f64)> {
+        None
+    }
+
     /// The operating-system process this server is, if it is one.
     ///
     /// A linked engine has none to give — it *is* this process — and the

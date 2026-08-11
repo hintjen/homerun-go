@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonArray
@@ -59,13 +60,6 @@ class JavaServerBackend(
 
     /** Where this host has read the supervisor's console up to. */
     private var engineCursor = 0L
-
-    /**
-     * This run's performance graph, and the coroutine feeding it. The graph
-     * belongs to `homerun-core`; this backend only reads `/proc`.
-     */
-    private val metrics = Core.Metrics()
-    private var perfJob: Job? = null
 
     private val wireProxy = WireProxy(context, scope)
     private val backups = BackupManager(context)
@@ -436,7 +430,6 @@ class JavaServerBackend(
         // judging. The core pins this launch's generation here, so a process
         // that outlives a stop-then-restart is recognised as the old one's.
         lifecycle.spawned(serverId)
-        startPerfSampler(serverId)
         // "Done" is the JVM telling us it is accepting connections. Waiting
         // for the process to merely exist would report a server that cannot
         // be joined yet; the bridge has no timeout so waiting is correct.
@@ -704,40 +697,25 @@ class JavaServerBackend(
     // -----------------------------------------------------------------------
 
     /**
-     * Feed the core a reading every so often, for as long as the JVM lives.
+     * The graph the supervisor built while this run was up.
      *
-     * The interval is the core's and is **re-read every pass**: it doubles
-     * once the graph is full, so a sampler that scheduled itself once would
-     * keep paying to read `/proc` at a resolution the core has stopped
-     * keeping. The first reading is taken immediately, so a server that is
-     * stopped after a minute still has a graph.
-     *
-     * Nothing here decides anything. It reads counters and hands them over —
-     * see [ProcMetrics] for why they are counters and not percentages.
+     * Nothing here samples anything. The supervisor owns the process, so it
+     * is the only thing that knows what to measure — and `homerun-core`
+     * decides what the readings mean and how much to keep. This host asks.
      */
-    private fun startPerfSampler(serverId: String) {
-        perfJob?.cancel()
-        metrics.reset()
-        perfJob = scope.launch(Dispatchers.IO) {
-            while (engineThread?.isAlive == true) {
-                // The supervisor owns the process, so it is the one that knows
-                // the pid. Null for a moment at the start, and a reading with
-                // nothing in it is still worth offering: it anchors the clock,
-                // and the graph renders "unavailable" rather than a zero.
-                val pid = enginePid()
-                metrics.record(
-                    atMs = System.currentTimeMillis(),
-                    memUsedKb = pid?.let { ProcMetrics.residentKb(it) },
-                    cpuSeconds = pid?.let { ProcMetrics.cpuSeconds(it) },
-                    // Best-effort, like everything else on this graph: the
-                    // roster is built from console lines and is empty before
-                    // the server has printed any.
-                    playerCount = players(serverId)?.players?.size,
-                )
-                delay(metrics.intervalMs())
-            }
+    private fun engineSamples(): List<PerfSample> = runCatching {
+        val obj = Json.parseToJsonElement(NativeServer.nativeMetrics()).jsonObject
+        (obj["samples"] as? JsonArray).orEmpty().map { entry ->
+            val o = entry.jsonObject
+            fun num(key: String) = o[key]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+            PerfSample(
+                t = o["t"]?.jsonPrimitive?.longOrNull ?: 0L,
+                memUsedMb = num("memUsedMb")?.toInt(),
+                cpuPercent = num("cpuPercent"),
+                playerCount = num("playerCount")?.toInt(),
+            )
         }
-    }
+    }.getOrDefault(emptyList())
 
     /**
      * Page the supervisor's console into this host's buffer.
@@ -824,14 +802,6 @@ class JavaServerBackend(
                 if (outcome == "crashed") ServerState.CRASHED else ServerState.STOPPED,
                 backupInProgress = backup != null,
             )
-            // The sampler notices a dead process only when it next wakes, and
-            // by then its interval may be half an hour. The samples stay in
-            // the core's history until the next launch resets it; nothing
-            // reads them once `currentServerId` is cleared below, which
-            // matches the UI — Insights only fetches while a server runs.
-            perfJob?.cancel()
-            perfJob = null
-
             engineThread = null
             currentServerId = null
             startedAt = null
@@ -964,9 +934,10 @@ class JavaServerBackend(
      */
     override fun memoryUsage(serverId: String): MemoryUsage? {
         if (currentServerId != serverId) return null
-        val pid = enginePid()?.takeIf { engineThread?.isAlive == true }
-        val usedKb = pid?.let { ProcMetrics.residentKb(it) }?.toInt()
-        return MemoryUsage(usedKb = usedKb, maxMb = lastHeapMb)
+        // The newest point on the supervisor's graph, which is where the
+        // reading came from in the first place.
+        val usedMb = engineSamples().lastOrNull()?.memUsedMb
+        return MemoryUsage(usedKb = usedMb?.times(1024), maxMb = lastHeapMb)
     }
 
     /**
@@ -980,12 +951,11 @@ class JavaServerBackend(
      */
     override fun cpuUsage(serverId: String): Double? {
         if (currentServerId != serverId) return null
-        return metrics.samples().lastOrNull()?.cpuPercent
+        return engineSamples().lastOrNull()?.cpuPercent
     }
 
     override fun perfHistory(serverId: String): List<PerfSample> =
-        if (currentServerId != serverId) emptyList()
-        else metrics.samples().map { PerfSample(it.t, it.memUsedMb, it.cpuPercent, it.playerCount) }
+        if (currentServerId != serverId) emptyList() else engineSamples()
 
     override fun port(serverId: String): Int? =
         if (currentServerId == serverId) currentPort else null
@@ -1001,18 +971,6 @@ class JavaServerBackend(
      * heap. What fraction of it is safe to hand a JVM is the core's — see
      * `homerun_core::minecraft::jvm::heap_mb`, which carries the reason.
      */
-    /**
-     * The pid of the process the supervisor is running, if it is running one.
-     *
-     * Read from its stats rather than kept here: this host no longer spawns
-     * anything, so it has no pid of its own to remember — which is also what
-     * retired the launcher line that used to announce one.
-     */
-    private fun enginePid(): Long? = runCatching {
-        Json.parseToJsonElement(NativeServer.nativeStats())
-            .jsonObject["pid"]?.jsonPrimitive?.longOrNull
-    }.getOrNull()
-
     private fun deviceTotalMb(): Int? = runCatching {
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val info = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }

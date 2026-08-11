@@ -181,7 +181,9 @@ pub fn apply_lists(settings: &EngineSettings, config: &PumpkinConfig, data: &mut
 
     let bans = data.banned_player_list.get_mut();
     for player in &settings.banned {
-        let Some(uuid) = uuid_of(player) else { continue };
+        let Some(uuid) = uuid_of(player) else {
+            continue;
+        };
         if bans.banned_players.iter().any(|entry| entry.uuid == uuid) {
             continue;
         }
@@ -342,7 +344,10 @@ mod tests {
         apply(&settings(json!({ "MOTD": "hi" })), &mut config);
 
         assert!(!config.basic.allow_nether);
-        assert_eq!(config.advanced.networking.java.compression.info.threshold, 512);
+        assert_eq!(
+            config.advanced.networking.java.compression.info.threshold,
+            512
+        );
     }
 
     /// Pumpkin asserts these, and `validate()` has already run by the time we
@@ -466,7 +471,8 @@ mod tests {
             &mut data,
         );
 
-        let json = serde_json::to_string(&data.banned_player_list.get_mut().banned_players).unwrap();
+        let json =
+            serde_json::to_string(&data.banned_player_list.get_mut().banned_players).unwrap();
         let round_tripped: Vec<BannedPlayerEntry> = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.len(), 1);
     }
@@ -507,10 +513,7 @@ mod tests {
         // server that will not start.
         let reloaded = load_data(&|line| panic!("{line}"));
         assert_eq!(reloaded.operator_config.blocking_read().ops.len(), 1);
-        assert_eq!(
-            reloaded.whitelist_config.blocking_read().whitelist.len(),
-            1
-        );
+        assert_eq!(reloaded.whitelist_config.blocking_read().whitelist.len(), 1);
     }
 
     /// An online-mode name nobody could resolve has no UUID to write, and that

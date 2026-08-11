@@ -25,6 +25,14 @@ struct Inner {
     status: ServerStatus,
     logs: LogBuffer,
     stop: StopSignal,
+    /// What this run has cost, sampled while it runs.
+    ///
+    /// One history per run: a graph covers a session, so a restart starts a
+    /// new one rather than continuing the last. The retention rule, the rate
+    /// arithmetic and the judgement about when a number cannot be trusted are
+    /// all `homerun_core::metrics` — this only takes the readings.
+    metrics: homerun_core::metrics::History,
+
     /// The engine running right now, if one is.
     ///
     /// Per-run rather than per-host because a device may host either kind:
@@ -34,7 +42,9 @@ struct Inner {
 }
 
 pub struct ServerHost {
-    inner: Mutex<Inner>,
+    /// Shared rather than owned so the sampler thread can hold the state for
+    /// as long as a run lasts, without borrowing the host it belongs to.
+    inner: Arc<Mutex<Inner>>,
     /// The engine that is compiled in — Pumpkin, or the stub. Used when a
     /// start names no other, which is every iOS launch.
     linked: Arc<dyn Engine>,
@@ -60,6 +70,21 @@ pub fn host() -> &'static ServerHost {
     })
 }
 
+/// A running sampler, stopped when its run ends.
+struct Sampling {
+    done: Arc<StopSignal>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Sampling {
+    fn stop(mut self) {
+        self.done.request_stop();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -70,12 +95,13 @@ fn now_ms() -> u64 {
 impl ServerHost {
     pub fn new(engine: Box<dyn Engine>) -> Self {
         Self {
-            inner: Mutex::new(Inner {
+            inner: Arc::new(Mutex::new(Inner {
                 status: ServerStatus::idle(),
                 logs: LogBuffer::default(),
                 stop: StopSignal::default(),
+                metrics: homerun_core::metrics::History::new(Default::default()),
                 engine: None,
-            }),
+            })),
             linked: Arc::from(engine),
         }
     }
@@ -159,6 +185,7 @@ impl ServerHost {
             inner.logs.clear();
             inner.stop.reset();
             inner.engine = Some(engine.unwrap_or_else(|| Arc::clone(&self.linked)));
+            inner.metrics = homerun_core::metrics::History::new(Default::default());
         }
 
         crash::set_crash_dir(data_dir);
@@ -228,7 +255,15 @@ impl ServerHost {
             .clone()
             .ok_or_else(|| "no engine for this run".to_string())?;
 
+        // Sampling runs beside the server for as long as it lives. It is here
+        // rather than in a host because the supervisor is the only thing that
+        // knows *which* process to measure — and because three hosts each
+        // keeping their own graph is how they ended up covering three
+        // different spans of time.
+        let sampler = self.start_sampling(Arc::clone(&engine));
+
         let outcome = engine.run(&request, stop, &|line| self.push_log(line), &on_ready);
+        sampler.stop();
 
         let mut inner = self.lock();
         // The run is over; nothing should be able to reach its stdin or ask it
@@ -257,6 +292,67 @@ impl ServerHost {
                 inner.status.transition(ServerState::Crashed)?;
                 Err(detail)
             }
+        }
+    }
+
+    /// The graph of this run, oldest first.
+    pub fn metrics(&self) -> Vec<homerun_core::metrics::Sample> {
+        self.lock().metrics.samples().to_vec()
+    }
+
+    /// Take a reading every so often, for as long as the run lasts.
+    ///
+    /// The interval is the core's and is re-read each pass: it doubles once
+    /// the graph is full, and a sampler still scheduling on the original would
+    /// keep paying to read `/proc` at a resolution the core has stopped
+    /// keeping.
+    fn start_sampling(&self, engine: Arc<dyn Engine>) -> Sampling {
+        let done = Arc::new(StopSignal::default());
+        let finished = Arc::clone(&done);
+        let inner = Arc::clone(&self.inner);
+
+        let handle = thread::spawn(move || loop {
+            if finished.should_stop() {
+                return;
+            }
+
+            let (mem, cpu) = match engine.usage() {
+                Some((mem, cpu)) => (Some(mem), Some(cpu)),
+                // An engine with nothing to report still anchors the clock;
+                // the graph renders "unavailable" rather than a fabricated
+                // zero.
+                None => (None, None),
+            };
+            // Straight from the engine rather than through the host's own
+            // getter, which refuses unless the state is Running — a sample
+            // taken while a world is still generating is worth having.
+            let players = engine.players().map(|(players, _)| players.len() as u32);
+
+            let interval = {
+                let mut inner = inner.lock().unwrap_or_else(|e| e.into_inner());
+                inner.metrics.record(homerun_core::metrics::Reading {
+                    at_ms: now_ms() as i64,
+                    mem_used_kb: mem,
+                    cpu_seconds: cpu,
+                    player_count: players,
+                });
+                inner.metrics.interval_ms()
+            };
+
+            // Slept in slices so a stop is noticed promptly rather than half
+            // an hour later, once the interval has grown.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(interval);
+            while std::time::Instant::now() < deadline {
+                if finished.should_stop() {
+                    return;
+                }
+                thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+
+        Sampling {
+            done,
+            handle: Some(handle),
         }
     }
 
@@ -415,6 +511,20 @@ mod tests {
             slice.lines
         );
 
+        // Sampled while it ran, by the supervisor rather than by a host.
+        let graph = host.metrics();
+        assert!(!graph.is_empty(), "the run was never sampled");
+
+        // The readings themselves come from `/proc`, which exists on the
+        // platform this ships to and not on the one it is usually written on.
+        // Everything above is asserted everywhere; this part is only true
+        // where there is a `/proc` to read, and is covered on device.
+        #[cfg(unix)]
+        assert!(
+            graph.iter().any(|s| s.mem_used_mb.is_some()),
+            "a child process must report memory: {graph:?}"
+        );
+
         host.command("stop").expect("stdin must be reachable");
         host.stop(Duration::from_secs(30)).expect("it must stop");
         runner
@@ -521,7 +631,8 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, Some(settings), None));
+        let handle =
+            thread::spawn(move || runner.start("s1", &run_dir, port, Some(settings), None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
