@@ -14,7 +14,10 @@
 //!    reads as "no local world" on a device that has one.
 //!  - **[`Step::RestoreWorld`] precedes [`Step::WriteSettings`].** Settings
 //!    are written into files inside the server directory; a restore that
-//!    landed afterwards would overwrite them with the snapshot's copies.
+//!    landed afterwards would overwrite them with the snapshot's copies. The
+//!    constraint holds for a host that configures a *linked* engine rather
+//!    than writing files: a restore can bring another device's engine config
+//!    into the directory, and it is loaded after this point.
 //!  - **[`Step::OpenTunnel`] precedes [`Step::AnnounceRunning`].** A server
 //!    accepting connections on loopback is not a server anyone can join.
 //!    Announcing first makes the API mark the service healthy and the UI show
@@ -99,7 +102,12 @@ pub enum Step {
     ResolveMainClass,
     /// Restore the world if another device holds a newer snapshot.
     RestoreWorld,
-    /// Write `server.properties` and friends from the API's settings.
+    /// Apply the API's settings to the server about to start.
+    ///
+    /// Writing `server.properties` and friends for a host that spawns a
+    /// process; configuring the engine in memory for one that links it. Same
+    /// step, because the ordering that makes it correct is the same either
+    /// way — after the world is in place, before the server is constructed.
     WriteSettings,
     /// Wait out a previous engine that has not finished exiting.
     AwaitPreviousExit,

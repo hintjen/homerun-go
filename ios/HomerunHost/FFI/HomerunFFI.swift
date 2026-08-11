@@ -15,46 +15,6 @@ enum HomerunFFI {
 
     // MARK: - Calls
 
-    /// The settings a launch carries: the API's `environment_variables`
-    /// verbatim, the game type that decides whether online mode is even
-    /// possible, and whatever identities the host managed to resolve.
-    ///
-    /// Nothing here is interpreted on this side. Rust decides what each key
-    /// means, so iOS and Android cannot drift on it — which is the whole
-    /// reason the settings cross the boundary raw rather than pre-chewed.
-    struct LaunchSettings {
-        let env: [String: String]
-        /// The API's value **verbatim** — `native-crossplay` is what forces
-        /// offline mode, and a value reduced to java/bedrock cannot say so.
-        let gameType: String
-        /// Name → UUID for the players named in the env. A name missing here
-        /// is one the lookup could not answer, which Rust then derives
-        /// offline or drops; it is never a reason to fail a launch.
-        let resolved: [String: String]
-    }
-
-    /// The wire form of a start request. One builder, used by both the launch
-    /// and the preview, so `ios/coretest` exercises the same encoding the app
-    /// does — a key misspelled here is caught there rather than by a player
-    /// getting a server on defaults.
-    static func startRequest(
-        serverId: String, dataDir: String, port: UInt16, settings: LaunchSettings?
-    ) -> [String: Any] {
-        var request: [String: Any] = [
-            "serverId": serverId,
-            "dataDir": dataDir,
-            "port": Int(port),
-        ]
-        if let settings {
-            request["settings"] = [
-                "env": settings.env,
-                "gameType": settings.gameType,
-                "resolved": settings.resolved.map { ["name": $0.key, "id": $0.value] },
-            ]
-        }
-        return request
-    }
-
     /// Blocks for the server's entire lifetime.
     ///
     /// > Must run on a thread with at least a 16 MB stack. See
@@ -63,10 +23,11 @@ enum HomerunFFI {
     /// `settings` is optional and its absence is not an error — it starts the
     /// server on the engine's own configuration and says so on the console.
     static func serverStart(
-        serverId: String, dataDir: String, port: UInt16, settings: LaunchSettings? = nil
+        serverId: String, dataDir: String, port: UInt16, settings: StartRequest.Settings? = nil
     ) -> Reply {
         withRequest(
-            startRequest(serverId: serverId, dataDir: dataDir, port: port, settings: settings),
+            StartRequest.encode(
+                serverId: serverId, dataDir: dataDir, port: port, settings: settings),
             "The server could not be started."
         ) { homerun_server_start($0) }
     }
@@ -76,10 +37,11 @@ enum HomerunFFI {
     /// Pure — for tests, and for a host that wants to log the effective
     /// settings without waiting for a server to come up.
     static func settingsPreview(
-        serverId: String, dataDir: String, port: UInt16, settings: LaunchSettings?
+        serverId: String, dataDir: String, port: UInt16, settings: StartRequest.Settings?
     ) -> Reply {
         withRequest(
-            startRequest(serverId: serverId, dataDir: dataDir, port: port, settings: settings),
+            StartRequest.encode(
+                serverId: serverId, dataDir: dataDir, port: port, settings: settings),
             "The server settings could not be read."
         ) { homerun_server_settings_preview($0) }
     }

@@ -158,6 +158,15 @@ enum Core {
             .compactMap { ($0 as? [String: Any])?["name"] as? String }
     }
 
+    /// Dash Mojang's 32-character hex id.
+    ///
+    /// The one game-specific call the host still makes, because fetching the
+    /// profile is the host's job and the response shape comes with it. Throws
+    /// if the value is not a 32-character hex id.
+    static func dashUuid(_ undashed: String) throws -> String {
+        try string("minecraft.settings.dashUuid", ["undashed": undashed])
+    }
+
     /// The files to write, given everything the host gathered.
     ///
     /// `existing` is keyed by the paths ``configInputs(env:game:)`` named; a

@@ -97,6 +97,14 @@ extension BridgeRouter {
             }
         }
 
+        // What the player chose in the creation wizard. Absent when the
+        // settings could not be read at all, which starts a server on the
+        // engine's defaults rather than refusing to start one.
+        if let settings {
+            config.settingsEnv = settings.env
+            config.gameType = settings.gameType
+        }
+
         if !token.isEmpty, !apiURL.isEmpty {
             config.resolveTunnel = {
                 // The baseline came with the settings above, so this no longer
