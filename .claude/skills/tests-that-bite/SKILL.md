@@ -1,6 +1,6 @@
 ---
 name: tests-that-bite
-description: Write tests that can actually fail, and prove it by breaking the code on purpose. Use when adding or changing a test, when a bug reached a device despite a green suite, or when deciding whether existing coverage really protects a behaviour you are about to change.
+description: Write tests that can actually fail, and prove it by breaking the code on purpose. Use when adding or changing a test, before changing behaviour that tests are supposed to protect, when moving a responsibility between components, or when a bug was found by using the app while the whole suite stayed green — that last one is usually a test performing the very step it was meant to be testing.
 ---
 
 # Tests that can actually fail
@@ -112,3 +112,16 @@ regression in the same area is equally invisible. Usually one of:
 - an error was swallowed, so the failure never became an observable
 
 Then add the test that would have caught it, and break the fix to prove it does.
+
+---
+
+## Found something this skill got wrong?
+
+Fix it here, in the same commit as the work that revealed it — while you still
+remember what was actually confusing. A trap you fell into, a command that did
+not behave as described, a step that was missing, an instruction that read two
+ways: all of it belongs in this file. The test is whether the next session
+avoids the mistake you just made.
+
+If the gap is big enough to be its own skill, say so and offer to write it —
+do not create one unasked.

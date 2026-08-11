@@ -281,3 +281,16 @@ also wipes its data.
 
 **Blank screen in a WebView app.** Web assets missing from the APK; check the
 project's asset-packaging step and `chrome://inspect` for the real error.
+
+---
+
+## Found something this skill got wrong?
+
+Fix it here, in the same commit as the work that revealed it — while you still
+remember what was actually confusing. A trap you fell into, a command that did
+not behave as described, a step that was missing, an instruction that read two
+ways: all of it belongs in this file. The test is whether the next session
+avoids the mistake you just made.
+
+If the gap is big enough to be its own skill, say so and offer to write it —
+do not create one unasked.

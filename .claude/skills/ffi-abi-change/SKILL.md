@@ -1,6 +1,6 @@
 ---
 name: ffi-abi-change
-description: Add, change, or remove a `homerun_*` C ABI export in homerun-pumpkin-ffi and wire it through to both hosts. Use when a host needs to call something new in Rust, when an existing export's shape changes, or when decoding an ABI mismatch. Not for adding a `core.*` method — that is a dispatch arm, see docs/core-bridge.md.
+description: Add, change, or remove a `homerun_*` C ABI export in homerun-pumpkin-ffi and wire it through to both hosts. Use when a host needs to call something new in Rust, when an export's shape changes, or when diagnosing UnsatisfiedLinkError, "the native core has no method", an ABI mismatch in logcat, a server backend that is silently unavailable while the rest of the app works, or a native change that seems not to have taken effect. Not for adding a `core.*` method — that is a dispatch arm, see docs/core-bridge.md.
 ---
 
 # Changing the C ABI
@@ -135,3 +135,16 @@ line ever will.
 **iOS link error naming your symbol.** Missing from `HomerunFFI.h`.
 
 **Works on the emulator, fails on a phone.** The arm64 `.so` was never rebuilt.
+
+---
+
+## Found something this skill got wrong?
+
+Fix it here, in the same commit as the work that revealed it — while you still
+remember what was actually confusing. A trap you fell into, a command that did
+not behave as described, a step that was missing, an instruction that read two
+ways: all of it belongs in this file. The test is whether the next session
+avoids the mistake you just made.
+
+If the gap is big enough to be its own skill, say so and offer to write it —
+do not create one unasked.
