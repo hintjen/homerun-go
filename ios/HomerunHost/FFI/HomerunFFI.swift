@@ -54,6 +54,29 @@ enum HomerunFFI {
         command.withCString { decode(homerun_server_command($0)) }
     }
 
+    /// A line from Homerun itself into the server's console — a world
+    /// restoring, the tunnel coming up, a launch waiting on its predecessor.
+    ///
+    /// Before this, the host emitted those as `native-server-log` events and
+    /// nowhere else, so a console opened *after* a slow launch showed nothing
+    /// of it. They now go into the same buffer the engine writes to, which is
+    /// also what Android does.
+    ///
+    /// Appends only — ``beginConsole()`` is what clears.
+    @discardableResult
+    static func note(_ line: String) -> Reply {
+        line.withCString { decode(homerun_server_note($0)) }
+    }
+
+    /// A launch is beginning; the previous run's console goes.
+    ///
+    /// Called at the top of a launch rather than left to `serverStart`, which
+    /// happens after the slow part a player most wants explained.
+    @discardableResult
+    static func beginConsole() -> Reply {
+        decode(homerun_server_console_begin())
+    }
+
     static func state() -> ServerState {
         guard let raw = decode(homerun_server_state()).object?["state"] as? String,
             let state = ServerState(rawValue: raw)

@@ -178,6 +178,35 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeLogsSince(
     to_jstring(&env, json)
 }
 
+/// A launch is beginning; the last one's console goes.
+#[no_mangle]
+pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeConsoleBegin(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = unsafe { take_json(crate::homerun_server_console_begin()) };
+    to_jstring(&env, json)
+}
+
+/// A line from Homerun rather than from the server. See
+/// [`crate::homerun_server_note`] — this appends; `nativeConsoleBegin` is what
+/// clears.
+#[no_mangle]
+pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeNote(
+    mut env: JNIEnv,
+    _class: JClass,
+    line: JString,
+) -> jstring {
+    let Some(line) = from_jstring(&mut env, &line) else {
+        return to_jstring(
+            &env,
+            r#"{"ok":false,"error":"line must be a valid string"}"#.to_string(),
+        );
+    };
+    let json = unsafe { take_json(crate::homerun_server_note(line.as_ptr())) };
+    to_jstring(&env, json)
+}
+
 #[no_mangle]
 pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeCommand(
     mut env: JNIEnv,

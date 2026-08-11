@@ -65,6 +65,10 @@ char *homerun_server_stats(void);
 char *homerun_server_players(void);
 char *homerun_server_logs_since(uint64_t cursor);
 char *homerun_server_command(const char *command);
+
+/* The host's own console lines, and the launch boundary. */
+char *homerun_server_note(const char *line);
+char *homerun_server_console_begin(void);
 ```
 
 Fallible calls answer `{"ok":true,…}` or `{"ok":false,"error":"…"}`.
@@ -170,6 +174,41 @@ Bounded at 2000 lines (a few hundred KB). A backgrounded phone may not poll
 for minutes while a busy server emits thousands of lines, so the buffer
 evicts the oldest rather than growing without limit — and reports the gap
 instead of hiding it.
+
+### It holds the host's lines too — `homerun_server_note`
+
+A launch is minutes of work before there is a server to have a console: a jar
+to fetch, a runtime to unpack, a world to restore, a tunnel to bring up. Those
+lines are the only answer to "why did starting take two minutes", and each
+host used to keep a **second buffer** for them because there was nowhere here
+to put them. Android's was a 30-line reimplementation of `log_buffer.rs`; iOS
+had none at all, so it emitted them as events and a console opened after the
+fact showed nothing of the launch.
+
+`homerun_server_note` puts them in the one buffer, in the order they actually
+happened relative to the server's own output.
+
+### What clears it, and why it is not `start`
+
+`homerun_server_console_begin`. A host calls it once, when it decides to
+launch — *before* the slow part it is about to narrate. `homerun_server_start`
+is far too late: by then the interesting lines are already written, and
+clearing there deleted exactly what this exists to keep.
+
+Two rules follow, and both were learned by getting them wrong:
+
+- **A note never clears.** Inferring "a new launch has begun" from the first
+  note looks tidy and is wrong: the on-stop backup writes `[Backup] …` lines
+  for minutes *after* a run has ended, so the first of those wiped the console
+  of the run the player had just watched stop.
+- **`start` still clears a console holding a finished run.** The safety net for
+  a host that never calls `console_begin` — it then behaves exactly as it did
+  before any of this existed. The cost of forgetting is losing that launch's
+  own notes, never showing the previous run's.
+
+**One buffer means one emitter.** A host that both emits a note itself and
+re-emits it from the pump reading the same buffer sends every line twice. The
+pump is the one that turns a console line into an event; `note` only writes.
 
 ## Crash handling
 

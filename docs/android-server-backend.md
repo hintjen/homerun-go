@@ -588,6 +588,32 @@ distinguishes worlds by process CWD, so a second concurrent run would quietly
 share the first one's world. Attempting it raises `AnotherServerRunning`,
 whose message is written for players because they are the ones who see it.
 
+### The console is the supervisor's, including Homerun's own lines
+
+`JavaServerBackend` used to keep a ring buffer of its own — a reimplementation
+of `log_buffer.rs` — for one reason: Homerun writes lines *before* there is a
+run to have a console. The jar, the runtime, the world coming back from a
+backup, the tunnel. It now writes those through `nativeNote`, so there is one
+buffer and one ordering.
+
+Three things about this that are easy to get wrong, all of which were:
+
+- **The pump is the only emitter.** `note` writes and does not emit. Doing
+  both sends every line twice — visibly, as a doubled
+  `[Homerun] Connecting to the Homerun gateway…`.
+- **The pump starts at `announceStarting`, not at the spawn.** It is what turns
+  console lines into events, and the minutes before the spawn are exactly the
+  ones worth watching. Starting it later delivered them in one burst at the end
+  of the wait.
+- **It stops after the on-stop backup, not at the exit.** A backup writes
+  `[Backup] …` for minutes after the JVM is gone. The paths that end a launch
+  without ever spawning stop it themselves, because no exit will arrive to do
+  it for them.
+
+`reset()` calls `nativeConsoleBegin`, which is what empties the previous run's
+console. Not the first note — see [`ffi.md`](./ffi.md#what-clears-it-and-why-it-is-not-start)
+for why that distinction is load-bearing.
+
 ## What the metrics actually measure
 
 Both backends now read counters and let `homerun_core::metrics` decide what

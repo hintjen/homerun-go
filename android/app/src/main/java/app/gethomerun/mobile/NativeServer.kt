@@ -25,7 +25,7 @@ object NativeServer {
      *
      * So `scripts/check-abi.js` compares the two at build time, and `npm test`
      * runs it. Forgetting is now loud and free.     */
-    private const val EXPECTED_ABI = 5
+    private const val EXPECTED_ABI = 6
 
     /**
      * The engine overflows a default thread stack and takes the process down
@@ -113,6 +113,26 @@ object NativeServer {
 
     external fun nativeLogsSince(cursor: Long): String
     external fun nativeCommand(command: String): String
+
+    /**
+     * A line from Homerun rather than from the server — a jar downloading, a
+     * world restoring, the tunnel coming up.
+     *
+     * Goes into the same console the server writes to, which is why a host
+     * does not need a buffer of its own for the minutes before a run exists.
+     * Appends only; [nativeConsoleBegin] is what clears.
+     */
+    external fun nativeNote(line: String): String
+
+    /**
+     * A launch is beginning: the previous run's console goes.
+     *
+     * Deliberately not folded into [nativeNote]. The on-stop backup writes
+     * notes for minutes *after* a run has ended, and treating the first of
+     * those as a new launch wipes the console of the run the player has just
+     * watched stop.
+     */
+    external fun nativeConsoleBegin(): String
 
     private const val TAG = "HomerunNative"
 }

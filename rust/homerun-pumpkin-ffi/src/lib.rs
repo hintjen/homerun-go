@@ -129,10 +129,15 @@ use serde_json::json;
 /// 5 added `homerun_server_metrics`, and with it the supervisor sampling its
 /// own run — hosts stopped keeping a graph each.
 ///
+/// 6 added `homerun_server_note` and `homerun_server_console_begin`, so a host
+/// writes its own launch narrative into the one console instead of keeping a
+/// second buffer for it. Additive: a host that calls neither gets exactly what
+/// 5 gave it, because `start` still clears a console holding a finished run.
+///
 /// Hosts *report* this at startup; Android also compares it
 /// (`NativeServer.EXPECTED_ABI`), which is the check that catches a `.a` or
 /// `.so` that links but decodes garbage.
-pub const FFI_ABI_VERSION: u32 = 5;
+pub const FFI_ABI_VERSION: u32 = 6;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -451,6 +456,49 @@ pub extern "C" fn homerun_server_logs_since(cursor: u64) -> *mut c_char {
             "dropped": slice.dropped,
         })
         .to_string()
+    })
+}
+
+/// Write a line from Homerun itself into the console.
+///
+/// For what a host does *around* a run — downloading a jar, restoring a world,
+/// bringing the tunnel up — most of which happens before there is a run at
+/// all. Those lines are the only explanation a slow launch ever gets, so they
+/// belong in the console the UI pages through rather than only in an event a
+/// screen that was not open never saw.
+///
+/// Appends only. What empties the console is
+/// [`homerun_server_console_begin`], because a note is not evidence of a new
+/// launch — the on-stop backup writes several after a run has ended.
+///
+/// # Safety
+/// `line` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn homerun_server_note(line: *const c_char) -> *mut c_char {
+    let line = borrow(line).map(str::to_owned);
+    guarded(move || match line {
+        None => err("line must be a valid UTF-8 string"),
+        Some(line) => {
+            server::host().push_note(line);
+            json!({ "ok": true }).to_string()
+        }
+    })
+}
+
+/// A launch is beginning: clear the console of whatever the last one left.
+///
+/// Call this once, at the moment the host decides to launch — before the jar,
+/// the world and the settings, all of which write into the console through
+/// [`homerun_server_note`]. `homerun_server_start` is far too late to be the
+/// thing that clears, because by then the interesting part has already been
+/// written.
+///
+/// Forgetting is safe: `start` still clears a console holding a finished run.
+#[no_mangle]
+pub extern "C" fn homerun_server_console_begin() -> *mut c_char {
+    guarded(|| {
+        server::host().begin_launch();
+        json!({ "ok": true }).to_string()
     })
 }
 

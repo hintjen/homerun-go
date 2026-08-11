@@ -109,4 +109,16 @@ char *homerun_server_players(void);
 char *homerun_server_logs_since(uint64_t cursor);
 char *homerun_server_command(const char *command);
 
+/* A line from Homerun itself — a jar downloading, a world restoring, the
+ * tunnel coming up — into the same console the server writes to. Most of
+ * these happen before there is a run at all, and they are the only account a
+ * slow launch ever gets. Appends only. */
+char *homerun_server_note(const char *line);
+
+/* A launch is beginning: clear whatever the last one left. Call once, at the
+ * moment the host decides to launch — before the world and the settings, all
+ * of which write through homerun_server_note. Forgetting is safe:
+ * homerun_server_start still clears a console holding a finished run. */
+char *homerun_server_console_begin(void);
+
 #endif /* HOMERUN_FFI_H */

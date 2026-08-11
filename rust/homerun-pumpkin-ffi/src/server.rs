@@ -24,6 +24,15 @@ pub const DEFAULT_JAVA_PORT: u16 = 25565;
 struct Inner {
     status: ServerStatus,
     logs: LogBuffer,
+    /// The console holds a run that has already finished.
+    ///
+    /// Only consulted by `start`, and only as a safety net: a host that
+    /// announced its launch through [`ServerHost::begin_launch`] has already
+    /// cleared the console and written into it, and `start` must leave that
+    /// alone. A launch is minutes of jar downloads and world restores before
+    /// there is a process, and that is exactly the part a player wants
+    /// explained when a start is slow.
+    console_holds_finished_run: bool,
     stop: StopSignal,
     /// What this run has cost, sampled while it runs.
     ///
@@ -98,6 +107,7 @@ impl ServerHost {
             inner: Arc::new(Mutex::new(Inner {
                 status: ServerStatus::idle(),
                 logs: LogBuffer::default(),
+                console_holds_finished_run: false,
                 stop: StopSignal::default(),
                 metrics: homerun_core::metrics::History::new(Default::default()),
                 engine: None,
@@ -115,6 +125,42 @@ impl ServerHost {
 
     pub fn push_log(&self, line: impl Into<String>) {
         self.lock().logs.push(line);
+    }
+
+    /// A line from Homerun rather than from the server.
+    ///
+    /// Jar downloads, runtime unpacking, world restores, the tunnel — the
+    /// things a host does *around* a run, most of them before there is a run
+    /// at all. They belong in the console because they are the only account of
+    /// why a launch took two minutes, and a console opened after the fact
+    /// should still show it.
+    ///
+    /// Appends, and never clears. A note is not evidence that a new launch has
+    /// begun — the on-stop backup writes several *after* a run has ended, and
+    /// treating the first of those as a new launch wiped the console of the
+    /// run the player had just watched stop. [`begin_launch`] is the boundary.
+    ///
+    /// [`begin_launch`]: ServerHost::begin_launch
+    pub fn push_note(&self, line: impl Into<String>) {
+        self.lock().logs.push(line);
+    }
+
+    /// A launch is beginning: everything the console holds belongs to the last
+    /// one and goes now.
+    ///
+    /// The host announces this because only the host knows it. A launch starts
+    /// minutes before `start` is called — a jar to fetch, a world to restore —
+    /// and those minutes are exactly what the console should be showing, so
+    /// `start` is far too late to be the thing that empties it.
+    ///
+    /// Forgetting to call this is safe: `start` still clears a console holding
+    /// a finished run, which is the behaviour every host had before this
+    /// existed. The cost of forgetting is losing that launch's own notes, not
+    /// showing the previous run's.
+    pub fn begin_launch(&self) {
+        let mut inner = self.lock();
+        inner.logs.clear();
+        inner.console_holds_finished_run = false;
     }
 
     pub fn logs_since(&self, cursor: u64) -> LogSlice {
@@ -181,8 +227,15 @@ impl ServerHost {
             }
             inner.status.server_id = Some(server_id.to_string());
             inner.status.transition(ServerState::Starting)?;
-            // A new run must not replay the previous one's console.
-            inner.logs.clear();
+            // A new run must not replay the previous one's console. The safety
+            // net rather than the rule: a host that announced its launch has
+            // already cleared this and written its narrative into it, and
+            // wiping that here would throw away the only record of what those
+            // minutes were spent on. `begin_launch` holds the other half.
+            if inner.console_holds_finished_run {
+                inner.logs.clear();
+                inner.console_holds_finished_run = false;
+            }
             inner.stop.reset();
             inner.engine = Some(engine.unwrap_or_else(|| Arc::clone(&self.linked)));
             inner.metrics = homerun_core::metrics::History::new(Default::default());
@@ -269,6 +322,11 @@ impl ServerHost {
         // The run is over; nothing should be able to reach its stdin or ask it
         // who is playing.
         inner.engine = None;
+        // What is in the console now belongs to a run that has ended. It stays
+        // readable — the crash reason below is written *into* it, and a player
+        // looking at why their server stopped is the whole point — until the
+        // next launch speaks or starts, whichever comes first.
+        inner.console_holds_finished_run = true;
         match outcome {
             RunOutcome::Stopped => {
                 // The engine may have returned on its own, without a stop
@@ -809,6 +867,97 @@ mod tests {
             .filter(|l| l.contains("starting"))
             .count();
         assert_eq!(starts, 1, "console should be cleared between runs");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reason `start` no longer clears unconditionally.
+    ///
+    /// A launch is minutes of downloading a jar and restoring a world before
+    /// there is a process to have a console. Those lines are the only account
+    /// of where the time went, and clearing at `start` deleted them at exactly
+    /// the moment they became worth reading.
+    #[test]
+    fn a_launch_keeps_the_notes_it_wrote_before_starting() {
+        let _guard = crash::test_guard();
+        let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
+        let dir = temp_dir();
+        let port = free_port();
+
+        host.begin_launch();
+        host.push_note("[Homerun] Downloading the server jar…");
+        host.push_note("[Homerun] Restoring the world from a backup…");
+
+        let runner = host.clone();
+        let run_dir = dir.clone();
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.state() != ServerState::Running {
+            assert!(std::time::Instant::now() < deadline, "never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+        host.stop(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap().unwrap();
+
+        let lines = host.logs_since(0).lines;
+        assert!(
+            lines.iter().any(|l| l.contains("Downloading the server jar")),
+            "the launch narrative was wiped by start: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Restoring the world")),
+            "the launch narrative was wiped by start: {lines:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half: keeping notes through `start` must not resurrect the
+    /// *previous* run. Announcing the launch is what empties the console.
+    #[test]
+    fn announcing_a_launch_clears_the_last_run() {
+        let _guard = crash::test_guard();
+        let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
+        let dir = temp_dir();
+        let port = free_port();
+
+        let runner = host.clone();
+        let run_dir = dir.clone();
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while host.state() != ServerState::Running {
+            assert!(std::time::Instant::now() < deadline, "never started");
+            thread::sleep(Duration::from_millis(10));
+        }
+        host.stop(Duration::from_secs(5)).unwrap();
+        handle.join().unwrap().unwrap();
+
+        // Still readable while nothing else is happening: this is what a
+        // player reads to find out why their server stopped.
+        assert!(!host.logs_since(0).lines.is_empty(), "a finished run's console must survive it");
+
+        // The on-stop backup runs for minutes after the JVM is gone and writes
+        // as it goes. Those lines belong to the run that just ended, so they
+        // must **append**. Treating the first of them as a new launch wiped
+        // the console of the run the player had just watched stop.
+        host.push_note("[Backup] Backing up the world…");
+        let during_backup = host.logs_since(0).lines;
+        assert!(
+            during_backup.iter().any(|l| l.contains("stopping, saving world")),
+            "the on-stop backup wiped the run it belongs to: {during_backup:?}"
+        );
+
+        host.begin_launch();
+        host.push_note("[Homerun] Downloading the server jar…");
+
+        let lines = host.logs_since(0).lines;
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("starting")).count(),
+            0,
+            "the new launch is replaying the last run's console: {lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("Downloading the server jar")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

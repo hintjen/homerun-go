@@ -71,8 +71,28 @@ final class PumpkinBackend: ServerBackend {
     private func backupLog(serverId: String) -> (String) -> Void {
         { [weak self] line in
             HostLog.host.info("\(line, privacy: .public)")
-            self?.onLog?(serverId, line)
+            self?.note(serverId, line)
         }
+    }
+
+    /// A line from Homerun rather than from the engine.
+    ///
+    /// Emitted for whoever is watching *and* written into the engine's console
+    /// buffer, so a player who opens the console after a slow launch still sees
+    /// what those minutes were — a world restoring, a gateway being waited on.
+    /// Emitting alone left no trace for a screen that was not open yet, which
+    /// is what this fixes.
+    ///
+    /// The first note of a launch also clears the previous run's console. That
+    /// rule is the core's, so nothing here has to sequence it.
+    private func note(_ serverId: String, _ line: String) {
+        HomerunFFI.note(line)
+        // Only while nothing else will. Once the pump is up it re-emits
+        // everything it finds in that buffer, including this line — emitting
+        // here as well is how the tunnel's two lines came out twice on
+        // Android. Before the spawn there is no pump, and this is the only
+        // thing that will carry a line to a console the player is watching.
+        if logTimer == nil { onLog?(serverId, line) }
     }
 
     // MARK: - Lifecycle
@@ -115,6 +135,10 @@ final class PumpkinBackend: ServerBackend {
         runFailure = nil
         threadFinished = false
         logCursor = 0
+        // This launch's console starts here, not at `serverStart`. Everything
+        // between the two — a world restoring, a gateway being waited on —
+        // is written into it through `note`.
+        HomerunFFI.beginConsole()
         // A graph covers one session. This also drops the rate anchor, which
         // is what stops the first point of this run being measured against the
         // last run's CPU counter — a fabricated spike the old `CPUSampler`,
@@ -231,7 +255,7 @@ final class PumpkinBackend: ServerBackend {
     /// mobile launch writes the server directory before it spawns anything.
     private func awaitPreviousExit(serverId: String) async throws {
         guard lifecycle.awaitPreviousExit(serverId) else { return }
-        onLog?(serverId, "[Homerun] Waiting for the previous server to finish saving…")
+        note(serverId, "[Homerun] Waiting for the previous server to finish saving…")
         while lifecycle.awaitPreviousExit(serverId) {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
@@ -315,7 +339,7 @@ final class PumpkinBackend: ServerBackend {
         let resolved = await MojangDirectory.identities(for: names)
 
         for name in names where resolved[name] == nil {
-            onLog?(serverId, "[Homerun] Could not look up \"\(name)\" — skipping.")
+            note(serverId, "[Homerun] Could not look up \"\(name)\" — skipping.")
         }
 
         return StartRequest.Settings(
@@ -355,7 +379,7 @@ final class PumpkinBackend: ServerBackend {
         self.tunnelTask = nil
 
         HostLog.tunnel.info("awaiting credentials")
-        onLog?(serverId, "[Homerun] Connecting to the Homerun gateway...")
+        note(serverId, "[Homerun] Connecting to the Homerun gateway...")
 
         guard let link = await tunnelTask.value else {
             try failTunnel(
@@ -379,13 +403,13 @@ final class PumpkinBackend: ServerBackend {
         }
 
         HostLog.tunnel.info("interface up")
-        onLog?(serverId, "[Homerun] Connected to the Homerun gateway.")
+        note(serverId, "[Homerun] Connected to the Homerun gateway.")
     }
 
     /// Report, stop, and throw — so `native-server-start` answers with the
     /// reason rather than reporting a server nobody can reach.
     private func failTunnel(serverId: String, kind: NetworkErrorKind, message: String) throws {
-        onLog?(serverId, "[Homerun] \(message) Stopping server.")
+        note(serverId, "[Homerun] \(message) Stopping server.")
         Task { await stopForNetworkError(serverId: serverId, kind: kind) }
         throw ServerBackendError.engine(message)
     }

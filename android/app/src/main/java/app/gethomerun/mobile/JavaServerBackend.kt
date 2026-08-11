@@ -123,10 +123,6 @@ class JavaServerBackend(
      */
     private var lastAnnounced: ServerState = ServerState.STOPPED
 
-    /** Console ring buffer. The bridge hands out slices by cursor. */
-    private val lines = ArrayDeque<String>()
-    private var firstLineIndex = 0
-
     /** Last roster size announced, so the pump only reports actual changes. */
     private var lastPlayerCount = -1
 
@@ -228,6 +224,12 @@ class JavaServerBackend(
         order.at("announceStarting")
         transition(serverId, ServerState.STARTING)
         reset()
+        // Before the slow work, not after it. Everything below writes into the
+        // supervisor's console — a jar being adopted, a world coming back —
+        // and the pump is what turns those into events. Starting it at the
+        // spawn, as it used to be, would mean the minutes before that arrived
+        // in one burst at the end of the wait rather than as they happened.
+        startLogPump(serverId)
 
         // Started now and awaited after the JVM is up. The gateway provisions
         // the peer asynchronously and the poll runs up to a minute, so doing
@@ -289,6 +291,9 @@ class JavaServerBackend(
                 )
             Launch(javaHome, libjvm, jar, mainClass)
         }.getOrElse { err ->
+            // Nothing was spawned, so no exit will arrive to tidy up after
+            // this one.
+            stopLogPump()
             transition(serverId, ServerState.STOPPED)
             throw err as? ServerBackendException ?: ServerBackendException.Engine(
                 err.message ?: "The server could not be prepared."
@@ -405,7 +410,6 @@ class JavaServerBackend(
 
         currentServerId = serverId
         currentPort = port
-        startLogPump(serverId)
 
         // From here the supervisor in `homerun-pumpkin-ffi` owns the process:
         // it spawns it, reads its console, climbs the stop ladder and reports
@@ -613,6 +617,8 @@ class JavaServerBackend(
         Log.i(TAG, "$serverId: launch abandoned — a stop arrived while it was preparing")
         tunnelJob?.cancel()
         tunnelJob = null
+        // Reached before anything was spawned, so nothing else will stop it.
+        stopLogPump()
         transition(serverId, ServerState.STOPPED)
         return true
     }
@@ -731,6 +737,10 @@ class JavaServerBackend(
      */
     private fun startLogPump(serverId: String) {
         pumpJob?.cancel()
+        // The cursor is deliberately *not* reset. Sequence numbers are
+        // monotonic across the buffer being cleared, so carrying it over is
+        // what stops a new launch replaying the last run's console — and it
+        // still picks up everything this launch has written.
         pumpJob = scope.launch(Dispatchers.IO) {
             while (true) {
                 drainConsole(serverId)
@@ -740,6 +750,12 @@ class JavaServerBackend(
         }
     }
 
+    /** Nothing more will be written for this run, so stop paging it. */
+    private fun stopLogPump() {
+        pumpJob?.cancel()
+        pumpJob = null
+    }
+
     private fun drainConsole(serverId: String) {
         val slice = runCatching { parseLogs(NativeServer.nativeLogsSince(engineCursor)) }
             .getOrNull() ?: return
@@ -747,7 +763,6 @@ class JavaServerBackend(
         for (raw in slice.first) {
             val line = raw.trim()
             if (line.isEmpty()) continue
-            record(line)
             onLog?.invoke(serverId, line)
         }
     }
@@ -781,9 +796,11 @@ class JavaServerBackend(
      */
     private suspend fun serverExited(serverId: String, result: String) {
         // The last of the console, including whatever it said on the way down.
+        // The pump keeps running past this: an on-stop backup writes `[Backup]`
+        // lines for minutes after the JVM is gone, and they are console lines
+        // like any other. It is stopped below, once there is genuinely nothing
+        // left to write.
         drainConsole(serverId)
-        pumpJob?.cancel()
-        pumpJob = null
 
         val ok = runCatching {
             Json.parseToJsonElement(result).jsonObject["ok"]?.jsonPrimitive?.boolean
@@ -838,46 +855,76 @@ class JavaServerBackend(
                         if (it is CancellationException) throw it
                         Log.w(TAG, "on-stop backup failed for $serverId: ${it.message}")
                     }
+                    // The backup's own last line, then the pump's work is done.
+                    // Cancellation skips this deliberately: the only thing that
+                    // cancels a backup is a relaunch, and that starts its own.
+                    drainConsole(serverId)
+                    stopLogPump()
                 }
                 backupJobs[serverId] = job
                 job.invokeOnCompletion { backupJobs.remove(serverId, job) }
+            } else {
+                stopLogPump()
             }
         }
     }
 
     /**
      * A line from Homerun rather than from the server — jar downloads, runtime
-     * unpacking. Recorded as well as emitted so a console that mounts after
-     * the fact still shows how the launch went; the log pump does not exist
-     * yet when these are written.
+     * unpacking, the world coming back from a backup.
+     *
+     * Into the supervisor's console, which is the same one the server writes
+     * to, so a console opened after a slow launch still shows where the time
+     * went. This host kept its own buffer for exactly this until the core
+     * grew somewhere to put them; the emit is still here because the UI wants
+     * the line now, not on its next poll.
+     *
+     * The **first** note of a launch is also what clears the previous run's
+     * console. That rule lives in the core, so nothing here has to sequence
+     * it — see `homerun_server_note`.
      */
     private fun note(serverId: String, line: String) {
         Log.i(TAG, line)
-        record(line)
-        onLog?.invoke(serverId, line)
+        // Written, not emitted. The pump is the only thing that turns a
+        // console line into an event now — emitting here as well is how the
+        // tunnel's two lines came out twice, once from this call and once
+        // from the pump reading the very same buffer a moment later.
+        //
+        // Loud on failure: this is the only copy of the launch narrative, so a
+        // note that never lands leaves a console that silently begins at the
+        // spawn, which reads as a launch that took no time rather than as a
+        // broken one.
+        runCatching { NativeServer.nativeNote(line) }
+            .onFailure { Log.w(TAG, "note did not reach the console: ${it.message}", it) }
     }
 
-    @Synchronized
-    private fun record(line: String) {
-        lines.addLast(line)
-        while (lines.size > MAX_BUFFERED_LINES) {
-            lines.removeFirst()
-            firstLineIndex++
-        }
-    }
-
-    @Synchronized
+    /**
+     * The console, paged by cursor — the supervisor's, not a copy of it.
+     *
+     * Same buffer the pump drains and the same one Homerun's own notes go
+     * into, so the launch narrative and the server's output are one sequence
+     * in the order they actually happened.
+     */
     override fun logs(serverId: String, cursor: Int): LogSlice {
         if (currentServerId != serverId) return LogSlice(emptyList(), cursor)
-        val from = (cursor - firstLineIndex).coerceIn(0, lines.size)
-        return LogSlice(lines.drop(from), firstLineIndex + lines.size)
+        val obj = runCatching { Json.parseToJsonElement(NativeServer.nativeLogsSince(cursor.toLong())).jsonObject }
+            .getOrNull() ?: return LogSlice(emptyList(), cursor)
+        val lines = obj["lines"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+        val next = obj["cursor"]?.jsonPrimitive?.longOrNull ?: cursor.toLong()
+        return LogSlice(lines, next.toInt())
     }
 
-    @Synchronized
+    /**
+     * A launch is beginning.
+     *
+     * The console this launch will write into is emptied here, at the top,
+     * rather than by `start` — everything between the two is the part a player
+     * most wants explained when a start is slow.
+     */
     private fun reset() {
-        lines.clear()
-        firstLineIndex = 0
         lastPlayerCount = -1
+        runCatching { NativeServer.nativeConsoleBegin() }
+            .onFailure { Log.w(TAG, "the console was not cleared for this launch: ${it.message}") }
     }
 
     override suspend fun command(serverId: String, command: String) {
@@ -1041,8 +1088,6 @@ class JavaServerBackend(
          * the heap ceiling and every refusal this file used to word for itself.
          */
         const val POLL_MS = 250L
-
-        const val MAX_BUFFERED_LINES = 2000
 
         /** The two `native-server-network-error` kinds the contract defines. */
         const val PROVISIONING = "provisioning"
