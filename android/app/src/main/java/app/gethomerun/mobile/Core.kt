@@ -14,6 +14,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 /**
@@ -650,6 +651,105 @@ object Core {
         return Report(
             body = reply["body"]!!.jsonObject,
             releasesLease = reply["releasesLease"]?.jsonPrimitive?.boolean == true,
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // What a run is costing
+    // -----------------------------------------------------------------------
+
+    /**
+     * One run's performance graph, kept by `homerun-core::metrics`.
+     *
+     * The host reads **counters** — resident KiB, cumulative CPU seconds — and
+     * offers them here. It never computes a percentage: that is a difference
+     * between two moments, and it is where wrong graphs come from. The core
+     * decides what a reading means, whether it is due, and how much history to
+     * keep, so a phone's graph of a server covers the same span as the
+     * desktop's graph of the same server.
+     *
+     * One instance per **run**. A graph covers a session; a restart starts a
+     * new one, so [reset] is called from `start`, not from a constructor.
+     *
+     * State is opaque and lives here, exactly as [Lifecycle]'s does.
+     * Synchronised because the sampler runs on its own coroutine while the
+     * bridge reads the graph from another.
+     */
+    class Metrics {
+        private var state: JsonObject? = null
+
+        /** Start a fresh session. Everything sampled so far is dropped. */
+        @Synchronized
+        fun reset() {
+            state = null
+        }
+
+        /**
+         * Offer a reading. Returns true when it became a point on the graph.
+         *
+         * Offering more often than [intervalMs] is fine and cheap — the extra
+         * readings still anchor the next rate, so a one-second pump feeding a
+         * thirty-second graph measures over the last second rather than over
+         * the whole interval.
+         */
+        @Synchronized
+        fun record(
+            atMs: Long,
+            memUsedKb: Long?,
+            cpuSeconds: Double?,
+            playerCount: Int?,
+        ): Boolean {
+            val reply = call("metrics.record", buildJsonObject {
+                state?.let { put("history", it) }
+                put("reading", buildJsonObject {
+                    put("atMs", atMs)
+                    memUsedKb?.let { put("memUsedKb", it) }
+                    cpuSeconds?.let { put("cpuSeconds", it) }
+                    playerCount?.let { put("playerCount", it) }
+                })
+            }).jsonObject
+            state = reply["history"]!!.jsonObject
+            return reply["appended"]?.jsonPrimitive?.boolean == true
+        }
+
+        /**
+         * How long to wait before offering the next reading.
+         *
+         * **Re-read this every time.** It doubles when the buffer fills, and a
+         * sampler still scheduling on the original keeps paying to read
+         * `/proc` at a resolution the core has stopped keeping.
+         */
+        @Synchronized
+        fun intervalMs(): Long =
+            query()["intervalMs"]?.jsonPrimitive?.longOrNull ?: 30_000L
+
+        /** The graph, oldest first. */
+        @Synchronized
+        fun samples(): List<Sample> =
+            (query()["samples"] as? JsonArray).orEmpty().map { entry ->
+                val obj = entry.jsonObject
+                fun number(key: String) = obj[key]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+                Sample(
+                    t = obj["t"]?.jsonPrimitive?.longOrNull ?: 0L,
+                    memUsedMb = number("memUsedMb")?.toInt(),
+                    // Not rounded here: an idle server is a fraction of a
+                    // percent, and the graph is the only thing entitled to
+                    // decide how to show that.
+                    cpuPercent = number("cpuPercent"),
+                    playerCount = number("playerCount")?.toInt(),
+                )
+            }
+
+        private fun query(): JsonObject = call("metrics.query", buildJsonObject {
+            state?.let { put("history", it) }
+        }).jsonObject
+
+        /** One point on a graph. Nulls render as "unavailable", not as zero. */
+        data class Sample(
+            val t: Long,
+            val memUsedMb: Int?,
+            val cpuPercent: Double?,
+            val playerCount: Int?,
         )
     }
 

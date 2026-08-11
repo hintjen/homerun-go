@@ -57,6 +57,21 @@ fn main() -> ExitCode {
     let jvm_options: Vec<String> = argv[3..split].to_vec();
     let program_args: Vec<String> = argv.get(split + 1..).unwrap_or(&[]).to_vec();
 
+    // Announced before the VM exists, so the host has it from the first line
+    // of the console.
+    //
+    // The host samples `/proc/<pid>` to graph what a server is costing, and it
+    // cannot learn this pid any other way: `java.lang.Process.pid()` does not
+    // resolve against the Android SDK, and the private field behind it is on
+    // the non-SDK interface list. We own this process, so it says who it is —
+    // which is simpler than either, and cannot be taken away by a platform
+    // release.
+    //
+    // On stdout rather than in a pid file: stdout is already the console the
+    // host reads, so this needs no path, no cleanup, and has no way to go
+    // stale. `[launcher]` marks it as ours, like the error path below.
+    println!("[launcher] pid={}", std::process::id());
+
     match run(&libjvm, &main_class, &jvm_options, &program_args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {

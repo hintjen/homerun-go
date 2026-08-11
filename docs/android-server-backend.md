@@ -267,17 +267,25 @@ desktop's `verifyExistingJar` does. The difference is that the marker lets the
 common case skip hashing entirely, where the desktop pays for it every launch.
 
 **3. Another server on this device has it.** `files/jars/<digest>.jar`, a
-sibling of `servers/`, content-addressed by `jar::cache_key` so two servers on
-one Minecraft version name one file. Before this existed, four servers on
-Minecraft 26.2 meant four copies of one 58 MB jar — 232 MB on the device that
-can least afford it — and creating a fifth downloaded it again.
+sibling of `servers/`, content-addressed by `jar::cache_key` so every server
+asking for one Minecraft version names one entry. Before this existed, a fifth
+server on Minecraft 26.2 downloaded 58 MB that four other servers already had.
 
-Servers get a **hard link** into that entry, not a copy, which is what actually
-collapses the four into one. Nothing writes a server jar in place — a download
-lands in `.part` and is renamed over the top, which replaces the link rather
-than writing through it — so servers cannot corrupt each other through the
-shared inode. A filesystem that will not link falls back to copying: that costs
-the space this exists to save, but it keeps working.
+**This saves downloads, not disk.** A server takes its own *copy* out of the
+cache, so the jar is still duplicated per server, and the cache itself is one
+more copy on top. That is deliberate, for two independent reasons:
+
+- Android refuses `link(2)` in app-private storage. `ln` there fails with
+  `Permission denied`, so the hard link that would have collapsed those copies
+  into one file is simply not available.
+- Backups cover the **whole server directory** — `engine.backup(repo, dir, dir,
+  …)`, not just `world/`. A symlink, which Android *does* allow, would restore
+  on another device pointing at a path that does not exist there.
+
+The duplication buys the thing that actually costs a player something: minutes
+and mobile data. It also means a world restored from another device arrives
+with its jar, and the digest check in step 2 adopts it instead of fetching it
+again.
 
 A cache hit is **verified, not trusted**. The entry is hashed and put through
 the same `cache_decision`, because a corrupt entry would be handed to every
@@ -290,8 +298,9 @@ writes outside the directory.
 
 **Eviction is by reference.** An entry no server's marker names is dropped —
 after a download, and when a server is deleted, which is the moment that
-actually orphans one. Deleting an entry can never cost a server its jar: the
-server's own link (or copy) keeps the data alive. That is why an unreadable
+actually orphans one. Deleting an entry can never cost a server its jar,
+precisely because it is a copy — the server's own is untouched. That is why an
+unreadable
 marker is allowed to prune rather than having to abort the sweep, and why
 `.part` files are skipped — one of those is a download someone may still be
 resuming, and by definition no marker names it.
@@ -560,10 +569,42 @@ whose message is written for players because they are the ones who see it.
 Be careful reading these — the in-process design makes some of them
 approximations, and the UI presents them as facts.
 
+### The JVM backend — real numbers, from `/proc`
+
+The server is a child process, so it can be measured properly. The Insights
+panel was empty before this existed: `memoryUsage` returned a null `usedKb`,
+`cpuUsage` returned null, and `perfHistory` was not overridden at all.
+
+| Channel | Source |
+|---|---|
+| `native-server-get-mem-usage` | `VmRSS` from `/proc/<pid>/status`, against the heap ceiling the JVM was given |
+| `native-server-get-cpu-usage` | the rate of the last two samples, worked out by the core |
+| `native-server-get-perf-history` | `homerun_core::metrics`, sampled every 30 s |
+
+**The host reads counters, never percentages.** `ProcMetrics` hands over
+resident KiB and cumulative CPU seconds; `metrics::History` decides what they
+mean, whether a reading is due, and how much history to keep — see
+[`shared-core.md`](./shared-core.md). A percentage is a difference between two
+moments, and computing it per platform is how three hosts ended up with three
+different graphs.
+
+Two things worth knowing:
+
+- **`cpuPercent` is fractional.** An idle Minecraft server sits under one
+  percent, and an `Int` drew a flat zero line for a server measurably using
+  0.6 % of a core.
+- **The pid comes from the launcher, not from `Process`.**
+  `java.lang.Process.pid()` does not resolve against the Android SDK, and the
+  private field behind it is on the non-SDK interface list. So
+  `homerun-java-launcher` prints `[launcher] pid=<n>` as its first console
+  line, before the VM exists, and the backend reads it from there.
+
+### The Pumpkin backend — approximations
+
 | Channel | Source | Caveat |
 |---|---|---|
 | `native-server-get-mem-usage` | `Debug.getNativeHeapAllocatedSize()` | Process-wide native heap, not the server alone. The engine is Rust, so JVM heap would be the wrong number entirely. |
-| `native-server-get-cpu-usage` | not reported | Returns null. Per-process CPU needs sampling `/proc/self/stat` over an interval; a wrong number becomes a wrong graph, and null renders as "unavailable", which is true. |
+| `native-server-get-cpu-usage` | not reported | Returns null. The engine runs *in this process*, so `/proc/self` would measure the app and the WebView too; null renders as "unavailable", which is true. |
 | `native-server-get-uptime` | engine `startedAtMs` | Real. |
 | `native-server-get-ops` | empty | The engine does not expose an op list yet. |
 
@@ -574,9 +615,13 @@ across updates. **Not `cacheDir`**: the system may delete that under storage
 pressure, and it would take the player's world with it.
 
 The server jar lives in that directory too, one copy per server, which is what
-the desktop does. On a phone that is worth revisiting — two servers on the same
-version is ~110 MB of identical bytes — but one-server-at-a-time makes it rare
-enough not to have earned a shared cache yet.
+the desktop does and what backups require — they cover the whole server
+directory, so a jar shared by reference would restore on another device
+pointing at nothing.
+
+`filesDir/jars/` is a sibling holding one copy of each jar any server has
+fetched, keyed by digest. It saves the **download**, not the disk: see
+[Never downloading a jar this device already has](#never-downloading-a-jar-this-device-already-has).
 
 ## Current engine
 

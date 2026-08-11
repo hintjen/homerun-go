@@ -215,7 +215,12 @@ data class LogSlice(val lines: List<String>, val cursor: Int)
 data class PerfSample(
     val t: Long,
     val memUsedMb: Int?,
-    val cpuPercent: Int?,
+    /**
+     * Fractional on purpose. An idle Minecraft server sits well under one
+     * percent, and truncating that to an `Int` drew a flat zero line for a
+     * server that was demonstrably working — 0.6 % measured, 0 % shown.
+     */
+    val cpuPercent: Double?,
     val playerCount: Int?,
 )
 

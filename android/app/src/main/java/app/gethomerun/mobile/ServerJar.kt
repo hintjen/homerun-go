@@ -23,7 +23,6 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.nio.file.Files
 import java.security.MessageDigest
 
 /**
@@ -55,6 +54,20 @@ import java.security.MessageDigest
  * file's — [Core.jarCacheDecision], which reaches the same answer the
  * desktop's `verifyExistingJar` does. This host adds the marker file that lets
  * the common case skip hashing entirely.
+ *
+ * # The shared cache saves downloads, not disk
+ *
+ * `files/jars/<digest>.jar` holds one copy of every jar any server has
+ * fetched, and a server that wants one **copies it out**. Every server still
+ * has its own jar, and that is on purpose twice over: Android refuses
+ * `link(2)` in app-private storage outright, and the backup covers the whole
+ * server directory, so a link would restore on another device pointing at a
+ * path that does not exist there.
+ *
+ * The duplication is the price of a saved download, which is the part that
+ * costs a player minutes and mobile data. It also means a world restored from
+ * another device arrives *with* its jar, and the digest check below adopts it
+ * rather than fetching it again.
  */
 object ServerJar {
 
@@ -184,6 +197,8 @@ object ServerJar {
         runCatching { Core.checkJava(artifact.toJson(), bundledJava) }
             .onFailure { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
 
+        val entry = Core.jarCacheKey(artifact.toJson())?.let { File(cacheDir, it) }
+
         // Whether the jar already here can be kept is the core's call, and it
         // answers in two steps: the marker beside the jar usually settles it,
         // and when it cannot the core asks for a digest rather than assuming
@@ -192,6 +207,7 @@ object ServerJar {
         when (cached(dir, jar, onDisk, artifact).action) {
             "use" -> {
                 Log.i(TAG, "${artifact.loader} ${artifact.version} already downloaded")
+                share(entry, jar)
                 return@withContext jar
             }
 
@@ -201,6 +217,7 @@ object ServerJar {
                 Log.i(TAG, "${artifact.loader} ${artifact.version} is already on disk — adopting it")
                 onLog("[Homerun] ${label(artifact)} is already downloaded.")
                 writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
+                share(entry, jar)
                 return@withContext jar
             }
         }
@@ -209,7 +226,6 @@ object ServerJar {
         // server that has ever downloaded this jar left it in the shared cache,
         // named after its digest. Four servers on one Minecraft version was
         // four copies of one 58 MB file before this existed.
-        val entry = Core.jarCacheKey(artifact.toJson())?.let { File(cacheDir, it) }
         if (entry != null && entry.isFile && adoptFromCache(entry, jar, artifact)) {
             Log.i(TAG, "${artifact.loader} ${artifact.version} came from the shared cache")
             onLog("[Homerun] ${label(artifact)} is already downloaded.")
@@ -248,7 +264,7 @@ object ServerJar {
             }
         }
 
-        if (entry != null) link(entry, jar)
+        if (entry != null) copyIn(entry, jar)
 
         writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
         onLog("[Homerun] ${label(artifact)} ready.")
@@ -495,42 +511,60 @@ object ServerJar {
             return false
         }
 
-        return runCatching { link(entry, jar) }.isSuccess
+        return runCatching { copyIn(entry, jar) }.isSuccess
     }
 
     /**
-     * Give [jar] the cache entry's contents without a second copy of them.
+     * Offer a jar this server already has to every other server on the device.
      *
-     * A hard link, so four servers on one Minecraft version cost one 58 MB
-     * file rather than four. Nothing writes a server jar in place — a download
-     * lands in `.part` and is renamed over the top, which replaces the link
-     * rather than writing through it — so the servers cannot corrupt each
-     * other through this.
+     * Without this the cache only ever fills from a *download*, so a device
+     * whose servers each downloaded their own would never start sharing. This
+     * costs one extra copy now to save a whole download later, which is the
+     * right way round on a phone: storage is cheap next to a 58 MB pull over
+     * mobile data, and the copy is reclaimed as soon as no server names it.
      *
-     * Copying is the fallback for a filesystem that will not link. It costs
-     * the space this exists to save but keeps the app working.
+     * Silent on failure. It is an optimisation for some future launch; the one
+     * in hand already has its jar and there is nothing to tell the player.
      */
-    private fun link(entry: File, jar: File) {
-        if (jar.exists()) jar.delete()
-        try {
-            Files.createLink(jar.toPath(), entry.toPath())
-        } catch (err: Exception) {
-            Log.w(TAG, "could not link the cached jar (${err.message}) — copying it")
-            entry.copyTo(jar, overwrite = true)
+    private fun share(entry: File?, jar: File) {
+        if (entry == null || entry.exists() || !jar.isFile) return
+        runCatching {
+            entry.parentFile?.mkdirs()
+            jar.copyTo(entry, overwrite = true)
+            Log.i(TAG, "seeded the shared cache with ${entry.name}")
+        }.onFailure {
+            runCatching { entry.delete() } // never leave a half-written entry
+            Log.d(TAG, "could not seed the shared cache: ${it.message}")
         }
+    }
+
+    /**
+     * Give this server its own copy of a jar the cache already holds.
+     *
+     * A copy, not a link. Android refuses `link(2)` in app-private storage
+     * outright — `ln` there fails with `Permission denied` — and a symlink
+     * would be worse than useless: the backup covers the whole server
+     * directory, so a link would restore on another device pointing at a path
+     * that does not exist there.
+     *
+     * So the jar is duplicated per server, deliberately. What this cache saves
+     * is the **download**, which is the part that costs a player time and data
+     * — not the disk.
+     */
+    private fun copyIn(entry: File, jar: File) {
+        entry.copyTo(jar, overwrite = true)
     }
 
     /**
      * Drop cache entries no server is using.
      *
-     * Referenced-ness comes from each server's own marker, not from a link
-     * count, because the copy fallback above leaves no link to count.
+     * Referenced-ness comes from each server's own marker. There is no link
+     * count to consult — everything here is a copy.
      *
-     * **Deleting here cannot cost a server its jar.** With a hard link the
-     * server's own directory entry keeps the data alive; with a copy it has
-     * its own. The worst a mistake here can do is make one future launch
-     * download again, which is why an unreadable marker is allowed to prune
-     * rather than having to abort the sweep.
+     * **Deleting here cannot cost a server its jar**, precisely because it is
+     * a copy: the server's own is untouched. The worst a mistake here can do
+     * is make one future launch download again, which is why an unreadable
+     * marker is allowed to prune rather than having to abort the sweep.
      *
      * Partials are left alone: a `.part` is a download someone may still be
      * resuming, and it has no marker naming it by definition.

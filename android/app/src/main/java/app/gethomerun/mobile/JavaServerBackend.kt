@@ -45,6 +45,23 @@ class JavaServerBackend(
     private var process: Process? = null
     private var pumpJob: Job? = null
 
+    /**
+     * This run's performance graph, and the coroutine feeding it. The graph
+     * belongs to `homerun-core`; this backend only reads `/proc`.
+     */
+    private val metrics = Core.Metrics()
+    private var perfJob: Job? = null
+
+    /**
+     * The JVM's pid, as the launcher announced it on its first console line.
+     *
+     * Read from the console rather than from [Process], whose `pid()` does not
+     * resolve against the Android SDK — see the note in the launcher's
+     * `main.rs`. Null until that line arrives, and again once the run ends.
+     */
+    @Volatile
+    private var serverPid: Long? = null
+
     private val wireProxy = WireProxy(context, scope)
     private val backups = BackupManager(context)
 
@@ -386,6 +403,7 @@ class JavaServerBackend(
         // that outlives a stop-then-restart is recognised as the old one's.
         lifecycle.spawned(serverId)
         startLogPump(serverId, started)
+        startPerfSampler(serverId, started)
 
         // "Done" is the JVM telling us it is accepting connections. Waiting
         // for the process to merely exist would report a server that cannot
@@ -670,6 +688,42 @@ class JavaServerBackend(
     // Console
     // -----------------------------------------------------------------------
 
+    /**
+     * Feed the core a reading every so often, for as long as the JVM lives.
+     *
+     * The interval is the core's and is **re-read every pass**: it doubles
+     * once the graph is full, so a sampler that scheduled itself once would
+     * keep paying to read `/proc` at a resolution the core has stopped
+     * keeping. The first reading is taken immediately, so a server that is
+     * stopped after a minute still has a graph.
+     *
+     * Nothing here decides anything. It reads counters and hands them over —
+     * see [ProcMetrics] for why they are counters and not percentages.
+     */
+    private fun startPerfSampler(serverId: String, running: Process) {
+        perfJob?.cancel()
+        metrics.reset()
+        perfJob = scope.launch(Dispatchers.IO) {
+            while (running.isAlive) {
+                // Null until the launcher's first console line has been read,
+                // which is a moment or two. A reading with nothing in it is
+                // still worth offering: it anchors the clock, and the graph
+                // renders "unavailable" rather than a fabricated zero.
+                val pid = serverPid
+                metrics.record(
+                    atMs = System.currentTimeMillis(),
+                    memUsedKb = pid?.let { ProcMetrics.residentKb(it) },
+                    cpuSeconds = pid?.let { ProcMetrics.cpuSeconds(it) },
+                    // Best-effort, like everything else on this graph: the
+                    // roster is built from console lines and is empty before
+                    // the server has printed any.
+                    playerCount = players(serverId)?.players?.size,
+                )
+                delay(metrics.intervalMs())
+            }
+        }
+    }
+
     private fun startLogPump(serverId: String, running: Process) {
         pumpJob?.cancel()
         pumpJob = scope.launch(Dispatchers.IO) {
@@ -722,7 +776,16 @@ class JavaServerBackend(
                 if (outcome == "crashed") ServerState.CRASHED else ServerState.STOPPED,
                 backupInProgress = backup != null,
             )
+            // The sampler notices a dead process only when it next wakes, and
+            // by then its interval may be half an hour. The samples stay in
+            // the core's history until the next launch resets it; nothing
+            // reads them once `currentServerId` is cleared below, which
+            // matches the UI — Insights only fetches while a server runs.
+            perfJob?.cancel()
+            perfJob = null
+
             process = null
+            serverPid = null
             currentServerId = null
             startedAt = null
             currentPort = null
@@ -754,6 +817,13 @@ class JavaServerBackend(
      * which is why the roster is best-effort and never blocks anything.
      */
     private fun interpret(serverId: String, line: String) {
+        // The launcher naming itself, before the VM has printed anything. Only
+        // taken once per run: the server's own output could contain this
+        // string, and the first one is the only one that came from us.
+        if (serverPid == null) {
+            LAUNCHER_PID.find(line)?.let { serverPid = it.groupValues[1].toLongOrNull() }
+        }
+
         // What a console line means is decided in `homerun-core::console`,
         // which knows the things a regex here kept having to relearn — that a
         // loader may add its own prefix, and that anyone can type "Notch
@@ -842,16 +912,35 @@ class JavaServerBackend(
         if (currentServerId == serverId) startedAt else null
 
     /**
-     * The heap we told the JVM to take, not what it is using. Reading a child
-     * process's RSS needs `/proc/<pid>/statm`, and the pid is not exposed
-     * below API 26 in a form worth the branch — this is honest and stable.
+     * What the JVM is actually resident in, against the ceiling it was given.
+     *
+     * Read live rather than from the graph, because this answers a number the
+     * Insights panel shows *now* and a caller may well ask between samples.
      */
     override fun memoryUsage(serverId: String): MemoryUsage? {
         if (currentServerId != serverId) return null
-        return MemoryUsage(usedKb = null, maxMb = lastHeapMb)
+        val pid = serverPid?.takeIf { process?.isAlive == true }
+        val usedKb = pid?.let { ProcMetrics.residentKb(it) }?.toInt()
+        return MemoryUsage(usedKb = usedKb, maxMb = lastHeapMb)
     }
 
-    override fun cpuUsage(serverId: String): Double? = null
+    /**
+     * The most recent rate the core worked out, which is the same number the
+     * graph's last point shows.
+     *
+     * Deliberately not measured on demand: a rate needs two readings separated
+     * by enough time to mean something, and taking the second one here would
+     * either block the caller or divide by an interval too short to trust.
+     * Null until the sampler has two readings, which renders as "unavailable".
+     */
+    override fun cpuUsage(serverId: String): Double? {
+        if (currentServerId != serverId) return null
+        return metrics.samples().lastOrNull()?.cpuPercent
+    }
+
+    override fun perfHistory(serverId: String): List<PerfSample> =
+        if (currentServerId != serverId) emptyList()
+        else metrics.samples().map { PerfSample(it.t, it.memUsedMb, it.cpuPercent, it.playerCount) }
 
     override fun port(serverId: String): Int? =
         if (currentServerId == serverId) currentPort else null
@@ -920,5 +1009,8 @@ class JavaServerBackend(
         const val HANDSHAKE = "handshake"
 
         val MAX_PLAYERS = Regex("""max(?:-players|Players)[=: ]+(\d+)""", RegexOption.IGNORE_CASE)
+
+        /** `homerun-java-launcher` naming itself, ahead of the VM's own output. */
+        val LAUNCHER_PID = Regex("""^\[launcher] pid=(\d+)$""")
     }
 }
