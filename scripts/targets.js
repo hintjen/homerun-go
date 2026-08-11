@@ -21,12 +21,21 @@ const LAUNCHER_CRATE = path.join(ROOT, "rust", "homerun-java-launcher");
  *   cargo — plain `cargo build --target <triple>`
  *   ndk   — `cargo ndk -t <abi> build`, which supplies the NDK toolchain
  *   host  — the machine's own target, for tests
+ *
+ * `features` is the cargo feature list, per target rather than per script,
+ * because the two platforms no longer want the same one. `backup-engine`
+ * links a restic-compatible library and costs ~5.6 MB; iOS needs it because
+ * it cannot spawn a process, and Android must not have it because it ships
+ * the restic binary instead. `--stub` overrides all of this with nothing,
+ * which is how you check the FFI surface for a target in seconds.
  */
 const TARGETS = {
   ios: {
     label: "iOS device",
     kind: "cargo",
     triple: "aarch64-apple-ios",
+    deploymentTarget: "16.0",
+    features: ["pumpkin-engine", "backup-engine"],
     artifact: `lib${CRATE_NAME}.a`,
     outDir: path.join(ROOT, "ios", "HomerunHost", "lib"),
     requiresMacOS: true,
@@ -35,6 +44,8 @@ const TARGETS = {
     label: "iOS simulator (Apple silicon)",
     kind: "cargo",
     triple: "aarch64-apple-ios-sim",
+    deploymentTarget: "16.0",
+    features: ["pumpkin-engine", "backup-engine"],
     artifact: `lib${CRATE_NAME}.a`,
     outDir: path.join(ROOT, "ios", "HomerunHost", "lib", "sim"),
     requiresMacOS: true,
@@ -45,6 +56,7 @@ const TARGETS = {
     triple: "aarch64-linux-android",
     abi: "arm64-v8a",
     artifact: `lib${CRATE_NAME}.so`,
+    features: ["pumpkin-engine"],
     // jniLibs is the only place Android will exec/load from on API 29+.
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "arm64-v8a"
@@ -56,6 +68,7 @@ const TARGETS = {
     triple: "x86_64-linux-android",
     abi: "x86_64",
     artifact: `lib${CRATE_NAME}.so`,
+    features: ["pumpkin-engine"],
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
     ),

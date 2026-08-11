@@ -33,9 +33,11 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `crash.rs` | Panic hook, crash reports, last-panic capture. |
 | `core_dispatch.rs` | `homerun-core`'s shared decisions, with no platform in it. |
 | `core_bridge.rs` | The JNI adapter around `core_dispatch` (Android only). |
+| `backup_job.rs` | Progress, cancellation and the one-at-a-time guard for a backup. Built everywhere. |
+| `backup_engine.rs` | The linked backup engine. iOS only, behind `backup-engine`. |
 
-Everything except `Engine::run` is platform-independent and unit-tested on
-any machine — 50 tests, no device and no Pumpkin required.
+Everything except `Engine::run` and `backup_engine` is platform-independent
+and unit-tested on any machine — 62 tests, no device and no Pumpkin required.
 
 `core_dispatch` is deliberately built on every target, not just the two mobile
 ones, which is what lets its dispatch tests run under plain `cargo test`.
@@ -267,6 +269,80 @@ Android loads the `.so`, and `rlib` keeps the test build fast.
 Release uses `opt-level = "z"` + LTO + strip: a debug build of the server is
 around 1.8 GB, which is impractical to ship or even copy to a device.
 
+## Backups — `backup_job.rs`, `backup_engine.rs`
+
+Android spawns the restic binary. iOS cannot spawn anything, so it links
+`rustic_core` instead, behind the **`backup-engine`** feature. Same repository
+format either way, which is the entire point: a world backed up from a phone
+has to be restorable from the desktop.
+
+The feature is set per target in `scripts/targets.js`. Android must not enable
+it — it would add ~5.6 MB for a job it already does better.
+
+### The surface
+
+Five calls, deliberately *not* methods on `homerun_core_call`:
+
+| Call | Blocks? | Notes |
+|---|---|---|
+| `homerun_backup_available` | no | 0 without the feature |
+| `homerun_backup_latest_snapshot` | seconds | networked; never on a UI thread |
+| `homerun_backup_run` | **minutes** | ≥8 MB stack, one at a time |
+| `homerun_backup_progress_since` | no | cursor poll, main-thread safe |
+| `homerun_backup_cancel` | no | cooperative, coarse |
+
+`core_dispatch` is one table compiled for both platforms and every method in it
+is instantaneous and pure — hosts call it from the main thread without
+thinking, because that has always been safe. A method there that opened TLS and
+blocked for four minutes would eventually be called the same way. A separate
+symbol with a loud doc comment is the only guard available.
+
+A build without the feature still exports all five; they answer "this copy of
+Homerun cannot back up worlds". Without that stub, host and Android builds
+would fail to link against a header that declares them.
+
+### Two things a linked engine does differently
+
+**There is no exit code.** The host passes no `exitCode` to `backup.classify`,
+so restic's exit-3 "completed with warnings" is unreachable and
+`Failure::succeeded()` can never be true. A snapshot came back or it did not.
+Warnings ride in the reply so the host can say something useful — not so it can
+call a failure a success.
+
+**rustic does no repository locking.** It neither writes a lock nor notices one
+a desktop restic client left. The backup lease, which the API owns and
+`backup::lease_decision` interprets, is the only thing keeping two devices out
+of one repository.
+
+There is a third, subtler one. `backup::classify` reads the failure *text*, and
+rustic's wording shares nothing with restic's — a refused connection surfaces
+as `error sending request … client error (Connect)`, which matched none of the
+transient patterns and so reported a dropped wifi connection as a permanently
+broken backup. `is_transient` now carries both dialects, with a test pinning
+each.
+
+### Cancellation is cooperative, and coarse
+
+rustic exposes no cancellation hook, and unwinding out of a progress callback
+would panic through its worker pool. So `homerun_backup_cancel` sets a flag
+checked at phase boundaries: a cancel during the open or index phases lands
+quickly, one during a transfer lands when the transfer ends.
+
+That is enough for what it is for. iOS gives a backgrounded app about five
+seconds' warning, and the useful thing to do with them is report the backup
+failed so the lease closes — not to stop the work.
+
+### Progress
+
+Same shape as the console: the engine writes into a `LogBuffer` and the host
+reads by cursor. Only a `ProgressType::Bytes` progress moves the counters —
+rustic runs several at once, and letting all of them write makes the percentage
+jump between unrelated denominators. `total` of 0 means "not known yet".
+
+A `log::Log` sink is installed alongside, because rustic reports a skipped or
+unreadable entry through `log::warn!` and returns a complete snapshot anyway.
+Without it a linked engine has *no* message to classify.
+
 ## Status
 
 Implemented and tested: state machine, console buffer, pre-flight, crash
@@ -277,5 +353,12 @@ and the stdout/stderr redirection. Both compile against the pinned fork; what
 has not happened is a server actually booting a world and a player joining it.
 Treat the run sequence above as the design until that has been done.
 
-The 36 tests all run against `StubEngine`. Nothing in this crate has been run
-on a device.
+The 62 tests all run against `StubEngine`.
+
+The backup engine **has** been run, on an iOS simulator: `ios/coretest/`
+compiled for `arm64-apple-ios-sim` and spawned with `simctl` does a real
+backup, lists the snapshot, restores it and compares the bytes — 55 checks,
+including that the snapshot's hostname is the device id, which is what the API
+resolves `pushed_by` from. What has not been done is any of it on a **device**,
+against a real `rest:` repository, or against a world large enough to test what
+`to_indexed()` costs in memory. That last one is the risk worth watching.

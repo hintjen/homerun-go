@@ -85,7 +85,9 @@ enum HomerunFFI {
         var error: String? { object?["error"] as? String }
     }
 
-    private static func decode(_ raw: UnsafeMutablePointer<CChar>?) -> Reply {
+    /// Internal rather than private because `BackupFFI` decodes the same way:
+    /// the free-on-every-path rule is the thing worth having in one place.
+    static func decode(_ raw: UnsafeMutablePointer<CChar>?) -> Reply {
         // A null return means the allocation failed, which is the one case
         // there is nothing to free.
         guard let raw else { return Reply(object: nil) }

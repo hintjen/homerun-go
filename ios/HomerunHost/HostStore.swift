@@ -17,6 +17,42 @@ enum HostStore {
         static let installed = "homerun.firstRunComplete"
         static let registeredDeviceId = "homerun.registeredDeviceId"
         static let deviceGroupId = "homerun.deviceGroupId"
+        static let pendingBackupReports = "homerun.pendingBackupReports"
+    }
+
+    // MARK: - The backup-state outbox
+
+    /// Backup reports that have not reached the API yet, keyed by server id.
+    ///
+    /// # Why this is on disk and not in a Task
+    ///
+    /// Reporting `backup-state` is what **closes the backup lease**, and the
+    /// lease has no timeout. A report that never lands leaves every other
+    /// device locked out of that world until this one launches again and acks
+    /// `running`. The escape hatch is a force-launch, which shows the user a
+    /// data-loss warning for what is usually just a phone that got closed.
+    ///
+    /// A fire-and-forget request racing app suspension is exactly the case
+    /// that loses one. So the body is written here *before* the POST is tried
+    /// and cleared when it succeeds; anything left is retried at launch.
+    ///
+    /// Only ever one entry per server, and a later report supersedes an
+    /// earlier one — the lease does not care which outcome closes it.
+    static var pendingBackupReports: [String: [String: Any]] {
+        get { defaults.dictionary(forKey: Key.pendingBackupReports) as? [String: [String: Any]] ?? [:] }
+        set { defaults.set(newValue, forKey: Key.pendingBackupReports) }
+    }
+
+    static func rememberBackupReport(serverId: String, body: [String: Any]) {
+        var pending = pendingBackupReports
+        pending[serverId] = body
+        pendingBackupReports = pending
+    }
+
+    static func forgetBackupReport(serverId: String) {
+        var pending = pendingBackupReports
+        pending.removeValue(forKey: serverId)
+        pendingBackupReports = pending
     }
 
     /// The device id the *backend* issued, from `/api/init/native/`.

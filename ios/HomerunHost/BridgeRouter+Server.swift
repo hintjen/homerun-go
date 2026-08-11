@@ -23,15 +23,25 @@ extension BridgeRouter {
 
         if backend.runningServerIds.contains(serverId) {
             // Not an error the player needs to see — the server they asked for
-            // is already up, which is the outcome they wanted.
+            // is already up (or on its way), which is the outcome they wanted.
             return ["success": true, "alreadyRunning": true]
         }
 
-        // From here until this call returns, the host is bringing this server
-        // up and has to say so when asked for its active ids — see
-        // `BridgeRouter.inFlight` for what it costs when it doesn't.
-        beginTransition(serverId)
-        defer { endTransition(serverId) }
+        // Claimed here, synchronously, before the first `await`. From this
+        // point `native-server-active-ids` reports the server as coming up,
+        // which the contract requires "from the moment the call arrives" — and
+        // everything below this line, the settings fetch especially, is a
+        // network round trip during which this host has committed to a launch.
+        // Released on every path that does not reach `start`; a no-op once it
+        // has.
+        //
+        // The claim rather than `beginTransition`, because it does one thing
+        // more: the `runningServerIds` check above sees it, so a second start
+        // arriving during the fetch is answered `alreadyRunning` instead of
+        // racing this one into the engine. The stop side has no such guard and
+        // uses `beginTransition`.
+        backend.claimStart(serverId: serverId)
+        defer { backend.releaseStart(serverId: serverId) }
 
         let raw = payload["config"] as? [String: Any] ?? [:]
         var config = ServerConfig(
@@ -45,12 +55,41 @@ extension BridgeRouter {
         // business there.
         let token = payload["userToken"] as? String ?? TokenStore.accessToken ?? ""
         let apiURL = HostStore.apiURL ?? ""
+
+        // Fetched once, on the critical path, because two things need it before
+        // the engine starts: the backup lease gate, and the tunnel baseline. It
+        // costs a round trip that this host did not previously pay — the same
+        // one Android has always paid.
+        let settings = token.isEmpty || apiURL.isEmpty
+            ? nil
+            : await HomerunAPI.serverSettings(apiURL: apiURL, serverId: serverId, token: token)
+
+        // A launch is refused only when another device is *actively* backing
+        // this world up. No settings, no backup block and no device id all mean
+        // "host without backups" — never "refuse to host".
+        if let settings, let deviceId = HostStore.registeredDeviceId {
+            let force = payload["force"] as? Bool ?? false
+            if let reason = backups.leaseBlockedReason(
+                settings: settings, deviceId: deviceId, force: force)
+            {
+                // Emitted as well as returned: the contract declares this event
+                // for hosts that advertise `backups`, and the error return is
+                // what the calling promise actually sees.
+                events?.emit("native-server-backup-lease-blocked", [["serverId": serverId]])
+                return ["success": false, "error": reason]
+            }
+            if settings.backup != nil {
+                config.backupContext = BackupContext(settings: settings, deviceId: deviceId)
+            }
+        }
+
         if !token.isEmpty, !apiURL.isEmpty {
             config.resolveTunnel = {
-                let baseline = await HomerunAPI.tunnelBaseline(
-                    apiURL: apiURL, serverId: serverId, token: token)
-                return await HomerunAPI.awaitTunnel(
-                    apiURL: apiURL, serverId: serverId, token: token, stale: baseline)
+                // The baseline came with the settings above, so this no longer
+                // re-fetches the same endpoint a second time per launch.
+                await HomerunAPI.awaitTunnel(
+                    apiURL: apiURL, serverId: serverId, token: token,
+                    stale: settings?.tunnelBefore)
             }
         }
 

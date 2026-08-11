@@ -48,8 +48,11 @@ final class BridgeRouter {
     let deepLinks: DeepLinkManager
     let backend: PumpkinBackend
     let deviceRegistrar = DeviceRegistrar()
+    /// Only the lease gate is reached from here; the restore and the on-stop
+    /// backup belong to the backend, which is where a run's start and end are.
+    let backups = BackupManager()
 
-    /// Servers with a start or a stop call in flight.
+    /// Servers with a stop call in flight.
     ///
     /// `native-server-active-ids` answers "is this server this device's right
     /// now", not "is it running". The UI's reconcile loop compares that list
@@ -60,6 +63,12 @@ final class BridgeRouter {
     /// Android fell into both — a launch long enough to restore a world, and
     /// the whole of a graceful shutdown (the dashboard PATCHes `stopped` only
     /// after the stop call returns).
+    ///
+    /// Only the second end is answered here. The launch window is held by
+    /// `PumpkinBackend.claimStart`, one layer down, because a claim that the
+    /// `runningServerIds` check can see also collapses a concurrent second
+    /// start into `alreadyRunning`. A stop has nothing to collapse, so this
+    /// stays.
     ///
     /// A count, not a set: concurrent calls for one id are normal — the
     /// reconcile loop issues its own start and is told `alreadyRunning` — and

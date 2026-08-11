@@ -1063,7 +1063,7 @@
         "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": false,
-        "backups": false,
+        "backups": true,
         "deviceWebsocket": true
       },
       "required": [
@@ -1097,6 +1097,7 @@
         "logout",
         "measure-region-latency",
         "native-server-active-ids",
+        "native-server-backup-lease-blocked",
         "native-server-delete",
         "native-server-error-report",
         "native-server-get-cpu-usage",

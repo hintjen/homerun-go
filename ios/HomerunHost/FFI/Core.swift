@@ -86,6 +86,13 @@ enum Core {
         return value
     }
 
+    private static func bool(_ method: String, _ args: [String: Any]) throws -> Bool {
+        guard let value = try call(method, args) as? Bool else {
+            throw CoreError(message: "\(method) did not return a yes or no.")
+        }
+        return value
+    }
+
     // MARK: - Config, through the game capability surface
 
     /// How a config file must be read and written.
@@ -270,5 +277,163 @@ enum Core {
             joined: reply["joined"] as? String,
             left: reply["left"] as? String
         )
+    }
+
+    // MARK: - Backups
+    //
+    // Decisions only. Nothing here opens a repository or moves a byte — that is
+    // the engine's job, and keeping the two apart is what lets a host that
+    // spawns a binary and a host that links a library reach the same answers.
+
+    /// What to do with the local world before launching.
+    enum Restore {
+        /// The dashboard pinned a snapshot. Unconditional, and one-shot.
+        case rollback(snapshotId: String)
+        /// Pull the newest snapshot over the local world. `reason` is
+        /// `anotherDeviceIsNewer` or `localWorldMissing`, and the two are
+        /// worded differently to the player.
+        case latest(snapshotId: String, reason: String)
+        /// Keep what is on disk.
+        case skip(reason: String)
+    }
+
+    static func restoreDecision(
+        pinned: String?,
+        latest: [String: Any]?,
+        deviceId: String,
+        hasLocalWorld: Bool
+    ) throws -> Restore {
+        var args: [String: Any] = ["deviceId": deviceId, "hasLocalWorld": hasLocalWorld]
+        if let pinned { args["pinned"] = pinned }
+        // Omitted rather than sent as null: absent is how the core reads "no
+        // snapshot to compare against", which is a normal first launch.
+        if let latest { args["latest"] = latest }
+
+        let reply = try object("backup.restoreDecision", args)
+        // Variant names are camelCase; the fields inside them are not — the
+        // core tags variants with `action` and leaves `snapshot_id` snake.
+        let snapshotId = reply["snapshot_id"] as? String
+        let reason = reply["reason"] as? String ?? ""
+
+        switch reply["action"] as? String {
+        case "rollback":
+            guard let snapshotId else {
+                throw CoreError(message: "The backup to roll back to was not named.")
+            }
+            return .rollback(snapshotId: snapshotId)
+        case "restoreLatest":
+            guard let snapshotId else {
+                throw CoreError(message: "The backup to restore was not named.")
+            }
+            return .latest(snapshotId: snapshotId, reason: reason)
+        default:
+            return .skip(reason: reason)
+        }
+    }
+
+    /// Whether the backup lease permits a launch.
+    enum Lease {
+        case launch
+        case blocked(device: String)
+        case forced(takenFrom: String)
+    }
+
+    static func leaseDecision(leaseDevice: String?, deviceId: String, force: Bool) throws -> Lease {
+        var args: [String: Any] = ["deviceId": deviceId, "force": force]
+        if let leaseDevice { args["leaseDevice"] = leaseDevice }
+
+        let reply = try object("backup.leaseDecision", args)
+        switch reply["action"] as? String {
+        case "blocked":
+            return .blocked(device: reply["device"] as? String ?? "")
+        case "forced":
+            return .forced(takenFrom: reply["taken_from"] as? String ?? "")
+        default:
+            return .launch
+        }
+    }
+
+    /// The no-world guard: refuses to push an empty snapshot over a good one.
+    static func shouldBackUp(hasLocalWorld: Bool) throws -> Bool {
+        try bool("backup.shouldBackUp", ["hasLocalWorld": hasLocalWorld])
+    }
+
+    /// What an engine failure means.
+    struct Failure {
+        /// `authRace`, `staleLocalLock`, `lockedByOther`, `completedWithWarnings`,
+        /// `transient` or `fatal`.
+        let kind: String
+        let retryable: Bool
+        /// True when the snapshot exists despite the failure.
+        let succeeded: Bool
+    }
+
+    /// Normalise an engine failure.
+    ///
+    /// > **Only ever call this on a failure.** The core reads an empty message
+    /// > with no exit code as `fatal`, so classifying a success reports one.
+    /// > A snapshot came back or it did not; that is the success test.
+    ///
+    /// The core's `classify` also takes an exit code, and this deliberately
+    /// does not offer one. A linked engine has no exit code to report, and the
+    /// one value that would matter — restic's exit 3, "completed with
+    /// warnings" — is reachable *only* from a real code. Synthesising one here
+    /// would move the meaning of "3" out of the core and into this host, which
+    /// is the drift the core exists to prevent. If a linked engine needs to say
+    /// "written, but something was skipped", that belongs in `backup.rs`.
+    static func classifyBackupFailure(message: String, host: String) throws -> Failure {
+        let reply = try object("backup.classify", ["message": message, "host": host])
+        return Failure(
+            kind: (reply["failure"] as? [String: Any])?["kind"] as? String ?? "fatal",
+            retryable: reply["retryable"] as? Bool ?? false,
+            succeeded: reply["succeeded"] as? Bool ?? false
+        )
+    }
+
+    /// The directory name a snapshot recorded a path under, if it has one.
+    static func recordedBasename(_ path: String) throws -> String? {
+        try call("backup.recordedBasename", ["path": path]) as? String
+    }
+
+    /// A recorded path in the form an engine selector wants.
+    ///
+    /// Folds `C:\Users\me\srv` to `/C/Users/me/srv`. The drive colon
+    /// disappearing is the point: a `SNAP:PATH` selector splits on the first
+    /// colon, so a Windows-written path that skipped this selects nothing —
+    /// silently, without erroring.
+    static func internalPath(_ path: String) throws -> String {
+        try string("backup.internalPath", ["path": path])
+    }
+
+    /// The `POST /backup-state/` body, and whether sending it closes the lease.
+    struct Report {
+        let body: [String: Any]
+        let releasesLease: Bool
+    }
+
+    /// Build a backup-state report.
+    ///
+    /// Passing `error` makes it a failure; omitting it makes it a success. Both
+    /// release the lease for a backup, which is why a failed backup must still
+    /// be reported — the lease has no timeout, and a device that claims it and
+    /// stays quiet locks every other device out.
+    static func backupReport(
+        operation: String,
+        snapshotId: String? = nil,
+        error: String? = nil,
+        bytes: Int = 0,
+        durationSeconds: Double = 0
+    ) throws -> Report {
+        var args: [String: Any] = [
+            "operation": operation, "bytes": bytes, "durationSeconds": durationSeconds,
+        ]
+        if let snapshotId { args["snapshotId"] = snapshotId }
+        if let error { args["error"] = error }
+
+        let reply = try object("backup.stateReport", args)
+        guard let body = reply["body"] as? [String: Any] else {
+            throw CoreError(message: "The backup report could not be built.")
+        }
+        return Report(body: body, releasesLease: reply["releasesLease"] as? Bool ?? false)
     }
 }

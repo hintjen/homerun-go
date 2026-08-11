@@ -9,7 +9,7 @@ import Foundation
 final class PumpkinBackend: ServerBackend {
     let kind = "pumpkin"
 
-    var onStateChanged: ((String, ServerState) -> Void)?
+    var onStateChanged: ((String, ServerState, Bool) -> Void)?
     var onLog: ((String, String) -> Void)?
     var onPlayersChanged: ((String) -> Void)?
     var onNetworkError: ((String, NetworkErrorKind) -> Void)?
@@ -38,6 +38,13 @@ final class PumpkinBackend: ServerBackend {
 
     private var perfHistory: [(t: Date, memUsedMb: Double?, cpuPercent: Double?, players: Int?)] = []
     private let cpuSampler = CPUSampler()
+
+    private let backups = BackupManager()
+
+    /// Held for the life of one run. By the time the server exits, the
+    /// caller's `ServerConfig` is long gone and the on-stop backup still needs
+    /// the repository credentials and this device's id.
+    private var backupContext: BackupContext?
 
     // MARK: - Lifecycle
 
@@ -69,13 +76,40 @@ final class PumpkinBackend: ServerBackend {
         try create(serverId: serverId)
 
         activeServerId = serverId
+        // Ownership passes from the claim to the real id here, so the two are
+        // never both set and `runningServerIds` never reports twice.
+        claimedServerId = nil
         startedAt = nil
         runFailure = nil
         threadFinished = false
         stopRequested = false
         logCursor = 0
         perfHistory.removeAll()
+        backupContext = config.backupContext
         emitState(serverId, .starting)
+
+        // Before anything reads or writes the world, and before the engine
+        // thread exists — a restore loads the whole repository index into
+        // memory, and doing that beside a running Pumpkin is how a phone gets
+        // jetsammed.
+        //
+        // A failure here aborts the launch, which is correct: starting on a
+        // world we have been told is stale is the divergence this exists to
+        // prevent. The state has to be unwound by hand, because nothing has
+        // been started yet for `finish` to tear down.
+        if let backup = config.backupContext {
+            do {
+                try await backups.restoreBeforeLaunch(
+                    serverId: serverId, dir: HostStore.serverDirectory(id: serverId),
+                    context: backup,
+                    onLog: { [weak self] line in self?.onLog?(serverId, line) })
+            } catch {
+                activeServerId = nil
+                backupContext = nil
+                emitState(serverId, .stopped)
+                throw error
+            }
+        }
 
         let port = (config.extra["port"] as? Int).map(UInt16.init) ?? 25565
 
@@ -250,23 +284,81 @@ final class PumpkinBackend: ServerBackend {
 
         heartbeat?.invalidate()
         heartbeat = nil
-        // An empty report, so the backend stops believing this device hosts a
-        // server the moment it does not.
-        report(instances: [])
 
         logTimer?.invalidate()
         logTimer = nil
         pollTimer?.invalidate()
         pollTimer = nil
 
+        // Cleared before the ack, so the instance report it sends is empty —
+        // the backend stops believing this device hosts a server the moment it
+        // does not.
         activeServerId = nil
         startedAt = nil
         listeningPort = nil
-        emitState(serverId, state)
+
+        // Every precondition, decided here, *before* the ack.
+        //
+        // The ack below is what opens the backup lease, and the lease has no
+        // timeout — a device that claims it and then finds it has nothing to do
+        // locks every other device out of this world until its own next
+        // `running` ack. So the question "will we back up" is answered once,
+        // in one variable, and the answer is what the ack carries. Android
+        // decides it in two places and leaks the lease on two paths as a
+        // result.
+        //
+        // A crash is never backed up: the world was not shut down cleanly and
+        // pushing it over a good snapshot is how a corrupted save spreads.
+        let context = backupContext
+        backupContext = nil
+        let willBackUp =
+            state != .crashed
+            && context?.settings.backup != nil
+            && BackupFFI.isAvailable
+            && backups.hasLocalWorld(HostStore.serverDirectory(id: serverId))
+
+        emitState(serverId, state, backupInProgress: willBackUp)
+
+        if willBackUp, let context, let repo = context.settings.backup {
+            let dir = HostStore.serverDirectory(id: serverId)
+            Task { [backups] in
+                await backups.backupAfterStop(
+                    serverId: serverId, dir: dir, repo: repo, deviceId: context.deviceId,
+                    onLog: { [weak self] line in self?.onLog?(serverId, line) })
+            }
+        }
+    }
+
+    /// A start this host has accepted but not yet begun.
+    ///
+    /// The contract requires `native-server-active-ids` to answer "running
+    /// **or coming up**, from the moment the call arrives". Everything between
+    /// the call and the engine thread — the settings fetch, the backup lease
+    /// gate — is time in which this host has committed to a launch and has no
+    /// `activeServerId` to show for it.
+    ///
+    /// Reporting nothing there is not a cosmetic gap. The UI's reconcile loop
+    /// reads a missing id as a start issued from *another* device and asks the
+    /// API to `force_link_up`, which regenerates the gateway keys underneath a
+    /// launch that has already resolved its tunnel config — the tunnel then
+    /// connects and carries nothing, which looks like a server that came up
+    /// and cannot be joined.
+    private var claimedServerId: String?
+
+    /// Claim the slot synchronously, before anything is awaited.
+    func claimStart(serverId: String) {
+        claimedServerId = serverId
+    }
+
+    /// Give it back. A no-op once `start` has taken ownership, so a caller can
+    /// `defer` this without having to know which happened.
+    func releaseStart(serverId: String) {
+        if claimedServerId == serverId { claimedServerId = nil }
     }
 
     var runningServerIds: [String] {
-        activeServerId.map { [$0] } ?? []
+        if let activeServerId { return [activeServerId] }
+        return claimedServerId.map { [$0] } ?? []
     }
 
     // MARK: - Introspection
@@ -350,7 +442,9 @@ final class PumpkinBackend: ServerBackend {
     /// finishes the start, not the tunnel.
     private func startHeartbeat(serverId: String) {
         heartbeat?.invalidate()
-        report(instances: [serverId])
+        // No immediate report here: the `running` emit that follows sends the
+        // instance report and the state ack together, in that order. This timer
+        // is only the keep-alive after that.
         heartbeat = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.report(instances: [serverId]) }
         }
@@ -418,9 +512,62 @@ final class PumpkinBackend: ServerBackend {
         }
     }
 
-    private func emitState(_ serverId: String, _ state: ServerState) {
+    /// Announce a state change, to the API and to the page.
+    ///
+    /// Both go out from here because this is the only funnel every state
+    /// passes through, and the two are not interchangeable: the page event
+    /// updates the screen in front of the player, and the API ack is what the
+    /// dashboard and every other device see. Reporting only the first is what
+    /// leaves a server looking stuck to everyone but its host.
+    ///
+    /// `backupInProgress` reaches the API only. It is true on exactly one kind
+    /// of ack — a `stopped` whose world is about to be backed up — and sending
+    /// it opens the backup lease.
+    private func emitState(
+        _ serverId: String, _ state: ServerState, backupInProgress: Bool = false
+    ) {
         HostLog.host.info("state -> \(state.rawValue, privacy: .public)")
-        onStateChanged?(serverId, state)
+        report(state: state, serverId: serverId, backupInProgress: backupInProgress)
+        onStateChanged?(serverId, state, backupInProgress)
+    }
+
+    /// The API's view of a server's lifecycle.
+    ///
+    /// Only the resting states are acked. `starting` and `stopping` are this
+    /// host talking to itself about work in progress; the API models a server
+    /// as running or not, and a `crashed` server is stopped as far as it is
+    /// concerned — the reason belongs in the console, not the status field.
+    /// **Two reports, not one, and in this order.** The state POST records what
+    /// happened; the instance report is what the API derives *health* from, and
+    /// health is what the UI shows. Sending only the state leaves a server that
+    /// is genuinely up reading as not-running until the next heartbeat tick.
+    /// Desktop and Android both push the pair together for this reason.
+    private func report(state: ServerState, serverId: String, backupInProgress: Bool) {
+        let status: String
+        switch state {
+        case .running: status = "running"
+        case .stopped, .crashed: status = "stopped"
+        case .starting, .stopping: return
+        }
+
+        guard let apiURL = HostStore.apiURL,
+            let deviceId = HostStore.registeredDeviceId,
+            let deviceToken = TokenStore.deviceToken
+        else { return }
+
+        // Read the running set now rather than capturing it: the transition has
+        // already been applied by the time this runs, so it is the post-change
+        // truth in both directions.
+        let instances = runningServerIds
+
+        Task {
+            await HomerunAPI.reportInstances(
+                apiURL: apiURL, deviceId: deviceId, deviceToken: deviceToken,
+                instances: instances)
+            await HomerunAPI.reportServerState(
+                apiURL: apiURL, serverId: serverId, state: status,
+                deviceToken: deviceToken, backupInProgress: backupInProgress)
+        }
     }
 
     /// Minecraft worlds are large and change constantly. Syncing one to iCloud

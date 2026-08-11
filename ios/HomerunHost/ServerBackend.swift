@@ -72,7 +72,13 @@ protocol ServerBackend: AnyObject {
     // MARK: Events
 
     /// Set by the bridge layer. Backends must invoke these on the main queue.
-    var onStateChanged: ((String, ServerState) -> Void)? { get set }
+    ///
+    /// The third argument is `backupInProgress`, and it is only ever true on a
+    /// `stopped` ack. It rides along with the state change rather than going in
+    /// a call of its own because that ack is what **opens the backup lease** —
+    /// a separate call afterwards would race a co-host's launch. The page
+    /// ignores it; only the API report carries it.
+    var onStateChanged: ((String, ServerState, Bool) -> Void)? { get set }
     var onLog: ((String, String) -> Void)? { get set }
     var onPlayersChanged: ((String) -> Void)? { get set }
 
@@ -122,6 +128,26 @@ struct ServerConfig {
     /// backend state — it stays captured in the bridge layer, which is the
     /// only place that legitimately has it.
     var resolveTunnel: (() async -> WireProxy.Link?)?
+
+    /// What the backup subsystem needs, or nil for a server without backups.
+    ///
+    /// A field of its own rather than a key in `extra`: `extra` is the UI's
+    /// config dict and is forwarded into the server's environment, and this
+    /// carries the repository password.
+    var backupContext: BackupContext?
+}
+
+/// The settings and identity one launch needs to back itself up.
+///
+/// Captured at `native-server-start` and held by the backend until the run
+/// ends — by the time the server exits, the caller's `ServerConfig` is long
+/// gone and the on-stop backup still needs both.
+struct BackupContext {
+    let settings: HomerunAPI.ServerSettings
+    /// This device's registry id. Written as the snapshot hostname, which is
+    /// how the API resolves `pushed_by` — and how `backup.restoreDecision`
+    /// tells our own snapshots from another device's.
+    let deviceId: String
 }
 
 struct PlayerRoster {

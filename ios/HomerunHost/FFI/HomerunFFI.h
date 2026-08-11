@@ -43,6 +43,41 @@ char *homerun_core_call(const char *method, const char *args);
  * engine and kills the app with no panic report. port 0 means the default. */
 char *homerun_server_start(const char *server_id, const char *data_dir, uint16_t port);
 
+/*
+ * Backups.
+ *
+ * Separate from homerun_core_call on purpose. That dispatch is shared with
+ * Android and every method in it is instantaneous and pure, so it gets called
+ * from the main thread without a second thought. These are not: two of them
+ * open TLS connections and block for minutes.
+ *
+ * Declared unconditionally. A build without the engine still exports all five;
+ * they answer "this copy cannot back up worlds".
+ */
+
+/* Whether this build links a backup engine. 0 on Android and host builds. */
+uint32_t homerun_backup_available(void);
+
+/* The newest snapshot, as homerun-core's Snapshot shape, or null. Networked —
+ * seconds, not milliseconds. Never call this on the main thread. */
+char *homerun_backup_latest_snapshot(const char *request_json);
+
+/* Runs one backup or restore to completion. BLOCKS, for minutes, and MUST run
+ * on a dedicated thread with at least an 8 MB stack — the same rule, for the
+ * same reason, as homerun_server_start. One at a time; a second call while one
+ * is in flight is an error, not a queue. */
+char *homerun_backup_run(const char *request_json);
+
+/* Progress since `cursor`. Cheap, and safe from the main thread while
+ * homerun_backup_run blocks another one. Same idiom as
+ * homerun_server_logs_since. `total` of 0 means "not known yet". */
+char *homerun_backup_progress_since(uint64_t cursor);
+
+/* Cooperative, and coarse: it lands at the next phase boundary and cannot
+ * interrupt a transfer already under way. Never blocks, and is not an error
+ * when nothing is running. */
+char *homerun_backup_cancel(void);
+
 char *homerun_server_stop(void);
 char *homerun_server_state(void);
 char *homerun_server_stats(void);

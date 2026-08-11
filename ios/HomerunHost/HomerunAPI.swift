@@ -104,6 +104,133 @@ enum HomerunAPI {
         }
     }
 
+    /// Acknowledge a server's state, with the **device** token.
+    ///
+    /// This is the report the API and the web dashboard wait on; the bridge
+    /// event of the same name only ever reaches the page in front of us.
+    ///
+    /// > `backupInProgress` is what **opens the backup lease**. Sending it
+    /// > commits this device to reporting `backup-state` afterwards — the lease
+    /// > has no timeout, so a device that claims it and never reports locks
+    /// > every other device out until its own next `running` ack.
+    static func reportServerState(
+        apiURL: String,
+        serverId: String,
+        state: String,
+        deviceToken: String,
+        backupInProgress: Bool = false
+    ) async {
+        guard !deviceToken.isEmpty else { return }
+
+        var body: [String: Any] = ["status": state]
+        // Omitted rather than sent as false: the API opens the lease on the
+        // key's presence.
+        if backupInProgress { body["backup_in_progress"] = true }
+
+        do {
+            try await postNoContent(
+                apiURL: apiURL, path: "/api/server/\(serverId)/state/",
+                body: body, token: deviceToken)
+        } catch {
+            // Best-effort, like the instance heartbeat: a missed ack is
+            // corrected by the next one, and failing a running server over it
+            // would be worse.
+            HostLog.host.error(
+                "state report (\(state, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    /// Report the outcome of a backup or restore.
+    ///
+    /// For a backup this is also what **releases the lease**, on success and on
+    /// failure alike — a failed backup that held it forever would strand the
+    /// server. The body comes from `homerun-core` (`backup.stateReport`), so
+    /// its field names cannot drift from what the endpoint reads.
+    ///
+    /// Best-effort in the sense that a reporting failure must never turn a
+    /// completed backup into a failed one. It does leave the lease open, which
+    /// is why this throws rather than swallowing: the caller holds a durable
+    /// record and retries on the next launch.
+    static func reportBackupState(
+        apiURL: String,
+        serverId: String,
+        body: [String: Any],
+        deviceToken: String
+    ) async throws {
+        guard !deviceToken.isEmpty else { throw APIError.notAuthenticated }
+        try await postNoContent(
+            apiURL: apiURL, path: "/api/server/\(serverId)/backup-state/",
+            body: body, token: deviceToken)
+    }
+
+    // MARK: - Server settings
+
+    /// A server's settings as the API describes them.
+    ///
+    /// Deliberately narrower than Android's: this host is Pumpkin-only and
+    /// therefore vanilla-only, so the loader and version fields that pick a jar
+    /// have nothing to pick here. What is left is what the host cannot derive —
+    /// the environment the world is configured from, and the three fields the
+    /// backup subsystem needs.
+    struct ServerSettings {
+        /// The server's settings as the API expressed them, verbatim. Fed to
+        /// `Core.configInputs`/`configFiles`, which know what the keys mean.
+        let env: [String: Any]
+        /// `get_backup`: `{repo, restic_password, keep}`, or nil for a server
+        /// with backups switched off. Opaque here — it is handed to the engine
+        /// and to `homerun-core`, and it carries the repository password, so it
+        /// is never logged.
+        let backup: [String: Any]?
+        /// The device currently holding the backup lease, if any.
+        let backupLeaseDevice: String?
+        /// A snapshot the dashboard pinned for restore on next launch.
+        let restoreFromSnapshot: String?
+        /// The tunnel as it stood before this launch — the staleness baseline
+        /// the post-launch poll compares against.
+        let tunnelBefore: WireProxy.Link?
+    }
+
+    /// Read a server's settings, or nil if they could not be read.
+    ///
+    /// Nil is a normal outcome, not an error: no token yet, no signal, a
+    /// backend hiccup. Every caller must treat it as "host without backups"
+    /// rather than as a reason to refuse the launch — a settings lookup that
+    /// failed is a far worse reason not to start a server than to start one
+    /// with defaults.
+    ///
+    /// Uses the **user** token, unlike the two reporting calls above: this is
+    /// the user's server being read, not the device speaking for itself.
+    static func serverSettings(
+        apiURL: String,
+        serverId: String,
+        token: String
+    ) async -> ServerSettings? {
+        guard !token.isEmpty else {
+            HostLog.host.info("no token for \(serverId, privacy: .public) — using defaults")
+            return nil
+        }
+
+        guard let body = try? await get(apiURL: apiURL, path: "/api/server/\(serverId)/", token: token)
+        else {
+            HostLog.host.error("could not read settings for \(serverId, privacy: .public)")
+            return nil
+        }
+
+        let env = (body["config"] as? [String: Any])?["environment_variables"] as? [String: Any]
+
+        func nonEmpty(_ value: Any?) -> String? {
+            (value as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        return ServerSettings(
+            env: env ?? [:],
+            backup: body["backup"] as? [String: Any],
+            backupLeaseDevice: nonEmpty(body["backup_lease_device"]),
+            restoreFromSnapshot: nonEmpty(env?["RESTORE_FROM_SNAPSHOT"]),
+            tunnelBefore: linkOf(body)?.link)
+    }
+
     // MARK: - Tunnel
 
     /// The tunnel credentials as they stood *before* launch, if any.
@@ -253,6 +380,34 @@ enum HomerunAPI {
             throw APIError.malformed
         }
         return object
+    }
+
+    /// A POST whose reply body is not wanted.
+    ///
+    /// The acknowledgement endpoints answer 204, or 200 with an empty body.
+    /// `post` treats an unparseable body as `.malformed` even on a 2xx, which
+    /// would report every successful ack as a failure — and, for
+    /// `backup-state`, would leave the caller retrying a report the API had
+    /// already accepted.
+    private static func postNoContent(
+        apiURL: String, path: String, body: [String: Any], token: String
+    ) async throws {
+        guard let url = URL(string: apiURL.trimmedTrailingSlash + path) else {
+            throw APIError.malformed
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setRequestValue()
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 30
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw APIError.http(status, String(data: data, encoding: .utf8) ?? "")
+        }
     }
 }
 

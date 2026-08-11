@@ -143,6 +143,25 @@ will not start, will not stop, or cannot be joined.
 
 ---
 
+### 💾 [iOS Backups](./ios-backups.md)
+
+Backing a world up and putting one back, with an engine linked into the app
+because this platform cannot spawn one.
+
+**Contains**:
+- The backup lease, its lack of a timeout, and the rule everything follows from
+- The three moments: restore before launch, the lease gate, the snapshot on stop
+- Why the world is moved aside rather than deleted before a restore
+- Foreground execution, the background-task assertion, and what its five
+  seconds are actually for
+- The durable outbox, and the failure it exists to prevent
+- Why the restore selector is resolved in Rust and not in Swift
+
+**Read this for**: Working on backups, or diagnosing a world that reverted, a
+launch that will not start, or a lease nobody is holding.
+
+---
+
 ### 🤖 [Android host](./android-host.md)
 
 The Android app shell — WebView, asset loader, capability injection, and the
