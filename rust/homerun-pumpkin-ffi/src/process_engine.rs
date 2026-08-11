@@ -61,6 +61,7 @@ pub struct ProcessEngine {
 struct Live {
     stdin: Option<ChildStdin>,
     roster: Arc<Mutex<RosterState>>,
+    pid: u32,
 }
 
 #[derive(Default)]
@@ -133,6 +134,7 @@ impl Engine for ProcessEngine {
         *self.live() = Some(Live {
             stdin: child.stdin.take(),
             roster: Arc::clone(&roster),
+            pid: child.id(),
         });
 
         // stderr on its own thread, merged into the same console. A server
@@ -212,6 +214,10 @@ impl Engine for ProcessEngine {
         writeln!(stdin, "{command}")
             .and_then(|_| stdin.flush())
             .map_err(|_| jvm::Refusal::NotAcceptingCommands.text().to_string())
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.live().as_ref().map(|run| run.pid)
     }
 
     fn players(&self) -> Option<Roster> {

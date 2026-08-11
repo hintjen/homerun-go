@@ -107,6 +107,11 @@ impl ServerHost {
         )
     }
 
+    /// The process this run is, if it is one. See `Engine::pid`.
+    pub fn pid(&self) -> Option<u32> {
+        self.lock().engine.clone()?.pid()
+    }
+
     pub fn players(&self) -> Option<Roster> {
         // Only meaningful while running; otherwise the UI would render a
         // roster for a server nobody can join.

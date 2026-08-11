@@ -79,6 +79,15 @@ pub trait Engine: Send + Sync {
 
     /// Currently connected players, if the engine can report them.
     fn players(&self) -> Option<Roster>;
+
+    /// The operating-system process this server is, if it is one.
+    ///
+    /// A linked engine has none to give — it *is* this process — and the
+    /// default says so. A host uses it to sample what the server costs, which
+    /// it cannot do for an engine sharing its own address space.
+    fn pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Engine used until the Pumpkin fork is pinned, and by the tests.

@@ -321,6 +321,9 @@ pub extern "C" fn homerun_server_stats() -> *mut c_char {
             "serverId": server_id,
             "startedAtMs": started_at_ms,
             "port": port,
+            // Null for a linked engine, which has no separate process to
+            // measure. A host samples this to graph what a server costs.
+            "pid": server::host().pid(),
         })
         .to_string()
     })

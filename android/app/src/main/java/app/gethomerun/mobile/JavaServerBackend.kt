@@ -13,6 +13,17 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import java.io.File
 import java.time.Instant
 
@@ -42,8 +53,12 @@ class JavaServerBackend(
 
     override val kind = "javaNative"
 
-    private var process: Process? = null
+    /** The thread the supervisor's blocking `start` runs on. */
+    private var engineThread: Thread? = null
     private var pumpJob: Job? = null
+
+    /** Where this host has read the supervisor's console up to. */
+    private var engineCursor = 0L
 
     /**
      * This run's performance graph, and the coroutine feeding it. The graph
@@ -51,16 +66,6 @@ class JavaServerBackend(
      */
     private val metrics = Core.Metrics()
     private var perfJob: Job? = null
-
-    /**
-     * The JVM's pid, as the launcher announced it on its first console line.
-     *
-     * Read from the console rather than from [Process], whose `pid()` does not
-     * resolve against the Android SDK — see the note in the launcher's
-     * `main.rs`. Null until that line arrives, and again once the run ends.
-     */
-    @Volatile
-    private var serverPid: Long? = null
 
     private val wireProxy = WireProxy(context, scope)
     private val backups = BackupManager(context)
@@ -253,6 +258,14 @@ class JavaServerBackend(
         // thing only it can know, which is how much RAM the device has.
         val jvm = Core.jvmLaunch(config.memoryMb, deviceTotalMb())
         lastHeapMb = jvm.heapMb
+        // Both inputs and the answer, because a heap that comes out at the
+        // floor is indistinguishable from one that was asked for — and the
+        // difference is whether the device is small or the request was.
+        Log.i(
+            TAG,
+            "$serverId: heap ${jvm.heapMb} MB " +
+                "(asked ${config.memoryMb}, device ${deviceTotalMb() ?: -1})",
+        )
 
         val prepared = runCatching {
             // Blocking the first time — a hundred megabytes out of the APK —
@@ -346,96 +359,91 @@ class JavaServerBackend(
         }
 
         if (order.at("spawn")) return
-        val started = withContext(Dispatchers.IO) {
-            runCatching {
-                ProcessBuilder(
-                    listOf(
-                        launcher.absolutePath,
-                        libjvm.absolutePath,
-                        mainClass.replace('.', '/'),
-                        // No `-jar` here: the VM is created through JNI, so the
-                        // jar goes on the classpath and the main class is named.
-                        "-Djava.class.path=${jar.absolutePath}",
-                        "-Djava.home=${javaHome.absolutePath}",
-                        // The JRE's own natives live here; without it the VM
-                        // starts but java.nio cannot load libnio.so.
-                        "-Djava.library.path=${javaHome.absolutePath}/lib",
-                        // These builds are Termux's and carry Termux's prefix
-                        // compiled in as the temp directory — a path that does
-                        // not exist outside Termux, so anything writing a temp
-                        // file fails on a path no one can explain.
-                        //
-                        // Note this does NOT silence the JNA/oshi stack trace
-                        // at boot: JNA ships a glibc `libjnidispatch.so`, and
-                        // bionic cannot dlopen it wherever it is unpacked.
-                        // Minecraft wraps that probe in `ignoreErrors` and
-                        // boots regardless — the cost is no hardware detail in
-                        // crash reports.
-                        "-Djava.io.tmpdir=${tmpDir(dir).absolutePath}",
-                        "-Duser.dir=${dir.absolutePath}",
-                    )
-                        // Everything above is Android's — a path that only
-                        // exists here, or a workaround for a Termux-built
-                        // runtime. Everything below is what any host running
-                        // this server would pass, so the core says it.
-                        + jvm.options
-                        + "--"
-                        + jvm.programArgs
+
+        // Everything the supervisor needs to run this server, and nothing it
+        // could work out for itself. Composing it is the genuinely
+        // platform-specific part: which launcher may be exec'd, which
+        // `libjvm.so` was unpacked, and what a Termux-built runtime needs on
+        // `LD_LIBRARY_PATH` before the linker reads it at exec.
+        val invocation = buildJsonObject {
+            put("program", launcher.absolutePath)
+            put("args", buildJsonArray {
+                add(libjvm.absolutePath)
+                add(mainClass.replace('.', '/'))
+                // No `-jar`: the VM is created through JNI, so the jar goes
+                // on the classpath and the main class is named.
+                add("-Djava.class.path=${jar.absolutePath}")
+                add("-Djava.home=${javaHome.absolutePath}")
+                // The JRE's own natives live here; without it the VM starts
+                // but java.nio cannot load libnio.so.
+                add("-Djava.library.path=${javaHome.absolutePath}/lib")
+                // These builds are Termux's and carry Termux's prefix
+                // compiled in as the temp directory — a path that does not
+                // exist outside Termux, so anything writing a temp file fails
+                // on a path no one can explain.
+                add("-Djava.io.tmpdir=${tmpDir(dir).absolutePath}")
+                add("-Duser.dir=${dir.absolutePath}")
+                // Everything above is Android's. Everything below is what any
+                // host running this server would pass, so the core says it.
+                jvm.options.forEach { add(it) }
+                add("--")
+                jvm.programArgs.forEach { add(it) }
+            })
+            put("env", buildJsonObject {
+                put("JAVA_HOME", javaHome.absolutePath)
+                // The runtime's .so files carry DT_NEEDED entries for each
+                // other (libnio -> libnet) and Android's linker will not find
+                // them without this. It has to be in the environment: the
+                // linker reads it at process start, so setting it later is
+                // too late.
+                put(
+                    "LD_LIBRARY_PATH",
+                    listOfNotNull(
+                        "${javaHome.absolutePath}/lib",
+                        "${javaHome.absolutePath}/lib/server",
+                        // Termux's libandroid-shmem, libandroid-spawn and
+                        // libz.so.1. The runtime's DT_RUNPATH points at
+                        // Termux's own prefix, which does not exist here —
+                        // LD_LIBRARY_PATH is searched first, so this resolves.
+                        "${javaHome.absolutePath}/${JavaRuntime.DEPS_DIR}",
+                        System.getenv("LD_LIBRARY_PATH"),
+                    ).joinToString(":"),
                 )
-                    .directory(dir)
-                    .redirectErrorStream(true)
-                    .also { builder ->
-                        builder.environment().apply {
-                            put("JAVA_HOME", javaHome.absolutePath)
-                            // The runtime's .so files carry DT_NEEDED entries
-                            // for each other (libnio -> libnet), and Android's
-                            // linker will not find them without this. It has
-                            // to be in the environment: the linker reads it at
-                            // process start, so setting it later is too late.
-                            put(
-                                "LD_LIBRARY_PATH",
-                                listOfNotNull(
-                                    "${javaHome.absolutePath}/lib",
-                                    "${javaHome.absolutePath}/lib/server",
-                                    // Termux's libandroid-shmem, libandroid-spawn
-                                    // and libz.so.1. The runtime's DT_RUNPATH
-                                    // points at Termux's own prefix, which does
-                                    // not exist here — LD_LIBRARY_PATH is
-                                    // searched first, so this is what resolves.
-                                    "${javaHome.absolutePath}/${JavaRuntime.DEPS_DIR}",
-                                    System.getenv("LD_LIBRARY_PATH"),
-                                ).joinToString(":"),
-                            )
-                            put("HOME", dir.absolutePath)
-                            config.extra.forEach { (k, v) -> if (v is String) put(k, v) }
-                        }
-                    }
-                    .start()
-            }
-        }.getOrElse { err ->
-            transition(serverId, ServerState.CRASHED)
-            throw ServerBackendException.Engine(
-                "The server could not be launched: ${err.message ?: "unknown error"}"
-            )
+                put("HOME", dir.absolutePath)
+                config.extra.forEach { (k, v) -> if (v is String) put(k, v) }
+            })
         }
 
-        process = started
         currentServerId = serverId
         currentPort = port
+        consoleReady = false
+        startLogPump(serverId)
+
+        // From here the supervisor in `homerun-pumpkin-ffi` owns the process:
+        // it spawns it, reads its console, climbs the stop ladder and reports
+        // what the exit meant. This host no longer manages any of that — the
+        // same state machine runs the linked engine on iOS.
+        engineThread = NativeServer.startBlocking(
+            serverId,
+            dir.absolutePath,
+            port,
+            invocation.toString(),
+        ) { result ->
+            scope.launch { serverExited(serverId, result) }
+        }
+
         // There is now something to stop, and something whose exit will need
         // judging. The core pins this launch's generation here, so a process
         // that outlives a stop-then-restart is recognised as the old one's.
         lifecycle.spawned(serverId)
-        startLogPump(serverId, started)
-        startPerfSampler(serverId, started)
-
+        startPerfSampler(serverId)
         // "Done" is the JVM telling us it is accepting connections. Waiting
         // for the process to merely exist would report a server that cannot
         // be joined yet; the bridge has no timeout so waiting is correct.
         order.at("awaitConsole")
         val ready = withTimeoutOrNull(Core.jvmLimits().startTimeoutMs) {
             while (true) {
-                if (!started.isAlive) return@withTimeoutOrNull false
+                if (engineThread?.isAlive != true) return@withTimeoutOrNull false
                 if (consoleReady) return@withTimeoutOrNull true
                 delay(POLL_MS)
             }
@@ -444,10 +452,11 @@ class JavaServerBackend(
 
         if (ready != true) {
             tunnelJob?.cancel()
-            climbStopLadder(started, console = true)
+            val stillUp = engineThread?.isAlive == true
+            if (stillUp) withContext(Dispatchers.IO) { NativeServer.nativeStop() }
             transition(serverId, ServerState.CRASHED)
             throw ServerBackendException.Engine(
-                if (started.isAlive) Core.refusal("startTimedOut")
+                if (stillUp) Core.refusal("startTimedOut")
                 else "The server stopped unexpectedly while starting."
             )
         }
@@ -462,7 +471,7 @@ class JavaServerBackend(
             tunnelJob = null
             withContext(Dispatchers.IO) {
                 wireProxy.stop()
-                climbStopLadder(started, console = true)
+                NativeServer.nativeStop()
             }
             return
         }
@@ -581,7 +590,7 @@ class JavaServerBackend(
      * one directory.
      */
     private suspend fun awaitPreviousExit(serverId: String) {
-        val previous = process ?: return
+        val previous = engineThread ?: return
         if (!previous.isAlive) return
         Log.i(TAG, "$serverId: waiting for the previous server to finish stopping")
         val gone = withTimeoutOrNull(Core.jvmLimits().previousExitWaitMs) {
@@ -645,8 +654,7 @@ class JavaServerBackend(
     }
 
     override suspend fun stop(serverId: String, graceful: Boolean) {
-        val running = process
-        if (running == null) {
+        if (engineThread?.isAlive != true) {
             // A launch can be minutes long before there is a process to talk
             // to — a jar downloading, a world restoring. The core recorded the
             // intent when the call arrived, so the launch will see it at its
@@ -668,66 +676,25 @@ class JavaServerBackend(
             // Before the JVM, so the gateway's peer slot is free by the time
             // the next start asks for one.
             wireProxy.stop()
-            // `graceful` is the core's word for "there is a console that can
-            // hear a stop". The ladder itself, including what to do when there
-            // is not, is also the core's.
+            // The ladder is climbed inside the supervisor, which owns the
+            // process and its stdin. `graceful` is the core's word for
+            // "there is a console that can hear a stop", and the supervisor
+            // reaches the same answer from the same place — so there is
+            // nothing left for this host to escalate.
             if (!graceful) {
                 Log.i(TAG, "$serverId: stopping before the console was ready")
             }
-            climbStopLadder(running, console = graceful)
-        }
-    }
-
-    /**
-     * Climb the core's stop ladder until the JVM is gone.
-     *
-     * Nothing about *what to try, in what order, waiting how long* is decided
-     * here — see `homerun_core::minecraft::jvm::stop_ladder`, which carries the
-     * reason the first rung is a console command and not a terminate. This
-     * carries the rungs out.
-     */
-    private fun climbStopLadder(running: Process, console: Boolean) {
-        val (command, rungs) = Core.stopLadder(console)
-
-        for (rung in rungs) {
-            when (rung.action) {
-                "console" -> runCatching {
-                    running.outputStream.write("$command\n".toByteArray())
-                    running.outputStream.flush()
-                }.onFailure {
-                    // Broken pipe means it is already on its way out. Benign,
-                    // and the next rung is harmless against a dead process.
-                    Log.d(TAG, "stdin closed before `$command` landed")
-                }
-
-                "terminate" -> {
-                    Log.w(TAG, "server has not gone — terminating")
-                    runCatching { running.destroy() }
-                }
-
-                "kill" -> {
-                    Log.w(TAG, "server ignored a terminate — killing")
-                    runCatching { running.destroyForcibly() }
-                }
-
-                else -> Log.w(TAG, "unknown stop rung \"${rung.action}\" — skipping")
+            val reply = NativeServer.nativeStop()
+            if (!ok(reply)) {
+                Log.w(TAG, "$serverId: the supervisor could not stop it: $reply")
             }
-
-            if (rung.waitMs <= 0L) return
-            if (running.waitFor(rung.waitMs, java.util.concurrent.TimeUnit.MILLISECONDS)) return
         }
     }
 
-    /**
-     * Straight from the core, which is the only place that knows.
-     *
-     * This used to re-derive it from `process.isAlive` and the last announced
-     * state, and the two could disagree: between the JVM dying and the console
-     * pump noticing, the host said "not running" while the core still said it
-     * was. That list goes to the API as this device's `instances` on every
-     * heartbeat, and to the UI on reconnect, so a second opinion is a device
-     * telling two stories about what it is hosting.
-     */
+    private fun ok(reply: String): Boolean = runCatching {
+        Json.parseToJsonElement(reply).jsonObject["ok"]?.jsonPrimitive?.boolean
+    }.getOrNull() == true
+
     override val runningServerIds: List<String>
         get() = lifecycle.runningIds()
 
@@ -748,16 +715,16 @@ class JavaServerBackend(
      * Nothing here decides anything. It reads counters and hands them over —
      * see [ProcMetrics] for why they are counters and not percentages.
      */
-    private fun startPerfSampler(serverId: String, running: Process) {
+    private fun startPerfSampler(serverId: String) {
         perfJob?.cancel()
         metrics.reset()
         perfJob = scope.launch(Dispatchers.IO) {
-            while (running.isAlive) {
-                // Null until the launcher's first console line has been read,
-                // which is a moment or two. A reading with nothing in it is
-                // still worth offering: it anchors the clock, and the graph
-                // renders "unavailable" rather than a fabricated zero.
-                val pid = serverPid
+            while (engineThread?.isAlive == true) {
+                // The supervisor owns the process, so it is the one that knows
+                // the pid. Null for a moment at the start, and a reading with
+                // nothing in it is still worth offering: it anchors the clock,
+                // and the graph renders "unavailable" rather than a zero.
+                val pid = enginePid()
                 metrics.record(
                     atMs = System.currentTimeMillis(),
                     memUsedKb = pid?.let { ProcMetrics.residentKb(it) },
@@ -772,31 +739,64 @@ class JavaServerBackend(
         }
     }
 
-    private fun startLogPump(serverId: String, running: Process) {
+    /**
+     * Page the supervisor's console into this host's buffer.
+     *
+     * A cursor rather than a stream: the process belongs to
+     * `homerun-pumpkin-ffi` now, and its console is read the same way the
+     * Pumpkin backend reads its own. Kept locally as well because this buffer
+     * also holds Homerun's own notes — the jar download, the runtime unpack —
+     * which happen minutes before there is a server to have a console.
+     */
+    private fun startLogPump(serverId: String) {
         pumpJob?.cancel()
         pumpJob = scope.launch(Dispatchers.IO) {
-            // Caught for the same reason as the tunnel's pump: this scope's
-            // SupervisorJob keeps siblings alive but does nothing about an
-            // unhandled exception, which reaches the default handler and kills
-            // the app. Killing the JVM closes this stream under a blocked
-            // readLine, so the throw is a normal part of stopping.
-            try {
-                running.inputStream.bufferedReader().useLines { seq ->
-                    for (raw in seq) {
-                        val line = raw.trim()
-                        if (line.isEmpty()) continue
-                        record(line)
-                        onLog?.invoke(serverId, line)
-                        interpret(serverId, line)
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (err: Throwable) {
-                Log.d(TAG, "console output ended: ${err.message}")
+            while (true) {
+                drainConsole(serverId)
+                delay(POLL_MS)
             }
-            // The stream ends when the process does.
-            val code = runCatching { running.waitFor() }.getOrDefault(-1)
+        }
+    }
+
+    private fun drainConsole(serverId: String) {
+        val slice = runCatching { parseLogs(NativeServer.nativeLogsSince(engineCursor)) }
+            .getOrNull() ?: return
+        engineCursor = slice.second
+        for (raw in slice.first) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            record(line)
+            onLog?.invoke(serverId, line)
+            interpret(serverId, line)
+        }
+    }
+
+    private fun parseLogs(raw: String): Pair<List<String>, Long> {
+        val obj = Json.parseToJsonElement(raw).jsonObject
+        val lines = obj["lines"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+            ?: emptyList()
+        return lines to (obj["cursor"]?.jsonPrimitive?.longOrNull ?: engineCursor)
+    }
+
+    /**
+     * The supervisor reported the run is over.
+     *
+     * Was the tail of the console pump, back when this host owned the process.
+     * The reasoning is unchanged; only who noticed has moved.
+     */
+    private suspend fun serverExited(serverId: String, result: String) {
+        // The last of the console, including whatever it said on the way down.
+        drainConsole(serverId)
+        pumpJob?.cancel()
+        pumpJob = null
+
+        val ok = runCatching {
+            Json.parseToJsonElement(result).jsonObject["ok"]?.jsonPrimitive?.boolean
+        }.getOrNull() == true
+        // There is no process exit code to read any more — the supervisor
+        // reports whether the run unwound cleanly, and 0 stands in for that.
+        val code = if (ok) 0 else 1
+        run {
             // The verdict is the core's: intent, not the exit code and not
             // a state a still-running launch can overwrite. A stop carried out
             // by terminating a starting JVM exits 143, and calling that a
@@ -832,8 +832,7 @@ class JavaServerBackend(
             perfJob?.cancel()
             perfJob = null
 
-            process = null
-            serverPid = null
+            engineThread = null
             currentServerId = null
             startedAt = null
             currentPort = null
@@ -865,12 +864,6 @@ class JavaServerBackend(
      * which is why the roster is best-effort and never blocks anything.
      */
     private fun interpret(serverId: String, line: String) {
-        // The launcher naming itself, before the VM has printed anything. Only
-        // taken once per run: the server's own output could contain this
-        // string, and the first one is the only one that came from us.
-        if (serverPid == null) {
-            LAUNCHER_PID.find(line)?.let { serverPid = it.groupValues[1].toLongOrNull() }
-        }
 
         // What a console line means is decided in `homerun-core::console`,
         // which knows the things a regex here kept having to relearn — that a
@@ -931,17 +924,13 @@ class JavaServerBackend(
     }
 
     override suspend fun command(serverId: String, command: String) {
-        val running = process
-        if (currentServerId != serverId || running == null) {
+        if (currentServerId != serverId || engineThread?.isAlive != true) {
             throw ServerBackendException.NotRunning(serverId)
         }
-        withContext(Dispatchers.IO) {
-            runCatching {
-                running.outputStream.write("$command\n".toByteArray())
-                running.outputStream.flush()
-            }.getOrElse {
-                throw ServerBackendException.Engine(Core.refusal("notAcceptingCommands"))
-            }
+        // Onto the server's stdin, by the supervisor that holds it.
+        val reply = withContext(Dispatchers.IO) { NativeServer.nativeCommand(command) }
+        if (!ok(reply)) {
+            throw ServerBackendException.Engine(Core.refusal("notAcceptingCommands"))
         }
     }
 
@@ -975,7 +964,7 @@ class JavaServerBackend(
      */
     override fun memoryUsage(serverId: String): MemoryUsage? {
         if (currentServerId != serverId) return null
-        val pid = serverPid?.takeIf { process?.isAlive == true }
+        val pid = enginePid()?.takeIf { engineThread?.isAlive == true }
         val usedKb = pid?.let { ProcMetrics.residentKb(it) }?.toInt()
         return MemoryUsage(usedKb = usedKb, maxMb = lastHeapMb)
     }
@@ -1012,6 +1001,18 @@ class JavaServerBackend(
      * heap. What fraction of it is safe to hand a JVM is the core's — see
      * `homerun_core::minecraft::jvm::heap_mb`, which carries the reason.
      */
+    /**
+     * The pid of the process the supervisor is running, if it is running one.
+     *
+     * Read from its stats rather than kept here: this host no longer spawns
+     * anything, so it has no pid of its own to remember — which is also what
+     * retired the launcher line that used to announce one.
+     */
+    private fun enginePid(): Long? = runCatching {
+        Json.parseToJsonElement(NativeServer.nativeStats())
+            .jsonObject["pid"]?.jsonPrimitive?.longOrNull
+    }.getOrNull()
+
     private fun deviceTotalMb(): Int? = runCatching {
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val info = ActivityManager.MemoryInfo().also { manager.getMemoryInfo(it) }
@@ -1069,7 +1070,5 @@ class JavaServerBackend(
         const val HANDSHAKE = "handshake"
 
 
-        /** `homerun-java-launcher` naming itself, ahead of the VM's own output. */
-        val LAUNCHER_PID = Regex("""^\[launcher] pid=(\d+)$""")
     }
 }
