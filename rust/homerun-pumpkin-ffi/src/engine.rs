@@ -16,6 +16,15 @@ pub struct RunRequest {
     /// worlds by CWD, which is why only one server runs at a time.
     pub data_dir: String,
     pub java_port: u16,
+    /// The player's settings, already resolved into what an engine can take.
+    ///
+    /// `None` means "apply nothing", which is what a host that has not been
+    /// taught to send them does. That is the dangerous state rather than the
+    /// harmless one — the engine's own defaults are not the player's choices,
+    /// and for Pumpkin that includes authenticating against Mojang — so
+    /// [`crate::server::ServerHost::start`] says so on the console rather than
+    /// leaving it silent.
+    pub settings: Option<crate::engine_settings::EngineSettings>,
 }
 
 /// Signals a running engine to shut down. Shared with the stop path.
@@ -152,6 +161,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: ".".into(),
             java_port: 25565,
+            settings: None,
         }
     }
 

@@ -35,9 +35,10 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `core_bridge.rs` | The JNI adapter around `core_dispatch` (Android only). |
 | `backup_job.rs` | Progress, cancellation and the one-at-a-time guard for a backup. Built everywhere. |
 | `backup_engine.rs` | The linked backup engine. iOS only, behind `backup-engine`. |
+| `engine_settings.rs` | What the player's settings mean to an engine — clamps, UUIDs, what cannot be honoured. No Pumpkin, so it is in the fast suite. |
 
 Everything except `Engine::run` and `backup_engine` is platform-independent
-and unit-tested on any machine — 62 tests, no device and no Pumpkin required.
+and unit-tested on any machine — 91 tests, no device and no Pumpkin required.
 
 `core_dispatch` is deliberately built on every target, not just the two mobile
 ones, which is what lets its dispatch tests run under plain `cargo test`.
@@ -56,7 +57,8 @@ void     homerun_free_string(char *ptr);
 /* The shared decisions. Method catalogue in docs/core-bridge.md. */
 char *homerun_core_call(const char *method, const char *args);
 
-char *homerun_server_start(const char *server_id, const char *data_dir, uint16_t port);
+char *homerun_server_start(const char *request_json);
+char *homerun_server_settings_preview(const char *request_json);
 char *homerun_server_stop(void);
 char *homerun_server_state(void);
 char *homerun_server_stats(void);
@@ -73,6 +75,52 @@ test asserts they contain no `errno`, `unwrap`, `panicked at`, `Mutex`, or
 
 Check `homerun_abi_version()` at startup; it is bumped whenever the surface
 changes shape.
+
+### Starting a server
+
+`homerun_server_start` takes one JSON request rather than arguments, so a new
+setting does not change a C signature — the same call three repositories agree
+on:
+
+```json
+{ "serverId": "abc", "dataDir": "/…/servers/abc", "port": 25565,
+  "settings": {
+    "env": { "MOTD": "…", "GAMEMODE": "creative", "MAX_PLAYERS": "8" },
+    "gameType": "native-crossplay",
+    "resolved": [{ "name": "Notch", "id": "069a79f4-…" }]
+  } }
+```
+
+`port` 0 means the default. `env` is the API's `environment_variables`
+verbatim; `gameType` is its `game_type` verbatim, because `native-crossplay` is
+what forces offline mode and a value reduced to java/bedrock cannot say so.
+`resolved` is whatever identities the host managed to look up — a name missing
+from it is derived offline, or dropped in online mode, and is never a reason to
+fail a launch.
+
+**`settings` is optional, and its absence is the dangerous state, not the
+harmless one.** Omitting it starts the server on the engine's own
+configuration, which for Pumpkin includes `online_mode = true`. That is what a
+host which has not been taught to send settings does — Android's Pumpkin
+backend today — so the console says so rather than leaving it silent.
+
+`homerun_server_settings_preview` takes the same request and reports what would
+be applied, without starting anything:
+
+```json
+{ "ok": true, "settings": { "motd": "…", "gameMode": "creative", … },
+  "summary": "[Homerun] Settings applied: …", "advisories": ["…"] }
+```
+
+It exists because `homerun_server_start`'s arguments are otherwise only
+observable by starting a real server, which blocks for its lifetime. A
+misspelled key — `game_type` where the wire says `gameType` — compiles, links,
+and yields a server on defaults with nothing anywhere saying so. `ios/coretest`
+calls this with a request built by the same Swift the app uses.
+
+What a setting *means* is decided in Rust (`engine_settings.rs`, on top of
+`homerun-core::minecraft::settings`), never per host. See
+`docs/ios-server-backend.md` for which settings a linked Pumpkin can honour.
 
 ### Responses
 
@@ -353,7 +401,7 @@ and the stdout/stderr redirection. Both compile against the pinned fork; what
 has not happened is a server actually booting a world and a player joining it.
 Treat the run sequence above as the design until that has been done.
 
-The 62 tests all run against `StubEngine`.
+The 91 tests all run against `StubEngine`.
 
 The backup engine **has** been run, on an iOS simulator: `ios/coretest/`
 compiled for `arm64-apple-ios-sim` and spawned with `simctl` does a real

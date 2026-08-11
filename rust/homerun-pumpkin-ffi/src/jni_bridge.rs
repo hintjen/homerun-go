@@ -88,13 +88,26 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeStart(
         );
     };
 
-    let json = unsafe {
-        take_json(crate::homerun_server_start(
-            id.as_ptr(),
-            dir.as_ptr(),
-            port as u16,
-        ))
+    // The C surface takes one JSON request so a launch can carry the player's
+    // settings. Android's Kotlin signature keeps its three arguments and the
+    // request is assembled here: its Pumpkin backend does not resolve settings
+    // yet, and there is no reason to break the Kotlin side before it does.
+    // When it does, this grows a fourth `JString` holding the settings object.
+    let Ok(request) = CString::new(
+        serde_json::json!({
+            "serverId": id.to_string_lossy(),
+            "dataDir": dir.to_string_lossy(),
+            "port": port as u16,
+        })
+        .to_string(),
+    ) else {
+        return to_jstring(
+            &env,
+            r#"{"ok":false,"error":"server_id and data_dir must not contain NUL"}"#.to_string(),
+        );
     };
+
+    let json = unsafe { take_json(crate::homerun_server_start(request.as_ptr())) };
     to_jstring(&env, json)
 }
 

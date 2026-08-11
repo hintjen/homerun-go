@@ -38,10 +38,34 @@ void homerun_free_string(char *ptr);
  */
 char *homerun_core_call(const char *method, const char *args);
 
-/* Blocks for the server's entire lifetime. MUST run on a dedicated thread
+/*
+ * Blocks for the server's entire lifetime. MUST run on a dedicated thread
  * with at least a 16 MB stack — the 512 KB default overflows inside the
- * engine and kills the app with no panic report. port 0 means the default. */
-char *homerun_server_start(const char *server_id, const char *data_dir, uint16_t port);
+ * engine and kills the app with no panic report.
+ *
+ * One JSON request rather than arguments, so a new setting does not change
+ * this signature:
+ *
+ *   { "serverId": "…", "dataDir": "…", "port": 25565,
+ *     "settings": { "env": {…}, "gameType": "native-crossplay",
+ *                   "resolved": [{ "name": "Notch", "id": "069a79f4-…" }] } }
+ *
+ * `port` 0 means the default. `settings` is optional; omitting it starts the
+ * server on the engine's own configuration, which is what a host that has not
+ * been taught to send them does — and which is announced on the console,
+ * because the engine's defaults are not the player's choices.
+ */
+char *homerun_server_start(const char *request_json);
+
+/*
+ * What that request's settings would apply, without starting anything.
+ *
+ * Pure. Exists because homerun_server_start's arguments are otherwise only
+ * observable by starting a real server: a misspelled key compiles, links, and
+ * yields a server on defaults with nothing saying so. ios/coretest calls this
+ * with a request built by the same Swift the app uses.
+ */
+char *homerun_server_settings_preview(const char *request_json);
 
 /*
  * Backups.

@@ -111,11 +111,15 @@ use serde_json::json;
 ///
 /// 2 added the `homerun_backup_*` calls.
 ///
-/// Hosts *report* this at startup; neither of them currently compares it to
-/// anything, so a stale staged library is caught by the linker (a missing
-/// symbol) rather than by this. Worth wiring up properly — the failure it
-/// exists to catch is a `.a` that links but decodes garbage.
-pub const FFI_ABI_VERSION: u32 = 2;
+/// 3 replaced `homerun_server_start`'s three scalar arguments with a single
+/// JSON request so a launch can carry the player's settings, and added
+/// `homerun_server_settings_preview`. This one is a genuine break: a host
+/// built against 2 passes a `server_id` where 3 expects the whole request.
+///
+/// Hosts *report* this at startup; Android also compares it
+/// (`NativeServer.EXPECTED_ABI`), which is the check that catches a `.a` or
+/// `.so` that links but decodes garbage.
+pub const FFI_ABI_VERSION: u32 = 3;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -210,6 +214,67 @@ fn err(message: impl Into<String>) -> String {
     json!({ "ok": false, "error": message.into() }).to_string()
 }
 
+/// What a start call carries, once parsed.
+struct StartRequest {
+    server_id: String,
+    data_dir: String,
+    port: u16,
+    settings: Option<engine_settings::EngineSettings>,
+}
+
+/// Parse a start request.
+///
+/// `settings` is optional and its absence is not an error: a host that has not
+/// been taught to send them starts a server on the engine's own defaults,
+/// which is what every host did before this existed.
+fn parse_start_request(raw: &str) -> Result<StartRequest, String> {
+    let request: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("bad start request: {e}"))?;
+
+    let text = |key: &str| -> Result<String, String> {
+        request
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("the start request needs {key}"))
+    };
+
+    let port = request.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let settings = request.get("settings").filter(|v| !v.is_null()).map(|s| {
+        // A name whose entry does not parse is simply not resolved, which the
+        // offline path derives and the online path drops — the same handling a
+        // lookup that failed already gets. Refusing the launch over it would
+        // trade a wrong MOTD for no server at all.
+        let resolved: Vec<homerun_core::game::Identity> = s
+            .get("resolved")
+            .and_then(|v| v.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        engine_settings::resolve(
+            s.get("env").unwrap_or(&serde_json::Value::Null),
+            s.get("gameType").and_then(|v| v.as_str()).unwrap_or("java"),
+            &resolved,
+        )
+    });
+
+    Ok(StartRequest {
+        server_id: text("serverId")?,
+        data_dir: text("dataDir")?,
+        port: if port == 0 {
+            server::DEFAULT_JAVA_PORT
+        } else {
+            port
+        },
+        settings,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
@@ -226,25 +291,22 @@ fn err(message: impl Into<String>) -> String {
 /// # Safety
 /// `server_id` and `data_dir` must be valid NUL-terminated UTF-8 strings.
 #[no_mangle]
-pub unsafe extern "C" fn homerun_server_start(
-    server_id: *const c_char,
-    data_dir: *const c_char,
-    port: u16,
-) -> *mut c_char {
-    let id = borrow(server_id).map(str::to_owned);
-    let dir = borrow(data_dir).map(str::to_owned);
+pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *mut c_char {
+    let request = borrow(request_json).map(str::to_owned);
 
     guarded(move || {
-        let (Some(id), Some(dir)) = (id, dir) else {
-            return err("server_id and data_dir must be valid UTF-8 strings");
-        };
-        let port = if port == 0 {
-            server::DEFAULT_JAVA_PORT
-        } else {
-            port
+        let request = match request.as_deref().map(parse_start_request) {
+            Some(Ok(request)) => request,
+            Some(Err(message)) => return err(message),
+            None => return err("the start request must be a valid UTF-8 string"),
         };
 
-        match server::host().start(&id, &dir, port) {
+        match server::host().start(
+            &request.server_id,
+            &request.data_dir,
+            request.port,
+            request.settings,
+        ) {
             Ok(()) => json!({ "ok": true }).to_string(),
             Err(message) => err(message),
         }
@@ -349,6 +411,40 @@ pub unsafe extern "C" fn homerun_server_command(command: *const c_char) -> *mut 
 // be called the same way, and the app would hang with nothing to point at.
 // A different symbol, with a doc comment that shouts, is the only guard the
 // type system will give us.
+
+/// What a start request's settings would apply, without starting anything.
+///
+/// Exists because [`homerun_server_start`]'s arguments are otherwise only
+/// observable by starting a real server, which blocks for its lifetime. A
+/// misspelled key — `game_type` where the wire says `gameType` — compiles,
+/// links, and yields a server on the engine's defaults with nothing anywhere
+/// saying so. This is what lets a host's test catch that in milliseconds.
+///
+/// Pure: touches no global state and starts nothing.
+///
+/// # Safety
+/// `request_json` must be a valid NUL-terminated UTF-8 JSON object.
+#[no_mangle]
+pub unsafe extern "C" fn homerun_server_settings_preview(
+    request_json: *const c_char,
+) -> *mut c_char {
+    let request = borrow(request_json).map(str::to_owned);
+
+    guarded(move || match request.as_deref().map(parse_start_request) {
+        Some(Ok(request)) => match request.settings {
+            Some(resolved) => json!({
+                "ok": true,
+                "settings": serde_json::to_value(&resolved).unwrap_or(serde_json::Value::Null),
+                "summary": resolved.summary(),
+                "advisories": resolved.advisories(),
+            })
+            .to_string(),
+            None => json!({ "ok": true, "settings": serde_json::Value::Null }).to_string(),
+        },
+        Some(Err(message)) => err(message),
+        None => err("the start request must be a valid UTF-8 string"),
+    })
+}
 
 /// Whether this build links a backup engine. 0 on Android and host builds.
 #[no_mangle]
@@ -504,9 +600,70 @@ mod tests {
 
     #[test]
     fn null_input_is_an_error_not_a_crash() {
-        let v = take(unsafe { homerun_server_start(ptr::null(), ptr::null(), 0) });
+        let v = take(unsafe { homerun_server_start(ptr::null()) });
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("UTF-8"));
+
+        let v = take(unsafe { homerun_server_settings_preview(ptr::null()) });
+        assert_eq!(v["ok"], false);
+    }
+
+    /// A request the host got wrong must not start a server on defaults.
+    ///
+    /// This is the failure the JSON surface introduces that three scalars
+    /// could not: a typo is now data rather than a compile error.
+    #[test]
+    fn a_malformed_start_request_is_refused() {
+        for raw in [
+            "not json at all",
+            "[]",
+            r#"{"dataDir":"/tmp"}"#,
+            r#"{"serverId":"s1"}"#,
+            r#"{"serverId":1,"dataDir":"/tmp"}"#,
+        ] {
+            let request = CString::new(raw).unwrap();
+            let v = take(unsafe { homerun_server_start(request.as_ptr()) });
+            assert_eq!(v["ok"], false, "{raw} should not have been accepted");
+        }
+    }
+
+    #[test]
+    fn a_preview_reports_what_a_start_would_apply() {
+        let request = CString::new(
+            json!({
+                "serverId": "s1",
+                "dataDir": "/tmp",
+                "settings": {
+                    "gameType": "native-crossplay",
+                    "env": { "MOTD": "hi", "GAMEMODE": "creative", "MAX_PLAYERS": "8" },
+                    "resolved": [],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let v = take(unsafe { homerun_server_settings_preview(request.as_ptr()) });
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["settings"]["motd"], "hi");
+        assert_eq!(v["settings"]["gameMode"], "creative");
+        assert_eq!(v["settings"]["maxPlayers"], 8);
+        // Crossplay cannot authenticate against Mojang, whatever the API says.
+        assert_eq!(v["settings"]["onlineMode"], false);
+        assert!(v["summary"].as_str().unwrap().contains("creative"));
+
+        // Nothing was started: the preview is pure.
+        assert_eq!(take(homerun_server_stats())["running"], false);
+    }
+
+    /// Absent settings is a real state — the host that has not been taught to
+    /// send them — and must be a working start, not an error.
+    #[test]
+    fn a_request_without_settings_is_valid() {
+        let request = CString::new(r#"{"serverId":"s1","dataDir":"/tmp","port":25565}"#).unwrap();
+        let v = take(unsafe { homerun_server_settings_preview(request.as_ptr()) });
+        assert_eq!(v["ok"], true);
+        assert!(v["settings"].is_null());
     }
 
     #[test]
