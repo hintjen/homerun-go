@@ -228,6 +228,28 @@ with the screen off.
 
 ---
 
+### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
+
+Not a subsystem doc — the full sweep behind "no", so it does not get
+re-researched every time someone notices Android can and iOS cannot.
+
+**Contains**:
+- The two hard walls: a 50 MB cap on every process type that runs
+  indefinitely, and what the server actually needs
+- All fourteen background modes, each with a verdict
+- Why `BGContinuedProcessingTask` is not a duration problem, and the three
+  properties of a game server that do disqualify it
+- The one mode that works, the App Store app already doing it, and why we
+  still should not
+- Guided Access, which solves it outright and needs no code
+- The handoff escape hatch this repo already owns
+- What to build instead, and the specific triggers for revisiting
+
+**Read this for**: Being asked why iOS cannot do what Android does, or
+deciding how far to push it.
+
+---
+
 ### 🌐 [The tunnel wrapper plan](../plans/tunnel-wrapper.md)
 
 Not a subsystem doc yet — the spec for sharing one wireproxy implementation
