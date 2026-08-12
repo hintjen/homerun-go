@@ -22,8 +22,14 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    # Both must be numeric and period-separated — Apple rejects a build whose
+    # version says "beta". Pre-release is expressed by the leading 0, not by
+    # a word, and TestFlight shows this as "0.0.1 (2026081201)".
+    MARKETING_VERSION: "0.0.1"
+    # The build number, invisible to players and unrelated to the version
+    # above. Apple rejects a duplicate, so this is the upload date plus a
+    # counter rather than a 1 someone has to remember to bump: yyyymmddNN.
+    CURRENT_PROJECT_VERSION: "2026081201"
 
 targets:
   HomerunHost:
