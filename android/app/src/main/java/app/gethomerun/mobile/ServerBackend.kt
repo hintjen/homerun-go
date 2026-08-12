@@ -104,6 +104,20 @@ interface ServerBackend {
     var onPlayersChanged: ((String) -> Unit)?
 
     /**
+     * The on-stop backup is over, however it went.
+     *
+     * The counterpart to [onStateChanged]'s third argument, and the reason it
+     * has to exist: that flag says a backup is *starting*, on a state change
+     * that says the server has *stopped*. Nothing else afterwards marks this
+     * device idle, and until something does, a host cannot know when it is safe
+     * to let the process be reclaimed — which on Android means killing an
+     * upload of the session that just finished.
+     *
+     * Backends with no backup path leave it unused.
+     */
+    var onBackupFinished: ((String) -> Unit)?
+
+    /**
      * The network tunnel failed, and the server is being stopped for it.
      *
      * `kind` is `provisioning` (never came up) or `handshake` (came up, then

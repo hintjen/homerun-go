@@ -202,6 +202,54 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
 
 ---
 
+### 🔋 [Android lifecycle](./android-lifecycle.md)
+
+How a server — and the backup that follows it — keeps running once the app is no
+longer in front of the user.
+
+**Contains**:
+- Why there is no "run in the background" permission to request, and which one
+  actually prompts
+- The foreground service, and why the notification is the price rather than a
+  feature
+- Why a wake lock is not implied by the service, and what breaks without one
+- `busy`: why "is a server running" is the wrong question, and the two extra
+  terms that make it right
+- Why `hostingRequested` must be paired inside the branch that requested it
+- The notification that is attached but never posted, and what re-posts it
+- Why the launcher icon cannot be a notification icon
+- `specialUse` versus `dataSync`, and the six-hour cap that decides it
+- What has been verified on device and what has not
+- Triage, symptom first
+
+**Read this for**: Working on backgrounding, or diagnosing a server that dies
+after the app is dismissed, a missing notification, or a session that stalls
+with the screen off.
+
+---
+
+### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
+
+Not a subsystem doc — the full sweep behind "no", so it does not get
+re-researched every time someone notices Android can and iOS cannot.
+
+**Contains**:
+- The two hard walls: a 50 MB cap on every process type that runs
+  indefinitely, and what the server actually needs
+- All fourteen background modes, each with a verdict
+- Why `BGContinuedProcessingTask` is not a duration problem, and the three
+  properties of a game server that do disqualify it
+- The one mode that works, the App Store app already doing it, and why we
+  still should not
+- Guided Access, which solves it outright and needs no code
+- The handoff escape hatch this repo already owns
+- What to build instead, and the specific triggers for revisiting
+
+**Read this for**: Being asked why iOS cannot do what Android does, or
+deciding how far to push it.
+
+---
+
 ### 🌐 [The tunnel wrapper plan](../plans/tunnel-wrapper.md)
 
 Not a subsystem doc yet — the spec for sharing one wireproxy implementation
@@ -261,7 +309,6 @@ Planned, one per milestone (see plans/shared-milestones.md):
 
   ios-lifecycle.md        iOS      M4
   android-bridge.md       Android  M1, extended at M2
-  android-lifecycle.md    Android  M4
 -->
 
 ## House style

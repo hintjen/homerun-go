@@ -302,13 +302,20 @@ class BridgeRouter(
     }
 
     /**
-     * Tell a freshly-loaded page what is already running.
+     * Tell a page what is already running.
      *
      * The server outlives the page, so a reload — or an activity rebuilt after
      * the render process died — starts with no idea a server is up. Without
      * this it renders a stopped server that is very much running.
+     *
+     * Also called on resume. The WebView usually survives being backgrounded
+     * and receives events normally, but "usually" is doing real work in that
+     * sentence now that a server keeps running while the app is away: the
+     * render process is exactly what Android reclaims first, and a player
+     * coming back to a stopped card for a server their friends are on is the
+     * failure this costs one event to rule out.
      */
-    private fun resyncServerState() {
+    fun resyncServerState() {
         val serverId = ServerHost.runningServerId() ?: return
         hostListener.onStateChanged(serverId, ServerState.RUNNING, false)
     }
@@ -616,7 +623,8 @@ class BridgeRouter(
             val message = payload?.get("message")?.jsonPrimitive?.contentOrNull
             if (message != null) {
                 notify(
-                    title = payload["title"]?.jsonPrimitive?.contentOrNull ?: "Homerun",
+                    title = payload["title"]?.jsonPrimitive?.contentOrNull
+                        ?: context.getString(R.string.app_name),
                     body = message,
                 )
             }
@@ -701,8 +709,29 @@ class BridgeRouter(
                         )
                     }
 
-                    else -> {
+                    // Paired with `hostingSettled` in this branch's own finally,
+                    // not the outer one. The outer finally also runs for the two
+                    // refusals above — and a reconcile-loop start that races the
+                    // user's own gets `alreadyRunning`, so settling there would
+                    // stand the foreground service down underneath a launch that
+                    // is still resolving its settings.
+                    else -> try {
                         val config = obj["config"] as? JsonObject
+
+                        // Raise the process to foreground importance before the
+                        // two lookups below, not after. Both are network
+                        // round-trips, and until the foreground service is up
+                        // this process is merely cached — a launch reclaimed
+                        // between here and the spawn is a server the user was
+                        // told was starting and that never did.
+                        //
+                        // This is also the only place the server's name is
+                        // known; the backend is never told it, and the
+                        // notification wants something to call it.
+                        ServerHost.hostingRequested(
+                            serverId,
+                            config?.get("name")?.jsonPrimitive?.contentOrNull,
+                        )
                         backend.create(serverId)
 
                         // The UI sends only a name and a memory ceiling; which Minecraft
@@ -778,6 +807,14 @@ class BridgeRouter(
                                 put("error", err.message)
                             }
                         }
+                    } finally {
+                        // Whatever happened. A launch refused by the lease, or
+                        // by a game type this host cannot run, throws before the
+                        // backend announces anything — so no `stopped` is coming
+                        // to release the service, and without this the
+                        // notification would describe a server that never
+                        // started for as long as the process lived.
+                        ServerHost.hostingSettled(serverId)
                     }
                 }
             } finally {
@@ -787,38 +824,15 @@ class BridgeRouter(
             }
         },
 
+        // Thin on purpose. The sequence lives in [ServerHost.stop] because the
+        // foreground notification's Stop action has to be the *same* stop — and
+        // the part that must not be re-derived is the core's `graceful` verdict,
+        // which decides whether a JVM is asked to save its world or terminated.
         "native-server-stop" to { params ->
-            val serverId = (params as JsonObject).serverId()
-
-            // A stopping server is still this device's. The dashboard PATCHes
-            // `stopped` only after this call returns, so for the whole
-            // graceful shutdown the API still reads `running` — and a host
-            // that reports itself idle in that window gets the server it just
-            // stopped restarted underneath it.
-            //
-            // `abandonLaunch` needs no branch of its own: the intent is
-            // recorded either way, and a launch with nothing spawned yet gives
-            // up at its next checkpoint.
-            val verdict = lifecycle.stopRequested(serverId).verdict
-            try {
-                if (verdict == "notRunning") {
-                    buildJsonObject {
-                        put("success", false)
-                        put("error", "That server is not running.")
-                    }
-                } else {
-                    try {
-                        backend.stop(serverId, graceful = verdict == "graceful")
-                        buildJsonObject { put("success", true) }
-                    } catch (err: ServerBackendException) {
-                        buildJsonObject {
-                            put("success", false)
-                            put("error", err.message)
-                        }
-                    }
-                }
-            } finally {
-                lifecycle.callFinished(serverId)
+            val error = ServerHost.stop((params as JsonObject).serverId())
+            buildJsonObject {
+                put("success", error == null)
+                if (error != null) put("error", error)
             }
         },
 
@@ -1043,7 +1057,11 @@ class BridgeRouter(
             manager.createNotificationChannel(
                 NotificationChannel(
                     NOTIFICATION_CHANNEL,
-                    "Homerun",
+                    // A channel name is a category *within* the app, so naming
+                    // it after the app read as "Homerun / Homerun" in system
+                    // settings — and gave the user nothing to distinguish it
+                    // from the hosting channel when deciding what to mute.
+                    context.getString(R.string.alerts_channel_name),
                     NotificationManager.IMPORTANCE_DEFAULT,
                 )
             )
@@ -1051,7 +1069,12 @@ class BridgeRouter(
             val notification = Notification.Builder(context, NOTIFICATION_CHANNEL)
                 .setContentTitle(title)
                 .setContentText(body)
-                .setSmallIcon(context.applicationInfo.icon)
+                // The dedicated monochrome icon, for the reason spelled out in
+                // res/drawable/ic_notification.xml: a small icon is drawn from
+                // its alpha channel, so the launcher icon renders as a solid
+                // shape with no mark in it.
+                .setSmallIcon(R.drawable.ic_notification)
+                .setColor(context.getColor(R.color.brand_cornflower))
                 .setAutoCancel(true)
                 .build()
 

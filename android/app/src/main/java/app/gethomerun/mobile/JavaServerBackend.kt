@@ -130,6 +130,7 @@ class JavaServerBackend(
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
     override var onNetworkError: ((String, String) -> Unit)? = null
+    override var onBackupFinished: ((String) -> Unit)? = null
 
     // -----------------------------------------------------------------------
     // Storage
@@ -862,7 +863,15 @@ class JavaServerBackend(
                     stopLogPump()
                 }
                 backupJobs[serverId] = job
-                job.invokeOnCompletion { backupJobs.remove(serverId, job) }
+                job.invokeOnCompletion {
+                    backupJobs.remove(serverId, job)
+                    // On completion rather than at the end of the block above,
+                    // so a cancelled backup announces itself too. The host uses
+                    // this to decide it may finally be reclaimed, and a
+                    // cancellation that stayed silent would leave it pinned in
+                    // the foreground for the life of the process.
+                    onBackupFinished?.invoke(serverId)
+                }
             } else {
                 stopLogPump()
             }
@@ -879,9 +888,11 @@ class JavaServerBackend(
      * grew somewhere to put them; the emit is still here because the UI wants
      * the line now, not on its next poll.
      *
-     * The **first** note of a launch is also what clears the previous run's
-     * console. That rule lives in the core, so nothing here has to sequence
-     * it — see `homerun_server_note`.
+     * A note only ever appends. Clearing the previous run's console is
+     * [reset]'s job, through `homerun_server_console_begin` — an implicit
+     * "the first note clears" would wipe the console of the run a player had
+     * just watched stop, because the on-stop backup writes notes after a run
+     * ends.
      */
     private fun note(serverId: String, line: String) {
         Log.i(TAG, line)

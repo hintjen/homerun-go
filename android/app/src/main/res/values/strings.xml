@@ -1,4 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Homerun</string>
+    <!--
+      The product name, as the shared UI's own header renders it. Used for the
+      launcher label, the notification header, and the title of the hosting
+      notification before a server name is known — so it has to match what the
+      user sees inside the app, which is "Homerun Go" and not "Homerun".
+    -->
+    <string name="app_name">Homerun Go</string>
+
+    <!--
+      The hosting notification. Written for a player glancing at a lock screen,
+      not for a log — the same rule the bridge's error messages follow.
+    -->
+    <string name="alerts_channel_name">Alerts</string>
+    <string name="hosting_channel_name">Server hosting</string>
+    <string name="hosting_channel_description">Shown while this phone is running a
+        Minecraft server, or finishing a backup. Turning it off will not stop the
+        server, but you will lose the Stop button.</string>
+    <string name="hosting_stop">Stop</string>
+    <string name="hosting_starting">Starting…</string>
+    <string name="hosting_stopping">Stopping — saving the world…</string>
+    <string name="hosting_running">Your server is online</string>
+    <string name="hosting_running_empty">Online · nobody playing yet</string>
+    <string name="hosting_running_one">Online · 1 player</string>
+    <string name="hosting_running_many">Online · %1$d players</string>
+    <string name="hosting_backing_up">Backing up your world — don\'t close Homerun</string>
 </resources>
