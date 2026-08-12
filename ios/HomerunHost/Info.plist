@@ -4,8 +4,10 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<!-- What appears under the icon. CFBundleName below stays $(PRODUCT_NAME)
+	     so the bundle and executable keep the space-free `Homerun` name. -->
 	<key>CFBundleDisplayName</key>
-	<string>Homerun</string>
+	<string>Homerun Go</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

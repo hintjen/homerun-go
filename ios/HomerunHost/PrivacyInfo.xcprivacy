@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Apple rejects an upload that uses a required-reason API without
+	  declaring it here (ITMS-91053). The rejection arrives by email after
+	  the upload succeeds, so nothing local catches it — the build simply
+	  never appears in TestFlight.
+
+	  The two entries below are audited and complete: a scan of the Swift
+	  sources found no file-timestamp, system-boot-time or active-keyboard
+	  API in use. Re-check when a new platform API lands.
+	-->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!-- HostStore.swift: a handful of scalars owned by this app. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- BridgeRouter+AppShell / +Session: free space, shown to the
+			     player before a world import so a failed one is not a
+			     surprise. Never leaves the device. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+
+	<!--
+	  PLACEHOLDER — this section is not audited yet, and an empty array is
+	  not a neutral default. It is an affirmative declaration that the app
+	  collects nothing, and it has to match the answers given in App Store
+	  Connect. The app signs players in and talks to the gateway, so this
+	  is almost certainly wrong as it stands: walk HomerunAPI.swift and
+	  declare the account identifier and anything else that leaves the
+	  device before the first external build.
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<!-- No ad networks, no cross-app tracking, nothing to declare. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+</dict>
+</plist>
