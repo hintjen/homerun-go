@@ -120,8 +120,16 @@ object ServerHost {
      * already looking when something has gone wrong.
      */
     fun note(serverId: String, line: String) {
-        forEach { it.onLog(serverId, "[Homerun] $line") }
+        // Some messages arrive already badged — `homerun-core` writes the
+        // prefix into the lines it hands back, because the desktop puts them
+        // straight into its log. Adding a second one produced
+        // "[Homerun] [Homerun] Operator change saved…" in front of a player.
+        val prefixed = if (line.startsWith(BADGE)) line else "$BADGE$line"
+        forEach { it.onLog(serverId, prefixed) }
     }
+
+    /** How Homerun's own lines are marked in a server's console. */
+    private const val BADGE = "[Homerun] "
 
     /** Copy before dispatch: a listener may unregister while being called. */
     private fun forEach(action: (Listener) -> Unit) {
