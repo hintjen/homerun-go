@@ -21,9 +21,42 @@ use crate::state::{ServerState, ServerStatus};
 
 pub const DEFAULT_JAVA_PORT: u16 = 25565;
 
+/// Something the host asks a running server that the player did not ask.
+///
+/// Reporting polls every two minutes for the roster and the gametime. On this
+/// platform a command's reply arrives as an ordinary console line — there is
+/// no separate RCON channel to hide it on, the way the desktop has — so
+/// without this, anyone watching their console sees two lines they did not
+/// type appear every two minutes, forever.
+///
+/// The answer is recognised by **the core parsing it**, not by matching text
+/// here. The shape of a `list uuids` reply then lives in exactly one place,
+/// and a reply this build cannot understand stays on the console, where
+/// somebody may make sense of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    Roster,
+    Age,
+}
+
+impl Ask {
+    fn recognises(self, line: &str) -> bool {
+        use homerun_core::reporting::stats;
+        match self {
+            Ask::Roster => stats::parse_list_uuids(line).is_some(),
+            Ask::Age => stats::parse_server_age(line).is_some(),
+        }
+    }
+}
+
 struct Inner {
     status: ServerStatus,
     logs: LogBuffer,
+    /// An [`Ask`] in flight, and where its answer goes.
+    ///
+    /// One at a time: the polls are made in sequence, and arming a second
+    /// would leave the first waiting for a line already given away.
+    quiet: Option<(Ask, std::sync::mpsc::SyncSender<String>)>,
     /// The console holds a run that has already finished.
     ///
     /// Only consulted by `start`, and only as a safety net: a host that
@@ -107,6 +140,7 @@ impl ServerHost {
             inner: Arc::new(Mutex::new(Inner {
                 status: ServerStatus::idle(),
                 logs: LogBuffer::default(),
+                quiet: None,
                 console_holds_finished_run: false,
                 stop: StopSignal::default(),
                 metrics: homerun_core::metrics::History::new(Default::default()),
@@ -124,7 +158,52 @@ impl ServerHost {
     }
 
     pub fn push_log(&self, line: impl Into<String>) {
-        self.lock().logs.push(line);
+        let line = line.into();
+        let mut inner = self.lock();
+        // An answer to something the host asked goes to whoever asked, and no
+        // further. Checked before the buffer, because the buffer is what the
+        // UI pages through — filtering later, in a host, does not work: the
+        // line is already stored by then.
+        if let Some((ask, sender)) = inner.quiet.as_ref() {
+            if ask.recognises(&line) {
+                let _ = sender.try_send(line);
+                inner.quiet = None;
+                return;
+            }
+        }
+        inner.logs.push(line);
+    }
+
+    /// Ask the server something on the host's behalf, and keep the answer off
+    /// the console.
+    ///
+    /// Blocking, with a deadline, because the reply is a console line that
+    /// arrives on the engine's thread — the caller waits on a channel rather
+    /// than polling. Hosts must call this off their main thread.
+    ///
+    /// `None` when the server is not running, refused the command, or said
+    /// nothing this build recognised inside the window. All three mean the
+    /// same thing to a report: that field is unknown.
+    ///
+    /// A player who runs `/list` in the same moment loses their own reply to
+    /// this. That is the trade for not showing everybody two machine-generated
+    /// lines every two minutes, and the window is only as long as the server
+    /// takes to answer.
+    pub fn ask(&self, ask: Ask, command: &str, timeout: std::time::Duration) -> Option<String> {
+        let (sender, answers) = std::sync::mpsc::sync_channel(1);
+        self.lock().quiet = Some((ask, sender));
+
+        if let Err(refusal) = self.command(command) {
+            self.lock().quiet = None;
+            log::warn!("could not ask the server: {refusal}");
+            return None;
+        }
+
+        let answer = answers.recv_timeout(timeout).ok();
+        // Disarmed either way: a late reply must not be swallowed from a
+        // console the player is reading, having missed its window.
+        self.lock().quiet = None;
+        answer
     }
 
     /// A line from Homerun rather than from the server.
@@ -969,5 +1048,94 @@ mod tests {
             .any(|l| l.contains("Downloading the server jar")));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- polls the player should not see ------------------------------------
+
+    /// The whole point: an answer reaches whoever asked and never the console.
+    ///
+    /// Driven through `push_log` rather than a real engine, because that is
+    /// the funnel every line goes through and the only place the decision can
+    /// be made — a host filtering afterwards is filtering a buffer the UI has
+    /// already read.
+    #[test]
+    fn an_answer_the_host_asked_for_stays_off_the_console() {
+        let host = Arc::new(ServerHost::new(Box::new(StubEngine::healthy())));
+
+        // Arm, then answer from another thread as the engine would.
+        let answering = {
+            let host = Arc::clone(&host);
+            thread::spawn(move || {
+                // Give the ask time to arm before the reply lands.
+                thread::sleep(Duration::from_millis(50));
+                host.push_log("[12:00:00] [Server thread/INFO]: an ordinary line");
+                host.push_log(
+                    "[12:00:00] [Server thread/INFO]: There are 2 of a max of 20 players online: \
+                     Notch (069a79f4-44e9-4726-a5be-fca90e38aaf5), Jeb_ (853c80ef-3c37-49fd-aa49-938b674adae6)",
+                );
+            })
+        };
+
+        // The stub is not running, so `command` refuses and `ask` gives up —
+        // which is itself the documented behaviour. Drive the arming directly
+        // instead by asking on a thread and pushing while it waits.
+        let asking = {
+            let host = Arc::clone(&host);
+            thread::spawn(move || {
+                let (sender, answers) = std::sync::mpsc::sync_channel(1);
+                host.lock().quiet = Some((Ask::Roster, sender));
+                let answer = answers.recv_timeout(Duration::from_secs(2)).ok();
+                host.lock().quiet = None;
+                answer
+            })
+        };
+
+        let answer = asking.join().unwrap();
+        answering.join().unwrap();
+
+        assert!(
+            answer
+                .as_deref()
+                .is_some_and(|l| l.contains("There are 2 of a max")),
+            "the roster reply never reached the caller: {answer:?}"
+        );
+
+        let console = host.logs_since(0).lines;
+        assert!(
+            console.iter().any(|l| l.contains("an ordinary line")),
+            "an unrelated line was swallowed: {console:?}"
+        );
+        assert!(
+            !console.iter().any(|l| l.contains("There are 2 of a max")),
+            "the poll's reply is on the player's console: {console:?}"
+        );
+    }
+
+    /// Nothing is withheld when nothing was asked — the same reply belongs on
+    /// the console when a player typed `/list` themselves.
+    #[test]
+    fn the_same_line_is_kept_when_no_poll_is_in_flight() {
+        let host = ServerHost::new(Box::new(StubEngine::healthy()));
+        host.push_log(
+            "[12:00:00] [Server thread/INFO]: There are 0 of a max of 20 players online:",
+        );
+
+        let console = host.logs_since(0).lines;
+        assert!(
+            console.iter().any(|l| l.contains("There are 0 of a max")),
+            "a player's own /list output went missing: {console:?}"
+        );
+    }
+
+    /// A server that says nothing recognisable inside the window leaves the
+    /// field unknown rather than hanging the report.
+    #[test]
+    fn a_poll_that_is_never_answered_gives_up() {
+        let host = ServerHost::new(Box::new(StubEngine::healthy()));
+        let started = std::time::Instant::now();
+        // Not running, so the command is refused and this returns at once.
+        let answer = host.ask(Ask::Age, "time query gametime", Duration::from_millis(250));
+        assert_eq!(answer, None);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

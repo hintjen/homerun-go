@@ -83,42 +83,54 @@ The loop sleeps on a `select` between the core's `waitMs` and a conflated
 because a party arriving together should be one report, which is the same
 coalescing the core's debounce expresses in time.
 
-### Scraping the console for RCON replies
+### Asking the server, without the player seeing it
 
-`native-server-rcon` is fire-and-forget on this host — replies arrive as
-ordinary console lines, not as a response — so `list uuids` and
-`time query gametime` are answered by watching the console.
+`native-server-rcon` is fire-and-forget on this host — a command's reply
+arrives as an ordinary console line, not as a response — so `list uuids` and
+`time query gametime` are answered by watching the console. That watching used
+to happen here in Kotlin; it happens in the supervisor now, for the reason
+below.
 
-**The reply is recognised by the core parsing it**, not by matching text here.
-`Core.parseRoster` returning non-null *is* the test. That is the same trick the
-desktop uses for Bedrock, which has no RCON at all, and it means the shape of a
-`list uuids` reply is written down once.
+### The poll is invisible to the player, and where that is enforced
 
-### Known issue: the poll is visible to the player
-
-Because the reply is an ordinary console line, **every player watching their
-own console sees two lines they did not type, every two minutes**:
+Because the reply is an ordinary console line, a naive implementation shows
+**every player two lines they did not type, every two minutes**:
 
 ```
 [20:23:05] [Server thread/INFO]: There are 0 of a max of 20 players online:
 [20:23:05] [Server thread/INFO]: The time is 32082
 ```
 
-The desktop does not have this problem: its replies come back over RCON, a
-separate channel the console never sees.
+The desktop has no such problem — its replies come back over RCON, a channel
+the console never sees.
 
-Filtering the host's event fan-out **does not fix it** — that was tried. The UI
-does not build the console from these events; it pages it out of the
-supervisor's own `LogBuffer` in Rust, so a line skipped in Kotlin is still
-there when the UI asks. A real fix has to keep the line out of that buffer,
-which means the supervisor has to know a command was issued on reporting's
-behalf. Two candidates:
+**Filtering in the host does not work, and was tried.** The UI does not build
+the console from the host's event stream; it pages it out of the supervisor's
+own `LogBuffer` in Rust. A line skipped in Kotlin is still in the buffer when
+the UI asks for it.
 
-1. Mark the command as internal when it is dispatched, and have the supervisor
-   withhold the next line that answers it from the buffer.
-2. Stop polling: take the count from the console-built roster the supervisor
-   already maintains, and lose the UUIDs — which journeys need to attribute a
-   session to a player, so this is a real loss rather than a free win.
+So the decision lives in the supervisor, at `push_log` — the single funnel
+every console line goes through. `server::Ask` arms an expectation, and a line
+that answers it is handed to the caller and **not** appended:
+
+```rust
+if let Some((ask, sender)) = inner.quiet.as_ref() {
+    if ask.recognises(&line) { sender.try_send(line); return; }
+}
+inner.logs.push(line);
+```
+
+`recognises` is the core's own parser returning `Some` — so the shape of a
+`list uuids` reply is written down once, and a reply this build cannot
+understand stays on the console where somebody may make sense of it.
+
+The host therefore makes **one** call, `server.statsPoll`, which sends both
+commands and returns both answers. It blocks while the server replies, so it is
+called off the main thread.
+
+The cost: a player who runs `/list` in the same moment loses their own reply to
+the poll. That is the trade for not showing everybody two machine-generated
+lines every two minutes.
 
 ### CPU is rescaled, and this is the easiest thing to get wrong
 
@@ -138,6 +150,24 @@ That port does not exist when a launch begins. It is assigned while the
 post-launch tunnel poll is waiting for it, so `HomerunApi.readLink` extracts it
 there and hands it to `Reporting.gatewayAddressResolved`. Until then
 `gateway_ping` is null, which is what the desktop sends in the same window.
+
+## Ops sync happens on both consoles
+
+An `op` typed in the app goes through `native-server-rcon` →
+`Reporting.consoleCommand`. An `op` typed in the **web dashboard** never
+touches Kotlin — it arrives as a `rcon` frame on the device websocket and is
+executed inside Rust. Both mirror the change into the server's settings, and
+both sign it as the person who typed it:
+
+| Console | Path | Credential |
+|---|---|---|
+| the app's | `Reporting.syncOps` | `Session.userToken()` |
+| the dashboard's | `device_ws::Connection::sync_ops` | the JWT that authenticated the socket |
+
+The device-websocket half is the closer match to the desktop, which passes the
+device-WS caller's token through for exactly this reason. Neither falls back to
+the device token: the API would accept it and strip the change, which reads as
+success.
 
 ## `Session.kt`
 
@@ -191,14 +221,16 @@ The desktop is still exposed to both. See `plans/android-parity.md`.
 
 | File | Role |
 |---|---|
-| `Reporting.kt` | the listener, the cadence loop, the scrapes, the ops chain |
+| `Reporting.kt` | the listener, the cadence loop, the ops chain |
 | `Session.kt` | the user token, read in one place |
 | `Core.kt` (§Reporting) | wrappers over the core's decisions |
 | `HomerunApi.kt` | `perform`, `serverBody`, `publicIpAddress`, PATCH |
 | `homerun-core/src/reporting/` | crash, stats, minigame — payloads and cadence |
 | `homerun-core/src/minecraft/ops.rs` | op/deop/ban/pardon, the list merge |
 | `homerun-core/src/minecraft/slp.rs` | the ping codec |
-| `homerun-pumpkin-ffi/src/host_dispatch.rs` | the socket, and the deadline |
+| `homerun-pumpkin-ffi/src/host_dispatch.rs` | the ping socket, the deadline, `server.statsPoll` |
+| `homerun-pumpkin-ffi/src/server.rs` | `Ask` — keeping a poll's answer off the console |
+| `homerun-pumpkin-ffi/src/device_ws/mod.rs` | ops sync for the dashboard's console |
 
 ## Triage
 
@@ -213,7 +245,7 @@ only said "reported" would make an all-null report look healthy. Then:
 
 | Field null | Likely cause |
 |---|---|
-| `players`, `age` | the console scrape timed out (3 s), or a plugin shadowed `/list` — the core's `pinned` exists for this |
+| `players`, `age` | the poll timed out (3 s), or a plugin shadowed `/list` — the core's `pinned` exists for this |
 | `cpu` | expected on the **first** report of a run: a rate needs two readings |
 | `ping` | the gateway has not assigned an external port yet, or the server is not reachable from the device |
 

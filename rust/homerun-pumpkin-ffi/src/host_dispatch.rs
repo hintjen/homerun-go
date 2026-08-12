@@ -46,9 +46,12 @@ const CHUNK: usize = 4 * 1024;
 pub fn call(method: &str, args: &str) -> String {
     let handled = match method {
         "net.gatewayPing" => Some(
-            std::panic::catch_unwind(|| gateway_ping(args)).unwrap_or_else(|_| {
-                Err(format!("the native host panicked handling \"{method}\""))
-            }),
+            std::panic::catch_unwind(|| gateway_ping(args))
+                .unwrap_or_else(|_| Err(format!("the native host panicked handling \"{method}\""))),
+        ),
+        "server.statsPoll" => Some(
+            std::panic::catch_unwind(|| stats_poll(args))
+                .unwrap_or_else(|_| Err(format!("the native host panicked handling \"{method}\""))),
         ),
         _ => None,
     };
@@ -58,6 +61,61 @@ pub fn call(method: &str, args: &str) -> String {
         Some(Err(error)) => json!({ "ok": false, "error": error }).to_string(),
         None => core_dispatch::call(method, args),
     }
+}
+
+/// How long to wait for a running server to answer a poll.
+///
+/// A console reply comes back in well under a second, or the command was
+/// shadowed by a plugin and is never coming.
+const POLL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The two things a stats report needs from the server itself.
+///
+/// One call rather than two round trips through the host, because the answers
+/// must not reach the console and only the supervisor can withhold them — see
+/// [`crate::server::Ask`]. A host that did this for itself would be filtering
+/// a buffer the UI has already read from.
+///
+/// Both fields are independently optional: a shadowed `/list` should not cost
+/// the gametime, and an unrecognised gametime reply should not cost the
+/// roster.
+fn stats_poll(args: &str) -> Result<Value, String> {
+    use homerun_core::minecraft::jar::Loader;
+    use homerun_core::reporting::stats;
+
+    let args: Value = serde_json::from_str(args).map_err(|e| format!("bad arguments: {e}"))?;
+    let loader = Loader::parse(args.get("loader").and_then(Value::as_str))
+        .map_err(|e| format!("\"server.statsPoll\": {e}"))?;
+    let timeout = args
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .unwrap_or(POLL_TIMEOUT);
+
+    let host = crate::server::host();
+
+    // Pinned, because a Bukkit-family plugin shadowing `/list` or `/time` is
+    // the ordinary reason these come back unreadable.
+    let roster = host
+        .ask(
+            crate::server::Ask::Roster,
+            &stats::pinned(stats::LIST_UUIDS, loader),
+            timeout,
+        )
+        .and_then(|reply| stats::parse_list_uuids(&reply));
+
+    let age = host
+        .ask(
+            crate::server::Ask::Age,
+            &stats::pinned(stats::GAMETIME, loader),
+            timeout,
+        )
+        .and_then(|reply| stats::parse_server_age(&reply));
+
+    Ok(json!({
+        "roster": roster,
+        "ageSecs": age,
+    }))
 }
 
 /// Round-trip time to a Minecraft server, in milliseconds.
@@ -100,7 +158,11 @@ fn measure(host: &str, port: u16, deadline: Duration) -> Option<f64> {
     // `checked_sub` rather than a subtraction: a socket call given a zero
     // timeout blocks forever, so an expired deadline must end the attempt
     // rather than begin an unbounded one.
-    let remaining = || deadline.checked_sub(started.elapsed()).filter(|d| !d.is_zero());
+    let remaining = || {
+        deadline
+            .checked_sub(started.elapsed())
+            .filter(|d| !d.is_zero())
+    };
 
     // Resolution counts against the deadline, and on a phone that has just
     // woken up it is the slowest part.

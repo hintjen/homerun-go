@@ -1032,27 +1032,32 @@ object Core {
             put("stats", stats)
         }))
 
+    /** The roster and the world's age, as the supervisor got them. */
+    data class Poll(val roster: JsonObject?, val ageSecs: Double?)
+
     /**
-     * A `list uuids` reply, if that is what this is.
+     * Ask the running server for the two things a report needs from it.
      *
-     * Null means the reply was not a roster at all — a plugin shadowed the
-     * command, or nothing answered. That is also how the console scrape knows
-     * it has found its line: the core recognising it is the test.
+     * **Blocking** — it sends a console command and waits for the reply, so
+     * call it off the main thread.
+     *
+     * The supervisor does this rather than this app, because the replies come
+     * back as ordinary console lines and only the supervisor can keep them out
+     * of the console buffer the UI reads. Filtering them here would be too
+     * late: the line is already stored. See `homerun-pumpkin-ffi::server::Ask`.
+     *
+     * Either field is null on its own — a plugin shadowing `/list` should not
+     * cost the gametime.
      */
-    fun parseRoster(reply: String): JsonObject? =
-        call("reporting.stats.parseRoster", buildJsonObject { put("reply", reply) }) as? JsonObject
-
-    /** Seconds of gametime, from a `time query gametime` reply. */
-    fun parseServerAge(reply: String): Double? =
-        (call("reporting.stats.parseServerAge", buildJsonObject { put("reply", reply) })
-            as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()
-
-    /** The spelling of a command that a plugin cannot shadow. */
-    fun pinned(command: String, loader: String): String =
-        call("reporting.stats.pinned", buildJsonObject {
-            put("command", command)
+    fun statsPoll(loader: String): Poll {
+        val reply = call("server.statsPoll", buildJsonObject {
             put("loader", loader)
-        }).jsonPrimitive.content
+        }) as? JsonObject ?: return Poll(null, null)
+        return Poll(
+            roster = reply["roster"] as? JsonObject,
+            ageSecs = (reply["ageSecs"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull(),
+        )
+    }
 
     /**
      * Per-core CPU onto the whole device.

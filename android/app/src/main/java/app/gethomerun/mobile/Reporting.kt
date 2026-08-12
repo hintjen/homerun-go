@@ -1,11 +1,13 @@
 package app.gethomerun.mobile
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.selects.select
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -77,13 +79,6 @@ object Reporting : ServerHost.Listener {
     private var retriesUsed = 0
 
     /**
-     * Scrapes in flight. Each answers whether a line was the reply it wanted,
-     * which is both how it receives its answer and how [consume] knows to keep
-     * the line off the player's console.
-     */
-    private val scrapes = mutableListOf<(String) -> Boolean>()
-
-    /**
      * What a run needs that only the launch knew.
      *
      * Set by the bridge when a start begins, because the settings are fetched
@@ -140,18 +135,10 @@ object Reporting : ServerHost.Listener {
     // -----------------------------------------------------------------------
 
     override fun onLog(serverId: String, line: String) {
-        val waiting = synchronized(this) {
+        synchronized(this) {
             tail.addLast(line)
             while (tail.size > TAIL_LIMIT) tail.removeFirst()
-            scrapes.toList()
         }
-        // Outside the lock: answering a scrape resumes a coroutine.
-        //
-        // Note what this does *not* do — it does not stop the line reaching
-        // the player. The UI pages the console out of the supervisor's own
-        // buffer rather than off this event stream, so a reply to a poll made
-        // here is visible to whoever is watching. See `docs/android-reporting.md`.
-        waiting.forEach { runCatching { it(line) } }
 
         if (serverId != runningId) return
 
@@ -237,8 +224,13 @@ object Reporting : ServerHost.Listener {
         val run = synchronized(this) { context }
         val loader = run?.loader ?: "vanilla"
 
-        val roster = scrape(serverId, Core.pinned(LIST_UUIDS, loader)) { Core.parseRoster(it) }
-        val age = scrape(serverId, Core.pinned(GAMETIME, loader)) { Core.parseServerAge(it) }
+        // Blocking, and deliberately off the reporting loop's own dispatcher:
+        // it sends two console commands and waits for their replies.
+        val poll = withContext(Dispatchers.IO) {
+            runCatching { Core.statsPoll(loader) }.getOrElse { Core.Poll(null, null) }
+        }
+        val roster = poll.roster
+        val age = poll.ageSecs
         val cpu = backend.cpuUsage(serverId)?.let {
             Core.cpuPercentOfDevice(it, Runtime.getRuntime().availableProcessors())
         }
@@ -378,44 +370,6 @@ object Reporting : ServerHost.Listener {
         ServerHost.note(serverId, change.line)
     }
 
-    /**
-     * Run a console command and wait for the reply the core can read.
-     *
-     * `native-server-rcon` is fire-and-forget here — this host's RCON replies
-     * arrive as ordinary console lines rather than as a response — so the
-     * reply is recognised by the core parsing it, not by matching text. That
-     * is the same trick the desktop uses for Bedrock, which has no RCON at
-     * all, and it means the shape of a `list uuids` reply is written down once.
-     */
-    private suspend fun <T> scrape(
-        serverId: String,
-        command: String,
-        parse: (String) -> T?,
-    ): T? {
-        val answer = Channel<T>(Channel.CONFLATED)
-        val watcher: (String) -> Boolean = { line ->
-            val parsed = parse(line)
-            if (parsed != null) {
-                answer.trySend(parsed)
-                true
-            } else {
-                false
-            }
-        }
-        synchronized(this) { scrapes.add(watcher) }
-        return try {
-            runCatching { ServerHost.backend.command(serverId, command) }
-                .onFailure { return null }
-            select {
-                answer.onReceive { it }
-                onTimeout(SCRAPE_TIMEOUT_MS) { null }
-            }
-        } finally {
-            synchronized(this) { scrapes.remove(watcher) }
-            answer.close()
-        }
-    }
-
     /** Perform a request the core built, with the credential it asked for. */
     private fun send(request: Core.Request, userSigned: Boolean) {
         ServerHost.scope.launch {
@@ -436,12 +390,7 @@ object Reporting : ServerHost.Listener {
 
     private const val TAG = "HomerunReporting"
 
-    /** Vanilla since 1.8.1 — names and UUIDs in one round trip. */
-    private const val LIST_UUIDS = "list uuids"
-    private const val GAMETIME = "time query gametime"
 
-    /** A console reply arrives in well under a second, or not at all. */
-    private const val SCRAPE_TIMEOUT_MS = 3_000L
 
     /** Never spin, even if the core ever answered that something is due now. */
     private const val MIN_WAIT_MS = 200L

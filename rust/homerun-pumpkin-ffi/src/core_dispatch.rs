@@ -718,7 +718,6 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         // body, and above all does not decide which credential signs it —
         // getting that wrong is either a silent 403 or a report filed against
         // the wrong person.
-
         "reporting.crash.diagnose" => {
             let lines = console_lines(&args, method)?;
             // Absent means a first attempt. The budget is the host's to keep
@@ -741,12 +740,17 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         "reporting.stats.report" => {
             let stats: stats::Stats = serde_json::from_value(field("stats")?.clone())
                 .map_err(|e| format!("\"{method}\" got stats it could not read: {e}"))?;
-            serde_json::to_value(stats::report(&text("serviceId")?, &text("deviceId")?, &stats))
-                .map_err(|e| e.to_string())
+            serde_json::to_value(stats::report(
+                &text("serviceId")?,
+                &text("deviceId")?,
+                &stats,
+            ))
+            .map_err(|e| e.to_string())
         }
 
         "reporting.stats.parseRoster" => {
-            serde_json::to_value(stats::parse_list_uuids(&text("reply")?)).map_err(|e| e.to_string())
+            serde_json::to_value(stats::parse_list_uuids(&text("reply")?))
+                .map_err(|e| e.to_string())
         }
 
         "reporting.stats.parseServerAge" => Ok(stats::parse_server_age(&text("reply")?).into()),
@@ -793,7 +797,9 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     None
                 }
                 Some("poll") | None => schedule.poll(now),
-                Some(other) => return Err(format!("\"{method}\" does not know the event {other:?}")),
+                Some(other) => {
+                    return Err(format!("\"{method}\" does not know the event {other:?}"))
+                }
             };
 
             Ok(json!({
@@ -806,10 +812,11 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
 
         // A line a server plugin printed for us. Nothing else in the console
         // is looked at here.
-        "reporting.minigame.fromLine" => {
-            serde_json::to_value(minigame::from_console_line(&text("serverId")?, &text("line")?))
-                .map_err(|e| e.to_string())
-        }
+        "reporting.minigame.fromLine" => serde_json::to_value(minigame::from_console_line(
+            &text("serverId")?,
+            &text("line")?,
+        ))
+        .map_err(|e| e.to_string()),
 
         // --- ops and bans typed into the console ----------------------------
         //
@@ -819,7 +826,6 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         // API currently holds. The host does the GET in between, and must
         // serialise the pair per server — two rapid commands would otherwise
         // each read the list before either wrote it.
-
         "minecraft.ops.parse" => {
             serde_json::to_value(ops::parse(&text("command")?)).map_err(|e| e.to_string())
         }
@@ -835,12 +841,9 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         // it assigned, which is the only address worth measuring latency to.
         // Java's listen port, because that is the only kind of server this
         // build hosts; a Bedrock backend would have to ask for 19132/udp.
-        "link.publicAddress" => Ok(link::public_address(
-            field("body")?,
-            minecraft::LISTEN_JAVA,
-            "tcp",
-        )
-        .into()),
+        "link.publicAddress" => {
+            Ok(link::public_address(field("body")?, minecraft::LISTEN_JAVA, "tcp").into())
+        }
 
         "lifecycle.query" => {
             let life = load_lifecycle(&args)?;

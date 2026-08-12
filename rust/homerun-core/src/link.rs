@@ -83,7 +83,11 @@ pub fn is_usable(polled: &PolledLink, before_launch: Option<&Link>) -> bool {
 /// `"25565/tcp"`, which is why the colon is required rather than assumed:
 /// without that check an unprovisioned server would be measured against port
 /// 25565 of the gateway itself — somebody else's server, or nothing.
-pub fn public_address(body: &serde_json::Value, listen_port: u16, protocol: &str) -> Option<String> {
+pub fn public_address(
+    body: &serde_json::Value,
+    listen_port: u16,
+    protocol: &str,
+) -> Option<String> {
     let link = body.get("config")?.get("links")?.as_array()?.first()?;
 
     let internal = format!("{listen_port}/{protocol}");
