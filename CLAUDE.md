@@ -56,6 +56,13 @@ it existed. When you find yourself writing a rule in Kotlin or Swift, stop and
 ask whether the other platform will need the same rule — and whether it will
 get it right.
 
+There is a second axis, and it points the other way: the core is native, so
+changing it needs a store release, while the UI bundle can ship over the air.
+The UI is shared across all three apps too, so "shared" does not settle it. A
+threshold someone will want to tune after launch may belong in the UI even
+when the core could hold it — decide that deliberately rather than by habit.
+See [`plans/ota-updates.md`](./plans/ota-updates.md).
+
 `homerun-pumpkin-ffi` is the other half: the **supervisor**. It owns the
 running server — the state machine, the console buffer, the stop ladder, the
 crash capture, the sampling — for a linked engine and a child process alike.

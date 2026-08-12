@@ -265,6 +265,33 @@ between iOS and Android, and the fork patches it needs.
 
 ---
 
+### 📦 [Shipping updates without the stores](../plans/ota-updates.md)
+
+Not a subsystem doc yet — the plan for pushing the shared UI bundle over the
+air, and the version negotiation it cannot ship without.
+
+**Contains**:
+- Why both stores explicitly allow this for a WebView host, quoted
+- What can and cannot move, by layer and by size
+- The one resolver function per platform that is the whole mechanism
+- A walkthrough: the four directories, and what happens across the two launches
+  between a release and a user seeing it
+- Why applying an update needs no app restart — and could not have one on iOS
+- Why a WebView swap is safe for a *running* server and not for a *starting*
+  one
+- Why an OTA'd UI against an older host turns this protocol's worst failure
+  mode from impossible into likely, and the revision counter that prevents it
+- The probation rule, without which a bad bundle bricks the app in a way no
+  store update can fix
+- Why the Play sentence that authorises this is the same one that governs
+  downloading server jars
+- Why to build it rather than adopt a framework
+
+**Read this for**: Planning a release, or deciding whether something belongs in
+the core or in the UI.
+
+---
+
 ### 📲 [iOS handoff](../plans/ios-handoff.md)
 
 Where the iOS side stands, what was changed without a Swift compiler, and the
