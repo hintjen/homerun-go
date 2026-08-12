@@ -767,6 +767,27 @@ final class PumpkinBackend: ServerBackend {
         }
 
         HostLog.host.info("state -> \(state.rawValue, privacy: .public)")
+
+        // The screen staying on *is* this platform's backgrounding story: iOS
+        // suspends the app, and a suspended app is a stopped server. So a
+        // session lasts exactly as long as auto-lock is held off, and this is
+        // where that is decided. See ``ScreenAwake``.
+        //
+        // Here rather than in `start`/`stop`, because this is the one funnel
+        // every state passes through, and `stopping` has to keep the hold —
+        // that is the world saving, which is the worst moment to be
+        // interrupted.
+        //
+        // After the veto guard on purpose: an announcement the core refuses is
+        // one contradicted by a stop already in flight, and that stop announces
+        // `stopped` itself, so no hold is ever stranded by returning early.
+        switch state {
+        case .starting, .running, .stopping:
+            ScreenAwake.hold(ScreenAwake.hosting)
+        case .stopped, .crashed:
+            ScreenAwake.release(ScreenAwake.hosting)
+        }
+
         report(state: state, serverId: serverId, backupInProgress: backupInProgress)
         onStateChanged?(serverId, state, backupInProgress)
     }

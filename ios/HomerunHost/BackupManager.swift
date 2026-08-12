@@ -245,9 +245,15 @@ final class BackupManager {
             // enough to stop pretending and let another device have the lease.
             BackupFFI.cancel()
         }
-        UIApplication.shared.isIdleTimerDisabled = true
+        // Through ``ScreenAwake`` rather than setting `isIdleTimerDisabled`
+        // here: a running server now holds the same flag, and two owners
+        // clearing a shared `Bool` independently is how a screen comes to lock
+        // in the middle of a session. The two do not overlap today — this runs
+        // after the server has stopped — but that is a property of the current
+        // call order rather than something either side enforces.
+        ScreenAwake.hold(ScreenAwake.backup)
         defer {
-            UIApplication.shared.isIdleTimerDisabled = false
+            ScreenAwake.release(ScreenAwake.backup)
             if assertion != .invalid { UIApplication.shared.endBackgroundTask(assertion) }
         }
 
