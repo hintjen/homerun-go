@@ -42,8 +42,16 @@ targets:
     sources:
       - path: HomerunHost
         excludes:
-          - web       # folder reference below; would otherwise be flattened
-          - lib       # build output, linked not compiled
+          - web            # folder reference below; would otherwise be flattened
+          - lib            # build output, linked not compiled
+          - AppIcon.icon   # a bundle, added whole below
+      # The Icon Composer source. It is a directory, but actool compiles it as
+      # one unit, so it has to reach the project as a single file reference —
+      # left to the glob above it would arrive as a loose .json and .svg and
+      # the app would build with no icon at all.
+      - path: HomerunHost/AppIcon.icon
+        type: file
+        buildPhase: resources
       # A folder reference, so the whole tree lands in the bundle as `web/`
       # and restaging the UI needs no `xcodegen generate`.
       - path: HomerunHost/web
@@ -62,6 +70,7 @@ targets:
         INFOPLIST_FILE: HomerunHost/Info.plist
         CODE_SIGN_ENTITLEMENTS: HomerunHost/HomerunHost.entitlements
         TARGETED_DEVICE_FAMILY: "1"        # iPhone; the UI is untested on iPad
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # HomerunHost/AppIcon.icon
         SWIFT_OBJC_BRIDGING_HEADER: HomerunHost/FFI/HomerunFFI.h
 
         # Simulator-first: no team needed, and Xcode signs simulator builds
