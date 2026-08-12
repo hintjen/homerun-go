@@ -49,6 +49,9 @@ device-ws = [
     "dep:futures-util",
     "dep:reqwest",
     "dep:jsonwebtoken",
+    "dep:tokio-rustls",
+    "dep:instant-acme",
+    "dep:rcgen",
 ]
 
 [dependencies]
@@ -98,6 +101,18 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
 ], optional = true }
 jsonwebtoken = { version = "9", default-features = false, optional = true }
+# Terminating TLS ourselves, because the gateway is SNI passthrough — see
+# plans/device-websocket.md. Same rustls the HTTP client above already pulls in,
+# so there is one crypto provider in the build rather than two.
+tokio-rustls = { version = "0.26", optional = true }
+# The ACME half. Hand-rolling it is what the desktop did (~479 lines of
+# TypeScript); there is no reason to do that again in a language with a
+# maintained client.
+instant-acme = { version = "0.8", optional = true }
+# The keypair and CSR the order is finalised with. The private key is ours to
+# keep — it is what serves TLS afterwards — so this cannot live inside the ACME
+# client's own abstractions.
+rcgen = { version = "0.14", optional = true }
 
 # Both appear in Pumpkin's own public types — a `uuid::Uuid` in an operator
 # entry, a `time::OffsetDateTime` in a ban — so seeding those lists means
