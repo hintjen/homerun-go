@@ -117,6 +117,26 @@ function sourceDir() {
   return dir;
 }
 
+/**
+ * Whether a file from the UI build belongs on a device.
+ *
+ * Source maps do not. They are debugger artifacts — nothing reads them at
+ * runtime, and no user has a debugger attached — and they dominate the bundle:
+ * 46 MB of the 57 MB staged before this filter existed, in 64 files, all of
+ * which shipped inside the APK and sat on every phone.
+ *
+ * They are dropped here rather than in `homerun-app-ui`, which legitimately
+ * wants them in its own `out/` for debugging the UI on a desktop. This is the
+ * packaging step; deciding what a device receives is its job.
+ *
+ * The saving is worth stating twice over, because it applies to both delivery
+ * routes: ~46 MB off every store download, and it is the difference between a
+ * ~15 MB and a ~3.5 MB OTA bundle (`plans/ota-updates.md`).
+ */
+function shipped(source) {
+  return !source.endsWith(".js.map");
+}
+
 refresh();
 const src = sourceDir();
 
@@ -126,7 +146,7 @@ for (const platform of platforms) {
   // would otherwise linger and get served.
   fs.rmSync(dest, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.cpSync(src, dest, { recursive: true });
+  fs.cpSync(src, dest, { recursive: true, filter: shipped });
   console.log(`${platform.padEnd(8)} <- ${dest}`);
 }
 
