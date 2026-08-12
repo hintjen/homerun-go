@@ -80,6 +80,12 @@ class MainActivity : ComponentActivity() {
      *
      *  - `__homerunCapabilities`, which the UI reads **synchronously** at
      *    startup and cannot await.
+     *  - `__homerunHostRevision`, for the same reason it has to be synchronous:
+     *    a bundle delivered over the air can be newer than the host under it,
+     *    and a feature gated on a channel this host does not answer must render
+     *    as absent rather than as a button that hangs. A sibling global rather
+     *    than a capability field, because capabilities are generated from the
+     *    contract and this is a property of the binary.
      *  - `__homerunHost.postMessage`, the name the shared transport looks for.
      *    `addJavascriptInterface` gives us `HomerunHost`; this is the adapter
      *    between that and the protocol's global.
@@ -89,6 +95,7 @@ class MainActivity : ComponentActivity() {
         """
         (function () {
           window.__homerunCapabilities = $capabilities;
+          window.__homerunHostRevision = ${BridgeRouter.HOST_REVISION};
           var host = window.__homerunHost || (window.__homerunHost = {});
           host.postMessage = function (json) { ${BridgeRouter.JS_INTERFACE}.postMessage(json); };
         })();
@@ -98,7 +105,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        assetLoader = WebBundle.loader(this)
+        // Before anything can load a page. A bundle downloaded on an earlier
+        // launch goes live here and nowhere else — never under a live WebView,
+        // which would cancel whatever bridge call is in flight, and
+        // `native-server-start` runs for minutes (plans/ota-updates.md).
+        BundleStore.activate(this)
+
         router = BridgeRouter(applicationContext, lifecycleScope)
 
         container = FrameLayout(this).apply {
@@ -134,6 +146,12 @@ class MainActivity : ComponentActivity() {
             container.removeView(old)
             old.destroy()
         }
+
+        // Re-asked for every WebView, not just the first. A render process that
+        // died is the strongest evidence a bundle is bad, and asking again is
+        // what spends its remaining attempts — so a fatal bundle rolls back
+        // within one session instead of waiting for relaunches.
+        assetLoader = WebBundle.loader(this, BundleStore.resolve(this).root)
 
         val view = WebView(this)
         view.layoutParams = FrameLayout.LayoutParams(

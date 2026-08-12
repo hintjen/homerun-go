@@ -248,6 +248,25 @@ does not survive a restart, or before adding anything else the API is told.
 
 ---
 
+### 📦 [Over-the-air UI bundles](./ota-bundles.md)
+
+Replacing the shared web bundle without a store release: which one is served,
+and what happens when a new one turns out to be fatal.
+
+**Contains**:
+- `BRIDGE_HOST_REVISION`, and the ledger check that makes bumping it mandatory
+- Why capabilities need no revision and channels do
+- The four directories, and the manifest a bundle directory must carry
+- What activate and resolve do, in order, and why both run before a WebView
+- Why the probation counter is on disk, written before the page can crash
+- Why there is no per-request fallback to the shipped copy
+- Testing the whole thing with `adb push`, and no CDN needed
+
+**Read this for**: Shipping a UI fix without a store release, or an app that
+came back on an older UI than the one it downloaded.
+
+---
+
 ### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
 
 Not a subsystem doc — the full sweep behind "no", so it does not get

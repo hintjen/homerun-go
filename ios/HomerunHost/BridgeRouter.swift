@@ -40,6 +40,21 @@ protocol BridgeEventSink: AnyObject {
 final class BridgeRouter {
     typealias Handler = (_ params: Any?) async throws -> Any?
 
+    /// How far along `shared/conformance/host-revisions.json` this host is.
+    ///
+    /// `PROTOCOL.md` §7 versions the protocol and says changes are additive,
+    /// which is why every host answers `v: 1` for ever and the UI cannot tell a
+    /// January host from a July one. That is harmless while the bundle and the
+    /// host ship in one binary, and stops being harmless the moment a bundle
+    /// arrives over the air: a call to a channel this host has never heard of
+    /// leaves a promise pending for ever, and the user sees a frozen screen
+    /// with no error.
+    ///
+    /// So: bump this whenever the table below gains a channel, and add the
+    /// matching ledger entry. `scripts/check-host-revision.js` compares the two
+    /// and fails the build if you do one without the other.
+    static let hostRevision = 1
+
     private(set) var handlers: [String: Handler] = [:]
 
     /// Set by `BridgeController` after construction — handlers emit through it.
