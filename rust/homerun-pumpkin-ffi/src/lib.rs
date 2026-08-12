@@ -28,6 +28,12 @@
 //! See `docs/ffi.md` for the full contract and host integration notes.
 
 pub mod crash;
+/// Serving `wss://<device-fqdn>` so the dashboard can reach this device's
+/// console and RCON directly. What the frames *mean* is decided in
+/// `homerun_core::device_ws::protocol`, which is pure and always compiled;
+/// this is the socket behind them, and it is the heaviest thing in the crate.
+#[cfg(feature = "device-ws")]
+pub mod device_ws;
 pub mod engine;
 pub mod log_buffer;
 pub mod preflight;

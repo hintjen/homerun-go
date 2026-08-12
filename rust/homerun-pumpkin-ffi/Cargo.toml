@@ -37,6 +37,20 @@ backup-engine = ["dep:rustic_core", "dep:rustic_backend", "dep:jiff"]
 # ever had and they need no device.
 process-engine = ["dep:libc"]
 
+# Serves `wss://<device-fqdn>` so the dashboard can reach this device's console
+# and RCON directly. Off by default and by some distance the heaviest feature
+# here — a TLS stack, an HTTP client and a JWT verifier — so the rest of the
+# crate keeps building and testing in seconds without it. The protocol it
+# speaks is decided in `homerun_core::device_ws::protocol`, which is pure and
+# always compiled. See plans/device-websocket.md.
+device-ws = [
+    "dep:tokio",
+    "dep:tokio-tungstenite",
+    "dep:futures-util",
+    "dep:reqwest",
+    "dep:jsonwebtoken",
+]
+
 [dependencies]
 # Pumpkin stays an ordinary dependency at a pinned rev. Keeping our FFI in
 # this crate means upstream's Cargo.toml needs no crate-type change, which is
@@ -55,7 +69,35 @@ process-engine = ["dep:libc"]
 pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
 pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
 pumpkin-util = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "time"], optional = true }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "time",
+    # The device websocket's listener and its per-connection tasks. Compiled
+    # only when a feature that needs them is on.
+    "net",
+    "sync",
+    "io-util",
+    "macros",
+], optional = true }
+
+# --- the device websocket -------------------------------------------------
+#
+# All behind `device-ws` and off by default, which is what keeps `npm test`
+# device-free and seconds long. This is the heaviest thing in the crate by a
+# distance, and it is here rather than in the hosts because the alternative is
+# writing the same socket twice — see plans/device-websocket.md.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", default-features = false, features = [
+    "sink",
+    "std",
+], optional = true }
+# rustls rather than the platform's TLS: one behaviour on both platforms,
+# no OpenSSL to cross-compile, and D3 needs rustls anyway to terminate TLS.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+], optional = true }
+jsonwebtoken = { version = "9", default-features = false, optional = true }
 
 # Both appear in Pumpkin's own public types — a `uuid::Uuid` in an operator
 # entry, a `time::OffsetDateTime` in a ban — so seeding those lists means

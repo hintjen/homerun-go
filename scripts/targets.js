@@ -56,7 +56,7 @@ const TARGETS = {
     triple: "aarch64-linux-android",
     abi: "arm64-v8a",
     artifact: `lib${CRATE_NAME}.so`,
-    features: ["pumpkin-engine", "process-engine"],
+    features: ["pumpkin-engine", "process-engine", "device-ws"],
     // jniLibs is the only place Android will exec/load from on API 29+.
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "arm64-v8a"
@@ -68,7 +68,7 @@ const TARGETS = {
     triple: "x86_64-linux-android",
     abi: "x86_64",
     artifact: `lib${CRATE_NAME}.so`,
-    features: ["pumpkin-engine", "process-engine"],
+    features: ["pumpkin-engine", "process-engine", "device-ws"],
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
     ),
