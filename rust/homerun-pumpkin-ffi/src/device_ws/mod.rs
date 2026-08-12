@@ -40,6 +40,7 @@ use homerun_core::device_ws::protocol::{
     outgoing, Refusal, Request, Scope, Session, CLOSE_AUTH_FAILED, HEARTBEAT_INTERVAL_MS,
 };
 
+pub mod app_logs;
 pub mod tls;
 
 /// Everything the socket needs that only the host can know.
@@ -661,10 +662,12 @@ impl Connection {
                 true
             }
             Request::GetAppLogs => {
-                // Nothing on a phone corresponds to the desktop's main-process
-                // log file. Answered honestly rather than with an empty string
-                // that would read as "no problems here".
-                self.send(outgoing::error("App logs are not available on this device"));
+                // logcat, filtered to this process by logd — see
+                // [`app_logs`]. Read on the caller's task rather than
+                // spawned: it is one `logcat -d` that returns in milliseconds,
+                // and a support request is not a hot path.
+                let (main_log, renderer_log) = app_logs::collect();
+                self.send(outgoing::app_logs(&main_log, &renderer_log));
                 true
             }
         }
