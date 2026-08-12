@@ -8,6 +8,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -221,6 +222,64 @@ object Core {
             put("polled", polled)
             before?.let { put("before", it) }
         }).jsonPrimitive.boolean
+
+    // -----------------------------------------------------------------------
+    // The device websocket
+    // -----------------------------------------------------------------------
+
+    /**
+     * This device's own link, as `link_up` returns it.
+     *
+     * Not a server's shape: it arrives flat rather than nested under
+     * `config.links[]`, which is why it has its own parser rather than a mode
+     * flag on [linkFromServerBody].
+     */
+    data class DeviceLink(
+        val link: JsonObject,
+        /** The ACME identifier, the TLS SNI, and what the dashboard dials. */
+        val fqdn: String?,
+        /**
+         * The legacy plane is nginx, which prefixes a PROXY v1 header on
+         * `:443`; the v2 gateway does not. Whatever terminates TLS has to be
+         * told which, because the header arrives where a ClientHello is
+         * expected and every handshake fails rather than one warning appearing.
+         */
+        val expectsProxyProtocol: Boolean,
+    )
+
+    /**
+     * Read a `link_up` result, or null while the task is still running.
+     *
+     * Null is not a failure. The API answers with no `native_config` for the
+     * first several seconds, and a caller that treats that as one abandons a
+     * link that was about to be provisioned.
+     */
+    fun deviceLinkFromBody(body: JsonElement): DeviceLink? {
+        val reply = call("deviceWs.fromLinkUpBody", buildJsonObject { put("body", body) })
+        if (reply is JsonNull) return null
+        val obj = reply.jsonObject
+        return DeviceLink(
+            link = obj.getValue("link").jsonObject,
+            fqdn = obj["fqdn"]?.jsonPrimitive?.contentOrNull,
+            // The core answers `gateway_v2`; this host cares about the
+            // consequence rather than the provenance.
+            expectsProxyProtocol = obj["gateway_v2"]?.jsonPrimitive?.booleanOrNull != true,
+        )
+    }
+
+    /**
+     * The wireproxy config for the device websocket's own tunnel.
+     *
+     * A null [httpTarget] omits the ACME forward, which is the shape a device
+     * with no certificate takes — forwarding a port at a listener that was
+     * never started is worse than not forwarding it.
+     */
+    fun deviceWsTunnelConfig(link: JsonObject, httpsTarget: Int, httpTarget: Int?): String =
+        call("deviceWs.tunnelConfig", buildJsonObject {
+            put("link", link)
+            put("httpsTarget", httpsTarget)
+            httpTarget?.let { put("httpTarget", it) }
+        }).jsonPrimitive.content
 
     // -----------------------------------------------------------------------
     // Lifecycle

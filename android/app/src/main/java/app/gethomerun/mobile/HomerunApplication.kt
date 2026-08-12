@@ -17,6 +17,12 @@ class HomerunApplication : Application() {
         // relaunch already holds the token issued last time.
         DeviceRegistry.init(this) { ServerHost.backend.runningServerIds }
 
+        // Process-scoped for the same reason the backend is: the device link
+        // takes up to a minute to provision and must outlive any page. The
+        // scope is ServerHost's — cancelled never, because the thing that ends
+        // it is the process ending.
+        DeviceWebsocket.init(this, ServerHost.scope)
+
         // Debug builds are inspectable from the host machine at
         // chrome://inspect — the only practical way to debug the shared UI
         // running inside the app.

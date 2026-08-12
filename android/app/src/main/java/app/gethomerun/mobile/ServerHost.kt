@@ -29,8 +29,12 @@ object ServerHost {
     /**
      * Deliberately not tied to any lifecycle. Cancelled never — the process
      * dying is what ends it, which is the same thing that ends the server.
+     *
+     * Shared with [DeviceWebsocket], which needs the same guarantee for the
+     * same reason: its link outlives every page and must not be taken down by
+     * one being rebuilt.
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     private lateinit var appContext: Context
     private val listeners = mutableSetOf<Listener>()

@@ -209,6 +209,60 @@ object HomerunApi {
         null
     }
 
+    /**
+     * Bring this **device's** own link up, and wait for the gateway to
+     * provision it.
+     *
+     * Two calls rather than one: the POST starts a task and returns its id,
+     * and the result is polled separately. That is the API's shape, and the
+     * desktop polls it the same way — see `launchDeviceWebsocket`.
+     *
+     * A poll that finds no config yet is the normal state for the first
+     * several seconds, not a failure. Null means the gateway never answered
+     * inside the window, which leaves this device unreachable by name and
+     * breaks nothing else.
+     */
+    suspend fun awaitDeviceLink(
+        apiUrl: String,
+        deviceId: String,
+        token: String,
+        attempts: Int = 20,
+        intervalMs: Long = 3_000,
+    ): Core.DeviceLink? = withContext(Dispatchers.IO) {
+        if (token.isBlank()) {
+            Log.i(TAG, "no token — this device will serve no websocket")
+            return@withContext null
+        }
+
+        val path = "/api/device/$deviceId/link_up/"
+        val task = runCatching {
+            post(apiUrl, path, buildJsonObject { }, token)
+                ?.get("task")?.jsonPrimitive?.contentOrNull
+        }.onFailure { Log.w(TAG, "link_up failed: ${it.message}") }.getOrNull()
+            ?: return@withContext null
+        Log.i(TAG, "link_up triggered, task $task")
+
+        repeat(attempts) { attempt ->
+            delay(intervalMs)
+            // The API answers 404 while the task is still running, so a failed
+            // GET here is "not yet" and not an error worth reporting.
+            val body = runCatching { get(apiUrl, "$path?result=$task", token) }
+                .onFailure { Log.d(TAG, "link_up poll ${attempt + 1}: ${it.message}") }
+                .getOrNull()
+                ?: return@repeat
+
+            val link = runCatching { Core.deviceLinkFromBody(body) }
+                .onFailure { Log.w(TAG, "link_up result unreadable: ${it.message}") }
+                .getOrNull()
+                ?: return@repeat
+
+            Log.i(TAG, "device link ready after ${attempt + 1} attempts (fqdn=${link.fqdn})")
+            return@withContext link
+        }
+        Log.w(TAG, "no device link after $attempts attempts")
+        null
+    }
+
     /** A link plus the one field that changes how staleness is judged. */
     private data class PolledLink(val link: WireProxy.Link, val isGateway2: Boolean)
 

@@ -195,6 +195,14 @@ class BridgeRouter(
 
     init {
         ServerHost.addListener(hostListener)
+
+        // A relaunch already holds the token issued at login, so the device's
+        // link belongs to the process rather than to the login — the same
+        // reasoning that starts the heartbeat in `HomerunApplication`. Waiting
+        // for `set-credentials` would mean a device is only reachable in the
+        // session it logged in on. `ensure` is idempotent, so a router rebuilt
+        // for a new activity does not start a second one.
+        DeviceWebsocket.ensure(apiUrl(), userToken())
     }
 
     /** The `native-server-*` channels that take an object payload. */
@@ -475,6 +483,10 @@ class BridgeRouter(
                 // the UI blocks on credentials-set to leave the login screen,
                 // and a device that registers a second later costs nothing.
                 scope.launch { DeviceRegistry.ensure(apiUrl(), userToken()) }
+                // The device's own link, which the dashboard dials to reach
+                // this device's console. Provisioning polls for up to a
+                // minute, so like registration it is started and not awaited.
+                DeviceWebsocket.ensure(apiUrl(), userToken())
 
                 emit("credentials-set")
             } else {
@@ -493,6 +505,10 @@ class BridgeRouter(
             // authenticates reports as them. Keeping it would have the next
             // person to log in heartbeating someone else's device.
             DeviceRegistry.clear()
+            // And the link that made this device reachable by name. It was
+            // provisioned against that registration, so leaving it up would
+            // serve the next user's traffic over the previous one's tunnel.
+            DeviceWebsocket.stop()
             null
         },
 
@@ -519,9 +535,17 @@ class BridgeRouter(
             if (registration == null) JsonNull else JsonPrimitive(registration.deviceId)
         },
 
-        // Nothing listens yet; the device WebSocket server arrives with the
-        // server backends. Null is the documented "not running" answer.
-        "get-device-ws-port" to { _ -> JsonNull },
+        // The port the device websocket server will bind. Reserved once the
+        // device's link is up; still null until then, and null is the
+        // documented "not running" answer.
+        //
+        // It answers a port before there is a server on it (D1 holds the
+        // tunnel, D2 binds the socket). That is deliberate: nothing in the UI
+        // reads this while `deviceWebsocket` is false in the capabilities, so
+        // the only consumer today is a person reading logs.
+        "get-device-ws-port" to { _ ->
+            DeviceWebsocket.port?.let { JsonPrimitive(it) } ?: JsonNull
+        },
 
         "set-api-url" to { params ->
             prefs.edit().putString(KEY_API_URL, params?.jsonPrimitive?.content).apply()

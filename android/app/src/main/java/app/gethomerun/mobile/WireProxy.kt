@@ -133,6 +133,27 @@ class WireProxy(
         minecraftPort: Int,
         onLog: (String) -> Unit,
         onHandshakeFailed: () -> Unit,
+    ) = startRendered(serverId, dir, render(link, minecraftPort), onLog, onHandshakeFailed)
+
+    /**
+     * Start a tunnel from a config that is already rendered.
+     *
+     * The device websocket needs this: its forwards are the gateway's `:443`
+     * and `:80` rather than a game's ports, so it renders through
+     * [Core.deviceWsTunnelConfig] instead of [render]. Everything below —
+     * spawning, the private-key file mode, the handshake watch, the stop — is
+     * the same, and duplicating it for a second caller is how the two would
+     * come to disagree about which of them holds the peer slot.
+     *
+     * [label] appears in the log lines and is a server id for the server
+     * tunnel, `"device"` for this one.
+     */
+    fun startRendered(
+        label: String,
+        dir: File,
+        config: String,
+        onLog: (String) -> Unit,
+        onHandshakeFailed: () -> Unit,
     ) {
         stop()
 
@@ -145,7 +166,7 @@ class WireProxy(
         // and readable only by us — the same reason the desktop writes it into
         // the server directory rather than a temp path.
         val conf = File(dir, "wireproxy.conf")
-        conf.writeText(render(link, minecraftPort))
+        conf.writeText(config)
         runCatching {
             conf.setReadable(false, false)
             conf.setReadable(true, true)
@@ -163,8 +184,8 @@ class WireProxy(
         }
 
         process = started
-        pump(serverId, started, onLog, onHandshakeFailed)
-        Log.i(TAG, "wireproxy up for $serverId -> ${link.endpoint}")
+        pump(label, started, onLog, onHandshakeFailed)
+        Log.i(TAG, "wireproxy up for $label")
     }
 
     /**
@@ -176,7 +197,7 @@ class WireProxy(
      * response resets the count.
      */
     private fun pump(
-        serverId: String,
+        label: String,
         running: Process,
         onLog: (String) -> Unit,
         onHandshakeFailed: () -> Unit,
@@ -203,7 +224,7 @@ class WireProxy(
                         val verdict = Core.observeHandshake(watch, line)
                         watch = verdict.watch
                         if (verdict.giveUp) {
-                            Log.w(TAG, "$serverId: the gateway stopped answering")
+                            Log.w(TAG, "$label: the gateway stopped answering")
                             onLog(
                                 "[Homerun] The connection to the Homerun gateway could " +
                                     "not be established, so players cannot reach this server."
@@ -221,7 +242,7 @@ class WireProxy(
                 // from here. Worth a line, never worth a crash.
                 Log.d(TAG, "tunnel output ended: ${err.message}")
             }
-            Log.i(TAG, "wireproxy exited for $serverId")
+            Log.i(TAG, "wireproxy exited for $label")
         }
     }
 
