@@ -126,6 +126,50 @@ target is where you predicted after A. When A doesn't land as expected, B fires
 into whatever is now under those coordinates — often a nav bar, and you end up
 on a different screen wondering what happened. Screenshot between steps.
 
+### System surfaces swallow taps aimed at the app
+
+The notification shade, a permission dialog and Recents are drawn by the system
+*over* the app. A tap meant for a button in the app lands on whatever the
+system is showing — and since `input tap` reports success either way, what you
+see is an app that ignored its input.
+
+The shade is the one that bites, because you open it deliberately to read a
+notification and then forget it is still down. **Never infer shade state — set
+it**, immediately before the tap:
+
+```bash
+adb shell cmd statusbar collapse              # before any in-app tap
+adb shell cmd statusbar expand-notifications  # before any notification tap
+```
+
+Both are idempotent, so running the right one unconditionally costs nothing and
+removes the whole class of failure.
+
+An unexpected dialog is the other half: a runtime-permission prompt can appear
+mid-flow and eat the next several taps. Look for one rather than theorising
+about a stalled app:
+
+```bash
+adb shell dumpsys window 2>/dev/null | grep -E "GrantPermissionsActivity|NotificationShade"
+```
+
+### Prefer firing the intent over tapping the UI
+
+A notification action, a service command or a deep link is reachable directly,
+which skips coordinates, scale factors and shade state entirely:
+
+```bash
+adb shell am start-service -n <appId>/<service> -a <ACTION>   # a notification action
+adb shell am start -a android.intent.action.VIEW -d "myapp://path"
+```
+
+That exercises the handler without proving the `PendingIntent` is attached to
+the button — so do both: the intent while iterating on behaviour, one real tap
+at the end to prove the wiring. And confirm that tap by **its own log line**,
+not by the outcome. An outcome can arrive from somewhere else entirely,
+including the user reaching over and doing it by hand while you work; that is a
+real way to conclude a control works when you never actually pressed it.
+
 Other input:
 
 ```bash
@@ -154,8 +198,20 @@ keep working; the completion notification will find you:
 
 ```bash
 adb logcat -c    # ALWAYS clear first
-until adb logcat -d -s MyTag:* | grep -q -E "<success>|<failure>"; do sleep 3; done
+for _ in $(seq 40); do
+  adb logcat -d -s MyTag:* | grep -q -E "<success>|<failure>" && break
+  sleep 3
+done
+adb logcat -d -s MyTag:* | grep -q -E "<success>|<failure>" \
+  || echo "TIMED OUT after 2 min — the action probably never landed"
 ```
+
+**Bound the loop.** An unbounded `until … do sleep 3; done` waiting on
+something that will never arrive does not fail, it *hangs* — and a tap that
+missed is exactly the case that makes it never arrive. The hang is worse than
+the missed tap, because a bounded loop hands you the diagnosis ("the trigger
+did not land") while an unbounded one hands you a session that has visibly
+stopped doing anything. Cap every wait and say so when it expires.
 
 **`adb logcat -c` before the loop, every time.** Without it the buffer still
 holds the *previous* run's matching line, so the loop exits instantly, and
@@ -266,6 +322,15 @@ factor, or the layout moved since your last screenshot.
 
 **A wait loop returns instantly and everything after it misfires.** You didn't
 `adb logcat -c` first, so it matched the previous run.
+
+**A wait loop never returns and the session looks stalled.** The trigger did
+not land — most often a tap absorbed by the notification shade or a permission
+dialog. Collapse the shade, screenshot, and check the action fired at all.
+Bound the loop so this reads as a timeout rather than as a hang.
+
+**The app did the thing but no log line says you asked for it.** Something
+other than your tap caused it. Do not credit the control you were testing —
+find the line that proves the path ran, or re-run it.
 
 **Scrolling a pane does nothing.** Swipe *inside* the pane's bounds, not the
 page's, and repeat — one swipe moves very little in a long buffer. Swipe

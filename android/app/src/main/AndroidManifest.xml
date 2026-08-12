@@ -4,6 +4,31 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+      Hosting while the app is not in front of the user.
+
+      None of these three prompts. They are install-time permissions, granted
+      by having been declared — there is no "allow this app to run in the
+      background" dialog on Android for a foreground service. What reviews
+      whether the use is legitimate is Play, not the OS.
+
+      WAKE_LOCK is not implied by the service and is not redundant: a
+      foreground service stops the *process* being reclaimed, it does not stop
+      the CPU suspending once the screen goes off.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!--
+      The one that does prompt, from API 33. It gates the *notification*, not
+      the service: denied, hosting still runs at foreground priority and the
+      player simply gets no indicator and no Stop button. Requested when the
+      first server is started rather than at launch, so the ask arrives with an
+      obvious reason attached.
+    -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:name=".HomerunApplication"
         android:allowBackup="false"
@@ -45,6 +70,38 @@
                 <data android:scheme="homerun" />
             </intent-filter>
         </activity>
+
+        <!--
+          Keeps the app process alive while a server runs or a backup uploads.
+
+          `specialUse` is the honest type for hosting a game server. It is not
+          media playback, not a data transfer on the user's behalf in the sense
+          the platform means, and not a companion device. `dataSync` would fit
+          the backup half and is deliberately not declared: from Android 15 a
+          dataSync service is capped at six hours in any 24, which would be a
+          limit on how long somebody may play.
+
+          `specialUse` is the type Play reviews by hand, against the subtype
+          string below and the declaration in Play Console. That review has not
+          happened yet — see plans/android.md, open question 1. If it is
+          refused, the fallback is `dataSync` and the six-hour cap comes with
+          it.
+
+          Not exported: nothing outside this app may start it. `stopWithTask`
+          is left at its default of false on purpose — swiping the app out of
+          Recents does not disconnect the players; the notification's Stop
+          does. See HostingService.onTaskRemoved.
+        -->
+        <service
+            android:name=".HostingService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Hosts a Minecraft server on this device for as long as the
+                    player chooses to keep it online, and finishes uploading the world to
+                    the player's backup repository after it stops." />
+        </service>
 
     </application>
 

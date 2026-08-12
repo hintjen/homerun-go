@@ -60,7 +60,10 @@ data class HostCapabilities(
             fileImport = false,
             // One server at a time, same as desktop.
             multipleRunningServers = false,
-            // Via a foreground service (M4).
+            // Implemented, not aspirational: a foreground service holds the
+            // process at foreground importance while a server runs, and past
+            // the stop until the on-stop backup has finished uploading. See
+            // `docs/android-lifecycle.md`.
             backgroundExecution = true,
             // restic, being wired now. Left true because that work is in
             // flight — but until it lands the UI offers a feature that does

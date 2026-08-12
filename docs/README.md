@@ -202,6 +202,32 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
 
 ---
 
+### 🔋 [Android lifecycle](./android-lifecycle.md)
+
+How a server — and the backup that follows it — keeps running once the app is no
+longer in front of the user.
+
+**Contains**:
+- Why there is no "run in the background" permission to request, and which one
+  actually prompts
+- The foreground service, and why the notification is the price rather than a
+  feature
+- Why a wake lock is not implied by the service, and what breaks without one
+- `busy`: why "is a server running" is the wrong question, and the two extra
+  terms that make it right
+- Why `hostingRequested` must be paired inside the branch that requested it
+- The notification that is attached but never posted, and what re-posts it
+- Why the launcher icon cannot be a notification icon
+- `specialUse` versus `dataSync`, and the six-hour cap that decides it
+- What has been verified on device and what has not
+- Triage, symptom first
+
+**Read this for**: Working on backgrounding, or diagnosing a server that dies
+after the app is dismissed, a missing notification, or a session that stalls
+with the screen off.
+
+---
+
 ### 🌐 [The tunnel wrapper plan](../plans/tunnel-wrapper.md)
 
 Not a subsystem doc yet — the spec for sharing one wireproxy implementation
@@ -261,7 +287,6 @@ Planned, one per milestone (see plans/shared-milestones.md):
 
   ios-lifecycle.md        iOS      M4
   android-bridge.md       Android  M1, extended at M2
-  android-lifecycle.md    Android  M4
 -->
 
 ## House style

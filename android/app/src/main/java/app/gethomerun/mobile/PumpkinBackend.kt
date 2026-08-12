@@ -79,6 +79,13 @@ class PumpkinBackend(
     // Pumpkin has no tunnel of its own yet, so this never fires here.
     override var onNetworkError: ((String, String) -> Unit)? = null
 
+    /**
+     * Never fires here either: this backend runs no on-stop backup. That path
+     * belongs to [JavaServerBackend], and this one exists for builds that ship
+     * no JRE — so a stop here really does mean the device is idle.
+     */
+    override var onBackupFinished: ((String) -> Unit)? = null
+
     // -----------------------------------------------------------------------
     // Storage
     // -----------------------------------------------------------------------

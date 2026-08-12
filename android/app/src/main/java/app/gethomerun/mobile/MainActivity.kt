@@ -1,7 +1,10 @@
 package app.gethomerun.mobile
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
@@ -14,6 +17,8 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
@@ -36,6 +41,39 @@ class MainActivity : ComponentActivity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var router: BridgeRouter
     private var webView: WebView? = null
+
+    private val requestNotifications =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            // Hosting is unaffected either way — this is the notification, not
+            // the service. Logged because a denied prompt is the explanation
+            // for a hosting session with no visible indicator, and nothing else
+            // would say so.
+            Log.i(TAG, if (granted) "notifications allowed" else "notifications denied; hosting silently")
+            // The service is already foreground by now and its notification was
+            // posted into a void. It has to enter the foreground again to
+            // become visible — see ServerHost.refreshHosting.
+            if (granted) ServerHost.refreshHosting()
+        }
+
+    /**
+     * Asks for POST_NOTIFICATIONS the first time this process hosts anything.
+     *
+     * Deliberately not at launch. The permission buys one thing — the hosting
+     * notification being *visible*, with its Stop action — and asking for it
+     * against a dashboard the user has just opened is a prompt with no
+     * apparent reason. Asking as a server starts is the same prompt with an
+     * obvious one, and the activity is by definition in front of the user at
+     * that moment because they just tapped Start.
+     *
+     * It gates nothing: denied, the foreground service still runs and the
+     * server still hosts. See AndroidManifest.xml.
+     */
+    private val hostingListener = object : ServerHost.Listener {
+        override fun onStateChanged(serverId: String, state: ServerState, backupInProgress: Boolean) {
+            if (state != ServerState.STARTING) return
+            runOnUiThread { askForNotifications() }
+        }
+    }
 
     /**
      * Injected before any page script runs. Two jobs:
@@ -78,6 +116,8 @@ class MainActivity : ComponentActivity() {
         }
 
         installWebView()
+
+        ServerHost.addListener(hostingListener)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -151,7 +191,29 @@ class MainActivity : ComponentActivity() {
         intent.dataString?.let { router.deliverDeepLink(it) }
     }
 
+    /**
+     * Back from the background, where a server may have been running the whole
+     * time. The page is told what is true now rather than left with whatever it
+     * last heard (PROTOCOL.md §4.3).
+     */
+    override fun onResume() {
+        super.onResume()
+        router.resyncServerState()
+    }
+
+    private fun askForNotifications() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        if (asked) return
+        asked = true
+        val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+            PackageManager.PERMISSION_GRANTED
+        if (granted) return
+        runCatching { requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) }
+            .onFailure { Log.w(TAG, "could not ask about notifications: ${it.message}") }
+    }
+
     override fun onDestroy() {
+        ServerHost.removeListener(hostingListener)
         webView?.let {
             container.removeView(it)
             it.destroy()
@@ -221,5 +283,12 @@ class MainActivity : ComponentActivity() {
     private companion object {
         const val TAG = "HomerunHost"
         const val TAG_WEB = "HomerunWeb"
+
+        /**
+         * Process-wide, not per-activity: a rotation must not re-prompt, and
+         * Android stops showing the dialog after two refusals anyway — asking
+         * again would silently do nothing and look like a bug.
+         */
+        var asked = false
     }
 }
