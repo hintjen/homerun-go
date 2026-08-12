@@ -347,20 +347,35 @@ fn is_uuid(text: &str) -> bool {
 
 /// Parse a `time query gametime` reply into the world's age in seconds.
 ///
+/// Two spellings, because Minecraft changed it:
+///
 /// ```text
-/// The time is 1234567
+/// The time is 1234567               // 1.21.4 and earlier
+/// The game time is 1234567 tick(s)  // seen on 26.2
 /// ```
+///
+/// The newer wording was found on a live server that was reporting a healthy
+/// player count and a null `server_age`. The desktop knows only the older
+/// spelling, so its reports have been quietly missing this field on current
+/// versions as well.
 ///
 /// Ticks, at twenty a second. This is the *world's* age and not this session's
 /// — gametime does not advance while the server is stopped, so it accumulates
 /// across runs, which is what the dashboard's "server age" means.
 ///
-/// `None` when the reply is not one of these, which on a Bukkit-family server
-/// is the ordinary consequence of an unpinned command: EssentialsX shadows
-/// `/time` as well as `/list`, and that nulled `server_age` on precisely the
-/// servers `/list` was already broken on.
+/// `None` when the reply is neither, which on a Bukkit-family server is the
+/// ordinary consequence of an unpinned command: EssentialsX shadows `/time` as
+/// well as `/list`, and that nulled `server_age` on precisely the servers
+/// `/list` was already broken on.
 pub fn parse_server_age(reply: &str) -> Option<f64> {
-    let (ticks, _) = leading_number(reply.split_once("The time is ")?.1)?;
+    // The newer phrase is tried first because the older one is not a substring
+    // of it ("The time is" vs "The game time is"), so a reply carrying the new
+    // wording would otherwise fall through to a match that cannot happen.
+    let rest = reply
+        .split_once("The game time is ")
+        .or_else(|| reply.split_once("The time is "))?
+        .1;
+    let (ticks, _) = leading_number(rest)?;
     Some(ticks as f64 / TICKS_PER_SECOND as f64)
 }
 
@@ -616,6 +631,21 @@ mod tests {
         // A day and a bit of gametime.
         assert_eq!(parse_server_age("The time is 1234567"), Some(61_728.35));
         assert_eq!(parse_server_age("The time is 0"), Some(0.0));
+    }
+
+    /// Minecraft reworded this. Both lines below were copied from real server
+    /// logs on the same device — 1.21.4 and 26.2 — after a live server
+    /// reported a healthy player count beside a null age.
+    #[test]
+    fn both_spellings_of_the_gametime_reply_are_understood() {
+        assert_eq!(
+            parse_server_age("[20:37:28] [Server thread/INFO]: The game time is 47632 tick(s)"),
+            Some(2_381.6)
+        );
+        assert_eq!(
+            parse_server_age("[20:23:05] [Server thread/INFO]: The time is 32082"),
+            Some(1_604.1)
+        );
     }
 
     #[test]

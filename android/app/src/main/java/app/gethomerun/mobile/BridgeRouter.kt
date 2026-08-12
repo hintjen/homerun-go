@@ -20,11 +20,13 @@ import kotlinx.serialization.encodeToString
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -883,6 +885,7 @@ class BridgeRouter(
             val obj = params as JsonObject
             val serverId = obj.serverId()
             val command = obj["command"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            Log.i(TAG, "console command for $serverId: ${command.take(32)}")
             try {
                 backend.command(serverId, command)
                 // An `op` or a `ban` typed here has to reach the server's
@@ -916,7 +919,18 @@ class BridgeRouter(
             }
         },
 
-        "native-server-get-ops" to { _ -> buildJsonObject { put("ops", buildJsonArray { }) } },
+        // The operators the server itself is running with, read from its
+        // `ops.json` — the desktop answers this from the same file
+        // (`getServerOps`). It was a hardcoded empty list here, which meant the
+        // UI showed no operators however many the server had, and made a
+        // working ops sync look broken.
+        "native-server-get-ops" to { params ->
+            buildJsonObject {
+                put("ops", buildJsonArray {
+                    opsOnDisk(params.asServerId()).forEach { add(it) }
+                })
+            }
+        },
 
         "native-server-get-mem-usage" to { params ->
             val usage = backend.memoryUsage(params.asServerId())
@@ -999,6 +1013,28 @@ class BridgeRouter(
      * than in the backend so it can never reach a server process's
      * environment.
      */
+    /**
+     * The names in a server's `ops.json`.
+     *
+     * Read from disk rather than from the API, so it reflects what the running
+     * server actually honours — including an `/op` typed into the console,
+     * which the server writes there itself and the API does not learn about
+     * until [Reporting] mirrors it back.
+     *
+     * Best-effort: a server that has never started has no file, and an empty
+     * list is the honest answer for that.
+     */
+    private fun opsOnDisk(serverId: String): List<String> = runCatching {
+        val file = File(context.filesDir, "servers/$serverId/ops.json")
+        if (!file.exists()) return emptyList()
+        (json.parseToJsonElement(file.readText()) as? JsonArray)
+            ?.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
+            ?: emptyList()
+    }.getOrElse {
+        Log.w(TAG, "could not read the operators for $serverId: ${it.message}")
+        emptyList()
+    }
+
     private fun userToken(): String = runCatching {
         val stored = prefs.getString(KEY_CREDENTIALS, null) ?: return@runCatching ""
         (json.parseToJsonElement(stored) as? JsonObject)

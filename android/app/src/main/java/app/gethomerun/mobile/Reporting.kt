@@ -318,13 +318,27 @@ object Reporting : ServerHost.Listener {
             Log.i(TAG, "not an ops command, nothing to sync: ${command.take(24)}")
             return
         }
+        // Captured *before* launching, and this is the whole trick. Reading
+        // `opsChain` from inside the coroutine reads the property as it stands
+        // when the body runs — by which time it is already this job, so the
+        // job waits for itself and nothing after the join ever executes. It
+        // fails perfectly silently: no error, no timeout, just a sync that
+        // never happened.
+        val previous = opsChain
         opsChain = ServerHost.scope.launch {
-            runCatching { opsChain?.join() }
+            runCatching { previous?.join() }
             runCatching { syncOps(serverId, parsed) }
                 .onFailure { Log.w(TAG, "ops sync failed for $serverId: ${it.message}") }
         }
     }
 
+    /**
+     * The last ops sync, so the next one waits for it.
+     *
+     * Serialised because this is a read-modify-write against one list: two
+     * commands typed in quick succession would each read the operators before
+     * either had written, and the second would erase the first.
+     */
     private var opsChain: Job? = null
 
     private suspend fun syncOps(serverId: String, command: JsonObject) {
@@ -336,8 +350,23 @@ object Reporting : ServerHost.Listener {
         }
         val api = DeviceRegistry.apiUrl()
 
-        val body = HomerunApi.serverBody(api, serverId, token) ?: return
-        val change = Core.opsSync(command, body, serverId) ?: return // already in that state
+        // Every arm below says something. The first version of this returned
+        // silently on both of the next two lines, so a change that never
+        // happened looked exactly like a change that did — which is how this
+        // shipped broken and was found by someone using the app rather than by
+        // the log.
+        val body = HomerunApi.serverBody(api, serverId, token)
+        if (body == null) {
+            Log.w(TAG, "could not read $serverId to change its operators")
+            return
+        }
+
+        val change = Core.opsSync(command, body, serverId)
+        if (change == null) {
+            Log.i(TAG, "$serverId: the settings already say this, nothing to save")
+            return
+        }
+        Log.i(TAG, "$serverId: saving ${change.request.method} ${change.request.path}")
 
         val reply = HomerunApi.perform(api, change.request, token)
         if (reply == null) {
