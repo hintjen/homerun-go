@@ -36,7 +36,9 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{self, jar, jvm, settings};
-use homerun_core::{backup, game, launch, lifecycle, link, metrics, properties, state, tunnel};
+use homerun_core::{
+    backup, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
+};
 
 /// Dispatch one call and render the reply envelope.
 ///
@@ -527,6 +529,28 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             Ok(Value::Bool(link::is_usable(&polled, before.as_ref())))
         }
 
+        // --- the device websocket -----------------------------------------
+        //
+        // A device link, not a server one: it arrives flat from
+        // `link_up`, and null means the task is still running rather than
+        // that anything failed. See `homerun_core::device_ws`.
+        "deviceWs.fromLinkUpBody" => Ok(match device_ws::from_link_up_body(field("body")?) {
+            Some(device) => serde_json::to_value(device).map_err(|e| e.to_string())?,
+            None => Value::Null,
+        }),
+
+        // `httpTarget` absent or null omits the ACME forward — the shape a
+        // device serving without a certificate takes.
+        "deviceWs.tunnelConfig" => {
+            let link: tunnel::Link = serde_json::from_value(field("link")?.clone())
+                .map_err(|e| format!("bad link: {e}"))?;
+            let port = |name: &str| args.get(name).and_then(|v| v.as_u64()).map(|p| p as u16);
+            let https = port("httpsTarget").ok_or("httpsTarget is required")?;
+            Ok(Value::String(
+                device_ws::tunnel_config(link, https, port("httpTarget")).render(),
+            ))
+        }
+
         // --- lifecycle ----------------------------------------------------
         "state.exit" => {
             let intentional = args
@@ -972,6 +996,79 @@ mod tests {
             text.contains("Target = 127.0.0.1:25570"),
             "the local port follows"
         );
+    }
+
+    /// A still-running `link_up` task must read as "not yet", not as a
+    /// failure. A host that treats it as one abandons a link that was seconds
+    /// from being provisioned, and the device never becomes reachable.
+    #[test]
+    fn a_device_link_that_is_not_ready_replies_null_rather_than_failing() {
+        assert_eq!(
+            ok(
+                "deviceWs.fromLinkUpBody",
+                json!({ "body": { "fqdn": "d.example.com" } })
+            ),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn a_device_link_crosses_the_boundary_whole() {
+        let device = ok(
+            "deviceWs.fromLinkUpBody",
+            json!({ "body": {
+                "fqdn": "d.example.com",
+                "gateway_version": 2,
+                "native_config": {
+                    "client_privkey": "K",
+                    "gateway_pubkey": "P",
+                    "link_address": "gw:51820",
+                    "address": "10.8.0.7/32"
+                }
+            }}),
+        );
+        assert_eq!(device["fqdn"], "d.example.com");
+        assert_eq!(device["gateway_v2"], true);
+        assert_eq!(device["link"]["client_privkey"], "K");
+    }
+
+    #[test]
+    fn the_device_tunnel_forwards_the_two_ports_the_gateway_dnats_to() {
+        let config = ok(
+            "deviceWs.tunnelConfig",
+            json!({
+                "link": {
+                    "client_privkey": "K",
+                    "gateway_pubkey": "P",
+                    "link_address": "gw:51820"
+                },
+                "httpsTarget": 8444,
+                "httpTarget": 8081
+            }),
+        );
+        let text = config.as_str().unwrap();
+        assert!(text.contains("ListenPort = 8443\nTarget = 127.0.0.1:8444"));
+        assert!(text.contains("ListenPort = 8080\nTarget = 127.0.0.1:8081"));
+    }
+
+    /// Serving without a certificate is a real state, and it must not leave a
+    /// forward pointing at a listener that was never started.
+    #[test]
+    fn a_device_tunnel_without_a_cert_manager_omits_the_challenge_forward() {
+        let config = ok(
+            "deviceWs.tunnelConfig",
+            json!({
+                "link": {
+                    "client_privkey": "K",
+                    "gateway_pubkey": "P",
+                    "link_address": "gw:51820"
+                },
+                "httpsTarget": 4000
+            }),
+        );
+        let text = config.as_str().unwrap();
+        assert!(text.contains("ListenPort = 8443"));
+        assert!(!text.contains("ListenPort = 8080"));
     }
 
     /// A typo must not silently produce a Java-only config for a crossplay

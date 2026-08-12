@@ -902,7 +902,9 @@ mod tests {
 
         let lines = host.logs_since(0).lines;
         assert!(
-            lines.iter().any(|l| l.contains("Downloading the server jar")),
+            lines
+                .iter()
+                .any(|l| l.contains("Downloading the server jar")),
             "the launch narrative was wiped by start: {lines:?}"
         );
         assert!(
@@ -935,7 +937,10 @@ mod tests {
 
         // Still readable while nothing else is happening: this is what a
         // player reads to find out why their server stopped.
-        assert!(!host.logs_since(0).lines.is_empty(), "a finished run's console must survive it");
+        assert!(
+            !host.logs_since(0).lines.is_empty(),
+            "a finished run's console must survive it"
+        );
 
         // The on-stop backup runs for minutes after the JVM is gone and writes
         // as it goes. Those lines belong to the run that just ended, so they
@@ -944,7 +949,9 @@ mod tests {
         host.push_note("[Backup] Backing up the world…");
         let during_backup = host.logs_since(0).lines;
         assert!(
-            during_backup.iter().any(|l| l.contains("stopping, saving world")),
+            during_backup
+                .iter()
+                .any(|l| l.contains("stopping, saving world")),
             "the on-stop backup wiped the run it belongs to: {during_backup:?}"
         );
 
@@ -957,7 +964,9 @@ mod tests {
             0,
             "the new launch is replaying the last run's console: {lines:?}"
         );
-        assert!(lines.iter().any(|l| l.contains("Downloading the server jar")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("Downloading the server jar")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

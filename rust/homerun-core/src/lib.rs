@@ -46,6 +46,7 @@
 
 // The game-agnostic layer. None of this knows what it is hosting.
 pub mod backup;
+pub mod device_ws;
 pub mod game;
 pub mod launch;
 pub mod lifecycle;
