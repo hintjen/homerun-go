@@ -73,9 +73,11 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon   # HomerunHost/AppIcon.icon
         SWIFT_OBJC_BRIDGING_HEADER: HomerunHost/FFI/HomerunFFI.h
 
-        # Simulator-first: no team needed, and Xcode signs simulator builds
-        # ad-hoc by itself. Set DEVELOPMENT_TEAM when you first deploy to a
-        # device.
+        # The Hintjen PBC team. Not a secret — a Team ID is public in every
+        # signed binary — so it is checked in rather than left to each
+        # machine's Xcode to guess. Automatic signing takes it from here and
+        # mints the certificate and profile itself.
+        DEVELOPMENT_TEAM: 35DS8JGY4Y
         #
         # Do NOT turn signing off to avoid needing a team. An unsigned app has
         # no application identifier, so the Keychain rejects every write with
