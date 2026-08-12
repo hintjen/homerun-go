@@ -71,15 +71,16 @@ data class HostCapabilities(
             // never becomes the newest snapshot, so the next desktop launch
             // restores over it.
             backups = true,
-            // Nothing implements this: `get-device-ws-port` returns null, and
-            // it is blocked behind M4's foreground service anyway — without
-            // one, a device-hosted WebSocket server exists only while the app
-            // is in front of the user, which is not something to advertise.
+            // Both reasons this was false have gone. `get-device-ws-port`
+            // answers a real port that a websocket is listening on, and the
+            // foreground service means the socket outlives the app being put
+            // away rather than existing only while somebody is looking at it.
             //
-            // Declaring a capability we do not have is worse than declaring it
-            // off: the UI renders the feature, conformance passes because the
-            // channel is answered, and nothing anywhere says it is absent.
-            deviceWebsocket = false,
+            // The contract has said `true` for Android all along — this
+            // constant was the one out of step, which is the drift the note
+            // above warns about, pointing the other way. See
+            // `plans/device-websocket.md`.
+            deviceWebsocket = true,
         )
     }
 }

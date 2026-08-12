@@ -113,7 +113,7 @@ fn slot() -> &'static Mutex<Option<Running>> {
 /// 0. Binds `127.0.0.1` only: the sole route in is the tunnel, and a listener
 /// on all interfaces would also be reachable from the phone's LAN, which is not
 /// something anyone asked for.
-pub fn start(config: Config) -> Result<u16, String> {
+pub fn start(config: Config) -> Result<Bound, String> {
     let mut current = slot()
         .lock()
         .map_err(|_| "the device websocket lock is poisoned")?;
@@ -127,12 +127,38 @@ pub fn start(config: Config) -> Result<u16, String> {
         .build()
         .map_err(|e| format!("the device websocket could not start: {e}"))?;
 
+    // Two listeners, both on loopback, both speaking the same protocol.
+    //
+    // The plaintext one is what the app's own UI connects to: the shared UI
+    // asks `get-device-ws-port` and dials `ws://localhost:<port>` for the
+    // device it is running on, reserving `wss://<fqdn>` for other people's
+    // devices. Terminating TLS on the single port would break that — the
+    // certificate is for the public hostname and a loopback client has no
+    // reason to present that SNI.
+    //
+    // Reaching the plaintext port still requires a Keycloak token and an API
+    // membership check, so another app on the device gains nothing by finding
+    // it. This is the shape desktop has had all along, and the reason its
+    // cert-manager sits in front of a separate plaintext server rather than
+    // replacing it.
     let listener = runtime
         .block_on(async { TcpListener::bind(("127.0.0.1", config.port)).await })
         .map_err(|e| format!("the device websocket could not bind: {e}"))?;
     let bound = listener
         .local_addr()
         .map_err(|e| format!("the device websocket has no address: {e}"))?
+        .port();
+
+    // The TLS one is what the tunnel forwards the gateway's `:443` to. Bound
+    // now, before the certificate exists, so the host can render the tunnel
+    // config immediately — an order takes seconds and the forward has to be
+    // right from the start.
+    let tls_listener = runtime
+        .block_on(async { TcpListener::bind(("127.0.0.1", 0)).await })
+        .map_err(|e| format!("the TLS listener could not bind: {e}"))?;
+    let tls_bound = tls_listener
+        .local_addr()
+        .map_err(|e| format!("the TLS listener has no address: {e}"))?
         .port();
 
     let (shutdown, mut stopping) = tokio::sync::oneshot::channel();
@@ -146,12 +172,36 @@ pub fn start(config: Config) -> Result<u16, String> {
     let staging = config.acme_staging;
     let state = Arc::new(Shared::new(config));
 
+    // The plaintext loop: the app's own UI, and nothing else.
+    {
+        let state = Arc::clone(&state);
+        runtime.spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            let _ = stream.set_nodelay(true);
+                            if let Err(err) = serve(stream, state).await {
+                                log::warn(&format!("local connection refused: {err}"));
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        log::warn(&format!("accept failed: {err}"));
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        });
+    }
+
     runtime.spawn(async move {
-        // The certificate is obtained *after* the listener is bound, so a slow
-        // or failing order never delays the port coming up. Until it arrives
-        // the socket answers plaintext, which the tunnel can carry and a
-        // browser cannot use — the honest intermediate state, and the one a
-        // device with no hostname stays in permanently.
+        // The certificate is obtained *after* both listeners are bound, so a
+        // slow or failing order never delays the ports coming up. Until it
+        // arrives the TLS listener has nothing to hand a connection, and says
+        // so rather than answering plaintext on a port the gateway will send a
+        // ClientHello to.
         let acceptor = match tls_inputs {
             None => {
                 log::warn("no hostname or storage — serving plaintext, which no browser will use");
@@ -181,10 +231,17 @@ pub fn start(config: Config) -> Result<u16, String> {
         loop {
             tokio::select! {
                 _ = &mut stopping => break,
-                accepted = listener.accept() => match accepted {
+                accepted = tls_listener.accept() => match accepted {
                     Ok((stream, _)) => {
+                        let Some(acceptor) = acceptor.clone() else {
+                            // Nothing to hand it. Dropping beats answering
+                            // plaintext to a peer that opened with a
+                            // ClientHello, which would look like a protocol
+                            // error rather than a missing certificate.
+                            log::warn("a connection arrived before there was a certificate");
+                            continue;
+                        };
                         let state = Arc::clone(&state);
-                        let acceptor = acceptor.clone();
                         tokio::spawn(async move {
                             // Warn, not debug. A connection that fails before
                             // it becomes a websocket is either a broken
@@ -209,7 +266,18 @@ pub fn start(config: Config) -> Result<u16, String> {
     });
 
     *current = Some(Running { shutdown, runtime });
-    Ok(bound)
+    Ok(Bound {
+        plaintext: bound,
+        tls: tls_bound,
+    })
+}
+
+/// The two ports a host has to know about.
+pub struct Bound {
+    /// What `get-device-ws-port` answers, and what the app's own UI dials.
+    pub plaintext: u16,
+    /// What the tunnel forwards the gateway's `:443` to.
+    pub tls: u16,
 }
 
 /// Stop serving and release the port.
@@ -236,7 +304,7 @@ pub fn is_running() -> bool {
 async fn accept(
     stream: TcpStream,
     shared: Arc<Shared>,
-    acceptor: Option<tokio_rustls::TlsAcceptor>,
+    acceptor: tokio_rustls::TlsAcceptor,
     expect_proxy: bool,
 ) -> Result<(), String> {
     // A peer that dies without a FIN leaves a socket that never errors. The
@@ -249,16 +317,11 @@ async fn accept(
         Prefixed::new(stream, Vec::new())
     };
 
-    match acceptor {
-        Some(acceptor) => {
-            let tls = acceptor
-                .accept(stream)
-                .await
-                .map_err(|e| format!("the TLS handshake failed: {e}"))?;
-            serve(tls, shared).await
-        }
-        None => serve(stream, shared).await,
-    }
+    let tls = acceptor
+        .accept(stream)
+        .await
+        .map_err(|e| format!("the TLS handshake failed: {e}"))?;
+    serve(tls, shared).await
 }
 
 /// Read the PROXY v1 header off the front, or establish there is none.

@@ -615,7 +615,17 @@ pub unsafe extern "C" fn homerun_device_ws_start(config: *const c_char) -> *mut 
                 return err("the device websocket needs an apiUrl and a jwksUrl");
             }
             match device_ws::start(config) {
-                Ok(port) => json!({ "ok": true, "port": port }).to_string(),
+                // Both ports, because the host needs each for a different
+                // thing: `port` is what its own UI dials over loopback, and
+                // `tlsPort` is what the tunnel forwards the gateway's `:443`
+                // to. Reporting only one would have the gateway sending a
+                // ClientHello at a plaintext socket.
+                Ok(bound) => json!({
+                    "ok": true,
+                    "port": bound.plaintext,
+                    "tlsPort": bound.tls,
+                })
+                .to_string(),
                 Err(message) => err(message),
             }
         }

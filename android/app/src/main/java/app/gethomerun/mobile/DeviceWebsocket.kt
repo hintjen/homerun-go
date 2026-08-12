@@ -110,11 +110,14 @@ object DeviceWebsocket {
         // 0 rather than picking a number removes the window where something
         // else takes the port between choosing and binding.
         expectsProxyProtocol = link.expectsProxyProtocol
-        val wsPort = startSocket(apiUrl, deviceId, link.fqdn, challengePort) ?: return
+        val bound = startSocket(apiUrl, deviceId, link.fqdn, challengePort) ?: return
 
         val config = Core.deviceWsTunnelConfig(
             link = link.link,
-            httpsTarget = wsPort,
+            // The **TLS** port, not the plaintext one. The gateway sends a
+            // ClientHello; forwarding it at the loopback socket the app's own
+            // UI uses would fail every handshake.
+            httpsTarget = bound.tls,
             // Only when there is a hostname to prove. Without one no order can
             // run, and a forward at a listener that never starts looks like the
             // device answered.
@@ -135,12 +138,16 @@ object DeviceWebsocket {
 
         synchronized(this) {
             tunnel = proxy
-            port = wsPort
+            // The plaintext port, because this is what `get-device-ws-port`
+            // answers and the shared UI dials `ws://localhost:<port>` for the
+            // device it is running on. `wss://<fqdn>` is for other people's.
+            port = bound.plaintext
             fqdn = link.fqdn
         }
         Log.i(
             TAG,
-            "device link up: fqdn=${link.fqdn ?: "(unnamed)"} ws=:$wsPort " +
+            "device link up: fqdn=${link.fqdn ?: "(unnamed)"} " +
+                "ws=:${bound.plaintext} tls=:${bound.tls} " +
                 "proxyProtocol=${link.expectsProxyProtocol}",
         )
     }
@@ -172,12 +179,15 @@ object DeviceWebsocket {
      * between picking a number and binding it in which something else could
      * take it, and the failure would land on the tunnel rather than here.
      */
+    /** The two ports the supervisor bound. */
+    private data class Bound(val plaintext: Int, val tls: Int)
+
     private fun startSocket(
         apiUrl: String,
         deviceId: String,
         fqdn: String?,
         challengePort: Int,
-    ): Int? {
+    ): Bound? {
         val config = buildJsonObject {
             put("port", 0)
             put("apiUrl", apiUrl)
@@ -205,7 +215,9 @@ object DeviceWebsocket {
             Log.w(TAG, "the socket refused to start: $reply")
             return null
         }
-        return parsed["port"]?.jsonPrimitive?.intOrNull
+        val plaintext = parsed["port"]?.jsonPrimitive?.intOrNull ?: return null
+        val tls = parsed["tlsPort"]?.jsonPrimitive?.intOrNull ?: return null
+        return Bound(plaintext, tls)
     }
 
     /**
