@@ -152,21 +152,69 @@ the app is away: the render process is the first thing Android reclaims, and a
 player returning to a stopped card for a server their friends are on is worth
 one event to rule out.
 
-## Play policy is the open risk
+## Play policy: the open item, and how to close it
 
-The service declares `foregroundServiceType="specialUse"`, which is the honest
-type for hosting a game server — not media playback, not a transfer, not a
-companion device.
+The service declares `foregroundServiceType="specialUse"`. **Google reviews that
+type by hand, and has not reviewed ours.** It is open question 1 in
+`plans/android.md`, and the plan's own advice was to submit to an internal track
+at M3 to find out early. M3 is done.
 
-`dataSync` would fit the backup half and is **deliberately not declared**: from
-Android 15 a `dataSync` service is capped at six hours in any 24, which would be
-a limit on how long somebody may play.
+### The risk is lower than the plan assumed
 
-`specialUse` is the type Google reviews by hand, against the subtype string in
-the manifest and a justification in Play Console. **That review has not
-happened.** It is open question 1 in `plans/android.md`, and the plan's own
-advice was to submit to an internal track at M3 to find out early. If it is
-refused, the fallback is `dataSync` and its six-hour cap comes with it.
+**Anvil-MC** (`com.armmc.app`) ships on Google Play doing the same thing —
+hosting a Minecraft server on a phone, with Spigot, Paper, Fabric, NeoForge and
+custom jars — and its reported permissions include
+`FOREGROUND_SERVICE_SPECIAL_USE`, `WAKE_LOCK`, `POST_NOTIFICATIONS` and
+`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`.
+
+That is a precedent for two separate policy questions at once: this foreground
+service type for this purpose, and downloading server jars at runtime — the
+other item on `plans/android.md`'s M5 list.
+
+Treat it as strong evidence rather than proof: it comes from a permissions
+listing rather than from the manifest itself. **Confirm it in thirty seconds**
+on any device — Play listing → About this app → App permissions → See more.
+
+### The criterion the declaration has to meet
+
+Google's own wording:
+
+> Google Play will **likely reject** apps using `specialUse` if another
+> foreground service type is appropriate for the use case.
+
+So the declaration is not "describe the feature", it is "show that nothing else
+fits". The manifest's `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` is written to answer
+that and kept to **one line** — XML normalises newlines inside an attribute
+value into runs of spaces, and a reviewer reads the value verbatim.
+
+### What the submission needs
+
+Play Console → **Policy → App content → Foreground service types**, per type:
+
+| Field | Ours |
+|---|---|
+| What the feature does | Runs a Minecraft server other players connect to, for as long as the player keeps it online, and finishes uploading the world to their backup repository afterwards. |
+| **Impact if deferred or interrupted** | Every connected player is disconnected mid-game and unsaved play is lost. If interrupted during the post-stop upload, the session that just finished never reaches the backup — so the loss is the play itself, not a restartable transfer. |
+| **Demo video** | Required. See below. |
+
+The video is the part nobody expects. Ours is short: open the app → **Start** →
+the ongoing notification appears with the server name and player count → leave
+the app → return and show the server still running → **Stop** from the
+notification → the notification reports the backup, then disappears.
+
+Review takes up to seven days, sometimes longer.
+
+### If it is refused
+
+The fallback is `dataSync`, and its cost is real but smaller than it first
+looks. Android 15 permits `dataSync` six hours per 24, then calls
+`Service.onTimeout()` — after which there are seconds to `stopSelf()` or the
+system throws `RemoteServiceException`. **Bringing the app to the foreground
+resets the timer**, so a player who opens Homerun during a session rarely hits
+it; a phone hosting untouched in a pocket all evening does.
+
+So a refusal degrades the product rather than blocking it — which is worth
+knowing before deciding how much to stake on the submission.
 
 ## Verified, and not
 

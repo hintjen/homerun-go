@@ -82,10 +82,17 @@
           limit on how long somebody may play.
 
           `specialUse` is the type Play reviews by hand, against the subtype
-          string below and the declaration in Play Console. That review has not
-          happened yet — see plans/android.md, open question 1. If it is
-          refused, the fallback is `dataSync` and the six-hour cap comes with
-          it.
+          string below and the declaration in Play Console. Google's own
+          guidance is that it "will likely reject apps using specialUse if
+          another foreground service type is appropriate" — so the string is
+          written to answer that question and not merely to describe the
+          feature. It is one line on purpose: XML normalises newlines in an
+          attribute value into runs of spaces, and a reviewer should not have
+          to read around them.
+
+          That review has not happened yet — see plans/android.md, open
+          question 1. If it is refused, the fallback is `dataSync` and the
+          six-hour cap comes with it.
 
           Not exported: nothing outside this app may start it. `stopWithTask`
           is left at its default of false on purpose — swiping the app out of
@@ -98,9 +105,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Hosts a Minecraft server on this device for as long as the
-                    player chooses to keep it online, and finishes uploading the world to
-                    the player's backup repository after it stops." />
+                android:value="Runs a Minecraft server on this device so the player's friends can join it, for as long as the player chooses to keep it online, and finishes uploading the world to their backup repository after they stop it. No other foreground service type fits: the work is not media playback, not a phone call, not location, and not a connected or companion device. It is not dataSync either — nothing is being synchronised on the user's behalf; the device is answering a game protocol for other players in real time, and the six-hour daily limit on dataSync would cap how long a player may host." />
         </service>
 
     </application>
