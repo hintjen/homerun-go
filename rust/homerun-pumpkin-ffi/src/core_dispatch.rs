@@ -35,7 +35,8 @@
 use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
-use homerun_core::minecraft::{self, jar, jvm, settings};
+use homerun_core::minecraft::{self, jar, jvm, ops, settings};
+use homerun_core::reporting::{crash, minigame, stats};
 use homerun_core::{
     backup, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
 };
@@ -163,6 +164,19 @@ fn resolve_game(args: &Value) -> Result<&'static dyn game::Game, String> {
 fn players(value: &Value, method: &str) -> Result<Vec<settings::Player>, String> {
     serde_json::from_value(value.clone())
         .map_err(|e| format!("\"{method}\" needs players as {{name, uuid}}: {e}"))
+}
+
+/// A run's console, as the crash reporters take it.
+///
+/// Missing is not empty here — a host that failed to collect the console and a
+/// run that printed nothing are different situations, and only one of them is
+/// worth a report. Absent is an error; an empty list is honoured.
+fn console_lines(args: &Value, method: &str) -> Result<Vec<String>, String> {
+    let raw = args
+        .get("lines")
+        .ok_or_else(|| format!("\"{method}\" needs the console lines"))?;
+    serde_json::from_value(raw.clone())
+        .map_err(|e| format!("\"{method}\" needs lines as a list of strings: {e}"))
 }
 
 fn dispatch(method: &str, args: &str) -> Result<Value, String> {
@@ -696,6 +710,137 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             }
             Ok(view)
         }
+
+        // --- reporting ----------------------------------------------------
+        //
+        // What the API is told about a run. Every arm here answers with a
+        // `Request` the host performs verbatim: it picks no path, builds no
+        // body, and above all does not decide which credential signs it —
+        // getting that wrong is either a silent 403 or a report filed against
+        // the wrong person.
+
+        "reporting.crash.diagnose" => {
+            let lines = console_lines(&args, method)?;
+            // Absent means a first attempt. The budget is the host's to keep
+            // — it knows whether a launch ever reached running — and the
+            // core's to interpret.
+            let used = args
+                .get("retriesUsed")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32;
+            serde_json::to_value(crash::diagnose(&lines, used)).map_err(|e| e.to_string())
+        }
+
+        "reporting.crash.report" => serde_json::to_value(crash::report(
+            &text("serverId")?,
+            &text("deviceId")?,
+            &console_lines(&args, method)?,
+        ))
+        .map_err(|e| e.to_string()),
+
+        "reporting.stats.report" => {
+            let stats: stats::Stats = serde_json::from_value(field("stats")?.clone())
+                .map_err(|e| format!("\"{method}\" got stats it could not read: {e}"))?;
+            serde_json::to_value(stats::report(&text("serviceId")?, &text("deviceId")?, &stats))
+                .map_err(|e| e.to_string())
+        }
+
+        "reporting.stats.parseRoster" => {
+            serde_json::to_value(stats::parse_list_uuids(&text("reply")?)).map_err(|e| e.to_string())
+        }
+
+        "reporting.stats.parseServerAge" => Ok(stats::parse_server_age(&text("reply")?).into()),
+
+        // Which spelling of a command survives a plugin that shadows it.
+        "reporting.stats.pinned" => {
+            let loader = jar::Loader::parse(optional_text("loader").as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(Value::from(stats::pinned(&text("command")?, loader)))
+        }
+
+        // Per-core in, percent-of-device out. The two scales agree on a
+        // single-core reading, which is why a host that skips this looks
+        // right in testing and reports a melting phone in the field.
+        "reporting.stats.cpuPercentOfDevice" => {
+            let per_core = field("perCorePercent")?
+                .as_f64()
+                .ok_or_else(|| format!("\"{method}\" needs perCorePercent as a number"))?;
+            let cores = args
+                .get("cores")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32;
+            Ok(stats::cpu_percent_of_device(per_core, cores).into())
+        }
+
+        // The cadence, held by the host between calls like `metrics.record`.
+        // No schedule means a run that has just started, and a fresh one is
+        // due immediately — the desktop reports the moment a server is up.
+        "reporting.stats.schedule" => {
+            let now = field("nowMs")?
+                .as_i64()
+                .ok_or_else(|| format!("\"{method}\" needs nowMs as a number"))?;
+            let mut schedule = match args.get("schedule") {
+                Some(held) if !held.is_null() => serde_json::from_value(held.clone())
+                    .map_err(|e| format!("\"{method}\" got a schedule it could not read: {e}"))?,
+                _ => stats::Schedule::started(stats::Cadence::default(), now),
+            };
+
+            let trigger = match optional_text("event").as_deref() {
+                // A join or a leave. Coalesced, so a party arriving together
+                // is one report rather than six.
+                Some("presence") => {
+                    schedule.presence(now);
+                    None
+                }
+                Some("poll") | None => schedule.poll(now),
+                Some(other) => return Err(format!("\"{method}\" does not know the event {other:?}")),
+            };
+
+            Ok(json!({
+                "schedule": serde_json::to_value(schedule).map_err(|e| e.to_string())?,
+                "trigger": serde_json::to_value(trigger).map_err(|e| e.to_string())?,
+                "waitMs": schedule.wait_ms(now),
+                "nextAtMs": schedule.next_at_ms(),
+            }))
+        }
+
+        // A line a server plugin printed for us. Nothing else in the console
+        // is looked at here.
+        "reporting.minigame.fromLine" => {
+            serde_json::to_value(minigame::from_console_line(&text("serverId")?, &text("line")?))
+                .map_err(|e| e.to_string())
+        }
+
+        // --- ops and bans typed into the console ----------------------------
+        //
+        // `ops.json` is rewritten from the API at every launch, so an operator
+        // granted only in the console loses it on the next start unless this
+        // runs. Two calls: recognise the command, then decide against what the
+        // API currently holds. The host does the GET in between, and must
+        // serialise the pair per server — two rapid commands would otherwise
+        // each read the list before either wrote it.
+
+        "minecraft.ops.parse" => {
+            serde_json::to_value(ops::parse(&text("command")?)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.ops.sync" => {
+            let command: ops::Command = serde_json::from_value(field("command")?.clone())
+                .map_err(|e| format!("\"{method}\" got a command it could not read: {e}"))?;
+            serde_json::to_value(ops::sync(&command, field("server")?, &text("serverId")?))
+                .map_err(|e| e.to_string())
+        }
+
+        // Where a player connects — the gateway's name and the external port
+        // it assigned, which is the only address worth measuring latency to.
+        // Java's listen port, because that is the only kind of server this
+        // build hosts; a Bedrock backend would have to ask for 19132/udp.
+        "link.publicAddress" => Ok(link::public_address(
+            field("body")?,
+            minecraft::LISTEN_JAVA,
+            "tcp",
+        )
+        .into()),
 
         "lifecycle.query" => {
             let life = load_lifecycle(&args)?;

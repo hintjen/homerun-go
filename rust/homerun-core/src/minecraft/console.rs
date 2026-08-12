@@ -10,12 +10,73 @@
 //! it — a roster that misses a player is survivable, a launch that hangs
 //! waiting for one is not.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
+
+const ESC: u8 = 0x1b;
+
+/// A line with its colour codes taken out, borrowed when there were none.
+///
+/// Paper colours its console — including the join and leave messages — so on
+/// most real servers every line below arrives wrapped in `ESC [ 0;39;22 m`.
+/// The escape byte is optional here on purpose: some log paths (a pty stripped
+/// of control characters, a Java `PrintStream` that dropped it) deliver the
+/// remnant `[0m` as plain text, and the desktop learned the same thing.
+///
+/// This runs on every line during world generation, a few hundred a second, so
+/// the clean case must not allocate — hence [`Cow`] and a single pass.
+pub fn strip_ansi(line: &str) -> Cow<'_, str> {
+    let bytes = line.as_bytes();
+    let mut out: Option<String> = None;
+    let (mut copied, mut at) = (0, 0);
+    while at < bytes.len() {
+        // Multi-byte UTF-8 is all >= 0x80, so no sequence can start mid-char
+        // and every index below lands on a character boundary.
+        if bytes[at] == ESC || bytes[at] == b'[' {
+            if let Some(len) = ansi_len(bytes, at) {
+                let out = out.get_or_insert_with(|| String::with_capacity(line.len()));
+                out.push_str(&line[copied..at]);
+                at += len;
+                copied = at;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    match out {
+        Some(mut owned) => {
+            owned.push_str(&line[copied..]);
+            Cow::Owned(owned)
+        }
+        None => Cow::Borrowed(line),
+    }
+}
+
+/// The length of the colour sequence starting at `at`, if one does.
+///
+/// Only SGR (`m`) is matched. Cursor moves and the like do not appear in a
+/// server log, and matching them too would risk eating real text — `[20:37:28`
+/// is one character away from looking like a sequence already.
+fn ansi_len(bytes: &[u8], at: usize) -> Option<usize> {
+    let mut end = at;
+    if bytes.get(end) == Some(&ESC) {
+        end += 1;
+    }
+    if bytes.get(end) != Some(&b'[') {
+        return None;
+    }
+    end += 1;
+    while matches!(bytes.get(end), Some(b'0'..=b'9' | b';')) {
+        end += 1;
+    }
+    (bytes.get(end) == Some(&b'm')).then_some(end + 1 - at)
+}
 
 /// `Done (12.345s)! For help, type "help"` — the server is accepting
 /// connections. Matched loosely enough to survive the timing text changing.
 pub fn is_ready(line: &str) -> bool {
-    let Some(rest) = line.split_once("Done (").map(|(_, r)| r) else {
+    let clean = strip_ansi(line);
+    let Some(rest) = clean.split_once("Done (").map(|(_, r)| r) else {
         return false;
     };
     rest.split_once(')')
@@ -46,12 +107,13 @@ pub fn left(line: &str) -> Option<&str> {
 /// Best-effort like everything else here — an unrecognised line yields None,
 /// which renders as unknown rather than as a ceiling of zero.
 pub fn max_players(line: &str) -> Option<u32> {
-    let lower = line.to_ascii_lowercase();
+    let clean = strip_ansi(line);
+    let lower = clean.to_ascii_lowercase();
     let after = ["max-players", "maxplayers"]
         .iter()
         .find_map(|key| lower.find(key).map(|at| at + key.len()))?;
 
-    let digits: String = line[after..]
+    let digits: String = clean[after..]
         .trim_start_matches([':', '=', ' '])
         .chars()
         .take_while(char::is_ascii_digit)
@@ -62,24 +124,32 @@ pub fn max_players(line: &str) -> Option<u32> {
 /// Pull the name immediately before a marker, after the log prefix.
 ///
 /// Vanilla prints `[HH:MM:SS] [Server thread/INFO]: Name joined the game`.
-/// Taking the last whitespace-separated token before the marker keeps this
-/// working when a loader adds its own prefix.
+/// Everything the server itself prefixes ends with `]: `, and what follows a
+/// real join line's prefix is one bare name and nothing else — a chat message
+/// puts its author in front (`<Griefer> Notch joined the game`), so requiring
+/// the remainder to be a lone name is what tells the two apart.
+///
+/// The prefix ends at the **first** `]: `: a later one is inside text somebody
+/// typed. Reading from the last one instead let anyone forge a join by saying
+/// `hey]: Notch joined the game` in chat. The desktop does not attempt this
+/// distinction at all — its presence check is `/ \S+ (?:joined|left) the
+/// game\s*$/`, which any chat message can satisfy.
 fn player_before<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     let head = line.split_once(marker)?.0;
-    // Everything the server itself prefixes ends with "]: ", and a chat
-    // message would put the name in brackets — refusing anything with a
-    // bracket after the prefix keeps `<Name> joined the game` in chat from
-    // being read as a real join.
-    let head = head.rsplit("]: ").next()?;
-    let name = head.split_whitespace().next_back()?;
-    if name.is_empty() || name.len() != head.trim().len() {
+    let clean = strip_ansi(head);
+    let name = clean
+        .split_once("]: ")
+        .map_or(&*clean, |(_, after)| after)
+        .trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
-    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        Some(name)
-    } else {
-        None
-    }
+    // Answer with a slice of the caller's line rather than of the stripped
+    // copy. The name survives stripping verbatim unless a colour code was
+    // printed inside it, which no server does and which is not worth trusting
+    // a reconstruction for.
+    let at = head.rfind(name)?;
+    Some(&head[at..at + name.len()])
 }
 
 /// A bounded console with a monotonic cursor.
@@ -186,6 +256,87 @@ mod tests {
         assert_eq!(
             joined("[20:37:28] [Server thread/INFO]: <Griefer> Notch joined the game"),
             None
+        );
+    }
+
+    /// Paper colours its join/leave messages, which is most servers, so a
+    /// parser that only reads plain lines sees no joins at all on them.
+    #[test]
+    fn a_coloured_paper_join_names_the_player() {
+        assert_eq!(
+            joined(
+                "\u{1b}[m\u{1b}[36;22m[20:37:28 INFO]: \u{1b}[m\u{1b}[0;39;22mNotch joined the game\u{1b}[m"
+            ),
+            Some("Notch")
+        );
+    }
+
+    /// Some log paths lose the escape byte and leave the rest of the sequence
+    /// behind as text.
+    #[test]
+    fn a_colour_code_that_lost_its_escape_byte_is_still_ignored() {
+        assert_eq!(
+            left("[m[36;22m[20:37:28 INFO]: [m[0;39;22mPlayer_1 left the game[m"),
+            Some("Player_1")
+        );
+    }
+
+    /// The log prefix ends at the *first* `]: `; anything after that is text
+    /// somebody may have typed. Taking the last one lets a chat message carry
+    /// its own fake prefix and be read as a join.
+    #[test]
+    fn chat_cannot_forge_a_join_by_typing_a_log_prefix() {
+        assert_eq!(
+            joined("[20:37:28] [Server thread/INFO]: <Griefer> hey]: Notch joined the game"),
+            None
+        );
+        assert_eq!(
+            left("[20:37:28] [Server thread/INFO]: [Griefer] hey]: Notch left the game"),
+            None
+        );
+    }
+
+    /// Ignoring colour codes must not become a way to erase the chat author.
+    #[test]
+    fn a_colour_code_in_chat_cannot_erase_the_author() {
+        assert_eq!(
+            joined("[20:37:28] [Server thread/INFO]: <Griefer>[0m Notch joined the game"),
+            None
+        );
+    }
+
+    /// A log line is mostly brackets and digits, and none of it may be
+    /// mistaken for a colour code — a timestamp that got eaten would take the
+    /// rest of the line with it.
+    #[test]
+    fn a_line_without_colour_is_returned_untouched() {
+        let line = "[20:37:28] [Server thread/INFO]: Preparing spawn area: 0% [1/9] {a;b}";
+        assert!(
+            matches!(strip_ansi(line), Cow::Borrowed(same) if same == line),
+            "a clean line was copied: {:?}",
+            strip_ansi(line)
+        );
+    }
+
+    #[test]
+    fn colour_survives_nothing_but_takes_nothing_with_it() {
+        assert_eq!(
+            strip_ansi("\u{1b}[0;39;22mDone (3.2s)!\u{1b}[m"),
+            "Done (3.2s)!"
+        );
+        // A half-written sequence is text, not a licence to eat the rest.
+        assert_eq!(strip_ansi("[0;39 red"), "[0;39 red");
+        assert_eq!(strip_ansi("[20:37:28] hi"), "[20:37:28] hi");
+    }
+
+    #[test]
+    fn a_coloured_ready_line_and_ceiling_are_still_read() {
+        assert!(is_ready(
+            "\u{1b}[m\u{1b}[36;22m[20:37:28 INFO]: \u{1b}[mDone (3.244s)\u{1b}[m! For help, type \"help\""
+        ));
+        assert_eq!(
+            max_players("\u{1b}[36;22m[12:00:00] [main/INFO]: maxPlayers: \u{1b}[0;39;22m8"),
+            Some(8)
         );
     }
 

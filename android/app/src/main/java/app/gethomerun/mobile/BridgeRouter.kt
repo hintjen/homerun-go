@@ -767,6 +767,10 @@ class BridgeRouter(
                         val api = apiUrl()
                         val settings = HomerunApi.serverSettings(api, serverId, token)
 
+                        // Before the backend starts, so a crash while starting
+                        // up still has somewhere to be reported from.
+                        Reporting.starting(serverId, settings)
+
                         // The device id restic records as the snapshot hostname, and the
                         // one the API resolves `pushed_by` from. Registration is already
                         // done by now in any normal flow; null just means no backups.
@@ -881,6 +885,12 @@ class BridgeRouter(
             val command = obj["command"]?.jsonPrimitive?.contentOrNull.orEmpty()
             try {
                 backend.command(serverId, command)
+                // An `op` or a `ban` typed here has to reach the server's
+                // settings too, or the next launch rewrites ops.json from the
+                // API and quietly takes it back. Signed as the person who
+                // typed it — the API strips a settings change from someone who
+                // could not have made it in the UI.
+                Reporting.consoleCommand(serverId, command)
                 emit(
                     "native-server-rcon-response",
                     listOf(buildJsonObject {

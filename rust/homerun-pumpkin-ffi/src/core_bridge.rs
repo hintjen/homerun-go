@@ -16,9 +16,10 @@ use jni::objects::{JClass, JString};
 use jni::sys::jstring;
 use jni::JNIEnv;
 
-use crate::core_dispatch;
+use crate::host_dispatch;
 
-/// Dispatch one core call. See [`crate::core_dispatch`] for the envelope.
+/// Dispatch one core call. See [`crate::core_dispatch`] for the envelope, and
+/// [`crate::host_dispatch`] for the few calls answered before it.
 #[no_mangle]
 pub extern "system" fn Java_app_gethomerun_mobile_Core_nativeCall(
     mut env: JNIEnv,
@@ -35,7 +36,7 @@ pub extern "system" fn Java_app_gethomerun_mobile_Core_nativeCall(
         Err(_) => return failure(&env, "arguments were not readable"),
     };
 
-    match env.new_string(core_dispatch::call(&method, &args)) {
+    match env.new_string(host_dispatch::call(&method, &args)) {
         Ok(s) => s.into_raw(),
         // Only if the VM is already out of memory. Null lets Kotlin surface it
         // rather than us panicking into an abort.

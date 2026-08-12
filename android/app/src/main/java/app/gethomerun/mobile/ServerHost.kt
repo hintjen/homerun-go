@@ -111,6 +111,18 @@ object ServerHost {
         listeners.remove(listener)
     }
 
+    /**
+     * Put a line of Homerun's own into a server's console.
+     *
+     * For what this app worked out and the server did not say — why a crash
+     * happened, that an operator change was saved. It reaches the UI on the
+     * same stream as the server's own output, which is where a player is
+     * already looking when something has gone wrong.
+     */
+    fun note(serverId: String, line: String) {
+        forEach { it.onLog(serverId, "[Homerun] $line") }
+    }
+
     /** Copy before dispatch: a listener may unregister while being called. */
     private fun forEach(action: (Listener) -> Unit) {
         val snapshot = synchronized(this) { listeners.toList() }
