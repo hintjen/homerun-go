@@ -26,6 +26,9 @@
 //! [`crate::tunnel`] documents for a server's ports, and it fails the same way
 //! if "corrected": a config that loads, connects, and is unreachable.
 
+/// The frames themselves, and the order they are allowed in.
+pub mod protocol;
+
 use crate::tunnel::{Config, Forward, Link};
 use serde::{Deserialize, Serialize};
 
