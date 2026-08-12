@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.io.File
+import java.net.ServerSocket
 
 /**
  * The socket the dashboard talks to this device on.
@@ -24,21 +25,17 @@ import java.io.File
  *
  * # What is here so far
  *
- * The device's link, the socket behind it, and the console and RCON it serves —
- * over the tunnel but **not yet over TLS**. The gateway hands this device
- * connections on `:443` expecting a TLS ClientHello, and until the certificate
- * work lands it gets a plaintext websocket instead. So this is reachable and
- * not yet usable by a browser, which is a deliberate intermediate state and not
- * a shippable one.
+ * The device's link, the socket behind it, the certificate it serves with, and
+ * the console and RCON it carries.
  *
- * The ACME `:80` forward is omitted for the same reason: there is no challenge
- * listener to answer on it, and forwarding a port at something that was never
- * started is a worse failure than not forwarding it — it looks like the device
- * answered.
+ * This class owns the link and the lifecycle. The socket and the TLS are the
+ * supervisor's, because that is where the console buffer and the command path
+ * already are — see `plans/device-websocket.md`.
  *
- * This class owns the link and the lifecycle; the socket itself is served by
- * the supervisor, because that is where the console buffer and the command path
- * already are.
+ * Two ports, both forwarded by the tunnel. The gateway's `:443` reaches the
+ * websocket; its `:80` reaches the ACME challenge listener, and that forward is
+ * omitted when there is no hostname to prove, because a forward at a listener
+ * that never starts looks like the device answered.
  *
  * # Why this is process-scoped
  *
@@ -64,6 +61,9 @@ object DeviceWebsocket {
     @Volatile
     var fqdn: String? = null
         private set
+
+    /** Read off the link, and passed to the socket that terminates TLS. */
+    private var expectsProxyProtocol: Boolean = true
 
     @Synchronized
     fun init(context: Context, scope: CoroutineScope) {
@@ -99,17 +99,26 @@ object DeviceWebsocket {
 
         val link = HomerunApi.awaitDeviceLink(apiUrl, deviceId, userToken) ?: return
 
-        // The socket first, then the tunnel that points at it. Order matters:
-        // the supervisor answers with the port it actually bound, and asking it
-        // to bind 0 rather than picking a number here removes the window where
-        // something else takes the port between choosing and binding.
-        val wsPort = startSocket(apiUrl, deviceId) ?: return
+        // The ACME challenge listener's port has to be decided *before* the
+        // socket starts, because the supervisor binds it during the order and
+        // the tunnel has to be forwarding at it by then. This one is chosen
+        // here rather than by the OS for that reason — the order and the
+        // forward have to agree, and the order happens first.
+        val challengePort = freePort()
+
+        // The socket next, then the tunnel that points at it. Asking it to bind
+        // 0 rather than picking a number removes the window where something
+        // else takes the port between choosing and binding.
+        expectsProxyProtocol = link.expectsProxyProtocol
+        val wsPort = startSocket(apiUrl, deviceId, link.fqdn, challengePort) ?: return
 
         val config = Core.deviceWsTunnelConfig(
             link = link.link,
             httpsTarget = wsPort,
-            // No cert manager yet, so nothing would answer a challenge.
-            httpTarget = null,
+            // Only when there is a hostname to prove. Without one no order can
+            // run, and a forward at a listener that never starts looks like the
+            // device answered.
+            httpTarget = if (link.fqdn != null) challengePort else null,
         )
 
         val proxy = WireProxy(appContext, scope ?: return)
@@ -163,12 +172,28 @@ object DeviceWebsocket {
      * between picking a number and binding it in which something else could
      * take it, and the failure would land on the tunnel rather than here.
      */
-    private fun startSocket(apiUrl: String, deviceId: String): Int? {
+    private fun startSocket(
+        apiUrl: String,
+        deviceId: String,
+        fqdn: String?,
+        challengePort: Int,
+    ): Int? {
         val config = buildJsonObject {
             put("port", 0)
             put("apiUrl", apiUrl)
             put("jwksUrl", JWKS_URL)
             put("deviceId", deviceId)
+            fqdn?.let { put("fqdn", it) }
+            put("storageDir", File(appContext.filesDir, "$DIRECTORY/tls").absolutePath)
+            put("challengePort", challengePort)
+            // Whether the plane in front of us writes a PROXY header. The core
+            // answered this off the link; getting it wrong fails every TLS
+            // handshake with a message about neither.
+            put("expectProxyProtocol", expectsProxyProtocol)
+            // Staging in debug builds. Production allows five certificates per
+            // hostname per week, and a developer reinstalling all afternoon
+            // would spend that before lunch.
+            put("acmeStaging", BuildConfig.DEBUG)
         }
         val reply = runCatching { NativeServer.nativeDeviceWsStart(config.toString()) }
             .onFailure { Log.w(TAG, "the socket did not start: ${it.message}", it) }
@@ -182,6 +207,18 @@ object DeviceWebsocket {
         }
         return parsed["port"]?.jsonPrimitive?.intOrNull
     }
+
+    /**
+     * A port nothing else currently holds.
+     *
+     * Only the ACME challenge listener needs this. The websocket asks the OS
+     * for its own port and reports back, but the challenge port has to be in
+     * the tunnel config *before* the order runs — the forward and the listener
+     * have to agree, and the order happens first. Bound and released rather
+     * than hardcoded: a fixed number collides with whatever else on the device
+     * wanted it, and fails with less to say about why.
+     */
+    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
 
     @Synchronized
     private fun stopSocket() {

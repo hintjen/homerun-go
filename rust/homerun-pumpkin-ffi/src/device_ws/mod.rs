@@ -25,11 +25,13 @@
 //! watching.
 
 use std::collections::{HashMap, HashSet};
+use std::io;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -37,6 +39,8 @@ use tokio_tungstenite::tungstenite::Message;
 use homerun_core::device_ws::protocol::{
     outgoing, Refusal, Request, Scope, Session, CLOSE_AUTH_FAILED, HEARTBEAT_INTERVAL_MS,
 };
+
+pub mod tls;
 
 /// Everything the socket needs that only the host can know.
 #[derive(Debug, Clone)]
@@ -49,6 +53,25 @@ pub struct Config {
     pub jwks_url: String,
     /// This device's API id, for device-scoped requests.
     pub device_id: String,
+    /// This device's public hostname. Absent means no certificate can be
+    /// obtained, and the socket serves plaintext — reachable through the
+    /// tunnel, not reachable by a browser.
+    pub fqdn: Option<String>,
+    /// Where the ACME account and the certificate live. Absent has the same
+    /// effect as no `fqdn`.
+    pub storage_dir: Option<String>,
+    /// The loopback port the tunnel forwards the gateway's `:80` to, for the
+    /// ACME challenge. Absent means no order can be validated.
+    pub challenge_port: Option<u16>,
+    /// True on the legacy plane, where nginx writes a PROXY v1 header ahead of
+    /// the ClientHello. The v2 gateway writes none, and stripping one that is
+    /// not there eats the handshake — see
+    /// [`homerun_core::device_ws::proxy_protocol`].
+    pub expect_proxy_protocol: bool,
+    /// Use Let's Encrypt's staging directory. Its certificates are not trusted
+    /// by browsers, which is the point: staging has generous rate limits and
+    /// production allows five certificates per hostname per week.
+    pub acme_staging: bool,
 }
 
 /// The `azp` claim every Homerun token carries.
@@ -113,18 +136,64 @@ pub fn start(config: Config) -> Result<u16, String> {
         .port();
 
     let (shutdown, mut stopping) = tokio::sync::oneshot::channel();
+    let expect_proxy = config.expect_proxy_protocol;
+    let tls_inputs = config
+        .fqdn
+        .clone()
+        .zip(config.storage_dir.clone())
+        .zip(config.challenge_port)
+        .map(|((fqdn, dir), port)| (fqdn, dir, port));
+    let staging = config.acme_staging;
     let state = Arc::new(Shared::new(config));
 
     runtime.spawn(async move {
+        // The certificate is obtained *after* the listener is bound, so a slow
+        // or failing order never delays the port coming up. Until it arrives
+        // the socket answers plaintext, which the tunnel can carry and a
+        // browser cannot use — the honest intermediate state, and the one a
+        // device with no hostname stays in permanently.
+        let acceptor = match tls_inputs {
+            None => {
+                log::warn("no hostname or storage — serving plaintext, which no browser will use");
+                None
+            }
+            Some((fqdn, dir, challenge_port)) => {
+                let store = tls::CertStore::new(dir);
+                match tls::ensure_certificate(&store, &fqdn, challenge_port, staging).await {
+                    Ok(certificate) => match tls::acceptor(&certificate) {
+                        Ok(acceptor) => {
+                            log::info(&format!("serving TLS for {fqdn}"));
+                            Some(acceptor)
+                        }
+                        Err(err) => {
+                            log::warn(&format!("the certificate could not be loaded: {err}"));
+                            None
+                        }
+                    },
+                    Err(err) => {
+                        log::warn(&format!("no certificate: {err}"));
+                        None
+                    }
+                }
+            }
+        };
+
         loop {
             tokio::select! {
                 _ = &mut stopping => break,
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => {
                         let state = Arc::clone(&state);
+                        let acceptor = acceptor.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = serve(stream, state).await {
-                                log::debug(&format!("connection ended: {err}"));
+                            // Warn, not debug. A connection that fails before
+                            // it becomes a websocket is either a broken
+                            // handshake or a misread PROXY header, and both are
+                            // invisible from the dashboard's side — a silent
+                            // one here is how a device looks unreachable with
+                            // nothing anywhere saying why.
+                            if let Err(err) = accept(stream, state, acceptor, expect_proxy).await {
+                                log::warn(&format!("connection refused: {err}"));
                             }
                         });
                     }
@@ -158,6 +227,134 @@ pub fn is_running() -> bool {
     slot().lock().map(|slot| slot.is_some()).unwrap_or(false)
 }
 
+/// Take one connection from the gateway through to a websocket.
+///
+/// Three things happen in order and each has to be exact: strip the PROXY
+/// header if the plane sends one, complete the TLS handshake if there is a
+/// certificate, then upgrade. Getting the first wrong breaks the second with a
+/// message about neither.
+async fn accept(
+    stream: TcpStream,
+    shared: Arc<Shared>,
+    acceptor: Option<tokio_rustls::TlsAcceptor>,
+    expect_proxy: bool,
+) -> Result<(), String> {
+    // A peer that dies without a FIN leaves a socket that never errors. The
+    // app-level ping is the real defence; this is the backstop under it.
+    let _ = stream.set_nodelay(true);
+
+    let stream = if expect_proxy {
+        strip_proxy_header(stream).await?
+    } else {
+        Prefixed::new(stream, Vec::new())
+    };
+
+    match acceptor {
+        Some(acceptor) => {
+            let tls = acceptor
+                .accept(stream)
+                .await
+                .map_err(|e| format!("the TLS handshake failed: {e}"))?;
+            serve(tls, shared).await
+        }
+        None => serve(stream, shared).await,
+    }
+}
+
+/// Read the PROXY v1 header off the front, or establish there is none.
+///
+/// Reads a byte at a time until the parser can answer. That is slower than one
+/// large read and it is the only way to guarantee nothing is consumed when the
+/// answer is "no header" — which is every connection on the v2 plane. Forty-odd
+/// syscalls once per connection is not a cost worth trading correctness for.
+async fn strip_proxy_header(mut stream: TcpStream) -> Result<Prefixed<TcpStream>, String> {
+    use homerun_core::device_ws::proxy_protocol::{self, Preface};
+
+    let mut seen = Vec::with_capacity(proxy_protocol::MAX_HEADER);
+    loop {
+        match proxy_protocol::read(&seen) {
+            Preface::Header { consumed, line } => {
+                log::debug(&format!("stripped {line:?}"));
+                // Anything read past the header is the client's first bytes and
+                // must be handed on, not dropped.
+                return Ok(Prefixed::new(stream, seen[consumed..].to_vec()));
+            }
+            // Not a header after all: everything read so far belongs to the
+            // client, so it is replayed rather than consumed.
+            Preface::Absent => return Ok(Prefixed::new(stream, seen)),
+            Preface::Incomplete => {
+                let mut byte = [0u8; 1];
+                match stream.read_exact(&mut byte).await {
+                    Ok(_) => seen.push(byte[0]),
+                    Err(err) => return Err(format!("the peer closed mid-header: {err}")),
+                }
+            }
+        }
+    }
+}
+
+/// A stream that yields some already-read bytes before the socket's own.
+///
+/// Needed because deciding whether a PROXY header is present means reading
+/// bytes that may turn out to belong to the TLS handshake. Without this they
+/// would be lost, and the failure would be a handshake error naming nothing.
+struct Prefixed<S> {
+    inner: S,
+    prefix: Vec<u8>,
+    offset: usize,
+}
+
+impl<S> Prefixed<S> {
+    fn new(inner: S, prefix: Vec<u8>) -> Self {
+        Self {
+            inner,
+            prefix,
+            offset: 0,
+        }
+    }
+}
+
+impl<S: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        if self.offset < self.prefix.len() {
+            let remaining = &self.prefix[self.offset..];
+            let take = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..take]);
+            self.offset += take;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
 /// State every connection shares.
 struct Shared {
     config: Config,
@@ -185,11 +382,16 @@ impl Shared {
 }
 
 /// One connection, from the upgrade to the close.
-async fn serve(stream: TcpStream, shared: Arc<Shared>) -> Result<(), String> {
-    // A peer that dies without a FIN leaves a socket that never errors. The
-    // app-level ping below is the real defence; this is the backstop under it.
-    let _ = stream.set_nodelay(true);
-
+///
+/// Generic over the stream because by here it may be a plain socket or a TLS
+/// session, and nothing below this point cares which.
+async fn serve<S>(stream: S, shared: Arc<Shared>) -> Result<(), String>
+where
+    // `Send + 'static` because the writer half is moved into its own task:
+    // the read loop and the write loop have to make progress independently, or
+    // a slow console blocks the frame the dashboard just sent.
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let socket = tokio_tungstenite::accept_async(stream)
         .await
         .map_err(|e| format!("upgrade failed: {e}"))?;
@@ -618,23 +820,25 @@ fn timestamp() -> String {
     format!("{y:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
-/// Logging that cannot reach a player's console.
+/// Logging that actually arrives somewhere.
 ///
-/// The rest of this crate writes to stdout, which after a launch is the pipe
-/// feeding the *server's* console — see `HostLog` on iOS for the same trap. A
-/// device-websocket line landing there would appear as server output.
+/// Through the `log` facade, never `eprintln!`. Two reasons, and the first cost
+/// a debugging round: **Android does not capture a process's stdout or stderr
+/// at all**, so an `eprintln!` here is written to nothing and a device with no
+/// certificate has no explanation anywhere. And after a server launches stdout
+/// *is* the pipe feeding the player-visible console — the same trap `HostLog`
+/// documents on iOS.
+///
+/// `nativeInitLogging` wires the facade to logcat under `HomerunNative`.
 mod log {
     pub fn info(message: &str) {
-        eprintln!("[DeviceWs] {message}");
+        ::log::info!("[DeviceWs] {message}");
     }
     pub fn warn(message: &str) {
-        eprintln!("[DeviceWs] WARN {message}");
+        ::log::warn!("[DeviceWs] {message}");
     }
     pub fn debug(message: &str) {
-        #[cfg(debug_assertions)]
-        eprintln!("[DeviceWs] {message}");
-        #[cfg(not(debug_assertions))]
-        let _ = message;
+        ::log::debug!("[DeviceWs] {message}");
     }
 }
 

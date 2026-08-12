@@ -575,11 +575,41 @@ pub unsafe extern "C" fn homerun_device_ws_start(config: *const c_char) -> *mut 
                     .unwrap_or_default()
                     .to_string()
             };
+            let optional = |key: &str| {
+                parsed
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            let port_of = |key: &str| {
+                parsed
+                    .get(key)
+                    .and_then(|v| v.as_u64())
+                    .filter(|p| *p > 0)
+                    .map(|p| p as u16)
+            };
             let config = device_ws::Config {
                 port: parsed.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16,
                 api_url: text("apiUrl"),
                 jwks_url: text("jwksUrl"),
                 device_id: text("deviceId"),
+                fqdn: optional("fqdn"),
+                storage_dir: optional("storageDir"),
+                challenge_port: port_of("challengePort"),
+                // Defaults to true: the legacy plane is what a device gets
+                // today, and expecting a header that never comes is a stall a
+                // log line explains, where not expecting one that does come is
+                // a handshake failure that names nothing.
+                expect_proxy_protocol: parsed
+                    .get("expectProxyProtocol")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                acme_staging: parsed
+                    .get("acmeStaging")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             };
             if config.api_url.is_empty() || config.jwks_url.is_empty() {
                 return err("the device websocket needs an apiUrl and a jwksUrl");

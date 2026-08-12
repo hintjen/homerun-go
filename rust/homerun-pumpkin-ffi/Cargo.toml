@@ -51,7 +51,10 @@ device-ws = [
     "dep:jsonwebtoken",
     "dep:tokio-rustls",
     "dep:instant-acme",
-    "dep:rcgen",
+    "dep:http",
+    "dep:http-body-util",
+    "dep:bytes",
+
 ]
 
 [dependencies]
@@ -108,11 +111,25 @@ tokio-rustls = { version = "0.26", optional = true }
 # The ACME half. Hand-rolling it is what the desktop did (~479 lines of
 # TypeScript); there is no reason to do that again in a language with a
 # maintained client.
-instant-acme = { version = "0.8", optional = true }
-# The keypair and CSR the order is finalised with. The private key is ours to
-# keep — it is what serves TLS afterwards — so this cannot live inside the ACME
-# client's own abstractions.
-rcgen = { version = "0.14", optional = true }
+#
+# `default-features = false` drops its bundled hyper-rustls client, which builds
+# on rustls-platform-verifier — and that needs a JavaVM and an Android Context
+# handed to it over JNI before it can reach the system trust store. Without
+# that initialisation it does not fail, it hangs: a device orders a certificate
+# and never hears back. reqwest is already in this build, already reaches the
+# API and Keycloak from Android, and carries its own roots, so it is the
+# transport rather than a second TLS stack with a platform dependency.
+# `aws-lc-rs` is kept: default-features drops the crypto provider too, and
+# instant-acme needs one to sign its JWS. Same provider rustls already uses
+# here, so there is one in the build rather than two.
+instant-acme = { version = "0.8", default-features = false, features = [
+    "aws-lc-rs",
+], optional = true }
+# Only to bridge instant-acme's request type onto reqwest. All three are
+# already in the tree behind reqwest; naming them keeps the adapter honest.
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
 
 # Both appear in Pumpkin's own public types — a `uuid::Uuid` in an operator
 # entry, a `time::OffsetDateTime` in a ban — so seeding those lists means
