@@ -952,4 +952,227 @@ object Core {
             maxPlayers = reply["maxPlayers"]?.jsonPrimitive?.intOrNull,
         )
     }
+
+    // -----------------------------------------------------------------------
+    // Reporting
+    // -----------------------------------------------------------------------
+    //
+    // What the API is told about a run. This app performs the requests and
+    // decides none of them — not the path, not the body, and not which
+    // credential signs it. See `homerun-core::reporting`.
+
+    /**
+     * One API call, decided by the core.
+     *
+     * [auth] is `device` or `user` and is **not** a detail: the reporting
+     * endpoints take the device token, while a settings change is judged
+     * against the person who asked for it. Signing with the wrong one is a
+     * silent failure in both directions — a 403 nobody sees, or a change
+     * attributed to whoever happened to start the server.
+     */
+    data class Request(
+        val method: String,
+        val path: String,
+        val body: JsonObject,
+        val auth: String,
+    ) {
+        val userSigned: Boolean get() = auth == "user"
+
+        companion object {
+            fun from(element: JsonElement?): Request? {
+                val obj = (element as? JsonObject) ?: return null
+                return Request(
+                    method = obj["method"]?.jsonPrimitive?.contentOrNull ?: return null,
+                    path = obj["path"]?.jsonPrimitive?.contentOrNull ?: return null,
+                    body = obj["body"] as? JsonObject ?: return null,
+                    auth = obj["auth"]?.jsonPrimitive?.contentOrNull ?: return null,
+                )
+            }
+        }
+    }
+
+    /** What a crash log says went wrong, when the core recognises it. */
+    data class Diagnosis(val cause: String, val message: String, val recovery: String) {
+        /** The jar was damaged and the budget allows another go at it. */
+        val repairable: Boolean get() = recovery == "redownloadAndRestart"
+    }
+
+    /**
+     * Read a finished run's console.
+     *
+     * [retriesUsed] is this app's count, not the core's — only the host knows
+     * whether a launch ever reached running, which is what resets it. Null
+     * means nothing was recognised, and the API's own matching is then the
+     * only explanation the player will get.
+     */
+    fun crashDiagnosis(lines: List<String>, retriesUsed: Int): Diagnosis? {
+        val reply = call("reporting.crash.diagnose", buildJsonObject {
+            put("lines", buildJsonArray { lines.forEach { add(it) } })
+            put("retriesUsed", retriesUsed)
+        })
+        val obj = reply as? JsonObject ?: return null
+        return Diagnosis(
+            cause = obj["cause"]?.jsonPrimitive?.contentOrNull ?: return null,
+            message = obj["message"]?.jsonPrimitive?.contentOrNull ?: return null,
+            recovery = obj["recovery"]?.jsonPrimitive?.contentOrNull ?: return null,
+        )
+    }
+
+    fun crashReport(serverId: String, deviceId: String, lines: List<String>): Request? =
+        Request.from(call("reporting.crash.report", buildJsonObject {
+            put("serverId", serverId)
+            put("deviceId", deviceId)
+            put("lines", buildJsonArray { lines.forEach { add(it) } })
+        }))
+
+    fun statsReport(serviceId: String, deviceId: String, stats: JsonObject): Request? =
+        Request.from(call("reporting.stats.report", buildJsonObject {
+            put("serviceId", serviceId)
+            put("deviceId", deviceId)
+            put("stats", stats)
+        }))
+
+    /** The roster and the world's age, as the supervisor got them. */
+    data class Poll(val roster: JsonObject?, val ageSecs: Double?)
+
+    /**
+     * Ask the running server for the two things a report needs from it.
+     *
+     * **Blocking** — it sends a console command and waits for the reply, so
+     * call it off the main thread.
+     *
+     * The supervisor does this rather than this app, because the replies come
+     * back as ordinary console lines and only the supervisor can keep them out
+     * of the console buffer the UI reads. Filtering them here would be too
+     * late: the line is already stored. See `homerun-pumpkin-ffi::server::Ask`.
+     *
+     * Either field is null on its own — a plugin shadowing `/list` should not
+     * cost the gametime.
+     */
+    fun statsPoll(loader: String): Poll {
+        val reply = call("server.statsPoll", buildJsonObject {
+            put("loader", loader)
+        }) as? JsonObject ?: return Poll(null, null)
+        return Poll(
+            roster = reply["roster"] as? JsonObject,
+            ageSecs = (reply["ageSecs"] as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull(),
+        )
+    }
+
+    /**
+     * Per-core CPU onto the whole device.
+     *
+     * The sampler measures a process against one core and may exceed 100; this
+     * endpoint wants the fraction of the machine. The two agree on a
+     * single-core reading, which is why skipping this looks correct until a
+     * real phone reports itself on fire.
+     */
+    fun cpuPercentOfDevice(perCorePercent: Double, cores: Int): Double? =
+        (call("reporting.stats.cpuPercentOfDevice", buildJsonObject {
+            put("perCorePercent", perCorePercent)
+            put("cores", cores)
+        }) as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()
+
+    /**
+     * When to report next, and whether now is one of those times.
+     *
+     * [held] is opaque state kept by the caller between calls, like
+     * [Handshake] — no schedule means a run that has just begun, and the first
+     * poll is due immediately. [event] is `presence` for a join or leave, or
+     * null to simply ask.
+     */
+    data class Schedule(
+        val held: JsonObject,
+        /** `periodic`, `presence`, or null when nothing is due yet. */
+        val trigger: String?,
+        val waitMs: Long,
+    )
+
+    fun schedule(held: JsonObject?, nowMs: Long, event: String? = null): Schedule {
+        val reply = call("reporting.stats.schedule", buildJsonObject {
+            held?.let { put("schedule", it) }
+            put("nowMs", nowMs)
+            event?.let { put("event", it) }
+        }).jsonObject
+        return Schedule(
+            held = reply["schedule"]!!.jsonObject,
+            trigger = (reply["trigger"] as? JsonPrimitive)?.contentOrNull,
+            waitMs = reply["waitMs"]?.jsonPrimitive?.longOrNull ?: 0L,
+        )
+    }
+
+    /**
+     * Whether this server verifies accounts with Mojang.
+     *
+     * Derived once, by the core, from the same inputs that write
+     * `server.properties` — the desktop computes it twice from two places and
+     * the two disagree, which is what silently breaks op-ing.
+     */
+    fun onlineMode(settings: HomerunApi.ServerSettings): Boolean? =
+        (call("minecraft.settings.fromEnv", buildJsonObject {
+            put("env", settings.env)
+            put("gameType", settings.rawGameType)
+            put("loader", settings.loader)
+        }) as? JsonObject)?.get("onlineMode")?.jsonPrimitive?.booleanOrNull
+
+    /**
+     * Where a player connects, from a `GET /api/server/<id>/` body.
+     *
+     * Null until the gateway has assigned an external port, which is the
+     * normal state during the first moments of a launch.
+     */
+    fun publicAddress(body: JsonElement): String? =
+        (call("link.publicAddress", buildJsonObject { put("body", body) })
+            as? JsonPrimitive)?.contentOrNull
+
+    /**
+     * Round-trip time to the gateway address, in milliseconds.
+     *
+     * Null for every ordinary failure — unreachable, not a Minecraft server,
+     * timed out. One optional field on a report is not worth failing over.
+     * The socket is the native side's, not this app's: the codec around it is
+     * the difficult half and iOS should not have to write a second one.
+     */
+    fun gatewayPing(address: String): Double? {
+        val host = address.substringBeforeLast(':', "").ifEmpty { return null }
+        val port = address.substringAfterLast(':', "").toIntOrNull() ?: return null
+        return (call("net.gatewayPing", buildJsonObject {
+            put("host", host)
+            put("port", port)
+        }) as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()
+    }
+
+    /**
+     * An `op`, `deop`, `ban` or `pardon` typed into the console, if that is
+     * what this was. Null for everything else, which is almost every command.
+     */
+    fun opsCommand(command: String): JsonObject? =
+        call("minecraft.ops.parse", buildJsonObject { put("command", command) }) as? JsonObject
+
+    /** The saved settings change, and the line to echo once it has landed. */
+    data class OpsChange(val request: Request, val line: String)
+
+    /**
+     * What that command should change on the API, given what it currently
+     * holds. Null means the list already says this — a `/op` for somebody who
+     * is already an operator is not a change to save.
+     */
+    fun opsSync(command: JsonObject, serverBody: JsonElement, serverId: String): OpsChange? {
+        val reply = call("minecraft.ops.sync", buildJsonObject {
+            put("command", command)
+            put("server", serverBody)
+            put("serverId", serverId)
+        }) as? JsonObject ?: return null
+        return OpsChange(
+            request = Request.from(reply["request"]) ?: return null,
+            line = reply["line"]?.jsonPrimitive?.contentOrNull ?: return null,
+        )
+    }
+
+    /** A match a server plugin announced, if this line announced one. */
+    fun minigameReport(serverId: String, line: String): Request? =
+        Request.from(call("reporting.minigame.fromLine", buildJsonObject {
+            put("serverId", serverId)
+            put("line", line)
+        }))
 }

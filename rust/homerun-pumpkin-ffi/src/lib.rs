@@ -109,6 +109,12 @@ pub mod jni_bridge;
 // too is what lets its tests run under plain `cargo test`.
 pub mod core_dispatch;
 
+// The same wire, for the handful of calls that need an effect the core is not
+// allowed to have. It answers what it knows and delegates the rest, so both
+// hosts reach it through the entry points they already call and no export
+// changes.
+pub mod host_dispatch;
+
 #[cfg(target_os = "android")]
 pub mod core_bridge;
 
@@ -199,7 +205,7 @@ pub unsafe extern "C" fn homerun_core_call(
         );
     };
 
-    out(core_dispatch::call(method, args))
+    out(host_dispatch::call(method, args))
 }
 
 /// Release a string returned by this library. Passing anything else is UB.

@@ -258,7 +258,7 @@ object DeviceRegistry {
      * The API base. Read from the same prefs the bridge writes, because the UI
      * pushes its own `apiUrl` down at boot and that is the one that wins.
      */
-    private fun apiUrl(): String =
+    fun apiUrl(): String =
         prefs.getString(KEY_API_URL, null) ?: BuildConfig.API_URL
 
     /** Forget this device. Called on logout, so the next user registers their own. */

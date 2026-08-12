@@ -228,6 +228,26 @@ with the screen off.
 
 ---
 
+### 📡 [Android reporting](./android-reporting.md)
+
+What this device tells the API about the server it runs — crashes, stats,
+presence, minigame results, and operator changes typed into the console.
+
+**Contains**:
+- Why a host that never reports looks fine from the inside, and what that cost
+- Which credential signs what, and why the wrong one is a *silent* success
+- Why the console tail is kept rather than read back when a run ends
+- Scraping console replies, and why the core parsing one *is* the test
+- The CPU rescale, and why forgetting it passes every test you would write
+- Why the gateway address cannot be read at launch
+- The two console forgeries the core refuses and the desktop still allows
+- Triage: what each null field in a report means
+
+**Read this for**: An empty graph, a crash with no explanation, an `/op` that
+does not survive a restart, or before adding anything else the API is told.
+
+---
+
 ### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
 
 Not a subsystem doc — the full sweep behind "no", so it does not get

@@ -13,7 +13,9 @@
 pub mod console;
 pub mod jar;
 pub mod jvm;
+pub mod ops;
 pub mod settings;
+pub mod slp;
 
 use crate::game::{BuildContext, ConfigInput, Encoding, FileWrite, Game, LineMeaning, Lookup};
 use crate::tunnel::Forward;

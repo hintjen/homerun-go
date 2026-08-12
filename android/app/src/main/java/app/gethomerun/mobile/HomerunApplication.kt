@@ -12,6 +12,15 @@ class HomerunApplication : Application() {
         // and the WebView being torn down and rebuilt.
         ServerHost.init(this)
 
+        // Reads the same preferences the bridge writes at login, and must be
+        // ready before anything that acts as the user.
+        Session.init(this)
+
+        // Listens for the life of the process, for the same reason the backend
+        // does: a page reload must not silence reporting for a server that is
+        // still running.
+        Reporting.init()
+
         // The heartbeat starts with the process, not with a login or a server.
         // The API marks a device unhealthy 60 s after its last report, and a
         // relaunch already holds the token issued last time.

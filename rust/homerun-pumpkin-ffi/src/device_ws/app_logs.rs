@@ -96,11 +96,20 @@ fn split(raw: String) -> (String, String) {
 ///
 /// The *end* of a log is the part that explains a problem. Cutting mid-line
 /// would leave a fragment that reads like a different message.
+///
+/// The search for that boundary starts from a **char** boundary. logcat is
+/// UTF-8 and carries whatever the server and the WebView printed — a player's
+/// name, a `§` colour code, an emoji out of chat — and slicing a `String`
+/// through the middle of a character panics. Here that panic would land in a
+/// tokio task serving the device websocket, where nothing catches it.
 fn tail(text: String) -> String {
     if text.len() <= MAX_BYTES {
         return text;
     }
-    let start = text.len() - MAX_BYTES;
+    let mut start = text.len() - MAX_BYTES;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
     let cut = text[start..]
         .find('\n')
         .map(|offset| start + offset + 1)
@@ -152,6 +161,22 @@ mod tests {
         // message, which is worse than one fewer line.
         for entry in main.lines().skip(1) {
             assert!(entry.starts_with("08-12"), "cut mid-line: {entry:?}");
+        }
+    }
+
+    /// logcat is UTF-8, so the byte offset the cap computes lands inside a
+    /// character for some log sizes — and slicing there panics, in a task
+    /// nothing is catching.
+    #[test]
+    fn a_cut_landing_inside_a_character_does_not_panic() {
+        for pad in 0..4 {
+            let line = format!(
+                "08-12 14:13:37.661 1 2 I HomerunJava: <Ünicode> {}\n",
+                "é".repeat(64 + pad)
+            );
+            let raw = line.repeat(MAX_BYTES / line.len() + 40);
+            let (main, _) = split(raw);
+            assert!(main.len() <= MAX_BYTES + 64, "not capped: {}", main.len());
         }
     }
 

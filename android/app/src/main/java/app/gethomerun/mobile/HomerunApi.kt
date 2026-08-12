@@ -109,6 +109,9 @@ object HomerunApi {
     private const val CONNECT_TIMEOUT_MS = 15_000
     private const val READ_TIMEOUT_MS = 20_000
 
+    /** Where the desktop asks too, so both platforms report the same field. */
+    private const val PUBLIC_IP_URL = "https://api.ipify.org/?format=json"
+
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
@@ -269,6 +272,13 @@ object HomerunApi {
     /** The current `native_config`, or null when the gateway has not written one. */
     private fun readLink(apiUrl: String, serverId: String, token: String): PolledLink? {
         val body = get(apiUrl, "/api/server/$serverId/", token) ?: return null
+        // The player-facing address rides along on a poll that was happening
+        // anyway. It cannot be read at launch: the gateway assigns the
+        // external port while this poll is waiting for it, so asking earlier
+        // reliably answers null. The desktop caches it here too, in
+        // `cacheGatewayHost`, for the same reason.
+        runCatching { Core.publicAddress(body) }.getOrNull()
+            ?.let { Reporting.gatewayAddressResolved(serverId, it) }
         return linkOf(body)
     }
 
@@ -416,7 +426,111 @@ object HomerunApi {
     }
 
     /** One authenticated POST, parsed. Throws on a non-2xx. */
+    /**
+     * A server record, whole.
+     *
+     * For the read half of a read-modify-write: the ops sync has to see the
+     * environment variables as the API currently holds them, not as they were
+     * at launch, because another device or the dashboard may have changed them
+     * since.
+     */
+    suspend fun serverBody(apiUrl: String, serverId: String, token: String): JsonObject? =
+        withContext(Dispatchers.IO) {
+            if (token.isBlank()) return@withContext null
+            runCatching { get(apiUrl, "/api/server/$serverId/", token) }
+                .onFailure { Log.w(TAG, "could not read $serverId: ${it.message}") }
+                .getOrNull()
+        }
+
+    /**
+     * Carry out a request the core decided on.
+     *
+     * The one entry point for everything in `homerun-core::reporting`: the
+     * path, the body and the method all arrive already chosen, and this
+     * supplies only the credential the core asked to be signed with and the
+     * connection to send it over.
+     *
+     * Never throws. A report that does not arrive is a gap in a graph; a
+     * report that interrupts hosting is a session lost, and every caller here
+     * is on a path where the server is more important than the telemetry.
+     */
+    suspend fun perform(
+        apiUrl: String,
+        request: Core.Request,
+        token: String,
+    ): JsonObject? = withContext(Dispatchers.IO) {
+        if (token.isBlank()) return@withContext null
+        runCatching {
+            when (request.method) {
+                "patch" -> patch(apiUrl, request.path, request.body, token)
+                else -> post(apiUrl, request.path, request.body, token)
+            }
+        }.onFailure {
+            Log.w(TAG, "${request.method} ${request.path} did not go through: ${it.message}")
+        }.getOrNull()
+    }
+
+    /**
+     * This device's public address, as the API records it.
+     *
+     * Cached for the life of the process. It is one fact about the network the
+     * phone is on, and asking a third party for it on every report would be
+     * both slower and more traffic to somewhere the user did not choose.
+     *
+     * Deliberately unauthenticated and deliberately not our own API — the same
+     * service the desktop uses (`fetchPublicIpAddress`), so both platforms
+     * report the same field the same way.
+     */
+    @Volatile
+    private var cachedPublicIp: String? = null
+
+    suspend fun publicIpAddress(): String? = withContext(Dispatchers.IO) {
+        cachedPublicIp?.let { return@withContext it }
+        val resolved = runCatching {
+            val connection = (URL(PUBLIC_IP_URL).openConnection() as HttpURLConnection).apply {
+                connectTimeout = CONNECT_TIMEOUT_MS
+                readTimeout = READ_TIMEOUT_MS
+                setRequestProperty("Accept", "application/json")
+            }
+            try {
+                if (connection.responseCode != HttpURLConnection.HTTP_OK) return@runCatching null
+                val text = connection.inputStream.bufferedReader().use { it.readText() }
+                (json.parseToJsonElement(text) as? JsonObject)
+                    ?.get("ip")?.jsonPrimitive?.contentOrNull
+            } finally {
+                connection.disconnect()
+            }
+        }.getOrNull()
+        cachedPublicIp = resolved
+        resolved
+    }
+
+    /**
+     * PATCH, which works here and would not on a desktop JVM.
+     *
+     * The JDK's `HttpURLConnection` rejects `PATCH` outright — its method list
+     * is a hardcoded array and `setRequestMethod` throws `ProtocolException`.
+     * Android's is OkHttp behind the same interface and allows it. So this is
+     * platform-specific in a way that reads as ordinary code — and if it ever
+     * stopped being true the failure would be a thrown `ProtocolException` on
+     * the ops-sync path, caught by [perform] and logged, not a silent no-op.
+     */
+    private fun patch(
+        apiUrl: String,
+        path: String,
+        body: JsonObject,
+        token: String,
+    ): JsonObject? = send("PATCH", apiUrl, path, body, token)
+
     private fun post(
+        apiUrl: String,
+        path: String,
+        body: JsonObject,
+        token: String,
+    ): JsonObject? = send("POST", apiUrl, path, body, token)
+
+    private fun send(
+        method: String,
         apiUrl: String,
         path: String,
         body: JsonObject,
@@ -424,7 +538,7 @@ object HomerunApi {
     ): JsonObject? {
         val connection = (URL("${apiUrl.trimEnd('/')}$path").openConnection() as HttpURLConnection)
             .apply {
-                requestMethod = "POST"
+                requestMethod = method
                 doOutput = true
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS

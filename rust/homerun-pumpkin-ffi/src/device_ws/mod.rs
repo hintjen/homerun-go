@@ -39,6 +39,8 @@ use tokio_tungstenite::tungstenite::Message;
 use homerun_core::device_ws::protocol::{
     outgoing, Refusal, Request, Scope, Session, CLOSE_AUTH_FAILED, HEARTBEAT_INTERVAL_MS,
 };
+use homerun_core::minecraft;
+use homerun_core::reporting;
 
 pub mod app_logs;
 pub mod tls;
@@ -659,6 +661,14 @@ impl Connection {
                     Err(err) => (err, false),
                 };
                 self.send(outgoing::rcon_response(&server_id, &text, ok));
+                // The dashboard's console is a console: an `op` typed here has
+                // to reach the server's settings for the same reason it does
+                // when typed in the app, or the next launch rewrites ops.json
+                // from the API and takes it back. The app's own path does this
+                // in `Reporting.consoleCommand`; this is the other half.
+                if ok {
+                    self.sync_ops(&server_id, &command).await;
+                }
                 true
             }
             Request::GetAppLogs => {
@@ -670,6 +680,52 @@ impl Connection {
                 self.send(outgoing::app_logs(&main_log, &renderer_log));
                 true
             }
+        }
+    }
+
+    /// Mirror an `op`/`deop`/`ban`/`pardon` into the server's settings.
+    ///
+    /// `ops.json` and `banned-players.json` are rewritten from the API's
+    /// environment variables at every launch, so an operator granted only
+    /// through a console silently loses it on the next start unless this runs.
+    ///
+    /// Signed as **the person who typed it**, which is the whole reason this
+    /// lives here rather than being handed to the host: the caller's token is
+    /// what authenticated this socket, and it is the only credential that
+    /// identifies them. The device token would be accepted and the change
+    /// stripped.
+    ///
+    /// Silent and best-effort by design — the command has already run on the
+    /// server, and a settings write that fails must not turn a working console
+    /// into an error. It says so in the log, and on the console the caller is
+    /// already reading.
+    async fn sync_ops(&self, server_id: &str, command: &str) {
+        let Some(parsed) = minecraft::ops::parse(command) else {
+            return;
+        };
+        let Some(token) = self.token.clone() else {
+            return;
+        };
+
+        let path = format!("/api/server/{server_id}/");
+        let Some(body) = self.shared.read_as(&token, &path).await else {
+            log::warn(&format!(
+                "could not read {server_id} to change its operators"
+            ));
+            return;
+        };
+
+        // None means the settings already say this — a `/op` for somebody who
+        // is already an operator is not a change to save.
+        let Some(change) = minecraft::ops::sync(&parsed, &body, server_id) else {
+            return;
+        };
+
+        if self.shared.perform_as(&token, &change.request).await {
+            // Onto the console, so the person who typed the command sees that
+            // it was kept — and only once it has been, because telling them it
+            // was saved and then losing it is worse than saying nothing.
+            crate::server::host().push_log(change.line);
         }
     }
 
@@ -820,6 +876,57 @@ impl Shared {
         }
         *cached = Some(keys.clone());
         Ok(keys)
+    }
+
+    /// A record read as the caller, or `None` if it could not be read.
+    ///
+    /// For decisions that degrade rather than fail — every caller treats a
+    /// missing answer as "change nothing".
+    async fn read_as(&self, token: &str, path: &str) -> Option<Value> {
+        let url = format!("{}{path}", self.config.api_url.trim_end_matches('/'));
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| log::warn(&format!("could not read {path}: {e}")))
+            .ok()?;
+        if !response.status().is_success() {
+            log::warn(&format!("reading {path} returned {}", response.status()));
+            return None;
+        }
+        response.json().await.ok()
+    }
+
+    /// Carry out a request `homerun-core` decided on, as the caller.
+    ///
+    /// The **caller's** token, never the device's. The API judges a settings
+    /// change against the person who asked for it, and strips one made by
+    /// somebody who could not have made it in the UI rather than refusing it —
+    /// so signing this with the device token would read as success and change
+    /// nothing.
+    async fn perform_as(&self, token: &str, request: &reporting::Request) -> bool {
+        let url = format!(
+            "{}{}",
+            self.config.api_url.trim_end_matches('/'),
+            request.path
+        );
+        let builder = match request.method {
+            reporting::Method::Patch => self.http.patch(url),
+            reporting::Method::Post => self.http.post(url),
+        };
+        match builder.bearer_auth(token).json(&request.body).send().await {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                log::warn(&format!("{} returned {}", request.path, response.status()));
+                false
+            }
+            Err(error) => {
+                log::warn(&format!("{} did not go through: {error}", request.path));
+                false
+            }
+        }
     }
 
     /// The ids at `path` the caller is a member of, or `None` if the API could
