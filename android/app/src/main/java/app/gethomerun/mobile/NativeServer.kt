@@ -25,7 +25,7 @@ object NativeServer {
      *
      * So `scripts/check-abi.js` compares the two at build time, and `npm test`
      * runs it. Forgetting is now loud and free.     */
-    private const val EXPECTED_ABI = 6
+    private const val EXPECTED_ABI = 7
 
     /**
      * The engine overflows a default thread stack and takes the process down
@@ -133,6 +133,22 @@ object NativeServer {
      * watched stop.
      */
     external fun nativeConsoleBegin(): String
+
+    /**
+     * Serve the dashboard's console and RCON on a loopback port.
+     *
+     * Takes `{ port, apiUrl, jwksUrl, deviceId }`; a `port` of 0 asks the OS to
+     * choose. **Read `port` back out of the reply** — it is the one the tunnel
+     * has to forward at, and it need not be the one that was asked for.
+     *
+     * The socket lives in the supervisor rather than here because it reads the
+     * same console buffer the log pump reads, in-process, and writes RCON
+     * straight into the running server. See `plans/device-websocket.md`.
+     */
+    external fun nativeDeviceWsStart(config: String): String
+
+    /** Stop serving and release the port. Safe when nothing is running. */
+    external fun nativeDeviceWsStop(): String
 
     private const val TAG = "HomerunNative"
 }

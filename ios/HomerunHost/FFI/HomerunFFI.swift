@@ -77,6 +77,24 @@ enum HomerunFFI {
         decode(homerun_server_console_begin())
     }
 
+    /// Serve the dashboard's console and RCON on a loopback port.
+    ///
+    /// Answers "this build cannot serve a device websocket" on iOS today, and
+    /// that is the honest answer rather than a gap to close: the socket would
+    /// only be alive while the app is in front of the player, so advertising
+    /// one would promise something the platform takes away — see
+    /// `plans/ios-background-execution.md`. Wired so the shape is already right
+    /// if that calculus changes.
+    @discardableResult
+    static func startDeviceWebsocket(_ config: String) -> Reply {
+        config.withCString { decode(homerun_device_ws_start($0)) }
+    }
+
+    @discardableResult
+    static func stopDeviceWebsocket() -> Reply {
+        decode(homerun_device_ws_stop())
+    }
+
     static func state() -> ServerState {
         guard let raw = decode(homerun_server_state()).object?["state"] as? String,
             let state = ServerState(rawValue: raw)

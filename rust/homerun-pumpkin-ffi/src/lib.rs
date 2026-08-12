@@ -140,10 +140,16 @@ use serde_json::json;
 /// second buffer for it. Additive: a host that calls neither gets exactly what
 /// 5 gave it, because `start` still clears a console holding a finished run.
 ///
+/// 7 added `homerun_device_ws_start` and `homerun_device_ws_stop`, so a device
+/// can serve the dashboard's console and RCON directly. Additive: a host that
+/// calls neither gets exactly what 6 gave it, and a build compiled without the
+/// `device-ws` feature answers that it cannot serve one rather than failing to
+/// link.
+///
 /// Hosts *report* this at startup; Android also compares it
 /// (`NativeServer.EXPECTED_ABI`), which is the check that catches a `.a` or
 /// `.so` that links but decodes garbage.
-pub const FFI_ABI_VERSION: u32 = 6;
+pub const FFI_ABI_VERSION: u32 = 7;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -521,6 +527,78 @@ pub unsafe extern "C" fn homerun_server_command(command: *const c_char) -> *mut 
             Ok(()) => json!({ "ok": true }).to_string(),
             Err(message) => err(message),
         },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The device websocket
+// ---------------------------------------------------------------------------
+
+/// Serve `wss://<device-fqdn>` on a loopback port the tunnel forwards to.
+///
+/// `config` is `{ port, apiUrl, jwksUrl, deviceId }`. A `port` of 0 asks the OS
+/// to choose, and the answer comes back as `{ ok: true, port }` — a host that
+/// ignores it will forward the gateway at a port nothing is listening on.
+///
+/// Builds without the `device-ws` feature answer that they cannot serve one,
+/// rather than pretending to. iOS is such a build today: it can only hold a
+/// socket open while the app is in the foreground, so advertising a device
+/// websocket there would promise something the platform withdraws — see
+/// `plans/ios-background-execution.md`.
+///
+/// # Safety
+/// `config` must be a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn homerun_device_ws_start(config: *const c_char) -> *mut c_char {
+    let config = borrow(config).map(str::to_owned);
+    guarded(move || {
+        let Some(raw) = config else {
+            return err("the device websocket config must be a valid UTF-8 string");
+        };
+
+        #[cfg(not(feature = "device-ws"))]
+        {
+            let _ = raw;
+            err("This build cannot serve a device websocket.")
+        }
+
+        #[cfg(feature = "device-ws")]
+        {
+            let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(value) => value,
+                Err(e) => return err(format!("the device websocket config was not JSON: {e}")),
+            };
+            let text = |key: &str| {
+                parsed
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let config = device_ws::Config {
+                port: parsed.get("port").and_then(|v| v.as_u64()).unwrap_or(0) as u16,
+                api_url: text("apiUrl"),
+                jwks_url: text("jwksUrl"),
+                device_id: text("deviceId"),
+            };
+            if config.api_url.is_empty() || config.jwks_url.is_empty() {
+                return err("the device websocket needs an apiUrl and a jwksUrl");
+            }
+            match device_ws::start(config) {
+                Ok(port) => json!({ "ok": true, "port": port }).to_string(),
+                Err(message) => err(message),
+            }
+        }
+    })
+}
+
+/// Stop serving and release the port. Safe to call when nothing is running.
+#[no_mangle]
+pub extern "C" fn homerun_device_ws_stop() -> *mut c_char {
+    guarded(|| {
+        #[cfg(feature = "device-ws")]
+        device_ws::stop();
+        json!({ "ok": true }).to_string()
     })
 }
 

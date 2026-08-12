@@ -5,8 +5,14 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import java.io.File
-import java.net.ServerSocket
 
 /**
  * The socket the dashboard talks to this device on.
@@ -18,16 +24,21 @@ import java.net.ServerSocket
  *
  * # What is here so far
  *
- * **D1: the tunnel, and nothing behind it.** This brings the device's link up
- * and holds it open with the gateway's `:443` forwarded to a port reserved for
- * the websocket server. That server does not exist yet, so connections to it
- * are refused — deliberately, and visibly. What this milestone proves is that a
- * phone can hold a *device* link at all, which is separate machinery from the
- * per-server tunnel and had never been exercised here.
+ * The device's link, the socket behind it, and the console and RCON it serves —
+ * over the tunnel but **not yet over TLS**. The gateway hands this device
+ * connections on `:443` expecting a TLS ClientHello, and until the certificate
+ * work lands it gets a plaintext websocket instead. So this is reachable and
+ * not yet usable by a browser, which is a deliberate intermediate state and not
+ * a shippable one.
  *
- * The ACME `:80` forward is omitted until there is a challenge listener to
- * answer on it. Forwarding a port at something that was never started is a
- * worse failure than not forwarding it: it looks like the device answered.
+ * The ACME `:80` forward is omitted for the same reason: there is no challenge
+ * listener to answer on it, and forwarding a port at something that was never
+ * started is a worse failure than not forwarding it — it looks like the device
+ * answered.
+ *
+ * This class owns the link and the lifecycle; the socket itself is served by
+ * the supervisor, because that is where the console buffer and the command path
+ * already are.
  *
  * # Why this is process-scoped
  *
@@ -88,9 +99,12 @@ object DeviceWebsocket {
 
         val link = HomerunApi.awaitDeviceLink(apiUrl, deviceId, userToken) ?: return
 
-        // Reserved now and bound by D2. Reserving early means the forward and
-        // the eventual listener cannot disagree about the number.
-        val wsPort = freePort()
+        // The socket first, then the tunnel that points at it. Order matters:
+        // the supervisor answers with the port it actually bound, and asking it
+        // to bind 0 rather than picking a number here removes the window where
+        // something else takes the port between choosing and binding.
+        val wsPort = startSocket(apiUrl, deviceId) ?: return
+
         val config = Core.deviceWsTunnelConfig(
             link = link.link,
             httpsTarget = wsPort,
@@ -126,25 +140,69 @@ object DeviceWebsocket {
     fun stop() {
         job?.cancel()
         job = null
+        // The tunnel before the socket: while wireproxy is up the gateway can
+        // still hand it a connection, and a forward pointing at a port that has
+        // just been released is how a dashboard gets a refusal instead of a
+        // clean close.
         tunnel?.stop()
         tunnel = null
+        stopSocket()
         port = null
         fqdn = null
     }
 
     /**
-     * A port nothing else holds.
+     * Bring the socket up, and answer the port it bound.
      *
-     * Bound and released rather than guessed. The window between releasing and
-     * D2 binding it is a race in theory; in practice the alternative — a fixed
-     * port — collides with whatever else on the device happened to want it, and
-     * fails at the same moment with less to say about why.
+     * The supervisor serves it, not this class: it already owns the console
+     * buffer the dashboard wants to read and the command path RCON needs, so
+     * everything stays in-process rather than crossing the FFI once per console
+     * line. See `plans/device-websocket.md`.
+     *
+     * Port 0 asks the OS to choose. Choosing here instead would leave a window
+     * between picking a number and binding it in which something else could
+     * take it, and the failure would land on the tunnel rather than here.
      */
-    private fun freePort(): Int = ServerSocket(0).use { it.localPort }
+    private fun startSocket(apiUrl: String, deviceId: String): Int? {
+        val config = buildJsonObject {
+            put("port", 0)
+            put("apiUrl", apiUrl)
+            put("jwksUrl", JWKS_URL)
+            put("deviceId", deviceId)
+        }
+        val reply = runCatching { NativeServer.nativeDeviceWsStart(config.toString()) }
+            .onFailure { Log.w(TAG, "the socket did not start: ${it.message}", it) }
+            .getOrNull()
+            ?: return null
+
+        val parsed = runCatching { Json.parseToJsonElement(reply).jsonObject }.getOrNull()
+        if (parsed?.get("ok")?.jsonPrimitive?.booleanOrNull != true) {
+            Log.w(TAG, "the socket refused to start: $reply")
+            return null
+        }
+        return parsed["port"]?.jsonPrimitive?.intOrNull
+    }
+
+    @Synchronized
+    private fun stopSocket() {
+        runCatching { NativeServer.nativeDeviceWsStop() }
+            .onFailure { Log.w(TAG, "the socket did not stop cleanly: ${it.message}") }
+    }
 
     private const val TAG = "HomerunDeviceWs"
     private const val LABEL = "device"
 
     /** Beside the servers, not among them — this link belongs to the device. */
     private const val DIRECTORY = "device-ws"
+
+    /**
+     * Keycloak's signing keys.
+     *
+     * One URL, whatever the API host is — which is what the desktop does
+     * (`deviceWebsocket/auth.ts`) and is the safer shape anyway: a device that
+     * could be told where to find "the" signing keys is a device that can be
+     * told to trust somebody else's.
+     */
+    private const val JWKS_URL =
+        "https://auth.gethomerun.app/realms/FractalKeycloak/protocol/openid-connect/certs"
 }

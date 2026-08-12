@@ -222,3 +222,33 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeCommand(
     let json = unsafe { take_json(crate::homerun_server_command(cmd.as_ptr())) };
     to_jstring(&env, json)
 }
+
+/// Serve the dashboard's console and RCON on a loopback port.
+///
+/// Takes `{ port, apiUrl, jwksUrl, deviceId }` and answers `{ ok, port }` with
+/// the port actually bound — which is the one the tunnel must forward at, and
+/// need not be the one asked for.
+#[no_mangle]
+pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeDeviceWsStart(
+    mut env: JNIEnv,
+    _class: JClass,
+    config: JString,
+) -> jstring {
+    let Some(config) = from_jstring(&mut env, &config) else {
+        return to_jstring(
+            &env,
+            r#"{"ok":false,"error":"config must be a valid string"}"#.to_string(),
+        );
+    };
+    let json = unsafe { take_json(crate::homerun_device_ws_start(config.as_ptr())) };
+    to_jstring(&env, json)
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeDeviceWsStop(
+    env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let json = unsafe { take_json(crate::homerun_device_ws_stop()) };
+    to_jstring(&env, json)
+}

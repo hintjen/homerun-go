@@ -121,4 +121,18 @@ char *homerun_server_note(const char *line);
  * homerun_server_start still clears a console holding a finished run. */
 char *homerun_server_console_begin(void);
 
+/* Serve the dashboard's console and RCON on a loopback port that the device's
+ * own tunnel forwards to. Config is { port, apiUrl, jwksUrl, deviceId }; a
+ * port of 0 asks the OS to choose, and the reply carries the port actually
+ * bound.
+ *
+ * iOS builds without the `device-ws` feature, so these answer that this build
+ * cannot serve one. That is honest rather than a gap to close: the app can
+ * only hold a socket open while it is in the foreground, so a device websocket
+ * here would be a promise the platform withdraws — see
+ * plans/ios-background-execution.md. Declared so the symbol resolves and the
+ * ABI matches; wired if that changes. */
+char *homerun_device_ws_start(const char *config);
+char *homerun_device_ws_stop(void);
+
 #endif /* HOMERUN_FFI_H */
