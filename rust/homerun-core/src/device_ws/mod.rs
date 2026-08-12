@@ -28,6 +28,8 @@
 
 /// The frames themselves, and the order they are allowed in.
 pub mod protocol;
+/// The header the legacy gateway writes ahead of the TLS ClientHello.
+pub mod proxy_protocol;
 
 use crate::tunnel::{Config, Forward, Link};
 use serde::{Deserialize, Serialize};
