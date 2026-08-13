@@ -511,6 +511,28 @@ class BridgeRouter(
         }
     }
 
+    /**
+     * The router itself is finished — the activity that owns it is being
+     * destroyed.
+     *
+     * Not the same as [onPageGone], which is a page ending inside a router that
+     * lives on. This is the router ending, and the reason it must exist is that
+     * [hostListener] is registered against [ServerHost], which is scoped to the
+     * *process*: a router is built in every `onCreate`, so without this a
+     * recreated activity — a low-memory kill, "Don't keep activities", a locale
+     * or theme change, a fold — leaves the previous router subscribed forever,
+     * holding a WebView that is already destroyed.
+     *
+     * The visible cost is not the memory. `onStateChanged` calls
+     * [DeviceRegistry.reportServerState], so N abandoned routers send N
+     * identical state POSTs per transition, and the API sees one device
+     * reporting the same server over and over.
+     */
+    fun dispose() {
+        ServerHost.removeListener(hostListener)
+        onPageGone()
+    }
+
     // ---------------------------------------------------------------------
     // Dispatch table
     // ---------------------------------------------------------------------
@@ -663,7 +685,7 @@ class BridgeRouter(
                 // succeeds and then hosts against a different server.
                 emit("credentials-error", listOf(JsonPrimitive(API_URL_REFUSED)))
             } else {
-                prefs.edit().putString(KEY_CREDENTIALS, json.encodeToString(params)).apply()
+                SecretStore.write(prefs, KEY_CREDENTIALS, json.encodeToString(params))
                 // No apiUrl at all leaves any existing override alone: the UI
                 // is saying nothing about the backend, which is not the same
                 // as set-api-url's explicit clear.
@@ -1006,10 +1028,20 @@ class BridgeRouter(
                         val deviceId = DeviceRegistry.currentDeviceId()
 
                         try {
-                            if (settings?.gameType == "bedrock") {
-                                throw ServerBackendException.Engine(
-                                    "Homerun for Android cannot host Bedrock servers yet."
-                                )
+                            // Before anything expensive. A modpack is minutes of
+                            // downloading and unpacking, and on a linked engine it
+                            // would then start vanilla and look like it worked.
+                            //
+                            // `rawGameType`, not `gameType` — the reduced form cannot
+                            // tell `native-crossplay` from plain Java, and crossplay
+                            // needs a plugin. `bedrock = false`: no phone ships BDS.
+                            if (settings != null) {
+                                Core.hostingRefusal(
+                                    engine = backend.engine,
+                                    bedrock = false,
+                                    gameType = settings.rawGameType,
+                                    env = settings.env,
+                                )?.let { throw ServerBackendException.Engine(it) }
                             }
 
                             // Refuse to launch while another device is finishing its
@@ -1301,7 +1333,7 @@ class BridgeRouter(
     }
 
     private fun userToken(): String = runCatching {
-        val stored = prefs.getString(KEY_CREDENTIALS, null) ?: return@runCatching ""
+        val stored = SecretStore.read(prefs, KEY_CREDENTIALS) ?: return@runCatching ""
         (json.parseToJsonElement(stored) as? JsonObject)
             ?.get("access_token")?.jsonPrimitive?.contentOrNull.orEmpty()
     }.getOrDefault("")

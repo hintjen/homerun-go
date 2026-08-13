@@ -248,6 +248,19 @@ every loader, not just vanilla, and it is what turns "latest" into a version.
 If the jar needs a newer Java than the build ships, that is said plainly before
 anything launches, rather than surfacing as `UnsupportedClassVersionError`.
 
+**This is the second of two refusals, and they are not the same question.**
+`homerun-core::minecraft::hosting` runs first, in `native-server-start`, and
+asks whether this *device* can host this server at all — it is where Bedrock is
+turned away, and it is shared with iOS so the two apps refuse the same things in
+the same words. The table above is narrower: given that the device could host
+it, can this build get a jar for that loader. Forge passes the first gate here
+(a spawned engine can load mods; iOS's linked one cannot) and is refused by the
+second, with a reason about installers rather than about phones.
+
+Keeping them separate is deliberate. Folding the loader table into the hosting
+rule would put "we have not written the Forge installer yet" — a fact about this
+build, changeable next release — into the crate that iOS also asks.
+
 Three deliberate differences from the desktop, all because this is a phone:
 
 - **Downloads resume.** The partial file is named after the artifact's own

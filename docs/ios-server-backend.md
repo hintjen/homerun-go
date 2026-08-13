@@ -287,8 +287,8 @@ all three, so a difference is a bug by definition.
 
 iOS renders TCP only. Desktop and Android also emit UDP sections for Bedrock
 (19132) and Simple Voice Chat (24454); neither can exist here, because a
-Pumpkin host is vanilla-only and runs no plugin, and Bedrock is rejected
-earlier.
+Pumpkin host is vanilla-only and runs no plugin, and both are rejected before
+a launch gets this far — see "What this host will not run" below.
 
 ### Credentials, and the staleness rule
 
@@ -335,6 +335,37 @@ threshold, a real signal, and no tunnel noise in the console.
 accepts without doing anything, because on a phone there is no LAN toggle to
 make — the device is on the player's Wi-Fi or it is not.
 
+## What this host will not run
+
+A linked engine cannot refuse a server it does not understand — it starts, and
+what it starts is vanilla. That is the whole problem: a player who asks this
+app to host their Forge pack waits through the download and the unpack, gets a
+`running` server, joins it, and finds a fresh vanilla world. No error is raised
+anywhere in that sequence, because from the engine's point of view nothing went
+wrong.
+
+So the refusal happens before the launch, in `native-server-start`, ahead of
+even the backup-lease gate — everything after that point costs minutes.
+
+| Server | Refused because |
+|---|---|
+| Bedrock (`bedrock`, `native-bedrock`) | no phone ships Bedrock Dedicated Server |
+| Modded or plugin (`TYPE` is anything but vanilla) | Pumpkin's plugins are WASM/native; it loads no Bukkit plugin or Fabric mod |
+| Crossplay (`native-crossplay`) | crossplay is Java plus Geyser, which is a plugin |
+
+**The rule is in `homerun-core::minecraft::hosting`, not here.** Both apps ask
+it and both show the sentence it returns, so the two cannot drift into refusing
+different things or explaining the same refusal differently. `Core.hostingRefusal`
+is the wrapper; nil means go ahead.
+
+> **Crossplay is the one that catches people out.** Its `TYPE` is vanilla, so
+> every loader-based check passes it. What makes it impossible is carried by
+> the *game type*, not the settings — which is why this host passes `gameType`
+> to the core verbatim rather than reducing it to java/bedrock first.
+
+A core that cannot answer refuses too, matching the admission check above it:
+a build mismatch is exactly when you least want to launch blind.
+
 ## Parameter shapes — `BridgeRouter+Server.swift`
 
 > **Six metrics getters and `get-native-server-logs` take a bare string server
@@ -353,6 +384,7 @@ make — the device is on the player's Wi-Fi or it is not.
 | `ios/HomerunHost/FFI/HomerunFFI.h` | Hand-written C declarations |
 | `ios/HomerunHost/FFI/StartRequest.swift` | The start request's wire form. A leaf, so `ios/coretest` can check it against the real parser |
 | `ios/HomerunHost/MojangDirectory.swift` | Name → UUID. The only outbound call here that is not to Homerun's API |
+| `rust/homerun-core/src/minecraft/hosting.rs` | Which servers this host may run at all. Shared with Android, so neither app refuses alone |
 | `rust/homerun-pumpkin-ffi/src/engine_settings.rs` | What a setting *means* to an engine. No Pumpkin, so it is in the fast test suite |
 | `rust/homerun-pumpkin-ffi/src/pumpkin_settings.rs` | Assignment onto Pumpkin's own types |
 | `ios/HomerunHost/DeviceMetrics.swift` | Process memory and CPU **counters**, from Mach. No arithmetic |
@@ -437,3 +469,15 @@ references the staged xcframework, and new Swift files need a regenerate.
 fork's 2023 wireguard-go. The generated `go.work` pins it — and note that
 `go work sync` *causes* this by writing resolved versions back into the fork's
 own `go.mod`, which also dirties another repository.
+
+**A modded server starts fine and the world is vanilla.** The refusal above did
+not fire. Either the settings could not be read at all — nil settings are
+deliberately not a refusal, so the launch proceeds on defaults — or the host is
+passing a reduced `game_type`. Check the start returned `success: false` with a
+sentence in `error`; if it returned success, the core was never asked.
+
+**Every launch is refused with "could not work out whether this server can
+start."** The core call itself threw, which means the linked library predates
+`minecraft.hosting.refuse`. Rebuild the framework — `npm run rust:ios-sim` for
+the simulator. This is the same class of failure as an unknown dispatch method,
+and it fails closed on purpose.

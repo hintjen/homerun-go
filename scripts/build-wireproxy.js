@@ -337,10 +337,19 @@ if (elf.interpreter !== target.interpreter) {
 if (!elf.pie) {
   fail("Built, but it is not PIE. Android has refused to exec non-PIE binaries since API 21.");
 }
+if (elf.pageAlign < 16 * 1024) {
+  fail(
+    `Built, but its LOAD segments are aligned to ${elf.pageAlign} bytes and Android needs\n` +
+      "at least 16384. New 64-bit devices run 16 KB pages and their linker refuses\n" +
+      "anything coarser — it would install and fail to start, with no useful error.\n" +
+      "Play has required 16 KB support for targetSdk 35+ since 1 November 2025.\n\n" +
+      "Rebuild with -ldflags=\"-extldflags=-Wl,-z,max-page-size=16384\"."
+  );
+}
 
 const size = (fs.statSync(outFile).size / 1024 / 1024).toFixed(1);
 console.log(`\nwireproxy ${version} -> ${target.abi}, ${size} MB`);
-console.log(`  ${elf.machine}, PIE, interpreter ${elf.interpreter}\n`);
+console.log(`  ${elf.machine}, PIE, interpreter ${elf.interpreter}, ${elf.pageAlign / 1024} KB page aligned\n`);
 
 /**
  * The three things about this binary that have to be true for Android to
@@ -366,13 +375,19 @@ function readElf(file) {
   const phnum = buf.readUInt16LE(56);
 
   let interpreter = null;
+  const aligns = [];
   for (let i = 0; i < phnum; i++) {
     const ph = phoff + i * phentsize;
-    if (buf.readUInt32LE(ph) !== 3) continue; // PT_INTERP
+    const ptype = buf.readUInt32LE(ph);
+    if (ptype === 1) aligns.push(Number(buf.readBigUInt64LE(ph + 48))); // PT_LOAD
+    if (ptype !== 3) continue; // PT_INTERP
     const offset = Number(buf.readBigUInt64LE(ph + 8));
     const filesz = Number(buf.readBigUInt64LE(ph + 32));
     interpreter = buf.toString("utf8", offset, offset + filesz).replace(/\0+$/, "");
-    break;
   }
-  return { machine, pie, interpreter };
+  // The coarsest page size this can load under. Go emits 64 KB by default,
+  // which already covers Android's 16 KB devices — checked so that a toolchain
+  // or flag change quietly dropping it fails here rather than on a phone. The
+  // JRE's libandroid-spawn.so did exactly that; see stage-jre.py.
+  return { machine, pie, interpreter, pageAlign: aligns.length ? Math.min(...aligns) : 0 };
 }

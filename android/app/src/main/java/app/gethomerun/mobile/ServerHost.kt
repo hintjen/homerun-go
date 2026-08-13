@@ -208,7 +208,14 @@ object ServerHost {
     private var hostingState: ServerState = ServerState.STOPPED
     private var hostingBackup: Boolean = false
     private var hostingStarting: Boolean = false
+    /**
+     * Whether [HostingService] is believed to be up. Set only after Android
+     * has accepted the start — see [syncHosting].
+     */
     private var serviceWanted: Boolean = false
+
+    /** One refused-service line per run — see [noteServiceRefused]. */
+    private var serviceRefused: Boolean = false
 
     /** One host-failure line per run — see [noteHostFailure]. */
     private var failureNoted: Boolean = false
@@ -278,6 +285,7 @@ object ServerHost {
         // A new run gets its own console, and its own chance to be told that
         // something inside Homerun went wrong during it.
         failureNoted = false
+        serviceRefused = false
         syncHosting()
     }
 
@@ -322,14 +330,60 @@ object ServerHost {
      */
     @Synchronized
     fun syncHosting() {
-        val busy = snapshot().busy
+        val snapshot = snapshot()
+        val busy = snapshot.busy
         if (busy == serviceWanted) {
             // Already up: refresh in place rather than re-entering the service.
             // The service listens for its own updates.
             return
         }
-        serviceWanted = busy
-        if (busy) HostingService.start(appContext) else HostingService.stop(appContext)
+
+        if (!busy) {
+            serviceWanted = false
+            serviceRefused = false
+            HostingService.stop(appContext)
+            return
+        }
+
+        // Latched only on success. Setting it first and swallowing the failure
+        // left the flag saying "up" for a service that never started, and
+        // because every later call returns at the check above, nothing ever
+        // tried again — a server hosted for the rest of the session with no
+        // foreground protection at all. This is the retry: the flag stays
+        // false, so the next state change comes back through here.
+        if (HostingService.start(appContext)) {
+            serviceWanted = true
+            serviceRefused = false
+            return
+        }
+
+        Log.w(TAG, "hosting is running without the foreground service; will retry on the next change")
+        noteServiceRefused(snapshot.serverId)
+    }
+
+    /**
+     * Tell the player, once per run, that the server is up without the
+     * protection that normally keeps it up.
+     *
+     * Worth saying out loud rather than only logging. The symptom — a server
+     * that dies a few minutes after the phone is put down, with no crash and
+     * nothing in the server's own log — is indistinguishable from a network
+     * problem from where the player is sitting, and the workaround (keep the
+     * app open, or stop and start it again) is only obvious once you know.
+     *
+     * Once per run for the same reason as [noteHostFailure]: [syncHosting] is
+     * called on every state change, and a line per change would bury the
+     * console it is printed into.
+     */
+    private fun noteServiceRefused(serverId: String?) {
+        if (serverId == null || serviceRefused) return
+        serviceRefused = true
+        note(
+            serverId,
+            "Android would not let Homerun run this server in the background. It is " +
+                "running now, but it may be shut down if you leave the app. Stopping " +
+                "this server and starting it again from the app should fix it.",
+        )
     }
 
     /**

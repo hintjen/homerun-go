@@ -49,7 +49,7 @@ object Session {
     fun userToken(): String? {
         if (!::prefs.isInitialized) return null
         return runCatching {
-            val stored = prefs.getString(KEY_CREDENTIALS, null) ?: return null
+            val stored = SecretStore.read(prefs, KEY_CREDENTIALS) ?: return null
             (json.parseToJsonElement(stored) as? JsonObject)
                 ?.get("access_token")?.jsonPrimitive?.contentOrNull
                 ?.takeIf { it.isNotBlank() }

@@ -123,9 +123,12 @@ function readElf(file) {
   const phnum = buffer.readUInt16LE(56);
 
   let interpreter = null;
+  const aligns = [];
   for (let i = 0; i < phnum; i++) {
     const offset = phoff + i * phentsize;
-    if (buffer.readUInt32LE(offset) !== 3 /* PT_INTERP */) continue;
+    const ptype = buffer.readUInt32LE(offset);
+    if (ptype === 1 /* PT_LOAD */) aligns.push(Number(buffer.readBigUInt64LE(offset + 48)));
+    if (ptype !== 3 /* PT_INTERP */) continue;
     const at = Number(buffer.readBigUInt64LE(offset + 8));
     const size = Number(buffer.readBigUInt64LE(offset + 32));
     interpreter = buffer.toString("utf8", at, at + size).replace(/\0+$/, "");
@@ -135,8 +138,17 @@ function readElf(file) {
     pie: type === 3,
     machine: machine === 0xb7 ? "AArch64" : machine === 0x3e ? "x86-64" : `unknown (0x${machine.toString(16)})`,
     interpreter,
+    // The coarsest page size this can load under. Go's linker emits 64 KB by
+    // default, which already satisfies Android's 16 KB devices — this is here
+    // so that a future toolchain or linker flag quietly dropping it fails the
+    // build rather than shipping a binary that cannot exec on a modern phone.
+    // The JRE's libandroid-spawn.so did exactly that; see stage-jre.py.
+    pageAlign: aligns.length ? Math.min(...aligns) : 0,
   };
 }
+
+/** Android's linker refuses anything aligned more coarsely than the page size. */
+const MIN_PAGE_ALIGN = 16 * 1024;
 
 const name = process.argv[2];
 const target = TARGETS[name];
@@ -186,9 +198,21 @@ try {
 const elf = readElf(outFile);
 const size = (fs.statSync(outFile).size / (1024 * 1024)).toFixed(1);
 console.log(`\nrestic ${version} -> ${target.abi}, ${size} MB`);
-console.log(`  ${elf.machine}, ${elf.pie ? "PIE" : "NOT PIE"}, interpreter ${elf.interpreter}`);
+console.log(
+  `  ${elf.machine}, ${elf.pie ? "PIE" : "NOT PIE"}, interpreter ${elf.interpreter}, ` +
+    `${elf.pageAlign / 1024} KB page aligned`
+);
 
 if (!elf.pie) fail("Not a PIE binary. Android will refuse to exec it.");
+if (elf.pageAlign < MIN_PAGE_ALIGN) {
+  fail(
+    `Aligned to ${elf.pageAlign} bytes, and Android needs at least ${MIN_PAGE_ALIGN}.\n\n` +
+      "New 64-bit devices run 16 KB pages, and their linker refuses a binary aligned\n" +
+      "more coarsely than that — it would install fine and fail to start on a phone.\n" +
+      "Play has required 16 KB support for targetSdk 35+ since 1 November 2025.\n\n" +
+      "Rebuild with -ldflags=\"-extldflags=-Wl,-z,max-page-size=16384\"."
+  );
+}
 if (elf.machine !== target.machine) fail(`Wrong architecture: ${elf.machine}, expected ${target.machine}.`);
 if (elf.interpreter !== "/system/bin/linker64") {
   fail(

@@ -292,6 +292,32 @@ object Core {
             put("code", code)
         }).jsonPrimitive.content
 
+    /**
+     * Why this device will not host this server, or null to go ahead.
+     *
+     * Asked *before* the launch plan, because the expensive half of a launch —
+     * fetching and unpacking a modpack — happens long before an engine would
+     * have a chance to object. A linked engine never objects at all: it starts
+     * vanilla and looks like it worked, which is how a player loses their mods
+     * without seeing an error.
+     *
+     * The message is written for a player and is shown as-is. `homerun-core::
+     * minecraft::hosting` holds the rules and the reasoning; this passes the
+     * server through verbatim, since reducing `game_type` first would hide
+     * `native-crossplay`.
+     */
+    fun hostingRefusal(engine: String, bedrock: Boolean, gameType: String, env: JsonObject): String? =
+        call("minecraft.hosting.refuse", buildJsonObject {
+            put("host", buildJsonObject {
+                put("engine", engine)
+                put("bedrock", bedrock)
+            })
+            put("server", buildJsonObject {
+                put("gameType", gameType)
+                put("env", env)
+            })
+        }).let { if (it is JsonNull) null else it.jsonObject["message"]?.jsonPrimitive?.content }
+
     /** One step of a launch, and whether a pending stop is honoured before it. */
     data class Step(val name: String, val checkpoint: Boolean)
 

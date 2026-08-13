@@ -78,6 +78,33 @@ extension BridgeRouter {
             ? nil
             : await HomerunAPI.serverSettings(apiURL: apiURL, serverId: serverId, token: token)
 
+        // Ahead of everything expensive, and ahead of the lease gate: this host
+        // links its engine, and a linked engine does not refuse a modpack — it
+        // starts vanilla and looks like it worked, leaving the player a world
+        // with their mods missing and no error anywhere. The rule lives in
+        // `homerun-core` so both apps refuse the same servers in the same words.
+        //
+        // Nil settings are not a refusal, for the reason `serverSettings`
+        // documents: a lookup that failed is a far worse reason not to start a
+        // server than to start one on defaults.
+        if let settings {
+            do {
+                if let refusal = try Core.hostingRefusal(
+                    gameType: settings.gameType, env: settings.env)
+                {
+                    return ["success": false, "error": refusal]
+                }
+            } catch {
+                // Same direction as the admission check above. A core that
+                // cannot answer means a build mismatch, and launching anyway is
+                // precisely the silent-wrong-world outcome this exists to stop.
+                return [
+                    "success": false,
+                    "error": "Homerun could not work out whether this server can start.",
+                ]
+            }
+        }
+
         // A launch is refused only when another device is *actively* backing
         // this world up. No settings, no backup block and no device id all mean
         // "host without backups" — never "refuse to host".
