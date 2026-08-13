@@ -184,12 +184,19 @@ player who pins light or dark gets a page that contradicts
 `traitCollection.userInterfaceStyle`. Hard-coding `.darkContent` — which this
 did — leaves a black clock and battery on a black page.
 
-The page reports through the `__host:theme` message, from a document-start
-user script (`BridgeController.themeWatcherScript`) that watches for the
-`light`/`dark` class next-themes puts on `<html>`, falling back to the media
-query before either class exists. It is a host-internal message on the existing
-`homerun` handler, like `__host:jsError` — **not** a bridge channel, so nothing
-in `shared/conformance/` describes it and nothing needs to.
+The page says so on the **`set-appearance`** channel (`light` or `dark`), which
+the router hands to `BridgeController.appearanceChanged` through
+`BridgeEventSink`. The web layer cannot do this itself: in a WKWebView the
+clock and battery are drawn by the view controller, and
+`apple-mobile-web-app-status-bar-style` applies only to a home-screen web app.
+
+> Briefly, before the channel existed, this host inferred the theme from a
+> document-start script watching the class next-themes puts on `<html>`. The
+> contract replaced it and the script was deleted rather than kept as a
+> fallback: the embedded bundle is the floor for over-the-air delivery, so
+> there is no bundle old enough to need it. `WKWebView.themeColor` is a third
+> way to read the same thing — the UI publishes `theme-color` — if the channel
+> ever needs a backstop.
 
 `BridgeController.pageTheme` goes back to nil only when the **content process
 dies**, because that is the one case where what is on screen becomes the launch
@@ -221,11 +228,12 @@ configuration *before* the WebView is constructed, and that the MIME table maps
 `js` to `text/javascript`.
 
 **The clock and battery are invisible against the page.** The status bar style
-is stale. It is driven by `__host:theme`, so either the watcher script did not
-run (check the other document-start scripts arrived — capabilities would be
-missing too) or `MainViewController` lost the `bridge.onThemeChanged` hook that
-calls `setNeedsStatusBarAppearanceUpdate()`. Nothing polls; a missed report
-stays missed until the next navigation.
+is stale. It is driven by the `set-appearance` channel, so either the page
+never sent one — check `npm run conformance:ios`, and look for
+`cannot do that yet (set-appearance)` in the log, which is what an unregistered
+handler looks like — or `MainViewController` lost the `bridge.onThemeChanged`
+hook that calls `setNeedsStatusBarAppearanceUpdate()`. Nothing polls; a missed
+send stays missed until the theme changes again.
 
 **A white flash before the splash.** One of the three launch surfaces is not
 `Brand.launchBackground` — see the launch colour table. A flash *only* at cold

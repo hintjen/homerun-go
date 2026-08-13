@@ -84,7 +84,11 @@ check("homerun_abi_version matches what this source expects") {
     // it is that the staged .a is the one this source was written against —
     // a mismatch otherwise shows up as garbage decoded out of a reply much
     // later, or as a symbol that links and does something else.
-    let expected: UInt32 = 3
+    //
+    // `npm run test:abi` reads this line, so forgetting the bump now fails a
+    // check that runs without a Swift toolchain. It went unnoticed from 3 to 7
+    // before that was true.
+    let expected: UInt32 = 7
     let v = homerun_abi_version()
     try expect(v == expected, "expected \(expected), got \(v) — is the staged .a stale?")
     return "v\(v)"
@@ -1385,6 +1389,209 @@ check("ten thousand calls do not leak the reply") {
         _ = try Core.shouldBackUp(hasLocalWorld: true)
     }
     return "10k calls completed"
+}
+
+// --- reporting -------------------------------------------------------------
+//
+// The wrappers whose field names nothing else checks. A stats report with a
+// misspelled key is accepted by the API and lands as null; an operator change
+// signed with the wrong credential answers 200 and is stripped. Neither has a
+// symptom, so the assertions here are about *names*, not behaviour.
+
+check("a crash the core recognises comes back as a cause and a message") {
+    guard
+        let diagnosis = Core.crashDiagnosis(lines: [
+            "[12:00:00] [main/ERROR]: Failed to start the minecraft server",
+            "java.lang.RuntimeException: java.net.BindException: FAILED TO BIND TO PORT!",
+        ])
+    else { throw Wrong(what: "a bind failure was not recognised") }
+
+    guard !diagnosis.message.isEmpty else { throw Wrong(what: "no message for the player") }
+    return "\(diagnosis.cause): \(diagnosis.message)"
+}
+
+check("a console the core has no pattern for is nil, not a wrong answer") {
+    // What a Pumpkin crash looks like: none of the JVM strings. The player
+    // gets the API's message rather than an invented local one.
+    if let wrong = Core.crashDiagnosis(lines: ["[Homerun] the server exited"]) {
+        throw Wrong(what: "invented a diagnosis: \(wrong.cause)")
+    }
+    return "nil, as it should be"
+}
+
+check("a crash report is device-signed and goes to service-error") {
+    guard
+        let request = Core.crashReport(
+            serverId: "srv-1", deviceId: "dev-1", lines: ["a line"])
+    else { throw Wrong(what: "no request") }
+
+    guard request.path == "/api/service-error/" else {
+        throw Wrong(what: "wrong path: \(request.path)")
+    }
+    guard !request.userSigned else { throw Wrong(what: "a crash must not need a signed-in user") }
+    return "\(request.method) \(request.path) as \(request.auth)"
+}
+
+check("every stats field reaches the key the API stores it under") {
+    guard
+        let request = Core.statsReport(
+            serviceId: "srv-1", deviceId: "dev-1",
+            stats: [
+                "memoryKb": 524_288,
+                "cpuPercent": 41.5,
+                "serverAgeSecs": 2_381.6,
+                "hostIp": "203.0.113.7",
+                "gatewayPingMs": 18.0,
+                "onlineMode": true,
+                "roster": ["count": 1, "max": 20,
+                    "players": [["name": "Notch", "uuid": "069a79f4-44e9-4726-a5be-fca90e38aaf5"]]],
+            ])
+    else { throw Wrong(what: "no request") }
+
+    // Wire names, which are not the names above — the core renames on the way
+    // out and this is the only place that crossing is checked from Swift.
+    for key in ["service", "device", "memory_usage", "cpu_usage", "server_age", "host_ip_address",
+        "gateway_ping", "online_mode", "player_count"]
+    {
+        guard request.body[key] != nil else {
+            throw Wrong(what: "\(key) missing from the body — \(Array(request.body.keys).sorted())")
+        }
+    }
+    // KiB in, bytes out. Getting this backwards reports half a gigabyte as
+    // half a megabyte and nothing complains.
+    guard (request.body["memory_usage"] as? Int) == 524_288 * 1024 else {
+        throw Wrong(what: "memory_usage is not bytes: \(request.body["memory_usage"] ?? "nil")")
+    }
+    return "\(request.body.count) keys, memory in bytes"
+}
+
+check("the cadence starts due immediately and then asks for two minutes") {
+    let first = Core.schedule(held: nil, nowMs: 1_000_000)
+    guard first.trigger != nil else { throw Wrong(what: "the first report was not due") }
+
+    let next = Core.schedule(held: first.held, nowMs: 1_000_000)
+    guard next.trigger == nil else { throw Wrong(what: "reported twice on the same clock") }
+    guard next.waitMs > 100_000 else { throw Wrong(what: "waitMs is \(next.waitMs), not ~120s") }
+    return "first=\(first.trigger ?? "nil"), then waits \(next.waitMs / 1000)s"
+}
+
+check("a join earns a report sooner than the next beat") {
+    let armed = Core.schedule(held: nil, nowMs: 1_000_000)
+    let quiet = Core.schedule(held: armed.held, nowMs: 1_000_000)
+    let nudged = Core.schedule(held: quiet.held, nowMs: 1_000_000, event: "presence")
+    guard nudged.waitMs < quiet.waitMs else {
+        throw Wrong(what: "presence did not bring the report forward: \(nudged.waitMs)")
+    }
+    return "waits \(nudged.waitMs)ms instead of \(quiet.waitMs)ms"
+}
+
+check("cpu is rescaled from one core to the whole device") {
+    guard let rescaled = Core.cpuPercentOfDevice(perCorePercent: 200, cores: 4) else {
+        throw Wrong(what: "no answer")
+    }
+    guard rescaled == 50 else { throw Wrong(what: "200% over 4 cores is not \(rescaled)%") }
+    return "200% of one core over 4 cores = 50% of the device"
+}
+
+check("an operator change is a user-signed PATCH of the settings") {
+    guard let command = Core.opsCommand("/op Notch") else {
+        throw Wrong(what: "\"/op Notch\" was not read as an ops command")
+    }
+    guard
+        let change = Core.opsSync(
+            command: command,
+            serverBody: ["id": "srv-1", "environment_variables": ["OPS": ""]],
+            serverId: "srv-1")
+    else { throw Wrong(what: "no change for a server with no operators") }
+
+    guard change.request.method == "patch" else {
+        throw Wrong(what: "not a patch: \(change.request.method)")
+    }
+    // The whole reason this path exists. A device-signed settings change is
+    // accepted with 200 and silently stripped.
+    guard change.request.userSigned else {
+        throw Wrong(what: "an operator change signed as \(change.request.auth)")
+    }
+    return "\(change.request.method) \(change.request.path) as user — \(change.line)"
+}
+
+check("an ordinary console command is not an operator change") {
+    if let wrong = Core.opsCommand("say hello") {
+        throw Wrong(what: "\"say hello\" parsed as \(wrong)")
+    }
+    return "nil, as it should be"
+}
+
+check("a minigame result is read out of the line a plugin printed") {
+    let line =
+        "[12:00:00] [Server thread/INFO]: [HOMERUN:STATS] "
+        + #"{"match":"m1","game":"spleef","players":[{"name":"Notch"}]}"#
+    guard let request = Core.minigameReport(serverId: "srv-1", line: line) else {
+        throw Wrong(what: "a marked line produced no report")
+    }
+    guard Core.minigameReport(serverId: "srv-1", line: "just a line") == nil else {
+        throw Wrong(what: "an unmarked line produced a report")
+    }
+    return "\(request.method) \(request.path)"
+}
+
+check("a stats poll with nothing running answers nulls rather than hanging") {
+    // The blocking one. With no server, `ask` cannot send a command and gives
+    // up at once, so this also proves it does not sit out its timeout.
+    let started = Date()
+    let poll = Core.statsPoll()
+    let elapsed = Date().timeIntervalSince(started)
+    guard poll.roster == nil, poll.ageSecs == nil else {
+        throw Wrong(what: "invented an answer with no server running")
+    }
+    guard elapsed < 1 else { throw Wrong(what: "took \(elapsed)s with nothing to ask") }
+    return String(format: "nulls in %.0fms", elapsed * 1000)
+}
+
+check("a gateway ping to nowhere is null, not an error") {
+    // Port 1 on loopback refuses immediately, so this is the failure path
+    // without the deadline. A report must survive a measurement that failed.
+    if let wrong = Core.gatewayPing(address: "127.0.0.1:1") {
+        throw Wrong(what: "measured \(wrong)ms to a closed port")
+    }
+    return "nil"
+}
+
+check("an address with no port is refused before a socket is opened") {
+    if Core.gatewayPing(address: "gateway.example.com") != nil {
+        throw Wrong(what: "pinged an address with no port")
+    }
+    return "nil"
+}
+
+check("the gateway address is where a player connects, not the tunnel endpoint") {
+    // The external port is the gateway's, assigned while the post-launch poll
+    // waits — which is why nothing earlier in a launch can answer this.
+    let body: [String: Any] = [
+        "config": [
+            "links": [[
+                "domain": ["uri": "eu.gethomerun.app"],
+                "forward_ports": ["minecraft": ["30001:25565/tcp"]],
+            ]]
+        ]
+    ]
+    guard let address = Core.publicAddress(serverBody: body) else {
+        throw Wrong(what: "no address")
+    }
+    guard address == "eu.gethomerun.app:30001" else { throw Wrong(what: "got \(address)") }
+    return address
+}
+
+check("a server with no gateway port yet has no address to ping") {
+    // Every launch passes through this state, and `gateway_ping` is null
+    // until it leaves it.
+    let body: [String: Any] = [
+        "config": ["links": [["domain": ["uri": "eu.gethomerun.app"]]]]
+    ]
+    if let wrong = Core.publicAddress(serverBody: body) {
+        throw Wrong(what: "invented \(wrong) before the gateway assigned a port")
+    }
+    return "nil"
 }
 
 print("\n\(checks - failures)/\(checks) passed")

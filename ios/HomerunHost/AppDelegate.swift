@@ -53,6 +53,10 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             deepLinks.handle(url: url)
         }
 
+        // Before the bridge, which is what will start feeding it console lines
+        // and state changes. The backend outlives every page and so does this.
+        Reporting.attach(backend: backend)
+
         let bridge = BridgeController(deepLinks: deepLinks, backend: backend)
         self.bridge = bridge
 

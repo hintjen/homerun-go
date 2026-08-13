@@ -274,6 +274,26 @@ impl ServerHost {
         self.lock().engine.clone()?.players()
     }
 
+    /// The roster to report, when the engine's own is fit to send.
+    ///
+    /// `None` means "ask the console instead" — either because this engine
+    /// only knows names (see [`Engine::roster_is_authoritative`]) or because
+    /// nothing is running, and a stats poll's other half may still be worth
+    /// asking for.
+    pub fn reportable_roster(&self) -> Option<homerun_core::reporting::stats::Roster> {
+        if self.state() != ServerState::Running {
+            return None;
+        }
+        let engine = self.lock().engine.clone()?;
+        if !engine.roster_is_authoritative() {
+            return None;
+        }
+        let (players, max) = engine.players()?;
+        Some(homerun_core::reporting::stats::roster_from_engine(
+            &players, max,
+        ))
+    }
+
     /// Start a server. Blocks for its whole lifetime — the host must call
     /// this on a dedicated thread with at least a 16 MB stack.
     /// Start a server, blocking for its whole lifetime.
@@ -656,7 +676,11 @@ mod tests {
         // platform this ships to and not on the one it is usually written on.
         // Everything above is asserted everywhere; this part is only true
         // where there is a `/proc` to read, and is covered on device.
-        #[cfg(unix)]
+        //
+        // `unix` was the wrong test and failed the whole suite on macOS, which
+        // is a unix with no `/proc` — the condition has to name the thing the
+        // reader actually needs.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         assert!(
             graph.iter().any(|s| s.mem_used_mb.is_some()),
             "a child process must report memory: {graph:?}"

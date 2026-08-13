@@ -262,6 +262,40 @@ pub fn report(service_id: &str, device_id: &str, stats: &Stats) -> Request {
 
 // --- reading the server's replies ------------------------------------------
 
+/// Build a roster from an engine that already knows who is connected.
+///
+/// The console round trip below exists because most engines are a child
+/// process with nothing but a pipe. A linked engine is not: it can be asked
+/// directly, and then the answer is exact, instant, costs no timeout, and
+/// cannot be shadowed by a plugin or mangled by a translation table.
+///
+/// Each entry is a name and, when the engine has one, a UUID. **An entry
+/// without a UUID is dropped from `players` but still counted**, which is the
+/// same split the parser makes: `count` is what the server says is online, and
+/// `players` is who could be identified. An engine that cannot name identities
+/// at all should not be using this — see `Engine::roster_is_authoritative`.
+pub fn roster_from_engine(players: &[(String, Option<String>)], max: Option<u32>) -> Roster {
+    Roster {
+        // The engine's own list, so this is a count and not an estimate.
+        count: u32::try_from(players.len()).ok(),
+        max,
+        players: players
+            .iter()
+            .filter_map(|(name, uuid)| {
+                let uuid = uuid.as_deref()?.to_ascii_lowercase();
+                // Validated even though an engine formats these itself: the
+                // rule that a player *is* a UUID belongs in one place, and a
+                // future engine handing over something else should lose the
+                // entry rather than put it on a leaderboard.
+                is_uuid(&uuid).then(|| Player {
+                    name: name.clone(),
+                    uuid,
+                })
+            })
+            .collect(),
+    }
+}
+
 /// Parse a `list uuids` reply.
 ///
 /// ```text
@@ -347,17 +381,26 @@ fn is_uuid(text: &str) -> bool {
 
 /// Parse a `time query gametime` reply into the world's age in seconds.
 ///
-/// Two spellings, because Minecraft changed it:
+/// Three spellings, because Minecraft changed it and Pumpkin never used
+/// either:
 ///
 /// ```text
 /// The time is 1234567               // 1.21.4 and earlier
 /// The game time is 1234567 tick(s)  // seen on 26.2
+/// Gametime is 1234567               // Pumpkin
 /// ```
 ///
-/// The newer wording was found on a live server that was reporting a healthy
-/// player count and a null `server_age`. The desktop knows only the older
-/// spelling, so its reports have been quietly missing this field on current
-/// versions as well.
+/// The newer Minecraft wording was found on a live server that was reporting a
+/// healthy player count and a null `server_age`. The desktop knows only the
+/// older spelling, so its reports have been quietly missing this field on
+/// current versions as well.
+///
+/// Pumpkin's is not a version difference but a translation one, and it is
+/// worth knowing why, because the same cause will produce more of these: its
+/// console renderer resolves a message through the *Bedrock* translation key
+/// in preference to the Java one, and Bedrock's `commands.time.query.gametime`
+/// reads `Gametime is %d`. Every host that links the engine sees it, so this
+/// belongs here rather than in a host.
 ///
 /// Ticks, at twenty a second. This is the *world's* age and not this session's
 /// — gametime does not advance while the server is stopped, so it accumulates
@@ -371,9 +414,14 @@ pub fn parse_server_age(reply: &str) -> Option<f64> {
     // The newer phrase is tried first because the older one is not a substring
     // of it ("The time is" vs "The game time is"), so a reply carrying the new
     // wording would otherwise fall through to a match that cannot happen.
+    //
+    // Pumpkin's is unambiguous against both, but it is deliberately not
+    // loosened to a bare " is " — the same command prints `Daytime is %d` and
+    // `Day is %d` for its other two modes, and those are different numbers.
     let rest = reply
         .split_once("The game time is ")
-        .or_else(|| reply.split_once("The time is "))?
+        .or_else(|| reply.split_once("The time is "))
+        .or_else(|| reply.split_once("Gametime is "))?
         .1;
     let (ticks, _) = leading_number(rest)?;
     Some(ticks as f64 / TICKS_PER_SECOND as f64)
@@ -624,6 +672,71 @@ mod tests {
         assert!(!is_uuid(""));
     }
 
+    // --- a roster the engine handed over -------------------------------------
+
+    #[test]
+    fn an_engine_roster_needs_no_parsing_and_no_console() {
+        let roster = roster_from_engine(
+            &[
+                (
+                    "Notch".to_string(),
+                    Some("069a79f4-44e9-4726-a5be-fca90e38aaf5".to_string()),
+                ),
+                (
+                    "Jeb_".to_string(),
+                    Some("853c80ef-3c37-49fd-aa49-938b674adae6".to_string()),
+                ),
+            ],
+            Some(20),
+        );
+
+        assert_eq!(roster.count, Some(2));
+        assert_eq!(roster.max, Some(20));
+        assert_eq!(roster.players.len(), 2);
+        assert_eq!(roster.players[0].name, "Notch");
+    }
+
+    /// An engine printing hex in caps must not make one player two rows, which
+    /// is the same rule the parser follows.
+    #[test]
+    fn an_engine_uuid_is_lowercased_like_a_parsed_one() {
+        let roster = roster_from_engine(
+            &[(
+                "Notch".to_string(),
+                Some("069A79F4-44E9-4726-A5BE-FCA90E38AAF5".to_string()),
+            )],
+            None,
+        );
+
+        assert_eq!(roster.players[0].uuid, "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        assert_eq!(roster.max, None);
+    }
+
+    /// Offline-mode child processes know names and no identities. Counting
+    /// them while listing nobody is the honest answer — the alternative is a
+    /// roster that says the server is empty when two people are on it.
+    #[test]
+    fn a_player_the_engine_cannot_identify_is_counted_but_not_listed() {
+        let roster = roster_from_engine(
+            &[
+                ("Notch".to_string(), None),
+                ("mangled".to_string(), Some("not-a-uuid".to_string())),
+            ],
+            Some(20),
+        );
+
+        assert_eq!(roster.count, Some(2));
+        assert!(roster.players.is_empty());
+    }
+
+    #[test]
+    fn an_empty_engine_roster_is_an_empty_server_not_an_unknown_one() {
+        let roster = roster_from_engine(&[], Some(20));
+
+        assert_eq!(roster.count, Some(0));
+        assert!(roster.players.is_empty());
+    }
+
     // --- the world's age ---------------------------------------------------
 
     #[test]
@@ -648,12 +761,36 @@ mod tests {
         );
     }
 
+    /// Pumpkin's wording, which is neither of Minecraft's.
+    ///
+    /// It prints through the Bedrock translation key
+    /// (`commands.time.query.gametime` = `Gametime is %d`) and carries no
+    /// log prefix, because the console line is a bare `println!`.
+    ///
+    /// Until this was understood, every iOS report carried a null age *and*
+    /// paid a three-second timeout for it — the supervisor withholds a poll's
+    /// reply from the player's console by asking whether this function
+    /// recognises it, so an unparsed reply is also a visible one.
+    #[test]
+    fn pumpkins_gametime_reply_is_understood() {
+        assert_eq!(parse_server_age("Gametime is 47632"), Some(2_381.6));
+    }
+
     #[test]
     fn a_shadowed_time_command_leaves_the_age_unknown() {
         // EssentialsX's /time, reformatted.
         assert_eq!(parse_server_age("It is currently day 5, 06:00"), None);
         assert_eq!(parse_server_age("The time is "), None);
         assert_eq!(parse_server_age(""), None);
+    }
+
+    /// The same Pumpkin command answers three different questions, and two of
+    /// them are not the world's age. Matching on " is " would read a day
+    /// number as a tick count and report a server minutes old.
+    #[test]
+    fn pumpkins_other_time_modes_are_not_mistaken_for_the_age() {
+        assert_eq!(parse_server_age("Daytime is 6000"), None);
+        assert_eq!(parse_server_age("Day is 5"), None);
     }
 
     // --- pinning -----------------------------------------------------------

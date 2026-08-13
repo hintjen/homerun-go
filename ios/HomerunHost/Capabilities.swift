@@ -11,10 +11,23 @@ import WebKit
 enum Capabilities {
     /// Injected at document start — the UI resolves capabilities synchronously
     /// as its first act and cannot await the host.
+    ///
+    /// `__homerunHostRevision` rides along for the same reason it has to be
+    /// synchronous, and it is a sibling global rather than a capability field
+    /// because capabilities are generated from the contract while this is a
+    /// property of the binary. A bundle delivered over the air can be newer
+    /// than the host under it, and a feature gated on a channel this host does
+    /// not answer must render as absent rather than as a button that hangs.
+    ///
+    /// Android has published this since the OTA work landed; iOS declared a
+    /// revision and told nobody, which made the number decorative here.
     static func userScript() -> WKUserScript {
         let json = BridgeEnvelope.jsLiteral(object: profile())
         return WKUserScript(
-            source: "window.__homerunCapabilities = \(json);",
+            source: """
+                window.__homerunCapabilities = \(json);
+                window.__homerunHostRevision = \(BridgeRouter.hostRevision);
+                """,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true)
     }

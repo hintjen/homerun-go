@@ -164,6 +164,74 @@ enum HomerunAPI {
             body: body, token: deviceToken)
     }
 
+    /// Send a request `homerun-core` decided on.
+    ///
+    /// The core says what, where and with which credential; this signs it and
+    /// sends it. The token is chosen by the caller **from `request.auth`** and
+    /// never guessed — `Reporting.send` is the one place that mapping lives.
+    ///
+    /// Best-effort like the two reports above: nil on any failure, logged, and
+    /// nothing retries. A stats report is superseded by the next one two
+    /// minutes later, and an operator change that did not save says so in the
+    /// console.
+    static func perform(
+        apiURL: String,
+        request: Core.Request,
+        token: String
+    ) async -> [String: Any]? {
+        guard !token.isEmpty else { return nil }
+        do {
+            // Lowercase, because that is what the core emits. Anything that is
+            // not a patch is a post — the core has no other verb.
+            if request.method == "patch" {
+                return try await patch(
+                    apiURL: apiURL, path: request.path, body: request.body, token: token)
+            }
+            return try await post(
+                apiURL: apiURL, path: request.path, body: request.body, token: token)
+        } catch {
+            HostLog.reporting.error(
+                "\(request.method, privacy: .public) \(request.path, privacy: .public) did not go through: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
+    /// A server as the API holds it *now*.
+    ///
+    /// The read half of an operator change's read-modify-write. It has to be a
+    /// fresh read rather than the settings this launch started with, because
+    /// the dashboard or another device may have moved them since.
+    static func serverBody(apiURL: String, serverId: String, token: String) async -> [String: Any]?
+    {
+        guard !token.isEmpty else { return nil }
+        return try? await get(apiURL: apiURL, path: "/api/server/\(serverId)/", token: token)
+    }
+
+    // MARK: - The public address
+
+    /// This device's public IP, as the internet sees it.
+    ///
+    /// One optional field on a stats report. Unauthenticated, and deliberately
+    /// the same third-party service the desktop and Android use, so the field
+    /// means the same thing on all three.
+    ///
+    /// Uncached here on purpose — the caller holds the cache, because this enum
+    /// has no mutable state anywhere and adding some would need a concurrency
+    /// story this host does not have.
+    static func fetchPublicIPAddress() async -> String? {
+        guard let url = URL(string: "https://api.ipify.org/?format=json") else { return nil }
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 20
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+            (200..<300).contains((response as? HTTPURLResponse)?.statusCode ?? 0),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return object["ip"] as? String
+    }
+
     // MARK: - Server settings
 
     /// A server's settings as the API describes them.
@@ -281,9 +349,22 @@ enum HomerunAPI {
 
             guard
                 let body = try? await get(
-                    apiURL: apiURL, path: "/api/server/\(serverId)/", token: token),
-                let polled = linkOf(body)
+                    apiURL: apiURL, path: "/api/server/\(serverId)/", token: token)
             else { continue }
+
+            // The one place the gateway address can be read. It is the
+            // *player's* address — gateway host plus the assigned external
+            // port — and not the WireGuard endpoint below it, so it cannot be
+            // taken from the link. The external port does not exist when a
+            // launch begins; it is assigned while this poll waits, which is
+            // why nothing earlier can answer it.
+            if let address = Core.publicAddress(serverBody: body) {
+                await MainActor.run {
+                    Reporting.gatewayAddressResolved(serverId: serverId, address: address)
+                }
+            }
+
+            guard let polled = linkOf(body) else { continue }
 
             // Gateway v2 reuses credentials deliberately, so for those this
             // check is skipped — without the exception a v2 link would poll
@@ -420,6 +501,35 @@ enum HomerunAPI {
         guard (200..<300).contains(status) else {
             throw APIError.http(status, String(data: data, encoding: .utf8) ?? "")
         }
+    }
+
+    /// The one verb the core emits that nothing here sent before.
+    ///
+    /// Operator changes are a read-modify-write of an environment variable, so
+    /// they PATCH the server rather than posting anything.
+    private static func patch(
+        apiURL: String, path: String, body: [String: Any], token: String
+    ) async throws -> [String: Any] {
+        guard let url = URL(string: apiURL.trimmedTrailingSlash + path) else {
+            throw APIError.malformed
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setRequestValue()
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 30
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw APIError.http(status, String(data: data, encoding: .utf8) ?? "")
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.malformed
+        }
+        return object
     }
 }
 

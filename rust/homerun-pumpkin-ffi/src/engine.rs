@@ -89,6 +89,25 @@ pub trait Engine: Send + Sync {
     /// Currently connected players, if the engine can report them.
     fn players(&self) -> Option<Roster>;
 
+    /// Whether [`Engine::players`] is good enough to report to the API, so a
+    /// stats poll can skip the console entirely.
+    ///
+    /// Default `false`, which is the honest answer for a child process: its
+    /// roster is assembled from join and leave lines and carries names with no
+    /// UUIDs, and a UUID is what makes a player a player to everything
+    /// downstream. Those engines keep asking `list uuids` and parsing the
+    /// reply.
+    ///
+    /// A linked engine holds the real player list and returns `true`. That is
+    /// worth more than saved milliseconds: the console round trip goes through
+    /// the engine's own message formatting, and Pumpkin's renders every player
+    /// as a translation key it fails to resolve — so the parse succeeded, the
+    /// header was right, and `players` was empty on every report ever sent.
+    /// Nothing about that failure was visible.
+    fn roster_is_authoritative(&self) -> bool {
+        false
+    }
+
     /// What this server is costing right now: resident KiB, and cumulative
     /// CPU seconds since it started.
     ///

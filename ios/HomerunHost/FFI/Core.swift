@@ -772,4 +772,242 @@ enum Core {
         }
         return Report(body: body, releasesLease: reply["releasesLease"] as? Bool ?? false)
     }
+
+    // MARK: - Reporting
+    //
+    // What this device tells the API about the server it runs. The core decides
+    // everything — what to send, where, and *which credential signs it*; this
+    // host signs it, sends it and forgets it. Mirrors `Core.kt` §Reporting, and
+    // the two must stay in step because the field names are the contract.
+    //
+    // See `docs/ios-reporting.md`.
+
+    /// One HTTP request the core has decided on.
+    ///
+    /// `auth` is the load-bearing field. Signing an operator change with the
+    /// device token instead of the user's is not an error anybody sees: the API
+    /// answers 200 and strips the change.
+    struct Request {
+        let method: String
+        let path: String
+        let body: [String: Any]
+        let auth: String
+
+        var userSigned: Bool { auth == "user" }
+
+        /// A reply is only a request if it carries all four. A missing field
+        /// yields nil so nothing is sent, rather than something sent wrongly.
+        static func from(_ value: Any?) -> Request? {
+            guard let object = value as? [String: Any],
+                let method = object["method"] as? String,
+                let path = object["path"] as? String,
+                let body = object["body"] as? [String: Any],
+                let auth = object["auth"] as? String
+            else { return nil }
+            return Request(method: method, path: path, body: body, auth: auth)
+        }
+    }
+
+    /// What the console said a crash was.
+    struct Diagnosis {
+        let cause: String
+        let message: String
+        let recovery: String
+
+        var repairable: Bool { recovery == "redownloadAndRestart" }
+    }
+
+    /// Read a crash out of a server's last words.
+    ///
+    /// `retriesUsed` is the *host's* count, because only the host knows whether
+    /// a launch ever reached running.
+    ///
+    /// Nil means the console said nothing this build recognises — which on iOS
+    /// is the ordinary outcome, since these patterns are JVM strings and
+    /// Pumpkin produces none of them. The player then gets the API's message
+    /// instead of a wrong local one.
+    static func crashDiagnosis(lines: [String], retriesUsed: Int = 0) -> Diagnosis? {
+        guard
+            let reply = try? call(
+                "reporting.crash.diagnose", ["lines": lines, "retriesUsed": retriesUsed])
+                as? [String: Any],
+            let cause = reply["cause"] as? String,
+            let message = reply["message"] as? String
+        else { return nil }
+        return Diagnosis(
+            cause: cause, message: message,
+            recovery: reply["recovery"] as? String ?? "report")
+    }
+
+    static func crashReport(serverId: String, deviceId: String, lines: [String]) -> Request? {
+        Request.from(
+            try? call(
+                "reporting.crash.report",
+                ["serverId": serverId, "deviceId": deviceId, "lines": lines]))
+    }
+
+    /// Build a stats report. The core's argument is `serviceId`, not
+    /// `serverId` — the endpoint speaks of services.
+    static func statsReport(
+        serviceId: String, deviceId: String, stats: [String: Any]
+    ) -> Request? {
+        Request.from(
+            try? call(
+                "reporting.stats.report",
+                ["serviceId": serviceId, "deviceId": deviceId, "stats": stats]))
+    }
+
+    /// What the running server answered about itself.
+    struct Poll {
+        let roster: [String: Any]?
+        let ageSecs: Double?
+    }
+
+    /// Ask the server for its roster and the world's age.
+    ///
+    /// > **Blocking, and not by a little.** The age is a console round trip
+    /// > with a three-second timeout. Call it off the main actor —
+    /// > `await Task.detached { Core.statsPoll(loader: …) }.value`.
+    ///
+    /// The roster no longer costs anything: a linked engine holds the player
+    /// list, so the supervisor answers from it and skips the console entirely.
+    ///
+    /// Never throws. Every failure degrades to nulls, because a report that
+    /// refuses to be built because one measurement failed is worse than a
+    /// report with a hole in it.
+    ///
+    /// `loader` must be `vanilla` here. The core pins commands with a
+    /// `minecraft:` prefix for Paper, and Pumpkin registers bare command names
+    /// — a pinned command fails outright.
+    static func statsPoll(loader: String = "vanilla") -> Poll {
+        guard let reply = try? object("server.statsPoll", ["loader": loader]) else {
+            return Poll(roster: nil, ageSecs: nil)
+        }
+        return Poll(
+            roster: reply["roster"] as? [String: Any],
+            ageSecs: number(reply["ageSecs"])?.doubleValue)
+    }
+
+    /// Rescale a per-core CPU percentage to a percentage of the device.
+    ///
+    /// Not optional, and not obvious: the backend reports percent of **one
+    /// core** and legitimately exceeds 100, while the endpoint's `cpu_usage` is
+    /// percent of the **machine**. They are identical on a single-core reading,
+    /// so skipping this passes every test anybody writes and reports a phone on
+    /// fire.
+    static func cpuPercentOfDevice(perCorePercent: Double, cores: Int) -> Double? {
+        guard
+            let value = try? call(
+                "reporting.stats.cpuPercentOfDevice",
+                ["perCorePercent": perCorePercent, "cores": cores])
+        else { return nil }
+        return number(value)?.doubleValue
+    }
+
+    /// When the next report is due, and why.
+    struct Schedule {
+        /// Opaque cadence state to hand back next time. Never inspected here.
+        let held: [String: Any]
+        /// `periodic`, `presence`, or nil when nothing is due yet.
+        let trigger: String?
+        let waitMs: Int
+    }
+
+    /// Advance the reporting cadence.
+    ///
+    /// The core owns every number in it — the 120 s interval, the 1 s presence
+    /// debounce, and the rule that a presence report resets the periodic clock.
+    /// The host owns only the clock and the opaque state, exactly as it does
+    /// for ``Metrics``.
+    ///
+    /// A nil `held` means "first call", which makes a report due immediately.
+    static func schedule(held: [String: Any]?, nowMs: Int, event: String? = nil) -> Schedule {
+        var args: [String: Any] = ["nowMs": nowMs]
+        if let held { args["schedule"] = held }
+        if let event { args["event"] = event }
+
+        guard let reply = try? object("reporting.stats.schedule", args),
+            let next = reply["schedule"] as? [String: Any]
+        else {
+            // Keeping the old state rather than dropping it: a lost call must
+            // not restart the cadence, which would report on the wrong beat
+            // forever after.
+            return Schedule(held: held ?? [:], trigger: nil, waitMs: 1_000)
+        }
+        return Schedule(
+            held: next,
+            trigger: reply["trigger"] as? String,
+            waitMs: number(reply["waitMs"])?.intValue ?? 1_000)
+    }
+
+    /// Round-trip time to where a player actually connects.
+    ///
+    /// > **Blocking**, up to a five-second deadline. Call it off the main actor.
+    ///
+    /// `address` is `host:port` from `link.publicAddress` — the gateway's
+    /// public address, never the port the server listens on locally. Splitting
+    /// it here rather than in the core matches Android; the core takes the two
+    /// halves.
+    static func gatewayPing(address: String) -> Double? {
+        guard let separator = address.lastIndex(of: ":") else { return nil }
+        let host = String(address[address.startIndex..<separator])
+        guard let port = Int(address[address.index(after: separator)...]), !host.isEmpty
+        else { return nil }
+
+        guard let value = try? call("net.gatewayPing", ["host": host, "port": port])
+        else { return nil }
+        return number(value)?.doubleValue
+    }
+
+    /// The gateway address a player connects to, out of a server body.
+    static func publicAddress(serverBody: [String: Any]) -> String? {
+        guard let value = try? call("link.publicAddress", ["body": serverBody]) else { return nil }
+        return value as? String
+    }
+
+    /// Whether a server's settings put it in online mode.
+    static func onlineMode(env: [String: Any], gameType: String?, loader: String) -> Bool? {
+        var args: [String: Any] = ["env": env, "loader": loader]
+        if let gameType { args["gameType"] = gameType }
+        guard let reply = try? object("minecraft.settings.fromEnv", args) else { return nil }
+        return reply["onlineMode"] as? Bool
+    }
+
+    /// Read an `op`/`deop`/`ban`/`pardon` out of a console command.
+    ///
+    /// Nil for everything else, which is most of what anybody types.
+    static func opsCommand(_ command: String) -> [String: Any]? {
+        (try? call("minecraft.ops.parse", ["command": command])) as? [String: Any]
+    }
+
+    /// A settings change, and the line to echo once it has been saved.
+    struct OpsChange {
+        let request: Request
+        let line: String
+    }
+
+    /// Work out what a parsed op command changes, against the settings the API
+    /// holds *now* — not the ones this launch started with, because another
+    /// device or the dashboard may have moved them since.
+    ///
+    /// Nil means the settings already say this, so there is nothing to save.
+    static func opsSync(
+        command: [String: Any], serverBody: [String: Any], serverId: String
+    ) -> OpsChange? {
+        guard
+            let reply = try? call(
+                "minecraft.ops.sync",
+                ["command": command, "server": serverBody, "serverId": serverId])
+                as? [String: Any],
+            let request = Request.from(reply["request"]),
+            let line = reply["line"] as? String
+        else { return nil }
+        return OpsChange(request: request, line: line)
+    }
+
+    /// A minigame result a plugin printed to the console, if this line is one.
+    static func minigameReport(serverId: String, line: String) -> Request? {
+        Request.from(
+            try? call("reporting.minigame.fromLine", ["serverId": serverId, "line": line]))
+    }
 }

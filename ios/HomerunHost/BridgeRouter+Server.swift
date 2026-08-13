@@ -115,6 +115,10 @@ extension BridgeRouter {
             }
         }
 
+        // Before the backend starts, so a crash on the way up still has
+        // somewhere to be reported from.
+        Reporting.starting(serverId: serverId, settings: settings)
+
         do {
             try await backend.start(serverId: serverId, config: config)
             if let port = backend.port(serverId: serverId) {
@@ -177,6 +181,10 @@ extension BridgeRouter {
 
         do {
             try await backend.command(serverId: serverId, command: command)
+            // An `op` or a `ban` typed here has to reach the server's settings
+            // too, or the next launch rewrites ops.json from the API and
+            // quietly takes it back. Signed as the person who typed it.
+            Reporting.consoleCommand(serverId: serverId, command: command)
             events?.emit(
                 "native-server-rcon-response", [["serverId": serverId, "response": NSNull()]])
             return ["success": true]

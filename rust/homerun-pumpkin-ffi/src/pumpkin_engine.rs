@@ -235,6 +235,18 @@ impl Engine for PumpkinEngine {
 
         Some((players, (max > 0).then_some(max)))
     }
+
+    /// Every entry above carries `gameprofile.id`, so a stats report never
+    /// needs `list uuids` from this engine — and must not use it. Pumpkin's
+    /// console renders each player through `commands.list.nameAndId`, which
+    /// its translation table cannot find (the lookup is lowercased, the key
+    /// is not), so the reply names every player as the literal string
+    /// `minecraft:commands.list.nameandid`. The header parses, the line is
+    /// withheld from the console as a recognised reply, and the roster is
+    /// empty. There is no symptom.
+    fn roster_is_authoritative(&self) -> bool {
+        true
+    }
 }
 
 /// Bind failures are the common way a start fails, and the message is shown to

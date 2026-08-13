@@ -121,26 +121,121 @@ pub fn max_players(line: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Strip a console line's log prefix, whatever shape the engine writes it in.
+///
+/// Two are in use, and they do not look alike:
+///
+/// ```text
+/// [HH:MM:SS] [Server thread/INFO]: Notch joined the game   // vanilla, Paper
+/// [INFO] Kologgs joined the game                           // Pumpkin
+/// ```
+///
+/// A prefix is a run of bracketed tags that **look like log tags** — a
+/// timestamp, or something naming a level — each followed by a space or by
+/// `: `. Consuming exactly those is what makes the two formats one case.
+///
+/// This used to split on the first `]: `, which Pumpkin never writes: the
+/// whole prefix stayed in the name, so on that engine every join and leave
+/// went unrecognised and presence reporting was silently dead.
+///
+/// The tag test is the security property, and it is not decoration. Consuming
+/// *any* bracketed run instead would read a chat author as a prefix, and then
+/// `[Griefer] Notch joined the game` typed into chat forges a join. Splitting
+/// on the last `]: ` has the same hole with `hey]: Notch`. What the two
+/// engines' prefixes have in common is that they announce a level or a time,
+/// and what a griefer types does not.
+fn after_log_prefix(line: &str) -> &str {
+    fn is_log_tag(tag: &str) -> bool {
+        let upper = tag.to_ascii_uppercase();
+        if ["INFO", "WARN", "ERROR", "DEBUG", "TRACE", "FATAL"]
+            .iter()
+            .any(|level| upper.contains(level))
+        {
+            return true;
+        }
+        // A bare timestamp: `[20:37:28]`, or an ISO one from a `tracing`
+        // subscriber. Digits and separators only, and never empty.
+        !tag.is_empty()
+            && tag
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, ':' | '.' | '-' | '+' | 'T' | 'Z'))
+    }
+
+    let mut rest = line.trim_start();
+    while let Some(open) = rest.strip_prefix('[') {
+        let Some(close) = open.find(']') else { break };
+        if !is_log_tag(&open[..close]) {
+            break;
+        }
+        let tail = &open[close + 1..];
+        // `]: ` on vanilla, `] ` on Pumpkin. A tag butted straight against
+        // text is not a prefix — it is text that happens to start with one.
+        let tail = tail.strip_prefix(':').unwrap_or(tail);
+        let Some(after) = tail.strip_prefix(' ') else { break };
+        rest = after.trim_start();
+    }
+    unbracketed(rest).unwrap_or(rest)
+}
+
+/// The other shape the same engine writes, and the one that actually reaches
+/// a linked host: `tracing`'s default event format.
+///
+/// ```text
+/// 2026-08-13 10:36:00  INFO tokio-rt-worker ThreadId(120) pumpkin::world: Kologgs joined the game
+/// ```
+///
+/// Pumpkin's *file* log is `[INFO] …` and its *stdout* is this, which is a
+/// good reminder to read the stream you actually consume — a host that links
+/// the engine captures fd 1, not `logs/latest.log`. The thread name and id are
+/// there because `logging.threads` is on, and the target because
+/// `with_target(true)` is; neither is guaranteed, so the shape between the
+/// level and the message is not worth enumerating.
+///
+/// What *is* reliable is that the **first** `": "` ends the prefix — the same
+/// property vanilla's first-`]: ` rule leans on. Nothing before it can contain
+/// one: a timestamp's colons are followed by digits, and a `tracing` target's
+/// `::` by a letter.
+///
+/// Anchored at the start and applied once. A level word further along belongs
+/// to whatever was typed, and a chat author's `<…>` before the separator means
+/// this is a message rather than a prefix.
+fn unbracketed(rest: &str) -> Option<&str> {
+    const LEVELS: [&str; 6] = ["INFO", "WARN", "ERROR", "DEBUG", "TRACE", "FATAL"];
+
+    // Whatever precedes the level may only be a timestamp.
+    let level_at = LEVELS
+        .iter()
+        .filter_map(|level| rest.find(level).map(|at| (at, level.len())))
+        .filter(|&(at, _)| {
+            rest[..at]
+                .chars()
+                .all(|c| c.is_whitespace() || c.is_ascii_digit() || matches!(c, ':' | '.' | '-'))
+        })
+        .min_by_key(|&(at, _)| at)?;
+
+    let after_level = &rest[level_at.0 + level_at.1..];
+    let payload = after_level.trim_start();
+    match payload.split_once(": ") {
+        // A chat author reaching the separator means the `: ` was typed, not
+        // logged — without this, a message of `hey: Notch joined the game`
+        // would forge a join on a build with no target in its format.
+        Some((preamble, message)) if !preamble.contains(['<', '>']) => Some(message.trim_start()),
+        _ => Some(payload),
+    }
+}
+
 /// Pull the name immediately before a marker, after the log prefix.
 ///
-/// Vanilla prints `[HH:MM:SS] [Server thread/INFO]: Name joined the game`.
-/// Everything the server itself prefixes ends with `]: `, and what follows a
-/// real join line's prefix is one bare name and nothing else — a chat message
-/// puts its author in front (`<Griefer> Notch joined the game`), so requiring
-/// the remainder to be a lone name is what tells the two apart.
-///
-/// The prefix ends at the **first** `]: `: a later one is inside text somebody
-/// typed. Reading from the last one instead let anyone forge a join by saying
-/// `hey]: Notch joined the game` in chat. The desktop does not attempt this
-/// distinction at all — its presence check is `/ \S+ (?:joined|left) the
-/// game\s*$/`, which any chat message can satisfy.
+/// What follows a real join line's prefix is one bare name and nothing else.
+/// A chat message puts its author in front (`<Griefer> Notch joined the
+/// game`), so requiring the remainder to be a lone name is what tells the two
+/// apart — the desktop does not attempt this distinction at all, and its
+/// presence check `/ \S+ (?:joined|left) the game\s*$/` is satisfied by any
+/// chat message.
 fn player_before<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     let head = line.split_once(marker)?.0;
     let clean = strip_ansi(head);
-    let name = clean
-        .split_once("]: ")
-        .map_or(&*clean, |(_, after)| after)
-        .trim();
+    let name = after_log_prefix(&clean).trim();
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         return None;
     }
@@ -294,6 +389,85 @@ mod tests {
             left("[20:37:28] [Server thread/INFO]: [Griefer] hey]: Notch left the game"),
             None
         );
+    }
+
+    /// Pumpkin's console, which is `tracing` rather than Minecraft's own
+    /// logger: one bracketed level and no `]: ` anywhere.
+    ///
+    /// Read from a real `logs/latest.log` on a phone after a player joined.
+    /// Before this, the prefix stayed in the name, `joined` answered `None`,
+    /// and the API learned about a player up to two minutes late — or never,
+    /// for a session shorter than the reporting interval.
+    #[test]
+    fn a_pumpkin_join_names_the_player() {
+        assert_eq!(joined("[INFO] Kologgs joined the game"), Some("Kologgs"));
+        assert_eq!(left("[INFO] Kologgs left the game"), Some("Kologgs"));
+    }
+
+    /// The same engine's *stdout*, which is what a linked host captures —
+    /// `tracing`'s default format, with a target and no brackets at all.
+    ///
+    /// The file log and the console are two different formatters in Pumpkin,
+    /// and only this one reaches `push_log`.
+    #[test]
+    fn a_tracing_join_names_the_player() {
+        // Captured from a phone's console, thread name and id included —
+        // two reconstructions of this line from the engine's source were
+        // wrong before someone read the real one.
+        assert_eq!(
+            joined(
+                "2026-08-13 10:36:00  INFO tokio-rt-worker ThreadId(120) pumpkin::world: Kologgs joined the game"
+            ),
+            Some("Kologgs")
+        );
+        assert_eq!(
+            left(
+                "2026-08-13 10:36:00  INFO tokio-rt-worker ThreadId(120) pumpkin::world: Player_1 left the game"
+            ),
+            Some("Player_1")
+        );
+        // Neither the thread fields nor the target is guaranteed to be on.
+        assert_eq!(
+            joined("2026-08-13 15:12:31  INFO pumpkin::world: Notch joined the game"),
+            Some("Notch")
+        );
+        assert_eq!(
+            joined(" INFO pumpkin::world: Notch joined the game"),
+            Some("Notch")
+        );
+    }
+
+    /// With no target in the format there is no separator of the host's own,
+    /// so a typed one must not be mistaken for it.
+    #[test]
+    fn chat_cannot_forge_a_join_with_its_own_separator() {
+        assert_eq!(joined(" INFO <Griefer> hey: Notch joined the game"), None);
+    }
+
+    /// The level word only ends a prefix when nothing but a timestamp came
+    /// before it. Otherwise a chat message could carry its own.
+    #[test]
+    fn chat_cannot_forge_a_join_by_typing_a_tracing_prefix() {
+        assert_eq!(
+            joined("2026-08-13 15:12:31  INFO pumpkin::world: <Griefer> INFO x: Notch joined the game"),
+            None
+        );
+        assert_eq!(
+            joined("[20:37:28] [Server thread/INFO]: <Griefer> INFO x: Notch joined the game"),
+            None
+        );
+    }
+
+    /// A bracketed run is only a prefix if it announces a level or a time.
+    ///
+    /// Without that test, consuming brackets to reach Pumpkin's name would
+    /// read a chat author as a prefix, and this line — which any player can
+    /// type — would be a join.
+    #[test]
+    fn a_bracketed_chat_author_is_not_a_log_prefix() {
+        assert_eq!(joined("[INFO] [Griefer] Notch joined the game"), None);
+        assert_eq!(left("[INFO] [Griefer] Notch left the game"), None);
+        assert_eq!(joined("[Griefer] Notch joined the game"), None);
     }
 
     /// Ignoring colour codes must not become a way to erase the chat author.

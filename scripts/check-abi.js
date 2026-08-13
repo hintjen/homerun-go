@@ -33,6 +33,15 @@ const EXPECTATIONS = [
     ),
     pattern: /EXPECTED_ABI\s*=\s*(\d+)/,
   },
+  {
+    // The third copy, and it rotted exactly as predicted: it sat at 3 while
+    // the ABI reached 7, failing the harness on a line that reads "is the
+    // staged .a stale?" — which it was not. A number nothing checks is a
+    // number that drifts, whether or not it is in shipping code.
+    label: "iOS coretest (main.swift)",
+    file: path.join(ROOT, "ios", "coretest", "main.swift"),
+    pattern: /let expected:\s*UInt32\s*=\s*(\d+)/,
+  },
 ];
 
 const CRATE = path.join(ROOT, "rust", "homerun-pumpkin-ffi", "src", "lib.rs");
