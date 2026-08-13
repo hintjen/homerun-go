@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Merged into the main manifest for debug builds only.
+
+  The one thing it adds is a network security config permitting cleartext to
+  the loopback addresses a developer's machine is reachable at, so a stand-in
+  manifest endpoint can be run locally while the real one is being built. See
+  res/xml/network_security_config.xml — and note that it is scoped to those
+  hosts rather than turning cleartext on wholesale.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application android:networkSecurityConfig="@xml/network_security_config" />
+</manifest>

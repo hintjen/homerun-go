@@ -5,11 +5,13 @@ both stores explicitly permit replacing that at runtime. `plans/ota-updates.md`
 is the design and the policy argument; this file is what exists, how it behaves
 on a device, and how to break it on purpose.
 
-**Built so far: the client half.** A bundle already on disk is activated,
-served, judged, and rolled back if it fails. Nothing downloads one yet — no
-manifest endpoint, no signature check, no updater. That is deliberate: the
-fallback is what stops a bad bundle bricking the app, so it exists before
-anything can deliver one.
+**Built so far: the whole client.** Android checks for a bundle, verifies its
+signature, downloads it, activates it on the next launch, judges it, and rolls
+it back if it fails. What does not exist yet is the *server*: the manifest
+endpoint is stubbed by a script in `scripts/`, and nothing publishes bundles.
+
+The order was deliberate — the fallback is what stops a bad bundle bricking the
+app, so it was built and proven before anything could deliver one.
 
 ## The number that has to move first
 
@@ -54,6 +56,78 @@ channel or a capability", but capabilities are already self-describing —
 `backups: false` truthfully, so a bundle gated on one degrades correctly with no
 revision involved. Channels are the ones with no way to ask.
 
+## Where a bundle comes from
+
+`BundleUpdater` checks at launch and on resume, throttled to once every six
+hours, on `Dispatchers.IO` after the page has been asked to load. It never
+blocks startup and every failure in it is survivable — the worst outcome of the
+whole class never running is an app a few days out of date.
+
+```
+GET {API_URL}/api/mobile/bundle/?platform=android&host=1&app=0.1.0&channel=stable
+Authorization: Bearer <device token>
+```
+
+The **device** token, not the user's: this is a property of the install, matching
+how reporting is signed. `204 No Content` means "nothing for you" — a channel
+with no release, or a rollout this device is not in yet — and is not an error.
+
+The reply is a signed manifest:
+
+```json
+{
+  "bundle":    "2026-08-14.1",
+  "url":       "https://cdn.gethomerun.app/ui/2026-08-14.1.zip",
+  "sha256":    "…",
+  "minHost":   1,
+  "serial":    7,
+  "platform":  "android",
+  "signature": "…"
+}
+```
+
+Two fields are additions to what `plans/ota-updates.md` first sketched, and both
+close a hole rather than add a feature:
+
+- **`serial`** is the ordering, monotonic across releases on a channel. Ids are
+  dates and dates do not order reliably across re-cuts. The client refuses
+  anything whose serial is not **strictly greater** than what it is running,
+  which is what stops a replayed old manifest rolling every device back to a
+  version whose bugs an attacker already knows. The cost is that a deliberate
+  rollback is a *forward* move: re-publish the older content under a higher
+  serial.
+- **`platform`** is signed, so an iOS manifest cannot be replayed at Android.
+
+### The judgement is in Rust
+
+Parsing, signature verification and the compare-against-installed all happen in
+`homerun_core::bundle`, reached through one FFI call — `bundle.evaluate`. Two
+calls would let a host judge a manifest it had not verified, and *that* mistake
+has no symptom: everything keeps working, against any manifest anyone serves.
+There is deliberately no way to obtain the fields of an unverified manifest.
+
+Android also cannot do this itself. `minSdk` is 26 and the platform gained
+Ed25519 at API 33, so verifying in Kotlin would mean bundling a crypto provider
+for seven API levels and then writing it again in Swift.
+
+SHA-256 stays in the host — the archive is streamed and every platform has a
+correct implementation — but the *comparison* is `bundle.digestMatches`, so it
+cannot be written three subtly different ways.
+
+### The key
+
+`BUNDLE_PUBLIC_KEY`, a build config field, 64 hex characters.
+
+**Empty disables updates entirely.** `BundleUpdater` refuses to fetch what it
+cannot verify, which is the only safe reading of "no key configured" — and it is
+the state of every build made before the signing key existed.
+
+`scripts/sign-manifest.js` generates the pair and signs manifests. It is the
+second implementation of the signed payload format, kept in the repo that holds
+the first so a change to one is an obviously incomplete change; a pinned vector
+in `bundle.rs` fails if they ever drift. The private half belongs in the CI
+secret store and nowhere else.
+
 ## On disk
 
 ```
@@ -61,6 +135,7 @@ files/ui/current      the bundle being served
 files/ui/previous     the last one known to have reached __bridge:ready
 files/ui/pending      verified, not yet live
 files/ui/probation    {"bundle":"<id>","attempts":N}
+files/ui/.staging     an archive mid-unpack; never a bundle
 (assets/web/)         the floor — never deleted, never overwritten
 ```
 
@@ -68,8 +143,19 @@ A bundle directory **is** the web root: `index.html` at the top of it, next to a
 `bundle.json`:
 
 ```json
-{ "id": "2026-08-14.1", "minHost": 1 }
+{ "id": "2026-08-14.1", "minHost": 1, "serial": 7 }
 ```
+
+That file is written by `BundleStore` from the **signed** manifest, not taken
+from inside the archive. The archive's own copy would be transitively signed via
+the digest, but two copies of a fact eventually disagree, so only one is
+authoritative. A bundle staged by hand has no serial and gets `0`, which any
+real release outranks.
+
+The unpack refuses entries that resolve outside the staging directory — an entry
+named `../../databases/homerun.db` is a valid zip entry and `File(root, name)`
+resolves it happily. It also caps entry count and expanded size: the digest
+proves an archive is the one that was signed, not that it is well behaved.
 
 Both files are required. A directory with no manifest is not a bundle with an
 unknown name — it is something we did not put there, and serving it would leave
@@ -163,12 +249,63 @@ emulator when it was built:
 
 The second one is the only test that matters. Everything else here is plumbing.
 
+## Driving the updater without a server
+
+`scripts/sign-manifest.js` plus any static file server is enough to exercise the
+whole chain. Debug builds permit cleartext to `10.0.2.2`, `localhost` and
+`127.0.0.1` and nowhere else (`app/src/debug/`), so the stand-in endpoint can be
+plain HTTP — but the **archive URL must be https**, which the core enforces, so
+the zip has to be somewhere real.
+
+```sh
+node scripts/sign-manifest.js keygen            # public half -> the build
+
+zip -r bundle.zip .                              # index.html at the ROOT
+aws s3 cp bundle.zip s3://homerun-ui-bundles/ui/2026-08-14.1.zip \
+  --cache-control "public, max-age=31536000, immutable"
+
+HOMERUN_BUNDLE_KEY=<private> node scripts/sign-manifest.js sign \
+  --archive bundle.zip --bundle 2026-08-14.1 --serial 1 \
+  --url https://cdn.gethomerun.app/ui/2026-08-14.1.zip --out manifest.json
+
+# serve manifest.json at /api/mobile/bundle, then:
+cd android && ./gradlew assembleDebug \
+  -PapiUrl=http://10.0.2.2:8787 -PbundlePublicKey=<public>
+```
+
+`adb logcat -s HomerunUpdate:V HomerunBundle:V` narrates both halves. The
+throttle survives a reinstall, so clear it between runs:
+`adb shell run-as app.gethomerun.mobile.debug rm -f shared_prefs/bundle-updater.xml`.
+
+The four checks worth re-running after touching any of this, all verified on the
+emulator against the real CDN when it was built:
+
+| Manifest | Expected |
+|---|---|
+| Correctly signed, newer serial | fetched, staged, live on the next launch |
+| A signed field edited in transit | `refusing the manifest: the manifest's signature does not match`, nothing fetched |
+| Validly signed, digest of other bytes | downloaded, then `does not match its signed digest; discarding it` |
+| Validly signed, serial ≤ installed | `no update: the offered bundle is serial N, older than the installed N` |
+
+The middle two are the ones that matter. A signature that verifies a manifest
+nobody can tamper with is the only reason it is safe to take an entire user
+interface from a CDN.
+
 ## Still to build
 
-- The manifest endpoint on the API — authenticated, uncached, device-signed.
-- Ed25519 verification of the manifest, and the SHA-256 check on the download.
-- The updater itself: check on launch and resume, throttled, writing `pending`.
-- Uploading bundles to `s3://homerun-ui-bundles/ui/` behind CloudFront, which is
-  provisioned (`plans/ota-updates.md`) but has nothing in it.
-- The iOS half. `AppSchemeHandler.resolve(path:in:)` is the same one-function
-  seam; `BundleStore` is the shape to copy.
+- **The manifest endpoint on the API** — authenticated, uncached, device-signed,
+  answering the request above. Release metadata lives in a Django model so that
+  rollback and rollout are row edits rather than an upload and an invalidation.
+- **The publish workflow** in the UI repo: build, zip, upload with the
+  cache-control header, sign, bump the serial. Note the bucket credential is
+  **append-only** — it has `PutObject` and not `DeleteObject`, confirmed — so a
+  workflow that tries to tidy up after itself will fail.
+- **The update modal.** `update-available`, `quit-and-install` and
+  `wait-for-update-check` are already optional channels in `bridge-v1.json` that
+  neither mobile host answers. Wiring them offers the update sooner, and on
+  mobile "restart" is `installWebView()` — about a second, with the running
+  server surviving it.
+- **The iOS half.** `AppSchemeHandler.resolve(path:in:)` is the same
+  one-function seam; `BundleStore` and `BundleUpdater` are the shapes to copy,
+  and the judgement is already shared. Blocked on iOS Swift never having been
+  compiled.

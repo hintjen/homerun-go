@@ -29,6 +29,15 @@ android {
         buildConfigField("String", "DEVICE_RELEASE_TAG", "\"${prop("deviceReleaseTag", "")}\"")
         buildConfigField("String", "GIT_COMMIT", "\"${prop("gitCommit", "")}\"")
 
+        // The Ed25519 public key that over-the-air bundle manifests are signed
+        // with, 64 hex characters. **Empty disables updates entirely** —
+        // BundleUpdater refuses to fetch what it cannot verify, which is the
+        // only safe reading of "no key configured". The key is public by
+        // nature, so it belongs in the build rather than a secret store; the
+        // private half signs at publish time and never leaves CI.
+        //   ./gradlew assembleRelease -PbundlePublicKey=<64 hex chars>
+        buildConfigField("String", "BUNDLE_PUBLIC_KEY", "\"${prop("bundlePublicKey", "")}\"")
+
         // The staged Java runtime is architecture-specific and ~165 MB, so a
         // build ships exactly one ABI — the same choice Anvil-MC makes. Pass
         // the ABI that `npm run jre:*` staged:

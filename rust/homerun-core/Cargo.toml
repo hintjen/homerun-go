@@ -20,6 +20,16 @@ crate-type = ["rlib", "staticlib", "cdylib"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The one exception to "serde and nothing else", argued at length in
+# `bundle.rs`: an over-the-air bundle replaces the entire UI, so the signature
+# on its manifest is the only thing standing between a compromised CDN and a
+# compromised app. `md5.rs` exists to avoid a dependency for a hash nothing
+# trusts; that reasoning inverts for signature verification, where a
+# hand-rolled implementation still accepts every honest signature while
+# quietly accepting forged ones as well. Verification needs no RNG, so this
+# pulls in no `getrandom` and nothing platform-specific.
+ed25519-dalek = "2"
+
 [profile.release]
 opt-level = "z"
 lto = true

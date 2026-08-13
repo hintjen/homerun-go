@@ -457,6 +457,11 @@ class MainActivity : ComponentActivity() {
 
         installWebView()
 
+        // After the page has been asked to load, never before. This is seconds
+        // of network and disk for something that takes effect on the *next*
+        // launch, so there is nothing to gain by making the user wait on it.
+        BundleUpdater.check(this, lifecycleScope)
+
         ServerHost.addListener(hostingListener)
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
@@ -553,6 +558,10 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         router.resyncServerState()
+        // The other half of "launch and resume". A phone that is never closed
+        // would otherwise check once and stay on that bundle for weeks; the
+        // throttle inside means most resumes cost nothing.
+        BundleUpdater.check(this, lifecycleScope)
     }
 
     private fun askForNotifications() {

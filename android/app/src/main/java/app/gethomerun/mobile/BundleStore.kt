@@ -4,11 +4,14 @@ import android.content.Context
 import android.util.Log
 import java.io.File
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 /**
@@ -63,6 +66,17 @@ object BundleStore {
         val id: String,
         /** The directory to serve, or null to serve `assets/web/`. */
         val root: File?,
+        /**
+         * The release ordering this bundle came from; `0` for the shipped copy,
+         * which every real release outranks.
+         *
+         * Separate from [id] because ids are dates and dates do not order
+         * reliably across channels or re-cuts. `homerun_core::bundle` refuses
+         * anything whose serial is not strictly greater than this, which is
+         * what stops a replayed old manifest from rolling every device back to
+         * a version whose bugs an attacker already knows.
+         */
+        val serial: Long = 0,
     )
 
     /**
@@ -90,6 +104,16 @@ object BundleStore {
     private const val PROBATION = "probation"
     private const val MANIFEST = "bundle.json"
 
+    /**
+     * Where [BundleUpdater] unpacks an archive before it is a bundle.
+     *
+     * Inside `ui/` rather than the cache directory so the final step is a
+     * rename within one filesystem — the atomic move that means `pending` never
+     * names a half-unpacked tree. The leading dot keeps it out of the way of
+     * the three real names.
+     */
+    private const val STAGING = ".staging"
+
     private const val TAG = "HomerunBundle"
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -104,6 +128,29 @@ object BundleStore {
 
     /** What is being served. [SHIPPED] until [resolve] has run. */
     fun active(): String = loaded?.id ?: SHIPPED
+
+    /**
+     * What the update check tells `homerun_core::bundle` about this device.
+     *
+     * Built from what [resolve] settled on rather than re-read from disk, so it
+     * describes the bundle actually running — which is the one whose serial a
+     * newer release has to beat.
+     */
+    fun installed(): JsonObject {
+        val live = loaded
+        return buildJsonObject {
+            // Null, not "shipped": core distinguishes "no over-the-air bundle"
+            // from "a bundle called shipped", and only the former may be
+            // replaced by serial 1.
+            if (live != null && live.root != null) put("bundle", live.id) else put("bundle", JsonNull)
+            put("serial", live?.serial ?: 0L)
+            put("hostRevision", BridgeRouter.HOST_REVISION)
+            put("platform", PLATFORM)
+        }
+    }
+
+    /** The `platform` a manifest must name to be for this host. */
+    const val PLATFORM = "android"
 
     // -----------------------------------------------------------------------
     // Promotion
@@ -153,6 +200,74 @@ object BundleStore {
     }
 
     // -----------------------------------------------------------------------
+    // Staging — what [BundleUpdater] hands back
+    // -----------------------------------------------------------------------
+
+    /**
+     * An empty directory to unpack an archive into.
+     *
+     * Cleared each time. A leftover tree from an interrupted download would
+     * otherwise be unpacked *over*, mixing two bundles' files — the exact
+     * failure the whole four-directory layout exists to prevent.
+     */
+    @Synchronized
+    fun stagingDir(context: Context): File {
+        val staging = File(uiDir(context), STAGING)
+        staging.deleteRecursively()
+        staging.mkdirs()
+        return staging
+    }
+
+    /**
+     * Make an unpacked tree the pending bundle. Returns false if it could not.
+     *
+     * The manifest is written **here**, from the signed values the update check
+     * verified, rather than trusted from inside the archive. The archive's own
+     * `bundle.json` is covered by the signed digest and so is not untrusted
+     * exactly — but it is a second copy of facts that already have an
+     * authority, and two copies of a fact eventually disagree. This one wins.
+     */
+    @Synchronized
+    fun stage(context: Context, unpacked: File, id: String, minHost: Int, serial: Long): Boolean {
+        if (!File(unpacked, "index.html").isFile) {
+            // The same completeness marker `scripts/build-ui.js` uses. An
+            // archive without one is not a UI, and staging it would trade a
+            // working app for a blank screen on the next launch.
+            Log.e(TAG, "the unpacked bundle $id has no index.html; discarding it")
+            unpacked.deleteRecursively()
+            return false
+        }
+
+        val record = buildJsonObject {
+            put("id", id)
+            put("minHost", minHost)
+            put("serial", serial)
+        }
+        val written = runCatching { File(unpacked, MANIFEST).writeText(record.toString()) }
+        if (written.isFailure) {
+            Log.e(TAG, "could not write the manifest for $id: ${written.exceptionOrNull()?.message}")
+            unpacked.deleteRecursively()
+            return false
+        }
+
+        val pending = File(uiDir(context), PENDING)
+        pending.deleteRecursively()
+        if (!unpacked.renameTo(pending)) {
+            // Same directory, same filesystem — this should not happen, and if
+            // it does the half-state is one `activate` already copes with.
+            Log.e(TAG, "could not stage bundle $id as pending")
+            unpacked.deleteRecursively()
+            return false
+        }
+        Log.i(TAG, "bundle $id is staged; it goes live on the next launch")
+        return true
+    }
+
+    /** The id already waiting to go live, if any. Keeps the updater from refetching it. */
+    @Synchronized
+    fun pending(context: Context): String? = readManifest(File(uiDir(context), PENDING))?.id
+
+    // -----------------------------------------------------------------------
     // Resolution
     // -----------------------------------------------------------------------
 
@@ -200,7 +315,7 @@ object BundleStore {
                 Log.i(TAG, "serving bundle ${bundle.id}")
             }
 
-            return Loaded(bundle.id, dir).also { loaded = it }
+            return Loaded(bundle.id, dir, bundle.serial).also { loaded = it }
         }
 
         return floor(ui)
@@ -255,7 +370,7 @@ object BundleStore {
     private fun uiDir(context: Context): File =
         File(context.filesDir, UI).apply { mkdirs() }
 
-    private data class Manifest(val id: String, val minHost: Int)
+    private data class Manifest(val id: String, val minHost: Int, val serial: Long)
 
     /**
      * Read a bundle directory's identity, or null if it is not one we may serve.
@@ -287,7 +402,11 @@ object BundleStore {
             )
             return null
         }
-        return Manifest(id, minHost)
+        // Absent means a bundle staged by hand — `docs/ota-bundles.md` — which
+        // is worth keeping working. Serial 0 makes it replaceable by any real
+        // release, which is the right answer for something pushed over adb.
+        val serial = parsed["serial"]?.jsonPrimitive?.longOrNull ?: 0L
+        return Manifest(id, minHost, serial)
     }
 
     /** Attempts remaining for [id], or null if it is not on probation. */

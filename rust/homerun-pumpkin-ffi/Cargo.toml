@@ -240,3 +240,10 @@ opt-level = 3
 [[example]]
 name = "boot_engine"
 required-features = ["pumpkin-engine"]
+
+[dev-dependencies]
+# Tests only, and only to *sign* — the crate under test does the verifying.
+# Pinning a pre-signed manifest as a constant instead would hide any change to
+# the signed payload behind a hex blob nobody can diff. Already in the tree via
+# homerun-core, so this adds nothing to what ships.
+ed25519-dalek = "2"

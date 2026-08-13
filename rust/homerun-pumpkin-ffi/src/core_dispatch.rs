@@ -38,7 +38,7 @@ use homerun_core::game::Game as _;
 use homerun_core::minecraft::{self, jar, jvm, ops, settings};
 use homerun_core::reporting::{crash, minigame, stats};
 use homerun_core::{
-    backup, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
+    backup, bundle, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
 };
 
 /// Dispatch one call and render the reply envelope.
@@ -564,6 +564,38 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 device_ws::tunnel_config(link, https, port("httpTarget")).render(),
             ))
         }
+
+        // --- over-the-air UI bundles ---------------------------------------
+        //
+        // Verifying and judging are **one call** on purpose. Two calls would
+        // let a host judge a manifest it had not verified, and that mistake
+        // has no symptom: everything keeps working, against any manifest
+        // anyone serves. `bundle::verify` is the only way to obtain a
+        // `Manifest`, and this is the only way to reach it.
+        "bundle.evaluate" => {
+            let installed: bundle::Installed =
+                serde_json::from_value(field("installed")?.clone())
+                    .map_err(|e| format!("bad installed record: {e}"))?;
+            let manifest = bundle::verify(&text("manifest")?, &text("publicKey")?)
+                .map_err(|e| e.to_string())?;
+            let verdict = bundle::judge(&manifest, &installed);
+            Ok(json!({
+                "manifest": serde_json::to_value(&manifest).map_err(|e| e.to_string())?,
+                "verdict": serde_json::to_value(&verdict).map_err(|e| e.to_string())?,
+                // Rendered here rather than in each host, so the sentence in
+                // an Android log and an iOS log is the same sentence.
+                "reason": verdict.reason(),
+                "install": verdict.should_install(),
+            }))
+        }
+
+        // The host hashes the archive it downloaded — see the module docs in
+        // `homerun_core::bundle` for why that is not done here — and this says
+        // whether it is the digest that was signed.
+        "bundle.digestMatches" => Ok(Value::Bool(bundle::digest_matches(
+            &text("expected")?,
+            &text("actual")?,
+        ))),
 
         // --- lifecycle ----------------------------------------------------
         "state.exit" => {
@@ -1316,6 +1348,108 @@ mod tests {
     #[test]
     fn an_unknown_backup_operation_is_refused() {
         assert!(err("backup.stateReport", json!({ "operation": "sync" })).contains("sync"));
+    }
+
+    // --- over-the-air UI bundles ------------------------------------------
+
+    /// Sign a manifest the way the publish workflow will, so these tests
+    /// exercise the real payload rather than a fixture that would keep
+    /// passing after the signed bytes changed.
+    fn signed_manifest(mutate: impl FnOnce(&mut Value)) -> (String, String) {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+
+        let mut manifest = json!({
+            "bundle": "2026-08-14.1",
+            "url": "https://cdn.gethomerun.app/ui/2026-08-14.1.zip",
+            "sha256": "b".repeat(64),
+            "minHost": 1,
+            "serial": 5,
+            "platform": "android",
+        });
+        mutate(&mut manifest);
+
+        // Must match `Manifest::signing_payload` exactly. Building it here by
+        // hand rather than importing the helper is deliberate: if the two ever
+        // disagree, this is the test that says so.
+        let field = |name: &str| manifest[name].as_str().unwrap_or_default().to_string();
+        let number = |name: &str| manifest[name].as_u64().unwrap_or_default().to_string();
+        let payload = format!(
+            "homerun-bundle-v1\n{}\n{}\n{}\n{}\n{}\n{}\n",
+            field("bundle"),
+            field("url"),
+            field("sha256"),
+            number("minHost"),
+            number("serial"),
+            field("platform"),
+        );
+
+        manifest["signature"] = json!(hex(&key.sign(payload.as_bytes()).to_bytes()));
+        (
+            manifest.to_string(),
+            hex(key.verifying_key().as_bytes()),
+        )
+    }
+
+    fn installed() -> Value {
+        json!({ "bundle": null, "serial": 0, "hostRevision": 1, "platform": "android" })
+    }
+
+    #[test]
+    fn a_signed_manifest_crosses_the_boundary_and_says_install() {
+        let (manifest, public_key) = signed_manifest(|_| {});
+        let reply = ok(
+            "bundle.evaluate",
+            json!({ "manifest": manifest, "publicKey": public_key, "installed": installed() }),
+        );
+        assert_eq!(reply["install"], true);
+        assert_eq!(reply["verdict"]["verdict"], "install");
+        assert_eq!(reply["manifest"]["bundle"], "2026-08-14.1");
+        assert_eq!(
+            reply["manifest"]["url"],
+            "https://cdn.gethomerun.app/ui/2026-08-14.1.zip"
+        );
+    }
+
+    /// The reason a host must never be handed a parsed manifest it has not
+    /// verified: this reply is the *only* place it can get one.
+    #[test]
+    fn a_forged_manifest_yields_no_manifest_at_all() {
+        let (manifest, public_key) = signed_manifest(|_| {});
+        let forged = manifest.replace("2026-08-14.1.zip", "2026-08-14.9.zip");
+        let message = err(
+            "bundle.evaluate",
+            json!({ "manifest": forged, "publicKey": public_key, "installed": installed() }),
+        );
+        assert!(message.contains("signature"), "{message}");
+    }
+
+    /// A declined bundle is not an error — the host logs the reason and waits.
+    #[test]
+    fn a_bundle_this_host_cannot_run_is_declined_with_a_sentence() {
+        let (manifest, public_key) = signed_manifest(|m| m["minHost"] = json!(9));
+        let reply = ok(
+            "bundle.evaluate",
+            json!({ "manifest": manifest, "publicKey": public_key, "installed": installed() }),
+        );
+        assert_eq!(reply["install"], false);
+        assert_eq!(reply["verdict"]["verdict"], "tooNew");
+        let reason = reply["reason"].as_str().unwrap();
+        assert!(reason.contains('9') && reason.contains('1'), "{reason}");
+    }
+
+    #[test]
+    fn digests_are_compared_in_one_place() {
+        let matches = |expected: &str, actual: &str| {
+            ok(
+                "bundle.digestMatches",
+                json!({ "expected": expected, "actual": actual }),
+            )
+        };
+        assert_eq!(matches(&"a".repeat(64), &"A".repeat(64)), json!(true));
+        assert_eq!(matches(&"a".repeat(64), &"c".repeat(64)), json!(false));
     }
 
     // --- lifecycle --------------------------------------------------------

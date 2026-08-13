@@ -1175,4 +1175,60 @@ object Core {
             put("serverId", serverId)
             put("line", line)
         }))
+
+    // -----------------------------------------------------------------------
+    // Over-the-air UI bundles
+    // -----------------------------------------------------------------------
+
+    /** A manifest whose signature verified, and what to do about it. */
+    data class Offer(
+        /** True only when this bundle should be fetched. */
+        val install: Boolean,
+        /** One sentence for the log, worded once in Rust so both hosts say it the same way. */
+        val reason: String,
+        val bundle: String,
+        val url: String,
+        val sha256: String,
+        val minHost: Int,
+        val serial: Long,
+    )
+
+    /**
+     * Verify a manifest's signature and judge it against what is installed.
+     *
+     * One call rather than two, and that is load-bearing: there is no way to
+     * get the fields of a manifest whose signature has not been checked. A host
+     * that could do that would keep working perfectly against any manifest
+     * anyone served it — a bug with no symptom until it is an incident.
+     *
+     * @throws CoreException if the signature does not verify or the manifest is
+     *   malformed. Both mean the same thing to the caller: fetch nothing.
+     */
+    fun evaluateBundle(manifestJson: String, publicKey: String, installed: JsonObject): Offer {
+        val reply = call("bundle.evaluate", buildJsonObject {
+            put("manifest", manifestJson)
+            put("publicKey", publicKey)
+            put("installed", installed)
+        }).jsonObject
+        val manifest = reply["manifest"]?.jsonObject
+            ?: throw CoreException("The core verified a manifest but returned none.")
+        fun required(name: String): String = manifest[name]?.jsonPrimitive?.contentOrNull
+            ?: throw CoreException("The verified manifest has no $name.")
+        return Offer(
+            install = reply["install"]?.jsonPrimitive?.boolean ?: false,
+            reason = reply["reason"]?.jsonPrimitive?.contentOrNull ?: "no reason given",
+            bundle = required("bundle"),
+            url = required("url"),
+            sha256 = required("sha256"),
+            minHost = manifest["minHost"]?.jsonPrimitive?.intOrNull ?: 0,
+            serial = manifest["serial"]?.jsonPrimitive?.longOrNull ?: 0L,
+        )
+    }
+
+    /** Whether a digest this host computed is the one that was signed. */
+    fun digestMatches(expected: String, actual: String): Boolean =
+        call("bundle.digestMatches", buildJsonObject {
+            put("expected", expected)
+            put("actual", actual)
+        }).jsonPrimitive.boolean
 }
