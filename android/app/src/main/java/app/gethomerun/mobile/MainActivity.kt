@@ -671,6 +671,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         ServerHost.removeListener(hostingListener)
+        // The router is built in `onCreate` and subscribes to `ServerHost`,
+        // which outlives every activity — so it has to be let go here for the
+        // same reason the listener above does. Missing this left one abandoned
+        // router per recreation, each still reporting server state to the API.
+        // Guarded because `onCreate` can throw before the assignment, and an
+        // UninitializedPropertyAccessException here would bury whatever did it.
+        if (::router.isInitialized) router.dispose()
         webView?.let {
             container.removeView(it)
             it.destroy()

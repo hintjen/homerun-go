@@ -511,6 +511,28 @@ class BridgeRouter(
         }
     }
 
+    /**
+     * The router itself is finished — the activity that owns it is being
+     * destroyed.
+     *
+     * Not the same as [onPageGone], which is a page ending inside a router that
+     * lives on. This is the router ending, and the reason it must exist is that
+     * [hostListener] is registered against [ServerHost], which is scoped to the
+     * *process*: a router is built in every `onCreate`, so without this a
+     * recreated activity — a low-memory kill, "Don't keep activities", a locale
+     * or theme change, a fold — leaves the previous router subscribed forever,
+     * holding a WebView that is already destroyed.
+     *
+     * The visible cost is not the memory. `onStateChanged` calls
+     * [DeviceRegistry.reportServerState], so N abandoned routers send N
+     * identical state POSTs per transition, and the API sees one device
+     * reporting the same server over and over.
+     */
+    fun dispose() {
+        ServerHost.removeListener(hostListener)
+        onPageGone()
+    }
+
     // ---------------------------------------------------------------------
     // Dispatch table
     // ---------------------------------------------------------------------
