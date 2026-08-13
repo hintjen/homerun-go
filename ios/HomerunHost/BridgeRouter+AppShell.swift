@@ -23,6 +23,39 @@ extension BridgeRouter {
         Locale.preferredLanguages.first ?? "en"
     }
 
+    /// Which colour scheme the page settled on, `light` or `dark`.
+    ///
+    /// **The web layer cannot set the status bar itself.** In a WKWebView the
+    /// clock and battery are drawn by the view controller, so the page has to
+    /// say and the host has to act.
+    ///
+    /// Not derivable from the device: the UI's theme setting defaults to
+    /// `system` but a player can pin it, and then the page and the phone
+    /// disagree.
+    func setAppearance(_ params: Any?) async throws -> Any? {
+        guard let value = params as? String, let theme = PageTheme(rawValue: value) else {
+            // A send has nobody to answer, so an unreadable one is only worth a
+            // line — the status bar keeps whatever it last knew.
+            HostLog.bridge.error("set-appearance sent something other than light or dark")
+            return nil
+        }
+        events?.appearanceChanged(theme)
+        return nil
+    }
+
+    /// The web splash has painted.
+    ///
+    /// Nothing to do on this platform, and that is worth stating rather than
+    /// leaving as a silent stub: iOS tears its own launch screen down as soon
+    /// as the app draws its first frame, so by the time this arrives the thing
+    /// it asks to hide is already gone. Answering it is still not optional —
+    /// an unimplemented channel is a channel the next contract sync reports as
+    /// missing, and the host that ignores it is the one that hangs when the
+    /// kind changes from a send to an invoke.
+    func splashShown(_ params: Any?) async throws -> Any? {
+        nil
+    }
+
     func setPosthogDistinctID(_ params: Any?) async throws -> Any? {
         HostStore.posthogDistinctID = params as? String
         return nil

@@ -253,6 +253,26 @@ does not survive a restart, or before adding anything else the API is told.
 
 ---
 
+### 📡 [iOS reporting](./ios-reporting.md)
+
+The same subsystem on the other host, written as the delta: three deliberate
+differences, and what a linked engine changes about asking a server anything.
+
+**Contains**:
+- Why there is no console tail here, when Android needs one
+- Why the cadence is a timer, and why suspension needs no teardown at all
+- Feeding a second subscriber when the backend offers one closure per event
+- What Pumpkin actually prints for `list uuids` and `time query gametime`, and
+  why the roster was silently empty on every report
+- Why `loader` must never be `paper` on this host
+- Triage: what each null field means when the engine, not a console, answered
+
+**Read this for**: An empty Insights graph on iOS, a null `age` or `players`,
+an `/op` that does not survive a restart, or before trusting a report this host
+sent.
+
+---
+
 ### 📦 [Over-the-air UI bundles](./ota-bundles.md)
 
 Replacing the shared web bundle without a store release: which one is served,

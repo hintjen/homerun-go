@@ -94,15 +94,21 @@ fn stats_poll(args: &str) -> Result<Value, String> {
 
     let host = crate::server::host();
 
+    // A linked engine holds the player list already, so asking the console for
+    // it would be a slower way to get a worse answer — and on Pumpkin, an
+    // empty one. Only an engine that cannot name identities falls through to
+    // the round trip below; see `Engine::roster_is_authoritative`.
+    //
     // Pinned, because a Bukkit-family plugin shadowing `/list` or `/time` is
     // the ordinary reason these come back unreadable.
-    let roster = host
-        .ask(
+    let roster = host.reportable_roster().or_else(|| {
+        host.ask(
             crate::server::Ask::Roster,
             &stats::pinned(stats::LIST_UUIDS, loader),
             timeout,
         )
-        .and_then(|reply| stats::parse_list_uuids(&reply));
+        .and_then(|reply| stats::parse_list_uuids(&reply))
+    });
 
     let age = host
         .ask(

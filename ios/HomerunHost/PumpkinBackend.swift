@@ -85,6 +85,20 @@ final class PumpkinBackend: ServerBackend {
     ///
     /// The first note of a launch also clears the previous run's console. That
     /// rule is the core's, so nothing here has to sequence it.
+    /// Put a line of Homerun's *own* into a server's console — what the app
+    /// worked out and the server did not say — on the stream the player is
+    /// already looking at.
+    ///
+    /// Badged unless it arrives badged. Some messages come from `homerun-core`
+    /// with the prefix already written in, because the desktop puts those
+    /// straight into its log; adding a second produced
+    /// `[Homerun] [Homerun] Operator change saved…` in front of a player on
+    /// Android.
+    func note(serverId: String, line: String) {
+        let badge = "[Homerun] "
+        note(serverId, line.hasPrefix(badge) ? line : badge + line)
+    }
+
     private func note(_ serverId: String, _ line: String) {
         HomerunFFI.note(line)
         // Only while nothing else will. Once the pump is up it re-emits

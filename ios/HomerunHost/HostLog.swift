@@ -21,5 +21,6 @@ enum HostLog {
     static let bridge = Logger(subsystem: subsystem, category: "bridge")
     static let device = Logger(subsystem: subsystem, category: "device")
     static let tunnel = Logger(subsystem: subsystem, category: "tunnel")
+    static let reporting = Logger(subsystem: subsystem, category: "reporting")
     static let keychain = Logger(subsystem: subsystem, category: "keychain")
 }

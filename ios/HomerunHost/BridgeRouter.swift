@@ -21,6 +21,14 @@ struct BridgeError: LocalizedError {
 @MainActor
 protocol BridgeEventSink: AnyObject {
     func emit(_ event: String, _ args: [Any])
+
+    /// The page said which colour scheme it is showing (`set-appearance`).
+    ///
+    /// Not an event — it travels the other way — but it belongs on the same
+    /// object for the same reason: the router answers channels and does not
+    /// own a view, and the controller that owns the WebView is the one thing
+    /// standing between it and the status bar.
+    func appearanceChanged(_ theme: PageTheme)
 }
 
 /// Maps a `bridge/v1` channel to the code that answers it.
@@ -53,7 +61,7 @@ final class BridgeRouter {
     /// So: bump this whenever the table below gains a channel, and add the
     /// matching ledger entry. `scripts/check-host-revision.js` compares the two
     /// and fails the build if you do one without the other.
-    static let hostRevision = 1
+    static let hostRevision = 2
 
     private(set) var handlers: [String: Handler] = [:]
 
@@ -90,6 +98,8 @@ final class BridgeRouter {
             "get-initial-config": getInitialConfig,
             "get-app-version": getAppVersion,
             "get-system-language": getSystemLanguage,
+            "set-appearance": setAppearance,
+            "splash-shown": splashShown,
             "set-posthog-distinct-id": setPosthogDistinctID,
             "cache-client-nonce": cacheClientNonce,
             "clipboard-write-text": clipboardWriteText,

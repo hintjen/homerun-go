@@ -132,6 +132,33 @@ The cost: a player who runs `/list` in the same moment loses their own reply to
 the poll. That is the trade for not showing everybody two machine-generated
 lines every two minutes.
 
+### The roster does not come from the console when it does not have to
+
+All of the above is what a **child process** requires: a JVM behind a pipe can
+be asked things only by typing at it. A *linked* engine is not that — it holds
+the player list in memory — so `Engine::roster_is_authoritative` says which
+kind this is, and `stats_poll` asks the engine directly when it can:
+
+| Engine | Roster from | Why |
+|---|---|---|
+| `ProcessEngine` (the JVM) | `list uuids`, parsed | its own roster is names tracked from console lines, with no UUIDs, and a UUID is what makes a player a player downstream |
+| `PumpkinEngine` (linked) | `Engine::players()` | exact, instant, no timeout, and nothing can shadow or reformat it |
+
+This is not only an optimisation, and Android's JVM path is unaffected by it —
+but Android's Pumpkin backend inherits the correctness. Pumpkin's console
+renders each player through a translation key its own table cannot find, so the
+reply names every player as the literal string
+`minecraft:commands.list.nameandid`. The header still parses, so the count was
+right, the line was still withheld as a recognised reply, and `players` was
+empty on every report. Nothing about that failure was visible from either end,
+which is the argument for not going through a console at all when the answer is
+already in hand.
+
+`time query gametime` has the same cause and no such escape — the world's age
+is not on the `Engine` trait — so it stays a console round trip, and the core
+learned Pumpkin's wording for the reply instead (`Gametime is 12345`, from the
+Bedrock translation key). See `parse_server_age`.
+
 ### CPU is rescaled, and this is the easiest thing to get wrong
 
 `backend.cpuUsage()` is percent **of one core** and legitimately exceeds 100.

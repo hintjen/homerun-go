@@ -61,7 +61,6 @@ final class BridgeController: NSObject, BridgeEventSink {
         config.setURLSchemeHandler(AppSchemeHandler(), forURLScheme: AppSchemeHandler.scheme)
         config.userContentController.addUserScript(Capabilities.userScript())
         config.userContentController.addUserScript(Self.errorHookScript())
-        config.userContentController.addUserScript(Self.themeWatcherScript())
         #if DEBUG
             config.userContentController.addUserScript(Self.networkErrorHookScript())
         #endif
@@ -87,7 +86,16 @@ final class BridgeController: NSObject, BridgeEventSink {
         // `backupInProgress` is deliberately dropped: it is an API concern, and
         // the contract's payload is `{serverId, state}`. Inventing a field here
         // would be a channel the UI repo never agreed to.
+        //
+        // These two also feed `Reporting`, which is why they forward rather
+        // than only emitting. The backend offers one closure per event, not a
+        // listener list the way Android's `ServerHost` does, and this is the
+        // one place that owns them — so a second subscriber joins here. Both
+        // sides are main-actor, so the call costs nothing, and reporting is
+        // told *after* the page is, because the page is what the player is
+        // looking at.
         backend.onStateChanged = { [weak self] serverId, state, _ in
+            defer { Reporting.onStateChanged(serverId: serverId, state: state) }
             guard let wire = ["running", "stopped", "crashed"].first(where: { $0 == state.rawValue })
             else { return }
             self?.emit("native-server-state-changed", [["serverId": serverId, "state": wire]])
@@ -95,6 +103,7 @@ final class BridgeController: NSObject, BridgeEventSink {
 
         backend.onLog = { [weak self] serverId, line in
             self?.emit("native-server-log", [["serverId": serverId, "line": line]])
+            Reporting.onLog(serverId: serverId, line: line)
         }
 
         backend.onPlayersChanged = { [weak self] serverId in
@@ -211,12 +220,6 @@ extension BridgeController: WKScriptMessageHandler {
             return
         }
 
-        if incoming.method == "__host:theme" {
-            let details = incoming.params as? [String: Any] ?? [:]
-            setPageTheme((details["theme"] as? String).flatMap(PageTheme.init(rawValue:)))
-            return
-        }
-
         if incoming.method == "__host:netError" {
             let details = incoming.params as? [String: Any] ?? [:]
             let method = details["method"] as? String ?? "?"
@@ -305,6 +308,17 @@ extension BridgeController: WKScriptMessageHandler {
         emit("get-api-url", [])
     }
 
+    /// `set-appearance`, from the router.
+    ///
+    /// The page is the only thing that knows: its theme setting defaults to
+    /// `system` but a player can pin it, and then the page and the phone
+    /// disagree. This host used to infer it from a document-start script that
+    /// watched the class next-themes puts on `<html>` — the channel replaced
+    /// that, and the script went with it. One answer, from the contract.
+    func appearanceChanged(_ theme: PageTheme) {
+        setPageTheme(theme)
+    }
+
     private func setPageTheme(_ theme: PageTheme?) {
         guard theme != pageTheme else { return }
         pageTheme = theme
@@ -337,53 +351,6 @@ extension BridgeController: WKScriptMessageHandler {
                 params: { message: 'Unhandled rejection: ' + String(e.reason), source: '', line: 0 }
               });
             });
-            """
-        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-    }
-
-    /// Reports which colour scheme the page has settled on, so the host can
-    /// colour the status bar to match.
-    ///
-    /// The UI is next-themes with `attribute="class"`: it puts `light` or
-    /// `dark` on `<html>`, from localStorage when the player has chosen one and
-    /// from the media query when they have left it on `system`. Reading the
-    /// class rather than the trait collection is the whole point — a pinned
-    /// theme diverges from the device, and the status bar has to follow what is
-    /// actually on screen.
-    ///
-    /// Injected at document start, so the observer is watching before the
-    /// theme script runs; the media-query listener covers the player changing
-    /// the device's appearance while a `system` page is open.
-    private static func themeWatcherScript() -> WKUserScript {
-        let source = """
-            (function () {
-              var root = document.documentElement;
-              var query = window.matchMedia('(prefers-color-scheme: dark)');
-              var last = null;
-
-              function resolved() {
-                if (root.classList.contains('dark')) return 'dark';
-                if (root.classList.contains('light')) return 'light';
-                return query.matches ? 'dark' : 'light';
-              }
-
-              function report() {
-                var theme = resolved();
-                if (theme === last) return;
-                last = theme;
-                try {
-                  window.webkit.messageHandlers.homerun.postMessage({
-                    v: 1, method: '__host:theme', params: { theme: theme }
-                  });
-                } catch (e) {}
-              }
-
-              new MutationObserver(report).observe(root, {
-                attributes: true, attributeFilter: ['class']
-              });
-              query.addEventListener('change', report);
-              report();
-            })();
             """
         return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
