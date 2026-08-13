@@ -348,6 +348,12 @@ Three things about it worth not undoing:
 - **It refuses to overwrite an existing archive**, checked through the CDN
   because the upload credential is `PutObject`-only and cannot list the bucket.
 
+Stage publishes under `ui/stage/`, prod under `ui/`. There is one bucket and one
+CloudFront, but stage and prod are separate databases with independent serials —
+so both count from 1 and would otherwise want the same key on the same day. The
+prefix is what stops one target overwriting bytes the other's signed manifest
+already names.
+
 It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
 `sign-manifest.js keygen`), the AWS upload credential as repository secrets
 *here*, and the API branch deployed.
