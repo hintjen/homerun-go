@@ -35,7 +35,7 @@
 use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
-use homerun_core::minecraft::{self, jar, jvm, ops, settings};
+use homerun_core::minecraft::{self, hosting, jar, jvm, ops, settings};
 use homerun_core::reporting::{crash, minigame, stats};
 use homerun_core::{
     backup, bundle, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
@@ -354,6 +354,27 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
 
         "minecraft.jvm.limits" => {
             serde_json::to_value(jvm::Limits::default()).map_err(|e| e.to_string())
+        }
+
+        // Can this host run this server at all? Answered before a launch is
+        // planned, because the expensive half of a launch — fetching and
+        // unpacking a modpack — happens before the engine would have a chance
+        // to object, and a linked engine never objects at all: it starts
+        // vanilla and looks like it worked.
+        //
+        // `host` is absent-means-conservative on purpose (see `hosting::Host`),
+        // so a host that has not been taught this yet refuses rather than
+        // launches. `server` is required: guessing it would defeat the point.
+        "minecraft.hosting.refuse" => {
+            let host: hosting::Host = match args.get("host") {
+                Some(v) if !v.is_null() => {
+                    serde_json::from_value(v.clone()).map_err(|e| format!("bad host: {e}"))?
+                }
+                _ => hosting::Host::default(),
+            };
+            let server: hosting::Server = serde_json::from_value(field("server")?.clone())
+                .map_err(|e| format!("bad server: {e}"))?;
+            serde_json::to_value(hosting::refuse(host, &server)).map_err(|e| e.to_string())
         }
 
         // One wording per refusal, so two apps turning down the same thing say
@@ -1622,6 +1643,45 @@ mod tests {
             &json!({ "kind": "nope" }).to_string()
         )
         .contains("\"ok\":false"));
+    }
+
+    /// What a host asks before it starts fetching a modpack it cannot run.
+    #[test]
+    fn a_host_can_ask_whether_it_may_host_a_server() {
+        let ios = json!({ "engine": "linked", "bedrock": false });
+        let android = json!({ "engine": "spawned", "bedrock": false });
+
+        // Null is "go ahead" on the wire, so a host branches on presence.
+        let fine = ok(
+            "minecraft.hosting.refuse",
+            json!({ "host": ios, "server": { "gameType": "native", "env": {} } }),
+        );
+        assert!(fine.is_null(), "vanilla java on a linked engine is fine: {fine}");
+
+        let modded = ok(
+            "minecraft.hosting.refuse",
+            json!({ "host": ios, "server": { "gameType": "native", "env": { "TYPE": "FORGE" } } }),
+        );
+        assert_eq!(modded["code"], "mods-unsupported");
+        assert!(modded["message"].as_str().unwrap().contains("mods or plugins"));
+
+        // The same server, on the host that ships a JVM.
+        let allowed = ok(
+            "minecraft.hosting.refuse",
+            json!({ "host": android, "server": { "gameType": "native", "env": { "TYPE": "FORGE" } } }),
+        );
+        assert!(allowed.is_null(), "android runs mods: {allowed}");
+
+        // An omitted host refuses rather than launching something it may not
+        // be able to honour.
+        let cautious = ok(
+            "minecraft.hosting.refuse",
+            json!({ "server": { "gameType": "native", "env": { "TYPE": "PAPER" } } }),
+        );
+        assert_eq!(cautious["code"], "mods-unsupported");
+
+        // The server is required — guessing it would defeat the check.
+        assert!(err("minecraft.hosting.refuse", json!({ "host": ios })).contains("server"));
     }
 
     /// The loop a host implements, on the wire: ask, read, record, read back.

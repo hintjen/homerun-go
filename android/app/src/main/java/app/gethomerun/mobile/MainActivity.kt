@@ -95,6 +95,58 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Back, while the page has somewhere to go back *to* — and only while.
+     *
+     * An always-enabled callback is the trap, and it hides well: androidx routes
+     * it to an `OnBackInvokedCallback` under the manifest's
+     * `enableOnBackInvokedCallback`, so back keeps working and nothing looks
+     * wrong. But an enabled callback is this app promising the system it will
+     * handle the gesture, so the system cannot render the predictive
+     * back-to-home animation — the player holds the swipe and sees nothing move
+     * behind the app. The `finish()` this used to call at the root of the
+     * history skipped the exit transition for the same reason. Disabled, the
+     * dispatcher falls through to the platform and both come back. It is the
+     * default from targetSdk 36, which Play requires by 31 Aug 2026.
+     *
+     * Registered against the *activity*, not a WebView: the render process can
+     * die and be rebuilt underneath this ([installWebView]), and the enabled
+     * state has to be re-answered when it is — see [syncBackCallback].
+     */
+    private val backToPreviousPage = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            val view = webView
+            if (view != null && view.canGoBack()) {
+                view.goBack()
+                return
+            }
+            // Raced: the history emptied between the last sync and this press.
+            // Hand the press back rather than dropping it — disabled, this
+            // second dispatch reaches the platform's own default, which is the
+            // finish this used to do by hand, with the transition it never had.
+            isEnabled = false
+            onBackPressedDispatcher.onBackPressed()
+        }
+    }
+
+    /**
+     * Re-answer "is there anywhere to go back to".
+     *
+     * From [BundleClient.doUpdateVisitedHistory], because that is what the
+     * WebView calls both for a real navigation and for the shared UI's own
+     * `pushState` routing — `onPageFinished` fires once for the whole SPA and
+     * would never fire again, so the callback would be stuck on the answer the
+     * first screen gave.
+     *
+     * And from [installWebView], which is the sharper one: a rebuilt WebView
+     * starts with an empty history, and a callback left enabled over it would
+     * swallow every back press into a `goBack()` that does nothing. A dead back
+     * button, with nothing in the log to say why.
+     */
+    private fun syncBackCallback() {
+        backToPreviousPage.isEnabled = webView?.canGoBack() == true
+    }
+
+    /**
      * Injected before any page script runs. Two jobs:
      *
      *  - `__homerunCapabilities`, which the UI reads **synchronously** at
@@ -509,12 +561,7 @@ class MainActivity : ComponentActivity() {
 
         ServerHost.addListener(hostingListener)
 
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                val view = webView
-                if (view != null && view.canGoBack()) view.goBack() else finish()
-            }
-        })
+        onBackPressedDispatcher.addCallback(this, backToPreviousPage)
     }
 
     /** Builds a fresh WebView, wires it to the router, and loads the bundle. */
@@ -579,6 +626,8 @@ class MainActivity : ComponentActivity() {
         webView = view
         router.attach(view)
         router.onPageGone()
+        // This WebView has no history, whatever the one it replaced had.
+        syncBackCallback()
 
         view.loadUrl(WebBundle.START_URL)
     }
@@ -651,6 +700,15 @@ class MainActivity : ComponentActivity() {
                 )
                 true
             }.getOrElse { true }
+        }
+
+        /**
+         * The only signal that covers the shared UI's client-side routing.
+         * Called for a document load and for `pushState`/`replaceState` alike,
+         * which in an SPA is nearly every screen change there is.
+         */
+        override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+            syncBackCallback()
         }
 
         override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {

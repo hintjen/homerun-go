@@ -43,6 +43,7 @@ use serde_json::Value;
 
 pub mod crash;
 pub mod minigame;
+pub mod scrub;
 pub mod stats;
 
 /// Which credential signs a request.

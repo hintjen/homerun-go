@@ -61,8 +61,19 @@ class HostingService : Service(), ServerHost.Listener {
      * Its own scope, not [ServerHost]'s: the only thing launched here is the
      * notification's Stop, and a stop that outlived the service would be
      * holding a notification nobody can see any more.
+     *
+     * Its own scope needs its own handler too ([ServerHost.keepAlive]) — a
+     * `SupervisorJob` does not stop a throw reaching the default handler. What
+     * that keeps alive is this service and therefore the whole session: the
+     * foreground priority, the wake lock, and the JVM and backup underneath
+     * them. [ServerHost.stop] calls into the core and the backend and both can
+     * throw, and this is the one path a player takes while the app is not in
+     * front of them — a failed Stop must leave them a server they can try to
+     * stop again, not a process that took the world down with it mid-save.
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + ServerHost.keepAlive(TAG, "the notification's Stop"),
+    )
 
     private var wakeLock: PowerManager.WakeLock? = null
 

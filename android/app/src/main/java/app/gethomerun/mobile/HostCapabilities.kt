@@ -69,11 +69,15 @@ data class HostCapabilities(
             // the stop until the on-stop backup has finished uploading. See
             // `docs/android-lifecycle.md`.
             backgroundExecution = true,
-            // restic, being wired now. Left true because that work is in
-            // flight — but until it lands the UI offers a feature that does
-            // nothing, and, the part that costs data, a world played here
-            // never becomes the newest snapshot, so the next desktop launch
-            // restores over it.
+            // restic, and it ships for both ABIs now. Deliberately not derived
+            // from `ResticEngine.isAvailable`: this constant describes the
+            // platform, and a build that forgot to stage the binary should be
+            // fixed rather than quietly advertising less. `verifyNativePayload`
+            // in `app/build.gradle.kts` is what enforces that — it fails a
+            // release whose `jniLibs` is missing `librestic.so`, because the
+            // alternative is an app that offers backups and silently does
+            // nothing, and a world played here that never becomes the newest
+            // snapshot, so the next desktop launch restores over it.
             backups = true,
             // Both reasons this was false have gone. `get-device-ws-port`
             // answers a real port that a websocket is listening on, and the

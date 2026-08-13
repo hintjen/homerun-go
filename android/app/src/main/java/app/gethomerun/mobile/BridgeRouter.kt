@@ -22,6 +22,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.URI
 import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -70,17 +71,39 @@ private data class BridgeError(val message: String, val code: String? = null)
 /**
  * The Android half of `bridge/v1` — see `shared/conformance/PROTOCOL.md`.
  *
- * Threading is the thing to get right here. `postMessage` is reached through
- * `addJavascriptInterface`, which means **it runs on a binder thread**, not the
- * main thread and not a thread we own. So:
+ * Threading is the thing to get right here, and **three** threads are in play,
+ * not two:
  *
- *  - Parsing happens on the binder thread (cheap, no shared state).
- *  - All router bookkeeping — the ready flag, the event queue — is confined to
- *    the main thread, which is also the only thread allowed to touch the
- *    WebView.
- *  - Actual channel work runs on [scope], so a slow handler can never block
- *    the binder thread. Blocking it ANRs the app in ways that look like
- *    WebView bugs.
+ *  - **A binder thread.** `postMessage` is reached through
+ *    `addJavascriptInterface`, so it runs on a thread the WebView owns rather
+ *    than one we do. Parsing happens there — cheap, no shared state — and
+ *    nothing else does; the envelope is handed straight to the main thread.
+ *  - **The main thread.** Router bookkeeping ([ready], [queued]) is confined
+ *    to it, and so is every touch of the WebView. [emit] and [reply] hop back
+ *    on their own, which is why both are safe to call from anywhere.
+ *  - **[Dispatchers.IO].** Every channel handler, because [dispatch] launches
+ *    with it explicitly. That is not decoration: [scope] is the activity's
+ *    `lifecycleScope`, whose dispatcher is `Main.immediate`, so `launch(job)`
+ *    with only a [Job] in the context inherits the **UI** thread. It did, for
+ *    every handler, while this doc claimed a slow one could not block —
+ *    true of the binder thread it was written about and never true of the UI
+ *    thread. Reachable underneath that claim: a recursive world delete, a
+ *    manifest read out of a 40–60 MB jar, `Process.waitFor(5, SECONDS)`, a
+ *    250 ms JNI poll held for up to five minutes, and two statfs calls.
+ *
+ * Three handlers hop back to the main thread and each says why in place:
+ * `clipboard-write-text`, `set-appearance` and `quit-and-install`. The test
+ * for a fourth is narrow — a handler needs the main thread only if it touches
+ * the WebView, the window, or a framework object that builds a `Handler` from
+ * the *calling* thread's Looper. `SharedPreferences`, `ActivityManager`,
+ * `NotificationManager`, `startActivity` and the JNI calls into
+ * `homerun-core` are all safe where they are, and most of them block.
+ *
+ * The consequence to know about: handlers no longer run in arrival order.
+ * They did, by accident — on `Main.immediate` a handler ran inline until its
+ * first suspension — and nothing ever promised it; PROTOCOL.md orders replies
+ * against their own invoke and nothing else. A channel that must be sequenced
+ * against another has to say so itself.
  *
  * There is deliberately **no call timeout**: `native-server-start` and modpack
  * imports legitimately run for minutes. Pending work is cleared when the page
@@ -113,6 +136,11 @@ class BridgeRouter(
      *
      * Null before an activity attaches, which is a real state: the router is
      * constructed before the first page exists.
+     *
+     * **Invoked on the main thread**, because what it does on the other side
+     * is rebuild a view hierarchy. Handlers otherwise run on
+     * [Dispatchers.IO], so this is a guarantee the router makes rather than
+     * one every activity has to remember to make for itself.
      */
     @Volatile
     var onApplyUpdate: (() -> Unit)? = null
@@ -120,8 +148,10 @@ class BridgeRouter(
     /**
      * The page's theme, for the system bars. `"light"` or `"dark"`.
      *
-     * A hook for the same reason as [onApplyUpdate]: the window belongs to the
-     * activity, and the router outlives any one of them.
+     * A hook for the same reason as [onApplyUpdate], and **invoked on the
+     * main thread** for the same reason too: it ends in the window's insets
+     * controller. Two hooks with different threading rules would be a trap
+     * worth more than the one dispatch it saves.
      */
     @Volatile
     var onAppearance: ((String) -> Unit)? = null
@@ -221,6 +251,20 @@ class BridgeRouter(
     init {
         ServerHost.addListener(hostListener)
 
+        // Heal an override this app itself may have written. `set-api-url`
+        // used to store `JsonNull.content` — the string "null" — whenever the
+        // page sent nothing, and from then on every backend call was built on
+        // it: no login, no device, no server, and no way back short of
+        // reinstalling. Re-checking the stored value on each launch also
+        // reaches [DeviceRegistry], which reads this key directly and cannot
+        // be given the rule any other way.
+        prefs.getString(KEY_API_URL, null)?.let {
+            if (validApiUrl(it) == null) {
+                Log.w(TAG, "dropping a stored API base that is not a usable https URL")
+                prefs.edit().remove(KEY_API_URL).apply()
+            }
+        }
+
         // A relaunch already holds the token issued at login, so the device's
         // link belongs to the process rather than to the login — the same
         // reasoning that starts the heartbeat in `HomerunApplication`. Waiting
@@ -230,15 +274,27 @@ class BridgeRouter(
         DeviceWebsocket.ensure(apiUrl(), userToken())
     }
 
-    /** The `native-server-*` channels that take an object payload. */
+    /**
+     * The `native-server-*` channels that take an object payload.
+     *
+     * Validated here rather than at each sink. Both backends check inside
+     * `dataDir`, which covers every path they build — but the router builds one
+     * itself (`opsOnDisk`), and the next handler that needs a path will be
+     * written the same way. These two extractors are the only door a page's
+     * `serverId` comes through, so the rule belongs on them.
+     */
     private fun JsonObject.serverId(): String =
-        this["serverId"]?.jsonPrimitive?.contentOrNull
-            ?: throw IllegalArgumentException("serverId is required")
+        requireValidServerId(
+            this["serverId"]?.jsonPrimitive?.contentOrNull
+                ?: throw IllegalArgumentException("serverId is required")
+        )
 
     /** The six metrics getters and the log reader take a bare string instead. */
     private fun JsonElement?.asServerId(): String =
-        this?.jsonPrimitive?.contentOrNull
-            ?: throw IllegalArgumentException("serverId is required")
+        requireValidServerId(
+            this?.jsonPrimitive?.contentOrNull
+                ?: throw IllegalArgumentException("serverId is required")
+        )
 
     // --- main-thread-only state ------------------------------------------
 
@@ -289,7 +345,16 @@ class BridgeRouter(
             return
         }
 
-        scope.launch(pageJobs) {
+        // [Dispatchers.IO] explicitly, and it is load-bearing. [pageJobs] is a
+        // [Job] — it says who owns the coroutine, not where it runs — so a
+        // bare `launch(pageJobs)` here took its dispatcher from [scope], which
+        // is `lifecycleScope`, which is `Main.immediate`. Every handler below
+        // ran on the UI thread, including the ones that delete a world tree or
+        // sit on a JNI poll for minutes.
+        //
+        // Handlers that genuinely need the main thread hop back for the few
+        // lines that do; see the class doc for which and why.
+        scope.launch(pageJobs + Dispatchers.IO) {
             try {
                 val result = handler(envelope.params)
                 if (envelope.id != null) {
@@ -493,7 +558,9 @@ class BridgeRouter(
         "set-appearance" to { params ->
             val appearance = (params as? JsonPrimitive)?.contentOrNull
             if (appearance == "light" || appearance == "dark") {
-                onAppearance?.invoke(appearance)
+                // Main, per [onAppearance]'s contract — the hook ends up in
+                // the window's insets controller.
+                withContext(Dispatchers.Main) { onAppearance?.invoke(appearance) }
             } else {
                 Log.w(TAG, "set-appearance wants \"light\" or \"dark\", got: $appearance")
             }
@@ -549,7 +616,9 @@ class BridgeRouter(
                 // the symptom is otherwise a button that does nothing at all.
                 Log.w(TAG, "quit-and-install with no activity attached; ignoring")
             } else {
-                apply()
+                // Main, per [onApplyUpdate]'s contract — the hook tears down
+                // and rebuilds the WebView.
+                withContext(Dispatchers.Main) { apply() }
             }
             null
         },
@@ -577,34 +646,66 @@ class BridgeRouter(
         // machine waits on that event before routing to the dashboard, so a
         // handler that only stores and stays quiet hangs login at a spinner.
         "credentials-received" to { params ->
-            if (params is JsonObject) {
+            // The second writer of the API base, so it takes the same rule as
+            // set-api-url — and it matters more here, because the thing being
+            // stored on the same breath is the token that would travel to
+            // whatever host this named.
+            val offered = (params as? JsonObject)?.get("apiUrl")?.takeIf { it !is JsonNull }
+            val override = validApiUrl((offered as? JsonPrimitive)?.contentOrNull)
+
+            if (params !is JsonObject) {
+                emit("credentials-error", listOf(JsonPrimitive("Credentials were not an object")))
+            } else if (offered != null && override == null) {
+                // Refused, and nothing stored — not even the credentials. The
+                // UI has authenticated somewhere this host will not follow it
+                // to, so the two halves already disagree about which backend
+                // they are on; a login that fails loudly beats one that
+                // succeeds and then hosts against a different server.
+                emit("credentials-error", listOf(JsonPrimitive(API_URL_REFUSED)))
+            } else {
                 prefs.edit().putString(KEY_CREDENTIALS, json.encodeToString(params)).apply()
-                (params["apiUrl"] as? JsonPrimitive)?.contentOrNull
-                    ?.let { prefs.edit().putString(KEY_API_URL, it).apply() }
+                // No apiUrl at all leaves any existing override alone: the UI
+                // is saying nothing about the backend, which is not the same
+                // as set-api-url's explicit clear.
+                override?.let { prefs.edit().putString(KEY_API_URL, it).apply() }
 
                 // The first moment this host holds a user token, which is the
                 // only thing registration needs. Deliberately not awaited —
                 // the UI blocks on credentials-set to leave the login screen,
                 // and a device that registers a second later costs nothing.
-                scope.launch { DeviceRegistry.ensure(apiUrl(), userToken()) }
+                //
+                // Dispatched explicitly, because [scope] is `lifecycleScope`:
+                // a bare `launch` here runs on the UI thread whatever the
+                // handler around it is running on.
+                //
+                // And handled explicitly, because this is the one launch in
+                // this file that escapes [dispatch]'s `catch`. `lifecycleScope`
+                // carries no handler of its own, so a throw out of `ensure` —
+                // a network failure at exactly the wrong moment — would reach
+                // the default handler and take the process down, along with any
+                // server it is hosting. See [ServerHost.keepAlive].
+                scope.launch(
+                    Dispatchers.IO + ServerHost.keepAlive(TAG, "registering this device"),
+                ) { DeviceRegistry.ensure(apiUrl(), userToken()) }
                 // The device's own link, which the dashboard dials to reach
                 // this device's console. Provisioning polls for up to a
                 // minute, so like registration it is started and not awaited.
                 DeviceWebsocket.ensure(apiUrl(), userToken())
 
                 emit("credentials-set")
-            } else {
-                emit("credentials-error", listOf(JsonPrimitive("Credentials were not an object")))
             }
             null
         },
 
         // Params are the user's email; the desktop also takes a
         // shouldRemoveDistro flag that has no meaning here.
-        // Params are the user's email; the desktop also takes a
-        // shouldRemoveDistro flag that has no meaning here.
         "logout" to { _ ->
-            prefs.edit().remove(KEY_CREDENTIALS).apply()
+            // The API base leaves with the credentials. It outranks
+            // BuildConfig.API_URL on every read, DeviceRegistry reads the same
+            // key, and nothing used to clear it — so an override set once for
+            // a staging backend survived the logout and pointed the *next*
+            // user's bearer token at a host they never chose.
+            prefs.edit().remove(KEY_CREDENTIALS).remove(KEY_API_URL).apply()
             // The registration belongs to the user who made it, and its token
             // authenticates reports as them. Keeping it would have the next
             // person to log in heartbeating someone else's device.
@@ -616,10 +717,20 @@ class BridgeRouter(
             null
         },
 
+        // The one system service here that is not thread-agnostic.
+        // `ClipboardManager` builds a `Handler` from the calling thread's
+        // Looper, and on a plain worker thread there is none — it dies with
+        // "Can't create handler inside thread that has not called
+        // Looper.prepare()", which reads like a WebView bug and is not one.
+        // Some OEM builds also toast from here, which is main-thread work by
+        // definition.
         "clipboard-write-text" to { params ->
             val text = params?.jsonPrimitive?.content.orEmpty()
-            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("Homerun", text))
+            withContext(Dispatchers.Main) {
+                val clipboard =
+                    context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("Homerun", text))
+            }
             null
         },
 
@@ -651,8 +762,22 @@ class BridgeRouter(
             DeviceWebsocket.port?.let { JsonPrimitive(it) } ?: JsonNull
         },
 
+        // Where this host sends the user's bearer token. Validated rather than
+        // stored as it arrives — see [validApiUrl] for what the rule is and
+        // why it is a shape check and not a list of hosts.
         "set-api-url" to { params ->
-            prefs.edit().putString(KEY_API_URL, params?.jsonPrimitive?.content).apply()
+            // Absent, or JSON null, means put the build's own backend back.
+            // It used to mean storing `JsonNull.content`, which is the four
+            // characters n-u-l-l, which the read path then handed to
+            // `URL(...)` as a perfectly good override — bricking every
+            // backend call until the app was reinstalled.
+            if (params == null || params is JsonNull) {
+                prefs.edit().remove(KEY_API_URL).apply()
+            } else {
+                val url = validApiUrl((params as? JsonPrimitive)?.contentOrNull)
+                    ?: throw IllegalArgumentException(API_URL_REFUSED)
+                prefs.edit().putString(KEY_API_URL, url).apply()
+            }
             null
         },
 
@@ -1109,6 +1234,44 @@ class BridgeRouter(
     private fun apiUrl(): String = prefs.getString(KEY_API_URL, null) ?: BuildConfig.API_URL
 
     /**
+     * [raw] if this host may send the user's bearer token to it, else null.
+     *
+     * Whatever passes here outranks `BuildConfig.API_URL` on every read, and
+     * not only this class's: [DeviceRegistry.apiUrl] reads the same key out of
+     * the same preferences file. So the value the page stores is where the
+     * access token, the device token and every server's settings request go.
+     *
+     * **Not an allowlist**, deliberately. The channel exists so a build can be
+     * pointed at a backend that is not production — `build.gradle.kts` already
+     * ships that as `-PapiUrl=…`, on a second domain — and a runtime list that
+     * did not know about the build-time default would refuse to restore the
+     * very URL the binary was built with. What is checkable without guessing
+     * the estate is the shape:
+     *
+     *  - `https` only. `http` puts the bearer token on the wire in clear, and
+     *    that is the whole of what this guard is for.
+     *  - a real host, and no `user:pass@` in front of it —
+     *    `https://api.gethomerun.app@evil.example` resolves to `evil.example`
+     *    and reads as ours to anyone skimming it.
+     *  - no query and no fragment. The base is concatenated with a path
+     *    (`HomerunApi.get`), so either one lands in the middle of every URL
+     *    built from it rather than at the end.
+     *
+     * That still trusts the page not to name a hostile host; the bundle is
+     * Ed25519-signed and this is not the layer that decides who may ship one.
+     * It does stop the accidents, and it stops the string `"null"`.
+     */
+    private fun validApiUrl(raw: String?): String? {
+        val trimmed = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val uri = runCatching { URI(trimmed) }.getOrNull() ?: return null
+        if (!"https".equals(uri.scheme, ignoreCase = true)) return null
+        if (uri.host.isNullOrBlank()) return null
+        if (uri.userInfo != null) return null
+        if (uri.query != null || uri.fragment != null) return null
+        return trimmed
+    }
+
+    /**
      * The user's access token, as handed down at login.
      *
      * Registration and the tunnel poll both need it, and it lives here rather
@@ -1303,6 +1466,16 @@ class BridgeRouter(
 
         /** Protocol-level, deliberately absent from the channel inventory. */
         private const val READY_METHOD = "__bridge:ready"
+
+        /**
+         * Shown to whoever tried to move this host to another backend, so it
+         * says what would be accepted rather than what was wrong. Nobody
+         * outside a dev build ever sees it — which is the point of it being
+         * a sentence and not a stack trace.
+         */
+        const val API_URL_REFUSED =
+            "That backend address was refused. Homerun only talks to an https address " +
+                "with a host name, like https://api.gethomerun.app."
 
         private const val PREFS = "homerun-host"
         private const val KEY_API_URL = "api-url"

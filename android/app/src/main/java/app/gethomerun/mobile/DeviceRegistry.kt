@@ -65,8 +65,20 @@ object DeviceRegistry {
      * Not tied to any lifecycle. The heartbeat has to outlive every activity —
      * a device that stops reporting is marked unhealthy 60 s later, whatever
      * the UI happens to be doing.
+     *
+     * What the handler ([ServerHost.keepAlive]) keeps alive is the process the
+     * server is a child of. Everything launched here is fire-and-forget
+     * reporting, so a throw costs one beat — the device reads unhealthy for
+     * 30 s and the next call corrects it — where letting it reach the default
+     * handler costs the running server and the backup behind it.
+     *
+     * The heartbeat loop itself does *not* survive its own throw: the loop is
+     * the failed coroutine. The ERROR line is the only thing that distinguishes
+     * a device that stopped reporting from one that never had anything to say.
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + ServerHost.keepAlive(TAG, "device reporting"),
+    )
 
     /** Serialises registration so a burst of callers makes one API call. */
     private val gate = Mutex()

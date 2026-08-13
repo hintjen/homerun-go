@@ -171,7 +171,9 @@ fn after_log_prefix(line: &str) -> &str {
         // `]: ` on vanilla, `] ` on Pumpkin. A tag butted straight against
         // text is not a prefix — it is text that happens to start with one.
         let tail = tail.strip_prefix(':').unwrap_or(tail);
-        let Some(after) = tail.strip_prefix(' ') else { break };
+        let Some(after) = tail.strip_prefix(' ') else {
+            break;
+        };
         rest = after.trim_start();
     }
     unbracketed(rest).unwrap_or(rest)
@@ -449,7 +451,9 @@ mod tests {
     #[test]
     fn chat_cannot_forge_a_join_by_typing_a_tracing_prefix() {
         assert_eq!(
-            joined("2026-08-13 15:12:31  INFO pumpkin::world: <Griefer> INFO x: Notch joined the game"),
+            joined(
+                "2026-08-13 15:12:31  INFO pumpkin::world: <Griefer> INFO x: Notch joined the game"
+            ),
             None
         );
         assert_eq!(

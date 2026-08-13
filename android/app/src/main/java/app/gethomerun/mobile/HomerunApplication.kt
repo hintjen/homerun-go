@@ -2,11 +2,15 @@ package app.gethomerun.mobile
 
 import android.app.Application
 import android.os.Build
+import android.util.Log
 import android.webkit.WebView
 
 class HomerunApplication : Application() {
     override fun onCreate() {
         super.onCreate()
+
+        // First, so it covers the rest of this method as well.
+        logCrashesBeforeDying()
 
         // Process-scoped, because a running server must survive the activity
         // and the WebView being torn down and rebuilt.
@@ -49,5 +53,40 @@ class HomerunApplication : Application() {
                 WebView.setDataDirectorySuffix(process.substringAfter(':', "alt"))
             }
         }
+    }
+
+    /**
+     * One line of context before the process goes, and then the platform's own
+     * handling, untouched.
+     *
+     * Nothing in this app reports crashes natively. The shared bundle carries
+     * `@sentry/electron`, which is a *renderer* integration looking for an
+     * Electron main process that does not exist here — it sees the page's
+     * errors and cannot see a Kotlin stack at all (docs/android-host.md). So
+     * what a crash leaves behind is the logcat tombstone, and the one thing a
+     * tombstone cannot say is what this device was doing at the time: a crash
+     * during a world upload is a lost session and looks exactly like any other
+     * crash. [ServerHost.hostingSummary] is deliberately the lock-free, JNI-free
+     * reading of that — this runs on the thread that is dying.
+     *
+     * **It always delegates.** Replacing the platform's handler instead of
+     * wrapping it would suppress the tombstone, the crash dialog, and Play's
+     * vitals — every crash would become invisible to everyone but us. Android
+     * always installs one (`RuntimeInit`'s `KillApplicationHandler`), so the
+     * null branch is theory. `runCatching` for the same reason: a handler that
+     * throws is a handler that never reaches the line below it.
+     */
+    private fun logCrashesBeforeDying() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, err ->
+            runCatching {
+                Log.e(TAG, "fatal on ${thread.name}; this device was ${ServerHost.hostingSummary()}", err)
+            }
+            previous?.uncaughtException(thread, err)
+        }
+    }
+
+    private companion object {
+        const val TAG = "HomerunHost"
     }
 }

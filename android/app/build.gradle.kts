@@ -48,8 +48,8 @@ android {
         // number has to be settable from CI:
         //   ./gradlew bundleRelease -PversionCode=2 -PversionName=0.1.1
         // The defaults are what a local build gets, and what the first store
-        // upload used. A build that cannot bump its own version turns every
-        // release into a source edit.
+        // upload will carry. A build that cannot bump its own version turns
+        // every release into a source edit.
         val code = prop("versionCode", "1")
         versionCode = code.toIntOrNull()
             ?: throw GradleException("versionCode must be a whole number, got: $code")
@@ -335,11 +335,60 @@ val verifyReleaseConfig by tasks.registering {
     }
 }
 
+/**
+ * Every native binary a release has to carry, and the npm script that stages
+ * it. The `-x86_64` suffix turns each into its emulator counterpart, which is
+ * why all four are spelled as the arm64 name.
+ *
+ * Gradle has no idea `jniLibs` is generated, so a missing entry is not a build
+ * failure — it is an APK that installs and then cannot do a thing the UI has
+ * already told the player it can. `librestic.so` is the sharpest of the four:
+ * `HostCapabilities.ANDROID` advertises `backups` unconditionally because the
+ * constant describes the *platform* rather than the build, so without the
+ * binary the app offers a feature that silently does nothing — and, the part
+ * that costs data, a world played here never becomes the newest snapshot, so
+ * the next desktop launch restores over it.
+ */
+val nativePayload = mapOf(
+    "libhomerun_pumpkin_ffi.so" to "rust:android",
+    "libjavabin.so" to "rust:java-launcher",
+    "libwireproxy.so" to "wireproxy:android",
+    "librestic.so" to "restic:android",
+)
+
+/**
+ * The release's native payload is complete for the ABI it is being built for.
+ *
+ * Separate from [verifyJavaRuntime] because the failure is different in kind:
+ * that one catches a runtime built for the wrong CPU, this one catches one
+ * that was never staged at all. Both fail open without a check, and both
+ * surface on a device a long way from the cause.
+ */
+val verifyNativePayload by tasks.registering {
+    val abi = requestedAbi
+    val libsDir = layout.projectDirectory.dir("src/main/jniLibs")
+    doFirst {
+        if (abi == null) return@doFirst // verifyReleaseConfig has already failed.
+        val suffix = if (abi == "x86_64") "-x86_64" else ""
+        val missing = nativePayload.filterKeys { !libsDir.dir(abi).file(it).asFile.exists() }
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "The $abi native payload is incomplete — this release would install " +
+                    "and then fail on a device:\n" +
+                    missing.entries.joinToString("\n") { (lib, script) ->
+                        "    $lib   ->  npm run $script$suffix"
+                    } +
+                    "\n\n`npm run build:android:release` stages all of them.",
+            )
+        }
+    }
+}
+
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach { dependsOn(verifyJavaRuntime) }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("ReleaseAssets") }
-    .configureEach { dependsOn(verifyReleaseConfig) }
+    .configureEach { dependsOn(verifyReleaseConfig, verifyNativePayload) }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach {

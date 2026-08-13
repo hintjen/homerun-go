@@ -11,6 +11,7 @@
 //! here and a line in [`crate::game::all`], not a change anywhere else.
 
 pub mod console;
+pub mod hosting;
 pub mod jar;
 pub mod jvm;
 pub mod ops;

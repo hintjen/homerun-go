@@ -2,6 +2,7 @@ package app.gethomerun.mobile
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -33,8 +34,16 @@ object ServerHost {
      * Shared with [DeviceWebsocket], which needs the same guarantee for the
      * same reason: its link outlives every page and must not be taken down by
      * one being rebuilt.
+     *
+     * The handler is not decoration — see [keepAlive]. Nearly everything the
+     * host does off the main thread runs here: both backends' log pumps, the
+     * backend's exit callback, [Reporting]'s loop and its fire-and-forget API
+     * calls, and the device link. Any one of them throwing would otherwise end
+     * the process that *is* the server.
      */
-    val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + keepAlive(TAG, "the host's background work"),
+    )
 
     private lateinit var appContext: Context
     private val listeners = mutableSetOf<Listener>()
@@ -201,9 +210,35 @@ object ServerHost {
     private var hostingStarting: Boolean = false
     private var serviceWanted: Boolean = false
 
+    /** One host-failure line per run — see [noteHostFailure]. */
+    private var failureNoted: Boolean = false
+
+    /**
+     * The last snapshot, readable with no lock and no JNI. For the crash
+     * handler in [HomerunApplication] and nothing else.
+     *
+     * A dying thread must not call [hosting]: that reaches into the supervisor's
+     * own mutex through JNI, and the thread that is crashing may be the one
+     * holding it. A crash handler that blocks turns a crash into a hang, which
+     * is the single outcome worse than the crash — a slightly stale answer is
+     * worth more than that.
+     */
+    @Volatile
+    private var lastHosting: Hosting = Hosting(null, null, ServerState.STOPPED, false, null)
+
     @Synchronized
     private fun snapshot(): Hosting =
         Hosting(hostingId, hostingName, hostingState, hostingBackup, null, hostingStarting)
+            .also { lastHosting = it }
+
+    /** What this device was doing, in a few words, for that handler's log. */
+    fun hostingSummary(): String = lastHosting.let {
+        when {
+            !it.busy -> "idle"
+            it.backingUp -> "backing up ${it.serverId}"
+            else -> "hosting ${it.serverId} (${it.state})"
+        }
+    }
 
     /**
      * A snapshot, safe to read from any thread.
@@ -240,6 +275,9 @@ object ServerHost {
         hostingId = serverId
         hostingName = name
         hostingStarting = true
+        // A new run gets its own console, and its own chance to be told that
+        // something inside Homerun went wrong during it.
+        failureNoted = false
         syncHosting()
     }
 
@@ -346,6 +384,77 @@ object ServerHost {
         } finally {
             lifecycle.callFinished(serverId)
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Not dying of a background failure
+    // -----------------------------------------------------------------------
+
+    /**
+     * The exception handler every scope in this app that outlives a screen has
+     * to carry.
+     *
+     * `SupervisorJob` answers a narrower question than its name suggests: it
+     * stops a failed child cancelling its *siblings*, and does nothing at all
+     * about the failure itself, which carries on to the thread's default handler
+     * and takes the process with it. That is the trap [WireProxy]'s log pump
+     * fell into once already, and a `try`/`catch` there only ever covers the one
+     * launch site somebody remembered to write it in.
+     *
+     * On this app a process death is not a restart. The Minecraft server is a
+     * child of this process, and the world upload runs for minutes after it
+     * stops — so a `CoreException` from a malformed native reply, the kind
+     * [JavaServerBackend]'s exit callback can raise, would end a session and
+     * lose the backup carrying it (see [HostingService]).
+     *
+     * **Nothing here is a silent no-op.** Everything that arrives is logged at
+     * ERROR with its stack, which is what `get-app-logs` hands to support, and
+     * named by [doing] — because the scope survives and the failed coroutine
+     * does not, and a heartbeat or a reporting loop that has quietly stopped is
+     * otherwise indistinguishable from a healthy one. A swallowed failure
+     * nobody can see is worse than the crash it replaced.
+     *
+     * A [VirtualMachineError] is *not* kept alive. That is the runtime saying it
+     * can no longer run this code, and a process carrying on past one cannot
+     * finish a backup either — it can only fail to, quietly. Re-throwing the
+     * **same instance** is deliberate: kotlinx.coroutines passes a handler's own
+     * throwable straight through when it is the one it just handed in, so the
+     * default handler gets the original stack rather than a wrapper around it.
+     *
+     * A cancellation never reaches here — the machinery treats it as ordinary
+     * completion — so there is nothing to filter out.
+     */
+    fun keepAlive(tag: String, doing: String): CoroutineExceptionHandler =
+        CoroutineExceptionHandler { _, err ->
+            if (err is VirtualMachineError) throw err
+            Log.e(tag, "$doing failed; this process is carrying on without it", err)
+            noteHostFailure(err)
+        }
+
+    /**
+     * Tell the player, once per run, that Homerun itself stumbled.
+     *
+     * The console is the only surface this host has for a failure that is not a
+     * server's own: `Core.crashReport` reads a server's output and would file a
+     * host bug as a Minecraft crash. The line is worth more than it looks —
+     * [Reporting] keeps every console line in the tail it sends with a crash
+     * report, so a host failure that preceded a crash travels with it to
+     * support without anything new being built to carry it.
+     *
+     * Once per run, because whatever failed usually fails on a timer: a report
+     * throwing every 30 s would bury the console a player reads to find out
+     * what went wrong.
+     */
+    private fun noteHostFailure(err: Throwable) {
+        val serverId = synchronized(this) {
+            snapshot().takeIf { it.busy && !failureNoted }?.serverId?.also { failureNoted = true }
+        } ?: return
+        note(
+            serverId,
+            "Homerun hit an unexpected problem in the background " +
+                "(${err.javaClass.simpleName}) and has carried on. If this server " +
+                "misbehaves from here, stopping it and starting it again is the fix.",
+        )
     }
 
     private const val TAG = "HomerunHost"

@@ -49,6 +49,7 @@
 //! server whose download is corrupt every single time then looks, from the
 //! API's side, like a server nobody ever started.
 
+use super::scrub;
 use super::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -271,13 +272,21 @@ pub fn diagnose<S: AsRef<str>>(lines: &[S], retries_used: u32) -> Option<Diagnos
 /// The API answers with a serialised ServiceErrorReport carrying its own
 /// `user_facing_message`, which is worth forwarding to the UI — it is the
 /// half of the diagnosis this crate cannot ship a fix to.
+/// # The console is other people's data
+///
+/// Every line is scrubbed by [`crate::reporting::scrub`] before it goes, and
+/// that is not optional. A Minecraft console records the people *playing on*
+/// the server rather than the person who owns it: join lines carry their IP
+/// addresses, chat lines carry whatever they said. They are usually the
+/// operator's friends, often minors, and none of them installed this app or
+/// saw a consent screen — the operator cannot agree on their behalf.
+///
+/// Doing it here rather than in each host is the whole reason it is here: a
+/// redaction one platform forgot is the same leak, and the leak is silent. If
+/// this request ever gains another field carrying console text, scrub that too.
 pub fn report<S: AsRef<str>>(server_id: &str, device_id: &str, lines: &[S]) -> Request {
     let from = lines.len().saturating_sub(MAX_REPORTED_LINES);
-    let output = lines[from..]
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let output = scrub::console_lines(&lines[from..]).join("\n");
     let output = tail_bytes(output);
 
     Request::post(
@@ -517,6 +526,47 @@ mod tests {
         assert_eq!(request.body["service"], "srv-1");
         assert_eq!(request.body["device"], "dev-9");
         assert_eq!(request.body["output"], "first line\nsecond line");
+    }
+
+    /// The console being uploaded is a record of **other people** — the
+    /// operator's friends, often minors, who never saw a consent screen. Their
+    /// addresses and their words must not leave the device.
+    ///
+    /// Tested here rather than only in `scrub` because this is the boundary
+    /// that matters: `scrub` being correct is no use if this function stops
+    /// calling it, and the way that regression would surface is a support
+    /// ticket from someone's parent.
+    #[test]
+    fn the_report_carries_no_addresses_and_no_chat() {
+        let console = [
+            "[12:00:00] [Server thread/INFO]: Steve[/203.0.113.4:52341] logged in",
+            "[12:00:01] [Server thread/INFO]: <Steve> my address is 10.0.0.7",
+            "[12:00:02] [Server thread/ERROR]: java.lang.OutOfMemoryError: Java heap space",
+        ];
+        let request = report("srv-1", "dev-9", &console);
+        let output = request.body["output"].as_str().expect("output is a string");
+
+        assert!(
+            !output.contains("203.0.113.4"),
+            "a join address was uploaded:\n{output}"
+        );
+        assert!(!output.contains("52341"), "a port was uploaded:\n{output}");
+        assert!(
+            !output.contains("10.0.0.7"),
+            "an address inside chat was uploaded:\n{output}"
+        );
+        assert!(
+            !output.contains("my address is"),
+            "chat was uploaded:\n{output}"
+        );
+
+        // And the half that makes the report worth sending at all.
+        assert!(output.contains("java.lang.OutOfMemoryError"), "{output}");
+        assert!(output.contains("logged in"), "{output}");
+        assert!(
+            output.contains("Steve"),
+            "names are deliberately kept: {output}"
+        );
     }
 
     /// A modded server logs tens of thousands of lines an hour. The desktop is
