@@ -165,14 +165,19 @@ launch that will not start, or a lease nobody is holding.
 
 ### 🤖 [Android host](./android-host.md)
 
-The Android app shell — WebView, asset loader, capability injection, and the
-bridge router's threading.
+The Android app shell — WebView, asset loader, capability injection, the safe
+area, the icons, and the bridge router's threading.
 
 **Contains**:
 - Why the bundle is served over an `https://` virtual host, not `file://`
 - The aapt asset filter that silently strips Next.js's entire `_next/` bundle
 - Where capability injection lands relative to the first page script, and the
   `__homerunHost.postMessage` adapter the shared transport requires
+- The safe area: why the *page* holds the bars' space and the host only hands
+  it the numbers, and what happens when the host tries to hold it instead
+- Reading the colour under the clock instead of guessing it from a theme name
+- The Android 12+ splash, and how to make it draw no icon
+- Both icons, generated from one master by `scripts/generate-icons.py`
 - Thread discipline: which callback lands on a binder thread and what ANRs
 - Render-process death, and why queued events are dropped rather than replayed
 - Building, running on an emulator, and remote debugging

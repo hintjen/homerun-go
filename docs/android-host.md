@@ -96,30 +96,51 @@ the backend that would serve it is still being built.
 
 ## Launch colour and the system bars — `MainActivity`, `res/values/`
 
-Two surfaces show before the page does, and both are `@color/launch_background`
-(`#5677DA`, the colour the bundle's splash animation sits on): the window,
-from `Theme.Homerun`, and the WebView itself, which paints **white** until the
-document has a background of its own. Missing the second one leaves the flash
-in place on every launch and every rebuild after a render-process death.
+Three surfaces show before the page does, and all three are
+`@color/launch_background` (`#5677DA`, the colour the bundle's splash animation
+sits on): the system splash on API 31+, the window from `Theme.Homerun`, and
+the WebView itself, which paints **white** until the document has a background
+of its own. Missing that last one leaves the flash in place on every launch and
+every rebuild after a render-process death.
 
 `values-night/themes.xml` sets the same colours as `values/`. It still exists,
 and deleting it would break something unrelated: WebView derives
 `prefers-color-scheme` from the theme's `isLightTheme`, so the night parent is
 what makes the shared UI's `system` setting follow the device at all.
 
-The status and navigation bars are then repainted at runtime, from the theme
-the *page* resolved:
+Everything after that comes from the page, as a colour and not as a theme name:
 
 ```
-document.documentElement class -> HomerunChrome.themeChanged -> applyPageTheme
+document.documentElement class -> HomerunChrome.backdropChanged("rgb(18, 18, 20)")
 ```
 
-Reading the page rather than the device is the point. The UI is next-themes
-with `defaultTheme: "system"`, so a player can pin light or dark and disagree
-with the phone. The theme XML resolves once, at activity creation, and `uiMode`
-is in `configChanges` — so nothing is recreated when the device's appearance
-changes either, and `windowLightStatusBar` stays whatever it was. That is what
-left a black clock on a black page.
+The watcher reads `getComputedStyle(document.body).backgroundColor` and reports
+it verbatim; `applyChrome` paints the container with it and picks the clock's
+appearance from its luminance.
+
+**It used to report `light`/`dark` and let the host map that to a hex of its
+own, and the hex was wrong** — `#0A0A0A` against the UI's actual `#121214`,
+which is close enough to look deliberate and far enough to read as a seam above
+the status bar. There is no version of that arrangement that stays correct: the
+bundle ships over the air and the host does not. So the host no longer keeps a
+copy of the page's palette, and `res/values/colors.xml` deliberately has none.
+
+Reading the page rather than the device is the other half of the point. The UI
+is next-themes with `defaultTheme: "system"`, so a player can pin light or dark
+and disagree with the phone. The theme XML resolves once, at activity creation,
+and `uiMode` is in `configChanges` — so nothing is recreated when the device's
+appearance changes either, and `windowLightStatusBar` stays whatever it was.
+That is what left a black clock on a black page.
+
+Reporting a colour also gets the launch right without a special case. The
+bundle paints `html, body` brand blue and swaps to its own background only when
+it adds `app-ready`, so through the whole splash animation the reported colour
+*is* the blue and the bars stay blue with it. Luminance, not theme, is what
+keeps the clock white on it — brand blue is a dark surface in both themes.
+
+One thing the colours do not do is agree to the last digit: the host launches
+on `#5677DA` and the bundle paints `#5778db`. One channel each, invisible in
+practice, but they are meant to be the same field and one of them is a typo.
 
 `HomerunChrome` is a second `@JavascriptInterface` object, deliberately not a
 bridge channel: this is host chrome, and routing it through `BridgeRouter`
@@ -131,7 +152,111 @@ alongside the capabilities.
 are what API 34 and below draws behind the clock; from API 35 they are ignored
 and the page shows through instead. The appearance flags matter on every
 version, which is why they go through `WindowInsetsControllerCompat` rather
-than the theme.
+than the theme. Both are set **per bar** — a sheet can dim the top of the
+screen while leaving its own surface at the bottom, and one flag for both puts
+a black clock on a dimmed page.
+
+### The safe area — `holdBarsOutOfThePage`, `ChromeInterface.safeArea`
+
+From Android 15 an app targeting SDK 35 is edge-to-edge and cannot opt out.
+The window is the whole display, so a WebView filling it draws under the clock
+and under the gesture pill. On the test phone that put the "Homerun Go"
+wordmark behind the status icons and the pill through the "Create" tab label.
+
+iOS never had this, and not because WKWebView is kinder: the shared UI has a
+complete safe-area system — `--safe-top`, `--safe-bottom`, `--safe-left`,
+`--safe-right`, and the `pt-safe` / `pb-safe` / `px-safe` classes that consume
+them — defined from `env(safe-area-inset-*)`. WKWebView answers those. Android
+WebView fills them in from a display **cutout** and never from the bars, so on
+Android the UI was asking a question the platform would not answer, and every
+answer came back zero.
+
+So the host answers it. `holdBarsOutOfThePage` records the insets;
+`ChromeInterface.safeArea()` hands them back as CSS pixels, and the
+document-start script writes them onto `<html>` as an inline style, which
+outranks the `:root` rule. Nothing forks — the same classes that space the UI
+on iOS start working here, from the same variables.
+
+**The host must not hold the space itself, and this is the part worth
+remembering.** The first version did: inset the WebView by the bars, fill the
+gap with two views, colour them from what the page reported it was painting.
+It looks right in a screenshot and it is wrong in motion. The page's dim and
+the host's strips are painted by two different compositors, so the strips
+arrive a frame late and a visible seam opens across the top of the screen every
+time a sheet opens. Sampling faster does not fix it — per-frame sampling was
+tried and still read as lag. The fix is structural: the bars' space belongs to
+the page, so there is one thing painting and nothing to keep in step.
+
+The insets are pulled rather than pushed because a document that has just
+started parsing must not paint even once without them; a page already loaded
+when the insets change (rotation, a keyboard) gets `__homerunSafeArea()`
+called on it instead. `CONSUMED` stops the inset dispatch at the container so
+the WebView never sees a cutout of its own — `env(safe-area-inset-*)` stays
+zero and the injected variables are the only source of the numbers.
+
+The IME is deliberately not part of the safe area: `adjustResize` in the
+manifest already shrinks the window when the keyboard opens. Adding
+`Type.ime()` would subtract the keyboard's height a second time and leave a gap
+the size of the keyboard above it.
+
+### The Android 12+ splash, and why it draws no icon
+
+From API 31 the platform shows a splash screen on every cold start whether the
+app asks for one or not, and its default content is the launcher icon over the
+window background. The bundle then plays its own logo animation — the mark
+arriving, settling, lifting — so the default meant a static copy of the mark
+appeared for a moment and was replaced by the animated one. The cut between the
+two reads as a flash, and it is not something the UI can fix from its side: the
+splash is gone before the page exists.
+
+There is no attribute for "no icon". `windowSplashScreenAnimatedIcon` is
+pointed at `drawable/splash_icon_none.xml`, a fully transparent shape, which
+leaves the splash running with an empty icon slot — so the whole cold start is
+one uninterrupted `launch_background` until the animation's first frame.
+
+The two splash attributes sit in the base `values/themes.xml` and its
+`values-night` twin rather than in a `values-v31`. Night beats version in
+resource-qualifier precedence, so a `values-v31` would simply be passed over on
+a dark-mode phone; doing it by qualifier properly would need four theme files.
+Declaring the attributes unconditionally is safe — a platform never looks up an
+attribute id it does not know — and `tools:targetApi="31"` is there to tell lint
+so.
+
+## The icons — `scripts/generate-icons.py`
+
+Both Android icons are generated from one master, `brand/app-icon.png`: a flat
+#5677DA tile with the white mark centred on it, carrying the padding the mark
+is meant to have. Nothing is traced by hand.
+
+It is vendored rather than read out of the desktop repo, because the two have
+already drifted — `homerun-ui/assets/icon.png` is the same mark on a rounded
+tile with far less air around it. The padding is load-bearing here (see the
+table below), so which master you point at changes how big the icon looks.
+
+The mark is *lifted* off the tile rather than cut out. Every pixel of the
+master sits on the line between the tile colour and white, so the red channel
+(86 → 255) gives the mark's coverage directly — antialiasing intact, and the
+blue dots punched through the crossbars coming out as holes. Blue would work in
+principle (218 → 255) and quantises to mush in practice.
+
+What comes out are two assets with genuinely different rules:
+
+| Asset | Canvas | Mark |
+|---|---|---|
+| `mipmap-*/ic_launcher_foreground.png` | 108dp, middle 72dp shown, 66dp guaranteed | the same share of the *visible* area it holds in the master |
+| `drawable-*/ic_notification.png` | 24dp, no safe zone | 20dp — status-bar size, so it nearly fills the canvas |
+
+The adaptive icon's background is not redrawn: `mipmap-anydpi-v26/ic_launcher.xml`
+declares it as `@color/launch_background`, which is the master's tile colour
+exactly. The script measures the master's tile and refuses to run if the two
+have parted company, because the failure is a seam around the mark on every
+launcher and nothing else would report it. It is also why the launcher icon,
+the window and the splash are all one blue — the app opens on the colour it was
+tapped on.
+
+`monochrome` reuses the foreground layer, which works because the foreground
+carries no colour of its own, only the mark's coverage, and themed icons are
+drawn from alpha.
 
 ## The bridge — `BridgeRouter.kt`
 
@@ -323,6 +448,33 @@ report never arrived. `HomerunChrome` is added to the WebView in
 `installWebView`, so a rebuilt WebView that missed it has no watcher at all —
 capabilities would be missing too. Nothing polls; a missed report stays missed
 until the next page load.
+
+**The page draws under the clock or the gesture pill.** The safe-area
+variables did not land. `ChromeInterface.safeArea()` is only useful if the page
+reads it, so check `getComputedStyle(document.documentElement)
+.getPropertyValue('--safe-top')` in `chrome://inspect` — zero there means the
+document-start script did not run (see the `DOCUMENT_START_SCRIPT` triage
+above), and a real value there means the screen in question is missing its
+`pt-safe`/`pb-safe`, which is a fix in the UI repo.
+
+**Desktop window controls flash at the top right during launch.** Not a host
+bug and not fixable here: `useCapabilities()` in the UI initialises its state
+to the Electron defaults and only reads the injected capabilities in an
+effect, so `CustomTitleBar` renders once, sees `windowChrome: true`, and is
+removed on the next commit. `window.__homerunCapabilities` is injected at
+document start and is available synchronously — the hook just does not read it
+during the first render.
+
+**The app icon flashes on screen before the logo animation.** The system splash
+is drawing its default content. Check that both `windowSplashScreenAnimatedIcon`
+and `windowSplashScreenBackground` survive in the theme the device actually
+resolved — the dark-mode copy in `values-night/themes.xml` is the one that gets
+forgotten, and it replaces the light theme wholesale rather than extending it.
+
+**The launcher icon is the wrong blue, or the mark sits crooked in the mask.**
+Do not nudge the PNGs. Re-run `python3 scripts/generate-icons.py`; the geometry
+is derived from the master, and the adaptive background is a colour resource
+that has to stay equal to the master's tile.
 
 **A UI action spins forever.** An invoke with no reply. Find the channel in
 logcat — unimplemented ones log a warning — and check `npm run

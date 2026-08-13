@@ -171,6 +171,14 @@ adb pull /sdcard/s.png ./s.png
 
 Then `Read` the pulled file. Pull into your scratchpad directory, not the repo.
 
+**The phone may be in someone's hand.** The physical device is the user's, and
+they use it while you work — a screenshot can come back showing the home
+screen, the app drawer, or Settings, because they navigated away between your
+`am start` and your `screencap`. Read what the screenshot actually shows before
+reasoning about it; "the app looks wrong" is sometimes "the app is not on
+screen". When that happens, `am start` again rather than concluding anything,
+and prefer not to drive the phone at all while the user is plainly on it.
+
 **On Windows Git Bash, prefix every `adb` command containing a device-side
 absolute path with `MSYS_NO_PATHCONV=1`:**
 
@@ -183,6 +191,31 @@ Git Bash rewrites `/sdcard/s.png` into a Windows path before `adb` sees it, and
 `screencap` replies with its *usage message* — which reads like you got the
 flags wrong, so the natural response is to fiddle with `-p` and lose two
 attempts. It applies to `shell`, `pull`, and `push` alike.
+
+### Something that is only on screen for a moment
+
+A splash, a launch animation, a toast, a transition — one screenshot will not
+catch it, and screenshot-then-pull is far too slow to catch it repeatedly:
+each round trip is most of a second, which is the entire thing you are trying
+to see. Keep the loop **on the device** and pull afterwards:
+
+```bash
+adb shell 'rm -f /sdcard/f*.png; am force-stop <appId>'
+adb shell 'am start -n <appId>/<activity> >/dev/null 2>&1
+           for i in 1 2 3 4 5 6 7 8 9 10 11 12; do screencap -p /sdcard/f$i.png; done'
+adb pull /sdcard/ <scratchpad>/frames
+```
+
+On-device `screencap` runs about four frames a second, so a dozen covers ~3s —
+enough for a cold start. Note `am start` and the loop are in **one** `adb shell`
+so nothing waits on the host between them, and `force-stop` is in a separate
+call because it must complete first.
+
+Then contact-sheet the frames into a single image and `Read` that, rather than
+reading twelve screenshots: `Image.paste` in a 6×2 grid with the filename drawn
+above each cell tells you which frame showed what. `screenrecord` is the obvious
+alternative and is worse here — extracting frames from its mp4 needs ffmpeg,
+which is not installed on this Mac.
 
 ## Tapping
 

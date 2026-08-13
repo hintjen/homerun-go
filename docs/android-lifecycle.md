@@ -127,7 +127,7 @@ over this.
 Added for this milestone. `PumpkinBackend` never invokes it — that backend runs
 no on-stop backup, so a stop there really does mean the device is idle.
 
-## Notification icons — `res/drawable/ic_notification.xml`
+## Notification icons — `res/drawable-*/ic_notification.png`
 
 Android draws a small icon from its **alpha channel only**, tinted flat. The
 launcher icon is an adaptive icon whose background layer is an opaque square, so
@@ -138,6 +138,10 @@ So a notification icon is a different asset with different rules: transparent
 except the mark, no background layer, 24dp with no safe zone, and the mark
 nearly filling the canvas because it is drawn at status-bar size. Both the
 hosting notification and the bridge's `push-notification` use it.
+
+It and the launcher icon are generated from the one brand master by
+`scripts/generate-icons.py` — see [android-host.md](./android-host.md#the-icons)
+for what that does and why the two assets come out different sizes.
 
 `app_name` is **"Homerun Go"** — what the shared UI's own header says. It is the
 launcher label, the notification header, and the hosting notification's title
@@ -246,7 +250,7 @@ never runs out of memory the way a mid-range phone does.
 | `BridgeRouter.kt` | `hostingRequested`/`hostingSettled` around the start call |
 | `MainActivity.kt` | asks for `POST_NOTIFICATIONS` on first host; resume resync |
 | `AndroidManifest.xml` | the permissions, and the `specialUse` declaration |
-| `res/drawable/ic_notification.xml` | the monochrome small icon |
+| `res/drawable-*/ic_notification.png` | the monochrome small icon, one per density |
 | `res/values/strings.xml` | notification copy, written for a player |
 
 ## Triage

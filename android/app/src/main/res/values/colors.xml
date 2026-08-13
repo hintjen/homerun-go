@@ -2,16 +2,17 @@
 <resources>
     <!-- Behind the WebView from launch until the page paints, and the colour
          the bundle's splash animation sits on — so there is no flash between
-         the window appearing and the UI arriving. -->
+         the window appearing and the UI arriving. Also the launcher icon's
+         tile and the Android 12+ splash background: every surface the player
+         sees before the first frame of the animation is this one colour. -->
     <color name="launch_background">#5677DA</color>
 
-    <!-- The shared UI's two page backgrounds. Not used by the theme: they are
-         applied at runtime, once the page says which of the two it resolved
-         (MainActivity.applyPageTheme). The theme cannot pick between them,
-         because the UI's own light/dark setting can disagree with the
-         device's. -->
-    <color name="page_background">#FFFFFF</color>
-    <color name="page_background_night">#0A0A0A</color>
+    <!-- There is deliberately no copy of the page's own backgrounds here. This
+         file held two, and the dark one was #0A0A0A against the UI's actual
+         #121214 — close enough to look intentional and wrong enough to see as
+         a seam above the status bar. The page reports what it is painted now
+         (MainActivity.backdropChanged), which is the only version that
+         survives the UI shipping a new palette over the air. -->
 
     <color name="brand_cornflower">#4B6BFB</color>
 </resources>

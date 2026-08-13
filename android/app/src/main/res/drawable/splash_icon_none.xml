@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+  The icon the Android 12+ splash screen draws: deliberately nothing.
+
+  From API 31 the system shows a splash for every cold start whether or not the
+  app asks for one, and the default is the launcher icon over the window
+  background. The bundle then plays its own logo animation — the mark arriving,
+  settling and lifting — so the default put a static copy of the same mark on
+  screen a moment before the animated one, and the cut between them read as a
+  flash.
+
+  There is no attribute for "no icon". Handing the platform a fully transparent
+  drawable is the way to get one: the splash still runs, with nothing in the
+  icon slot, so all the player sees is `windowSplashScreenBackground` — the
+  same blue the window and the WebView are already painted — straight into the
+  animation.
+
+  Below API 31 there is no system splash and this is unused; `windowBackground`
+  covers that case on its own.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="@android:color/transparent" />
+</shape>

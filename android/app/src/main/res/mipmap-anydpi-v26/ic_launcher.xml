@@ -1,6 +1,23 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?><!--
+  The launcher icon, from `brand/app-icon.png`. Regenerate with
+
+      python3 scripts/generate-icons.py
+
+  The master is a flat #5677DA tile with the white mark on it, so the two
+  adaptive layers are exactly that: the tile becomes the background colour and
+  the mark, lifted off it by coverage, becomes the foreground. The mark keeps
+  the same share of the visible area it has in the master, so the master's
+  padding is what decides how large the icon reads — see the script.
+
+  The background is `launch_background` and not `brand_cornflower` because the
+  master's tile is that colour. It also means the icon and the window the app
+  opens on are the same blue, which is what the launch animation depends on.
+
+  `monochrome` reuses the foreground: themed icons are drawn from alpha alone
+  and the foreground has no colour of its own, only the mark's coverage.
+-->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/brand_cornflower" />
-    <foreground android:drawable="@drawable/ic_launcher_foreground" />
-    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+    <background android:drawable="@color/launch_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_foreground" />
 </adaptive-icon>

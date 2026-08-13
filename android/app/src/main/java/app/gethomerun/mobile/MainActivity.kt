@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -20,6 +21,10 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.graphics.ColorUtils
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
@@ -28,6 +33,7 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.Locale
 
 /**
  * The whole app shell: one WebView running the shared UI, one bridge router
@@ -43,6 +49,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var router: BridgeRouter
     private var webView: WebView? = null
+
+    /**
+     * The space the system bars occupy; zero until the first inset pass.
+     *
+     * Written on the UI thread and read from a binder thread by
+     * `ChromeInterface.safeArea`, which is why it is volatile.
+     */
+    @Volatile
+    private var bars: Insets = Insets.NONE
 
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -101,38 +116,164 @@ class MainActivity : ComponentActivity() {
           var host = window.__homerunHost || (window.__homerunHost = {});
           host.postMessage = function (json) { ${BridgeRouter.JS_INTERFACE}.postMessage(json); };
 
-          // Which colour scheme the page settled on, reported to the host so
-          // it can colour the status and navigation bars to match.
-          //
-          // The UI is next-themes with attribute="class": it puts `light` or
-          // `dark` on <html>, from localStorage when the player has pinned one
-          // and from the media query when they have left it on `system`. The
-          // class is the only honest source — a pinned theme disagrees with
-          // the device, and the system bars have to follow what is on screen.
-          //
-          // This runs at document start, so the observer is watching before
-          // the theme script runs. The media listener covers the device's
-          // appearance changing while a `system` page is open, which the
-          // activity does not otherwise notice: uiMode is in configChanges,
-          // so nothing is recreated and the theme XML is never re-applied.
           var root = document.documentElement;
-          var query = window.matchMedia('(prefers-color-scheme: dark)');
-          var last = null;
 
-          function report() {
-            var theme = root.classList.contains('dark') ? 'dark'
-              : root.classList.contains('light') ? 'light'
-              : (query.matches ? 'dark' : 'light');
-            if (theme === last) return;
-            last = theme;
-            try { ${CHROME_INTERFACE}.themeChanged(theme); } catch (e) {}
+          // The system bars' size, in the variables the shared UI already
+          // reads. It defines them from `env(safe-area-inset-*)`, which is
+          // right on iOS and always zero here — Android WebView fills those in
+          // from a display cutout and never from the bars. An inline style on
+          // <html> outranks the :root rule, so this is a substitution rather
+          // than a fork: every `pt-safe`, `pb-safe` and `px-safe` in the bundle
+          // starts working, and the page holds its own content clear of the
+          // clock exactly as it does on the other platform.
+          //
+          // Read back synchronously rather than pushed, because a document
+          // that has just started parsing has no styles of ours on it yet and
+          // must not paint even once without them.
+          window.__homerunSafeArea = function () {
+            if (!root) return;
+            try {
+              var v = ${CHROME_INTERFACE}.safeArea().split(' ');
+              root.style.setProperty('--safe-top', v[0]);
+              root.style.setProperty('--safe-right', v[1]);
+              root.style.setProperty('--safe-bottom', v[2]);
+              root.style.setProperty('--safe-left', v[3]);
+            } catch (e) {}
+          };
+          window.__homerunSafeArea();
+
+          // What the page is painted at its top and bottom edges, reported so
+          // the clock and the gesture pill stay legible against it.
+          //
+          // This is all that is left of the host chasing the page, and it is
+          // the part that can afford to: an icon flipping black-on-white a
+          // frame late is invisible, where a mismatched band of colour was
+          // not.
+          //
+          // Measured, never inferred, and measured per edge. Two earlier
+          // versions of this were wrong in the same way — they answered a
+          // question about one thing (which theme is on) when the question is
+          // about another (what colour is under the clock *now*):
+          //
+          //   theme name -> a hex in the host.  The hex was #0A0A0A against the
+          //   UI's real #121214. Close enough to look deliberate, far enough to
+          //   read as a seam. Nothing can keep those in step: the bundle ships
+          //   over the air and the host does not.
+          //
+          //   body's background.  Right until anything is drawn over it. A
+          //   sheet dims the page behind it, so the clock kept its undimmed
+          //   appearance over a dimmed screen.
+          //
+          // So: ask what is actually on screen at each edge. elementFromPoint
+          // gives the topmost element there, its ancestors are what is painted
+          // behind it, and compositing that stack back to front gives the
+          // colour an eye would see. A dim overlay contributes its alpha and
+          // the page contributes what shows through. Per edge, because a sheet
+          // that reaches the bottom of the screen but not the top leaves the
+          // two ends of the screen genuinely different colours.
+          var query = window.matchMedia('(prefers-color-scheme: dark)');
+          var last = '';
+
+          function parse(css, opacity) {
+            var m = /rgba?\(([^)]+)\)/.exec(css || '');
+            if (!m) return null;
+            var p = m[1].split(',').map(parseFloat);
+            var a = (p.length > 3 ? p[3] : 1) * opacity;
+            return a > 0 ? { r: p[0], g: p[1], b: p[2], a: a } : null;
           }
 
-          new MutationObserver(report).observe(root, {
-            attributes: true, attributeFilter: ['class']
+          function edge(y) {
+            var el = document.elementFromPoint(Math.floor(window.innerWidth / 2), y);
+            var stack = [];
+            while (el) {
+              var style = getComputedStyle(el);
+              // An ancestor's opacity dims everything already collected from
+              // inside it, its own background included. Framer Motion fades
+              // overlays in exactly this way, so without it the answer would
+              // jump to the settled colour on the first frame of the fade.
+              var o = parseFloat(style.opacity);
+              if (o < 1) for (var j = 0; j < stack.length; j++) stack[j].a *= o;
+              var c = parse(style.backgroundColor, isNaN(o) ? 1 : o);
+              if (c) { stack.push(c); if (c.a >= 1) break; }
+              el = el.parentElement;
+            }
+            // Nothing opaque underneath means there is nothing to report yet —
+            // at document start there is no stylesheet and usually no <body>.
+            // Saying nothing leaves the host on its launch blue, which is what
+            // belongs on screen at that point anyway.
+            var out = stack.pop();
+            if (!out || out.a < 1) return '';
+            while (stack.length) {
+              var s = stack.pop();
+              out = {
+                r: s.r * s.a + out.r * (1 - s.a),
+                g: s.g * s.a + out.g * (1 - s.a),
+                b: s.b * s.a + out.b * (1 - s.a),
+                a: 1,
+              };
+            }
+            return 'rgb(' + Math.round(out.r) + ',' + Math.round(out.g) + ',' +
+                   Math.round(out.b) + ')';
+          }
+
+          function report() {
+            var top = edge(1);
+            var bottom = edge(Math.max(1, window.innerHeight - 2));
+            if (!top || !bottom || top + '|' + bottom === last) return;
+            last = top + '|' + bottom;
+            try { ${CHROME_INTERFACE}.backdropChanged(top, bottom); } catch (e) {}
+          }
+
+          // Sampled for a short while after anything moves, rather than once:
+          // a sheet slides and a dim fades, and the answer during the animation
+          // is different from the answer after it.
+          //
+          // Every frame rather than on a timer, so the clock flips in the
+          // middle of the fade that makes it necessary instead of a beat after
+          // it. The burst is bounded and `report` does nothing when the
+          // composite has not moved, so this costs close to nothing.
+          var deadline = 0;
+          var running = false;
+          function frame() {
+            report();
+            if (Date.now() < deadline) requestAnimationFrame(frame);
+            else running = false;
+          }
+          function schedule() {
+            deadline = Date.now() + 500;
+            report();
+            if (!running) { running = true; requestAnimationFrame(frame); }
+          }
+
+          // Deliberately not a subtree observer. Overlays and sheets portal
+          // into <body> as direct children, and a page whose console is
+          // streaming a server's output mutates deep in the tree hundreds of
+          // times a second — watching all of it would run this sampler forever
+          // for nothing. The theme class lands on <html>; scroll covers a
+          // header that changes colour as it passes under the clock.
+          new MutationObserver(schedule).observe(root, {
+            attributes: true, attributeFilter: ['class'],
           });
-          query.addEventListener('change', report);
-          report();
+          function watchBody() {
+            if (document.body) {
+              new MutationObserver(schedule).observe(document.body, {
+                attributes: true, childList: true,
+              });
+            }
+          }
+          document.addEventListener('DOMContentLoaded', function () {
+            watchBody();
+            schedule();
+          });
+          // The media listener covers the device's appearance changing under a
+          // `system` page, which the activity does not otherwise notice: uiMode
+          // is in configChanges, so nothing is recreated and the theme XML is
+          // never re-applied.
+          query.addEventListener('change', schedule);
+          window.addEventListener('scroll', schedule, true);
+          window.addEventListener('resize', schedule);
+          watchBody();
+          schedule();
         })();
         """.trimIndent()
     }
@@ -147,52 +288,144 @@ class MainActivity : ComponentActivity() {
      */
     private inner class ChromeInterface {
         @JavascriptInterface
-        fun themeChanged(theme: String) {
-            val light = theme != "dark"
-            runOnUiThread { applyPageTheme(light) }
+        fun backdropChanged(top: String, bottom: String) {
+            val above = parseCssColour(top) ?: return
+            val below = parseCssColour(bottom) ?: return
+            runOnUiThread { applyChrome(above, below) }
+        }
+
+        /**
+         * `top right bottom left`, in CSS pixels — the order the shorthand
+         * everyone already knows uses, so the JS side can split and assign.
+         *
+         * CSS pixels, not device pixels: the bundle sets `initial-scale=1` on
+         * a `device-width` viewport, so one CSS pixel is one dp. Fractional on
+         * purpose. Rounding a 21.33dp gesture inset to 21 leaves a sliver of
+         * page under the pill on exactly the phones where it is tightest.
+         */
+        @JavascriptInterface
+        fun safeArea(): String {
+            val density = resources.displayMetrics.density
+            val bars = bars
+            // Locale.US, not the default: a device set to a comma-decimal
+            // locale would format 21.33 as "21,33px", which is not a CSS
+            // length. The page would silently keep its zeroes and draw under
+            // the bars in exactly the places this exists to prevent.
+            return "%.2fpx %.2fpx %.2fpx %.2fpx".format(
+                Locale.US,
+                bars.top / density,
+                bars.right / density,
+                bars.bottom / density,
+                bars.left / density,
+            )
         }
     }
 
     /**
-     * Paints the system bars for the theme the page is showing.
+     * `rgb(18, 18, 20)` — what the page's compositing produced. Alpha never
+     * arrives here: the page has already flattened its stack against something
+     * opaque, and a colour that could not be flattened is not sent at all.
      *
-     * The half that was wrong is the icon appearance. It came from the theme,
-     * which resolves once from the device's dark mode — so a player who pins
-     * the UI to dark on a light phone got a black clock on a black page, and
-     * nothing corrected it because uiMode is in `configChanges` and the
-     * activity is never recreated.
+     * Returns null rather than a guess. The caller's job is then to leave the
+     * chrome exactly as it was, which beats flashing a wrong colour.
      */
-    private fun applyPageTheme(light: Boolean) = applyChrome(
-        ContextCompat.getColor(
-            this,
-            if (light) R.color.page_background else R.color.page_background_night,
-        ),
-        light = light,
-    )
+    private fun parseCssColour(css: String): Int? {
+        val channels = CSS_CHANNEL.findAll(css)
+            .take(3)
+            .mapNotNull { it.value.toIntOrNull()?.takeIf { n -> n in 0..255 } }
+            .toList()
+        if (channels.size < 3) {
+            Log.w(TAG, "unparseable backdrop colour: $css")
+            return null
+        }
+        return Color.rgb(channels[0], channels[1], channels[2])
+    }
 
     /**
-     * Back to what the theme starts on: blue bars, white icons. Used whenever
-     * there is no page — cold start, and again after the render process dies
-     * and the WebView is rebuilt.
+     * Back to what the theme starts on: blue everywhere, white icons. Used
+     * whenever there is no page — cold start, and again after the render
+     * process dies and the WebView is rebuilt.
      */
-    private fun applyLaunchChrome() = applyChrome(
-        ContextCompat.getColor(this, R.color.launch_background),
-        light = false,
-    )
+    private fun applyLaunchChrome() =
+        ContextCompat.getColor(this, R.color.launch_background)
+            .let { applyChrome(it, it) }
 
     /**
-     * The bar colours are what API 34 and below draws behind the clock; from
-     * API 35 they are ignored and the page shows through instead. The
-     * appearance flag is what matters on every version.
+     * Sets the clock and the gesture pill to whatever stays legible against
+     * what the page is painting behind them.
+     *
+     * Per bar, because the two ends of the screen are not always the same: a
+     * sheet covers the bottom and dims the top, and one appearance for both
+     * puts a black clock on a dimmed page.
+     *
+     * By luminance rather than by theme. Brand blue is not a dark colour in
+     * the sense a theme means, and still needs a white clock on it.
+     *
+     * The window bar colours are set too and matter only on API 34 and below;
+     * from 35 the platform ignores them and shows the page through the bar.
+     * The container is behind the WebView, so it only shows in the moment
+     * before the page's first paint.
      */
-    private fun applyChrome(background: Int, light: Boolean) {
+    private fun applyChrome(top: Int, bottom: Int) {
+        container.setBackgroundColor(top)
         @Suppress("DEPRECATION")
-        window.statusBarColor = background
+        window.statusBarColor = top
         @Suppress("DEPRECATION")
-        window.navigationBarColor = background
+        window.navigationBarColor = bottom
         WindowInsetsControllerCompat(window, window.decorView).apply {
-            isAppearanceLightStatusBars = light
-            isAppearanceLightNavigationBars = light
+            isAppearanceLightStatusBars = ColorUtils.calculateLuminance(top) > 0.5
+            isAppearanceLightNavigationBars = ColorUtils.calculateLuminance(bottom) > 0.5
+        }
+    }
+
+    /**
+     * Keeps the page out from under the status bar and the gesture pill.
+     *
+     * From Android 15 an app targeting SDK 35 is edge-to-edge and cannot opt
+     * out: the window is the whole display, and a WebView filling it draws
+     * beneath the clock at the top and beneath the navigation pill at the
+     * bottom. On this phone that put the "Homerun Go" wordmark behind the
+     * status icons and the pill straight through the "Create" tab label.
+     *
+     * iOS has never had this problem, because WKWebView answers
+     * `env(safe-area-inset-*)` and the shared UI — which does set
+     * `viewport-fit=cover` and does consume those variables — gets real numbers
+     * back. Android WebView only ever fills them in from a display *cutout*,
+     * never from the bars, so on most phones the UI is asking a question the
+     * platform will not answer.
+     *
+     * So the host measures the bars and hands the page the numbers, in the
+     * variables the shared UI already reads. The WebView stays full-bleed and
+     * the *page* keeps its own content clear of them, which is exactly what it
+     * does on iOS — the only difference being where the numbers came from.
+     *
+     * **The host must not hold the space itself.** It was tried: inset the
+     * WebView, fill the gap with two views, colour them from what the page
+     * reported. It works until something animates. The page's dim and the
+     * host's strips are painted by two different compositors, so the strips
+     * always arrive a frame late and the seam is visible every time a sheet
+     * opens. Nothing about the sampling rate fixes that — the fix is for the
+     * bars to be part of the page, so there is one thing painting and nothing
+     * to keep in step.
+     *
+     * `CONSUMED` stops the dispatch here so the WebView never sees a display
+     * cutout of its own. `env(safe-area-inset-*)` therefore stays 0 and the
+     * variables below are the single source of the numbers.
+     *
+     * The IME is deliberately not in this: `adjustResize` in the manifest
+     * already shrinks the window when the keyboard opens. Adding `Type.ime()`
+     * would take the keyboard's height out a second time and leave a gap the
+     * size of the keyboard above it.
+     */
+    private fun holdBarsOutOfThePage() {
+        ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
+            bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            // A page already loaded needs telling; one loading now reads the
+            // same numbers itself, from the document-start script.
+            webView?.evaluateJavascript("window.__homerunSafeArea && __homerunSafeArea()", null)
+            WindowInsetsCompat.CONSUMED
         }
     }
 
@@ -214,6 +447,7 @@ class MainActivity : ComponentActivity() {
             )
         }
         setContentView(container)
+        holdBarsOutOfThePage()
 
         // Before the page loads, so `deep-link:consume` finds it on mount.
         intent?.dataString?.let {
@@ -404,8 +638,11 @@ class MainActivity : ComponentActivity() {
         const val TAG = "HomerunHost"
         const val TAG_WEB = "HomerunWeb"
 
-        /** The global the injected theme watcher reports through. */
+        /** The global the injected backdrop watcher reports through. */
         const val CHROME_INTERFACE = "HomerunChrome"
+
+        /** One channel of an `rgb()`/`rgba()`, which is all CSS ever hands back. */
+        val CSS_CHANNEL = Regex("""\d+""")
 
         /**
          * Process-wide, not per-activity: a rotation must not re-prompt, and
