@@ -57,6 +57,16 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // and state changes. The backend outlives every page and so does this.
         Reporting.attach(backend: backend)
 
+        // Before anything can load a page. A bundle downloaded on an earlier
+        // launch goes live here and in `quit-and-install`, nowhere else — never
+        // under a live WebView, which would cancel whatever bridge call is in
+        // flight, and `native-server-start` runs for minutes.
+        //
+        // Without this an over-the-air bundle only ever activates if the user
+        // taps Install Now, so the whole mechanism looks like it works — the
+        // fetch is narrated, the bundle stages — and silently never goes live.
+        BundleStore.activate()
+
         let bridge = BridgeController(deepLinks: deepLinks, backend: backend)
         self.bridge = bridge
 

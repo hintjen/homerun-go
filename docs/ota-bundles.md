@@ -372,12 +372,33 @@ It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
 
 ## Still to build
 
-- **The update modal.** `update-available`, `quit-and-install` and
-  `wait-for-update-check` are already optional channels in `bridge-v1.json` that
-  neither mobile host answers. Wiring them offers the update sooner, and on
-  mobile "restart" is `installWebView()` — about a second, with the running
-  server surviving it.
-- **The iOS half.** `AppSchemeHandler.resolve(path:in:)` is the same
-  one-function seam; `BundleStore` and `BundleUpdater` are the shapes to copy,
-  and the judgement is already shared. Blocked on iOS Swift never having been
-  compiled.
+The update modal and the iOS half were the two items here, and both are now
+written. `update-available`, `quit-and-install` and `wait-for-update-check` are
+answered by both hosts; on mobile "restart" is a WebView rebuild, about a
+second, with the running server surviving it.
+
+**iOS, as of 2026-08-13**, compiles and is proven on the simulator, both
+halves. The store: the shipped floor, a hand-placed bundle, activation of a
+`pending` one, probation, rollback to `previous` and to the floor, the
+`minHost` refusal, an unusable `current`, and apply-on-request without
+relaunching. The network: a manifest signed over the real published archive
+`ui/stage/2026-08-13.2.zip` fetched, verified, digest-checked, unpacked,
+staged, activated and confirmed with the real UI rendering — plus all three
+tampered-manifest refusals, with the same messages Android gives.
+
+Two caveats. The **real stage API has never served iOS a manifest**: it
+answers `204` for `platform=ios` because nothing has been published there,
+which the client reports correctly as `the server has no bundle for this
+host`. And the fetch was proven against a local stub with a throwaway signing
+key, because the production private half is CI-only — so what is unexercised
+is the server, not the client. `plans/ios-ota.md` carries the rig and the
+traps.
+
+One bug worth remembering, because the same shape can recur in any port of
+this: `BundleStore.activate()` existed and was correct but had **no caller at
+launch** — only `quit-and-install`. Every log line said the right thing while
+no bundle ever went live. When porting this to a fourth host, check the call
+sites before the file contents.
+
+What is genuinely left is switching it on: the API branch deployed, the AWS
+credential proven, and a store release carrying the public key.

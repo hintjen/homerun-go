@@ -198,8 +198,13 @@ enum BundleUpdater {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard status == 200 else { throw Failure("HTTP \(status) fetching the bundle") }
 
-        let size = (try? FileManager.default.attributesOfItem(atPath: temporary.path)[.size] as? Int) ?? 0
-        guard let size, size <= maxArchiveBytes else {
+        // An unreadable size is refused rather than treated as zero: the point
+        // of the ceiling is that nothing unbounded reaches the unpack, and
+        // "we could not tell" is not evidence that it is small.
+        guard let size = (try? FileManager.default.attributesOfItem(atPath: temporary.path))?[.size] as? Int else {
+            throw Failure("the size of the downloaded bundle archive could not be read")
+        }
+        guard size <= maxArchiveBytes else {
             throw Failure("the bundle archive is larger than \(maxArchiveBytes) bytes")
         }
 
@@ -247,7 +252,9 @@ enum BundleUpdater {
         let zip = try Archive(url: archive, accessMode: .read)
         let root = destination.standardizedFileURL
         var entries = 0
-        var written = 0
+        // UInt64 to match the zip header's own type: converting to Int would
+        // trap on a corrupt entry rather than fail the ceiling below.
+        var written: UInt64 = 0
 
         for entry in zip {
             entries += 1
@@ -271,7 +278,7 @@ enum BundleUpdater {
             }
 
             written += entry.uncompressedSize
-            guard written <= maxUnpackedBytes else {
+            guard written <= UInt64(maxUnpackedBytes) else {
                 throw Failure("the bundle expands to more than \(maxUnpackedBytes) bytes")
             }
 
