@@ -111,7 +111,11 @@ object DeviceRegistry {
 
     fun current(): Registration? {
         val id = prefs.getString(KEY_ID, null) ?: return null
-        val token = prefs.getString(KEY_TOKEN, null) ?: return null
+        // A token that will not decrypt reads as absent, which lands here as
+        // "not registered" — and [register] re-sends the id above, so the
+        // recovery is a new token for the same device row rather than a
+        // second device appearing in the dashboard.
+        val token = SecretStore.read(prefs, KEY_TOKEN) ?: return null
         return Registration(id, token, prefs.getString(KEY_GROUP, null))
     }
 
@@ -150,9 +154,9 @@ object DeviceRegistry {
 
         prefs.edit()
             .putString(KEY_ID, result.deviceId)
-            .putString(KEY_TOKEN, result.deviceToken)
             .putString(KEY_GROUP, result.groupId)
             .apply()
+        SecretStore.write(prefs, KEY_TOKEN, result.deviceToken)
         Log.i(TAG, "registered as ${result.deviceId}")
 
         startHeartbeat()

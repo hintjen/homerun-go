@@ -3,10 +3,11 @@ import Security
 
 /// Keychain storage for the two bearer tokens the host holds.
 ///
-/// Android keeps these in private SharedPreferences, which is the platform's
-/// equivalent. On iOS the Keychain is the right home: `UserDefaults` is a
-/// plist inside the app container, and it lands in device backups. The device
-/// token in particular never expires, so it is worth the extra twenty lines.
+/// Android's half of this is `SecretStore` — private SharedPreferences under a
+/// Keystore AES-GCM envelope. On iOS the Keychain is the right home:
+/// `UserDefaults` is a plist inside the app container, and it lands in device
+/// backups. The device token in particular never expires, so it is worth the
+/// extra twenty lines.
 ///
 /// `kSecAttrAccessibleAfterFirstUnlock` rather than the stricter
 /// `WhenUnlocked`: the host may need to reach the API while the screen is

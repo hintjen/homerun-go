@@ -663,7 +663,7 @@ class BridgeRouter(
                 // succeeds and then hosts against a different server.
                 emit("credentials-error", listOf(JsonPrimitive(API_URL_REFUSED)))
             } else {
-                prefs.edit().putString(KEY_CREDENTIALS, json.encodeToString(params)).apply()
+                SecretStore.write(prefs, KEY_CREDENTIALS, json.encodeToString(params))
                 // No apiUrl at all leaves any existing override alone: the UI
                 // is saying nothing about the backend, which is not the same
                 // as set-api-url's explicit clear.
@@ -1311,7 +1311,7 @@ class BridgeRouter(
     }
 
     private fun userToken(): String = runCatching {
-        val stored = prefs.getString(KEY_CREDENTIALS, null) ?: return@runCatching ""
+        val stored = SecretStore.read(prefs, KEY_CREDENTIALS) ?: return@runCatching ""
         (json.parseToJsonElement(stored) as? JsonObject)
             ?.get("access_token")?.jsonPrimitive?.contentOrNull.orEmpty()
     }.getOrDefault("")
