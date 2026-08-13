@@ -31,12 +31,30 @@ settings:
     # counter rather than a 1 someone has to remember to bump: yyyymmddNN.
     CURRENT_PROJECT_VERSION: "2026081201"
 
+# The only third-party Swift dependency in the app.
+#
+# iOS ships no zip API at all — not in Foundation, not in Compression (raw
+# streams, no container), not in AppleArchive (a different format entirely). A
+# UI bundle arrives as a zip because that is what the publish workflow produces
+# and what Android's java.util.zip reads, so something here has to open it.
+#
+# The alternative was a zip container parser over Compression: roughly 200
+# lines of offset arithmetic guarding the one path in this app that unpacks an
+# archive it did not create. This is the safer trade. `BundleUpdater` still
+# walks entries by hand rather than calling `unzipItem`, so the path-traversal
+# refusal and the size ceilings are ours and match Android's.
+packages:
+  ZIPFoundation:
+    url: https://github.com/weichsel/ZIPFoundation
+    from: "0.9.19"
+
 targets:
   HomerunHost:
     type: application
     platform: iOS
 
     dependencies:
+      - package: ZIPFoundation
       # The wireproxy tunnel, gomobile-bound so it runs in-process — iOS
       # cannot spawn the binary the way desktop and Android do. Staged by
       # `node scripts/build-wireproxy.js ios`, so that must run before

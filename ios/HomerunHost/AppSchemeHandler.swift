@@ -45,8 +45,53 @@ final class AppSchemeHandler: NSObject, WKURLSchemeHandler {
     /// Tasks WebKit has not stopped yet. See `finish`.
     private var live = Set<ObjectIdentifier>()
 
-    private lazy var root: URL? =
+    /// Where the bundle being served lives.
+    ///
+    /// This is the whole of over-the-air updates at the serving end: prefer a
+    /// downloaded bundle, fall back to the copy inside the app. ``BundleStore``
+    /// has already decided which — including spending a probationary attempt
+    /// and rolling back one that never reached `__bridge:ready`.
+    ///
+    /// Resolved once per handler, and a handler belongs to one `WKWebView`, so
+    /// rebuilding the web view re-asks. That is what lets `quit-and-install`
+    /// work without restarting the process, and it is also why a render
+    /// process that died spends an attempt — dying is the strongest evidence a
+    /// bundle is bad.
+    ///
+    /// A nil store root means the shipped copy, not "no UI": the bundle inside
+    /// the app is a permanent floor that is never deleted, so a device that
+    /// cannot reach the CDN — or has just rolled back — still has a working
+    /// app. It is also what keeps us honest with Apple, whose 3.3.2 carve-out
+    /// assumes the submitted app is complete on its own.
+    private var root: URL? { Self.currentRoot() }
+
+    /// The bundle in the app, and the floor beneath everything.
+    private static let shippedRoot: URL? =
         Bundle.main.resourceURL?.appendingPathComponent("web").standardizedFileURL
+
+    private static var resolvedRoot: URL?
+    private static var didResolve = false
+
+    /// Resolved once, not per request: ``BundleStore/resolve()`` spends one of
+    /// a new bundle's probationary attempts, and doing that per asset would
+    /// burn them before the page had finished loading.
+    private static func currentRoot() -> URL? {
+        if !didResolve {
+            didResolve = true
+            resolvedRoot = BundleStore.resolve().root ?? shippedRoot
+        }
+        return resolvedRoot
+    }
+
+    /// Forget the resolution, so the next request re-asks the store.
+    ///
+    /// This is how `quit-and-install` applies an update without relaunching:
+    /// promote, forget, reload. It exists because the configuration retains
+    /// the handler and the controller does not hold one, so there is no
+    /// instance to reach — see `BridgeController.init`.
+    static func invalidateRoot() {
+        didResolve = false
+    }
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         live.insert(ObjectIdentifier(task))

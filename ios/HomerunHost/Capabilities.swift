@@ -9,6 +9,24 @@ import WebKit
 /// silently fall behind it, and a *missing* field is a host bug rather than a
 /// default the UI fills in (PROTOCOL.md §4.1).
 enum Capabilities {
+
+    /// The Ed25519 public key over-the-air bundle manifests are signed with.
+    ///
+    /// Must be byte-identical to Android's `bundlePublicKey` default in
+    /// `android/app/build.gradle.kts` — one key signs for both platforms, and
+    /// the publish workflow signs once.
+    ///
+    /// Public by nature, which is the whole point of signing asymmetrically,
+    /// so it is checked in rather than injected at build time. **Empty
+    /// disables over-the-air updates entirely**: `BundleUpdater` refuses to
+    /// fetch what it cannot verify, and a build that quietly stopped updating
+    /// is far harder to notice than one that never started.
+    ///
+    /// Changing it needs an App Store release. A device only accepts manifests
+    /// signed by the key compiled into *it*, so every installed copy holds the
+    /// old key until it updates through the store.
+    static let bundlePublicKey = "8d44ecfa010fe0136b450baee986a352cd027d3555403f0662dce5eb2ff16f4e"
+
     /// Injected at document start — the UI resolves capabilities synchronously
     /// as its first act and cannot await the host.
     ///

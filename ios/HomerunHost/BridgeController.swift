@@ -146,6 +146,34 @@ final class BridgeController: NSObject, BridgeEventSink {
 
     func load() {
         webView.load(URLRequest(url: AppSchemeHandler.indexURL))
+
+        // `quit-and-install` — which on this platform installs without
+        // quitting. iOS has no relaunch API, `exit(0)` reads to a user as a
+        // crash, and quitting would take a running Pumpkin server with it.
+        // The router has already promoted the bundle and invalidated the
+        // resolved root, so a reload is the whole of applying it.
+        router.onApplyUpdate = { [weak self] in
+            guard let self else { return }
+            HostLog.bundle.info("applying a staged bundle at the page's request")
+            self.webView.reload()
+        }
+
+        // Offer an update as soon as it is staged rather than waiting for the
+        // user to relaunch of their own accord.
+        BundleUpdater.onBundleStaged = { [weak self] bundle in
+            Task { @MainActor in
+                self?.emit("update-available", [[
+                    "status": "available",
+                    "version": bundle,
+                    "bundle": bundle,
+                ]])
+            }
+        }
+
+        // After the page has been asked to load, never before: this is seconds
+        // of network and disk for something that takes effect later, so there
+        // is nothing to gain by making the user wait on it.
+        BundleUpdater.check()
     }
 
     // MARK: - Host -> UI
@@ -211,6 +239,11 @@ extension BridgeController: WKScriptMessageHandler {
         }
 
         if incoming.method == BridgeEnvelope.readyMethod {
+            // The handshake is also the health signal for an over-the-air
+            // bundle: one that throws on its first chunk never gets here, and
+            // one that does has proved it can run. Nothing else in the
+            // protocol says that.
+            BundleStore.confirm()
             flushQueue()
             return
         }

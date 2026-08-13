@@ -10,10 +10,16 @@ both; the app build itself stays in Xcode and Gradle where it belongs.
 Nothing here is committed — bundles and native libraries are build output.
 
 ```
-npm run doctor            what can this machine build, and what is missing
-npm run build:ios         stage the UI + build the iOS static library
-npm run build:android     stage the UI + build the Android shared library
+npm run doctor              what can this machine build, and what is missing
+npm run build:ios           stage the UI + build the iOS static library
+npm run build:android       stage the UI + build the Android shared library
+npm run build:android:release   everything an installable release needs
 ```
+
+`build:android` stages what the *debug* loop needs and no more. A release
+needs four more pieces, and every one of them fails open — the build
+succeeds and the app is broken on a phone instead. See
+[Building a release](#building-a-release).
 
 ## Check the machine first — `scripts/doctor.js`
 
@@ -165,6 +171,36 @@ repo and point the host at `http://localhost:3000`.
 npm install
 npm run doctor
 npm run build:android      # or build:ios on a Mac
+```
+
+## Building a release
+
+`build:android` is the debug loop's staging step. It covers the UI bundle,
+the FFI library and wireproxy — and stops there, which is right for the
+emulator and wrong for anything you would upload.
+
+```bash
+npm run build:android:release
+```
+
+That adds the four pieces a release needs and a debug build does not:
+
+| Piece | Without it |
+|---|---|
+| `rust:java-launcher` (`libjavabin.so`) | `JavaRuntime.isAvailable` is false, so `ServerHost` picks a backend that cannot start a Java server |
+| `restic:android` (`librestic.so`) | backups silently no-op while `HostCapabilities` still advertises them — the app offers a feature that does nothing |
+| `jre:android` | the app installs and can never host anything |
+| — and it stages the **arm64** JRE, not the emulator's | an APK that runs on no phone |
+
+Every one of those fails open: the build succeeds and the failure surfaces
+on a device, a long way from the cause. That is why this is a separate
+script rather than a note in a checklist.
+
+The Gradle build then wants the ABI named explicitly, because the staged
+JRE is architecture-specific and a release must ship exactly one:
+
+```bash
+./gradlew :app:bundleRelease -Pabi=arm64-v8a
 ```
 
 ## Conformance

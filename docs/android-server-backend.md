@@ -681,6 +681,24 @@ pointing at nothing.
 fetched, keyed by digest. It saves the **download**, not the disk: see
 [Never downloading a jar this device already has](#never-downloading-a-jar-this-device-already-has).
 
+### The id is checked before it is a path
+
+`serverId` reaches the host verbatim from the page, so `requireValidServerId`
+(in `ServerBackend.kt`) refuses anything outside `[A-Za-z0-9._-]{1,128}`, and
+anything starting with a dot. Both backends call it from `dataDir`, which is
+the one place either builds a path out of an id.
+
+Without it, `native-server-delete` with an id of `../..` deletes the app's
+private root — `shared_prefs` with the credentials and the device token, the
+unpacked JRE, the jar cache and every world. The `activeIds` membership check
+is not a guard against that: it asks whether an id is *busy*, and any invented
+id passes.
+
+An allowlist rather than a canonical-path check at each sink, because the id is
+a path segment in more places than the filesystem — `/api/server/<id>/`,
+restic's recorded basename, `cacheDir/restore-<id>` — and a rule about the id
+holds at all of them, including the one somebody adds next.
+
 ## Current engine
 
 `StubEngine`, because the Pumpkin fork is not pinned yet. It is not a no-op:

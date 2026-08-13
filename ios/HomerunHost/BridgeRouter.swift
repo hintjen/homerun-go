@@ -61,7 +61,7 @@ final class BridgeRouter {
     /// So: bump this whenever the table below gains a channel, and add the
     /// matching ledger entry. `scripts/check-host-revision.js` compares the two
     /// and fails the build if you do one without the other.
-    static let hostRevision = 2
+    static let hostRevision = 5
 
     private(set) var handlers: [String: Handler] = [:]
 
@@ -69,6 +69,14 @@ final class BridgeRouter {
     weak var events: BridgeEventSink?
 
     let deepLinks: DeepLinkManager
+
+    /// How `quit-and-install` applies a staged bundle: the view controller
+    /// rebuilds its `WKWebView`, and the scheme handler on the new one asks
+    /// ``BundleStore`` for a root again.
+    ///
+    /// A hook rather than a direct call because the router does not own the
+    /// view controller — it outlives any single web view, which is the point.
+    var onApplyUpdate: (() -> Void)?
     let backend: PumpkinBackend
     let deviceRegistrar = DeviceRegistrar()
     /// Only the lease gate is reached from here; the restore and the on-stop
@@ -98,6 +106,8 @@ final class BridgeRouter {
             "get-initial-config": getInitialConfig,
             "get-app-version": getAppVersion,
             "get-system-language": getSystemLanguage,
+            "wait-for-update-check": waitForUpdateCheck,
+            "quit-and-install": quitAndInstall,
             "set-appearance": setAppearance,
             "splash-shown": splashShown,
             "set-posthog-distinct-id": setPosthogDistinctID,
@@ -165,6 +175,48 @@ final class BridgeRouter {
             "commit": NSNull(),
             "platform": "ios",
             "arch": "arm64",
+            // Two update paths means two ways to be wrong about what a user is
+            // running. The binary version no longer identifies the UI —
+            // `bundle` does, and without it every bug report is a guess.
+            "bundle": BundleStore.active(),
+            "hostRevision": Self.hostRevision,
         ]
+    }
+
+    // MARK: - Over-the-air updates
+
+    /// An **invoke**, so it must always answer. Every failure inside
+    /// `checkNow` is swallowed for exactly that reason: a check that cannot
+    /// reach the network is no reason to leave a UI promise unresolved for
+    /// ever.
+    ///
+    /// `status` mirrors the desktop's shape — the UI stores this payload and
+    /// tests `status !== "not-available"`.
+    func waitForUpdateCheck(_ params: Any?) async throws -> Any? {
+        let staged = await BundleUpdater.checkNow()
+        var reply: [String: Any] = ["status": staged == nil ? "not-available" : "available"]
+        if let staged {
+            // The bundle id is the version here. The binary's version has not
+            // changed, and reporting it as though it had would be a lie the UI
+            // writes to localStorage.
+            reply["version"] = staged
+            reply["bundle"] = staged
+        }
+        return reply
+    }
+
+    /// Named for what it does on desktop, not for what it does here: this
+    /// **must not quit**. iOS has no relaunch API, `exit(0)` is against
+    /// Apple's guidance and reads to a user as a crash, and quitting would
+    /// take any running Pumpkin server with it. Rebuilding the web view is
+    /// enough — the scheme handler re-asks `BundleStore` for a root, which is
+    /// the whole of applying an update.
+    func quitAndInstall(_ params: Any?) async throws -> Any? {
+        BundleStore.activate()
+        // Forget the resolved root before reloading, or the page comes back on
+        // the bundle it was already showing and the button reads as broken.
+        AppSchemeHandler.invalidateRoot()
+        onApplyUpdate?()
+        return nil
     }
 }

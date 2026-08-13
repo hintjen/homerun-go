@@ -1,3 +1,7 @@
+// Imported rather than written out: inside this script `java` is the Java
+// plugin extension, so `java.util.Properties` does not resolve.
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -7,6 +11,26 @@ plugins {
 /** A `-P` override, or the default. Keeps build config out of source. */
 fun prop(name: String, fallback: String): String =
     (project.findProperty(name) as String?)?.takeIf { it.isNotBlank() } ?: fallback
+
+/**
+ * The one ABI this build packages, or null for "every ABI that is staged".
+ *
+ * Read once, because two things depend on it and they have to agree: which
+ * native libraries are packaged, and which Java runtime was staged. When they
+ * disagree the app installs and runs and simply cannot host — see
+ * `verifyJavaRuntime`.
+ */
+val requestedAbi: String? = (project.findProperty("abi") as String?)?.takeIf { it.isNotBlank() }
+
+/**
+ * Per ABI: the `OS_ARCH` its Java runtime reports in `assets/jre/release`, and
+ * the command that stages one. Both belong to `scripts/stage-jre.py`, the only
+ * thing that ever writes into `assets/jre/`; it takes the same two ABI names.
+ */
+val jreForAbi = mapOf(
+    "arm64-v8a" to Pair("aarch64", "npm run jre:android"),
+    "x86_64" to Pair("x86_64", "npm run jre:android-x86_64"),
+)
 
 android {
     namespace = "app.gethomerun.mobile"
@@ -19,8 +43,17 @@ android {
         // but honouring it unconditionally is simpler than branching.
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+
+        // Play refuses an upload whose versionCode it has already seen, so the
+        // number has to be settable from CI:
+        //   ./gradlew bundleRelease -PversionCode=2 -PversionName=0.1.1
+        // The defaults are what a local build gets, and what the first store
+        // upload used. A build that cannot bump its own version turns every
+        // release into a source edit.
+        val code = prop("versionCode", "1")
+        versionCode = code.toIntOrNull()
+            ?: throw GradleException("versionCode must be a whole number, got: $code")
+        versionName = prop("versionName", "0.1.0")
 
         // Mirrors what the desktop app reads out of its package.json. Override
         // for a dev backend:  ./gradlew installDebug -PapiUrl=https://api.fractalnetworks.co
@@ -65,8 +98,9 @@ android {
         // the ABI that `npm run jre:*` staged:
         //   ./gradlew assembleRelease -Pabi=arm64-v8a
         // Omitted, every built ABI is packaged, which is right for local work
-        // and wrong for a release.
-        (project.findProperty("abi") as String?)?.let { abi ->
+        // and wrong for a release — so a release without it fails, see
+        // `verifyReleaseConfig`.
+        requestedAbi?.let { abi ->
             ndk { abiFilters += abi }
         }
     }
@@ -75,12 +109,52 @@ android {
         buildConfig = true
     }
 
+    // Release signing. The keystore and its passwords live in
+    // `android/keystore.properties` — gitignored, supplied by CI from a secret,
+    // never committed. Keys: storeFile, storePassword, keyAlias, keyPassword.
+    //
+    // With no such file the release build still completes, unsigned. That is
+    // deliberate: conformance runs, CI smoke builds and local audit builds all
+    // want a release APK and none of them can upload one, and requiring a
+    // keystore to compile would put a copy of the signing key on every
+    // developer's disk. What an unsigned artifact cannot do is reach Play — so
+    // `verifyReleaseConfig` says so out loud rather than leaving the difference
+    // to be noticed in the Play Console.
+    val releaseKeystore = rootProject.file("keystore.properties").takeIf { it.exists() }?.let { file ->
+        Properties().apply { file.inputStream().use { stream -> load(stream) } }
+    }
+
+    signingConfigs {
+        releaseKeystore?.let { props ->
+            create("release") {
+                // A half-filled file would otherwise surface as a null
+                // dereference somewhere inside the Android plugin.
+                val missing = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
+                    .filter { props.getProperty(it).isNullOrBlank() }
+                if (missing.isNotEmpty()) {
+                    throw GradleException(
+                        "android/keystore.properties is missing: ${missing.joinToString(", ")}",
+                    )
+                }
+                // Relative paths resolve against `android/`, so a keystore kept
+                // beside the properties file needs only its name.
+                storeFile = rootProject.file(props.getProperty("storeFile"))
+                storePassword = props.getProperty("storePassword")
+                keyAlias = props.getProperty("keyAlias")
+                keyPassword = props.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
             isMinifyEnabled = false
         }
         release {
+            // Null when no keystore is configured, which leaves the artifact
+            // unsigned rather than failing the build.
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -169,10 +243,25 @@ val verifyUiBundle by tasks.registering {
  * The Java runtime is staged by `npm run jre:android`, not committed. Without
  * it the app builds and installs perfectly and then cannot host anything, so
  * say so at build time instead.
+ *
+ * And the runtime is architecture-specific, which is the sharper edge: staging
+ * the x86_64 JRE for the emulator and then building `-Pabi=arm64-v8a` for a
+ * phone produces an APK that installs, launches, shows every screen — and can
+ * never start a server, because the only `java` in it is for the wrong CPU. The
+ * ABI filter cannot catch that; the JRE lives in `assets/`, where nothing looks
+ * at architecture. So read the architecture the runtime states about itself and
+ * refuse the build when the two disagree.
  */
 val verifyJavaRuntime by tasks.registering {
-    val marker = layout.projectDirectory.file("src/main/assets/jre/java-major")
+    val jre = layout.projectDirectory.dir("src/main/assets/jre")
+    val marker = jre.file("java-major")
+    val releaseFile = jre.file("release")
     inputs.file(marker).optional(true)
+    inputs.file(releaseFile).optional(true)
+    // Captured here, not read in the action: the action must not reach back
+    // into the project while it runs.
+    val abi = requestedAbi
+    val expected = abi?.let { jreForAbi[it] }
     doFirst {
         if (!marker.asFile.exists()) {
             logger.warn(
@@ -183,12 +272,74 @@ val verifyJavaRuntime by tasks.registering {
                            npm run jre:android-x86_64  (emulator)
                 """.trimIndent(),
             )
+            return@doFirst
+        }
+        // No `-Pabi` means every ABI is packaged and there is nothing to
+        // contradict; a release always passes one, see `verifyReleaseConfig`.
+        if (expected == null) return@doFirst
+        val (wantedArch, stageCommand) = expected
+
+        // Every JDK image ships `release`, a shell-sourceable file of KEY="value".
+        val staged = releaseFile.asFile.takeIf { it.exists() }?.readText()?.let {
+            Regex("""^OS_ARCH="?([^"\n]+)"?$""", RegexOption.MULTILINE).find(it)
+        }?.groupValues?.get(1)
+            ?: throw GradleException(
+                "The staged Java runtime does not say what architecture it is for " +
+                    "(no OS_ARCH in app/src/main/assets/jre/release).\n" +
+                    "Restage it:  $stageCommand",
+            )
+
+        if (staged != wantedArch) {
+            throw GradleException(
+                "The staged Java runtime is for the wrong architecture.\n" +
+                    "  staged:    $staged  (app/src/main/assets/jre/release)\n" +
+                    "  requested: $wantedArch  (-Pabi=$abi)\n" +
+                    "This would build an APK that installs and can never host a " +
+                    "server: the JRE lives in assets/, so nothing at install time " +
+                    "notices the CPU is wrong.\n" +
+                    "Restage the runtime:  $stageCommand",
+            )
+        }
+    }
+}
+
+/**
+ * The checks that only make sense for a release build.
+ *
+ * Both are about artifacts that look finished and are not: one that packages
+ * every ABI and so carries a JRE for the wrong CPU alongside the right one, and
+ * one that Play will not accept because nothing signed it.
+ */
+val verifyReleaseConfig by tasks.registering {
+    val abi = requestedAbi
+    val signed = android.buildTypes.getByName("release").signingConfig != null
+    doFirst {
+        if (abi == null) {
+            throw GradleException(
+                "A release build must name its ABI:  -Pabi=arm64-v8a\n" +
+                    "Without it every built ABI is packaged, and only one of them " +
+                    "matches the single Java runtime staged in assets/ — so the " +
+                    "APK is both twice the size it should be and unable to host on " +
+                    "the architectures it claims to support.",
+            )
+        }
+        if (!signed) {
+            logger.warn(
+                """
+                WARNING: no android/keystore.properties, so this release artifact
+                         is UNSIGNED and cannot be uploaded to Play. Fine for a
+                         local or CI build; not something to hand to the store.
+                """.trimIndent(),
+            )
         }
     }
 }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach { dependsOn(verifyJavaRuntime) }
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("ReleaseAssets") }
+    .configureEach { dependsOn(verifyReleaseConfig) }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach {

@@ -136,8 +136,14 @@ class JavaServerBackend(
     // Storage
     // -----------------------------------------------------------------------
 
+    /**
+     * Every path this backend builds from an id goes through here, which is
+     * what makes it the place to check one — a caller that reached the
+     * filesystem without it would be a path the check does not cover. See
+     * [requireValidServerId].
+     */
     private fun dataDir(serverId: String): File =
-        File(context.filesDir, "servers/$serverId").apply { mkdirs() }
+        File(context.filesDir, "servers/${requireValidServerId(serverId)}").apply { mkdirs() }
 
     /** Scratch space for the JVM, inside the server's own directory. */
     private fun tmpDir(dir: File): File = File(dir, "tmp").apply { mkdirs() }

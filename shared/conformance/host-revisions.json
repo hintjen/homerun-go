@@ -144,6 +144,17 @@
         ],
         "ios": []
       }
+    },
+    {
+      "revision": 5,
+      "summary": "iOS answers the over-the-air update channels. Same two as Android gained at revision 3, arriving later because the iOS host is behind — the ledger records what each host answers, not when the feature was designed.",
+      "adds": {
+        "android": [],
+        "ios": [
+          "wait-for-update-check",
+          "quit-and-install"
+        ]
+      }
     }
   ]
 }

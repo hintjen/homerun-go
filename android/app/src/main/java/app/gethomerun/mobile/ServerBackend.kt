@@ -238,6 +238,49 @@ data class PerfSample(
     val playerCount: Int?,
 )
 
+/**
+ * Check a `serverId` before anything builds a path out of it.
+ *
+ * The id arrives verbatim from JavaScript and both backends spell their
+ * storage `filesDir/servers/$serverId`, so `../..` is the app's private root —
+ * and `native-server-delete` would take `shared_prefs` (credentials and the
+ * device token), the unpacked JRE and every world with it. The membership
+ * check against the lifecycle's active ids is not a guard: any invented id
+ * passes it, because it is asking whether the id is *busy*, not whether it is
+ * real.
+ *
+ * An allowlist on the id rather than a canonical-path assertion at each sink,
+ * because the id is a path segment in more places than the filesystem —
+ * `/api/server/<id>/`, restic's recorded basename
+ * (`homerun_core::backup::recorded_basename`), `cacheDir/restore-<id>`. A
+ * containment check has to be repeated at every one of those and is missing
+ * from whichever is added next; a rule about the id itself holds everywhere at
+ * once.
+ *
+ * The set is what an API-issued id can already be: anything outside it would
+ * corrupt the URLs this host builds from the same string long before it
+ * reached a directory. A leading dot is refused separately — the character is
+ * legal in the middle of an id, and refusing it only at the front is what
+ * rules out `.` and `..` themselves.
+ *
+ * Nothing exploits this today: the page is the bundle inside the APK. It goes
+ * live the moment that bundle comes over the air (`docs/ota-bundles.md`), and
+ * any XSS in the shared UI reaches it now.
+ */
+fun requireValidServerId(serverId: String): String {
+    if (!SERVER_ID.matches(serverId) || serverId.startsWith(".")) {
+        throw ServerBackendException.InvalidId()
+    }
+    return serverId
+}
+
+/**
+ * Matched with `matches`, which is a whole-string test — deliberately not an
+ * `^…$` pattern, whose `$` also matches before a trailing newline and would
+ * admit `"s1\n../.."`.
+ */
+private val SERVER_ID = Regex("[A-Za-z0-9._-]{1,128}")
+
 sealed class ServerBackendException(message: String) : Exception(message) {
     class NotFound(id: String) : ServerBackendException("No server with id $id")
     class AlreadyRunning(id: String) : ServerBackendException("Server $id is already running")
@@ -247,6 +290,19 @@ sealed class ServerBackendException(message: String) : Exception(message) {
     /** Surfaced to players, so phrased for them. */
     class AnotherServerRunning(id: String) : ServerBackendException(
         "Another server is already running. Stop it first — this device can host one at a time."
+    )
+
+    /**
+     * A `serverId` this host will not build a path from — see
+     * [requireValidServerId].
+     *
+     * Thrown rather than swallowed: the bridge answers the invoke with this
+     * message, and a handler that returned quietly would leave the UI's promise
+     * pending for the life of the page. The id is deliberately not in the text
+     * — it came from the page, and this is read by a player.
+     */
+    class InvalidId : ServerBackendException(
+        "Homerun cannot open that server — its id is not one this app recognises."
     )
 
     class Engine(message: String) : ServerBackendException(message)

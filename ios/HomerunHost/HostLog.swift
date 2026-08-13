@@ -23,4 +23,8 @@ enum HostLog {
     static let tunnel = Logger(subsystem: subsystem, category: "tunnel")
     static let reporting = Logger(subsystem: subsystem, category: "reporting")
     static let keychain = Logger(subsystem: subsystem, category: "keychain")
+    /// Over-the-air UI bundles. Its own category because every decision it
+    /// makes is narrated: a silent fallback is indistinguishable from a
+    /// network problem, and this is the only console a shipped build has.
+    static let bundle = Logger(subsystem: subsystem, category: "bundle")
 }

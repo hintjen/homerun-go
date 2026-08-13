@@ -33,6 +33,12 @@ xcuserdata/
 /android/.idea/
 *.iml
 /android/app/src/main/jniLibs/
+# The upload signing key and the passwords for it. CI writes keystore.properties
+# from a secret; a committed one would let anyone publish as this app for ever,
+# and Play will not reissue the key.
+*.jks
+*.keystore
+keystore.properties
 
 # Node (tooling only)
 node_modules/

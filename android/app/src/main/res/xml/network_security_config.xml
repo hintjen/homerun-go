@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  No cleartext leaves this device.
+
+  Every host the app itself dials is HTTPS — the Homerun API, the Mojang and
+  PaperMC metadata, the OTA bundle CDN, the Keycloak certificate endpoint — so
+  this is an assertion rather than a change in behaviour. It is worth making
+  because the alternative is a property of the source that holds only until
+  somebody types a URL: cleartext is permitted by default below targetSdk 28,
+  and a plain `http://` would simply work, quietly, on a phone sharing a café's
+  wifi with everyone else in it.
+
+  This governs the app process — HttpURLConnection and the WebView. It does not
+  reach the server the app hosts: that is a child process with its own runtime
+  and its own sockets, and the Minecraft protocol is not HTTP at all.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!--
+      Except the loopback, which never touches a network.
+
+      The device link binds a plaintext WebSocket on 127.0.0.1 and the UI dials
+      `ws://localhost:<port>` for the device it is running on; the TLS listener
+      beside it is for the tunnel, where other people's dashboards arrive. There
+      is nothing between the two ends here to encrypt against, and the platform
+      grants loopback no exemption of its own — without this entry the dashboard
+      of the phone you are holding is the one that stops working.
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

@@ -1010,4 +1010,64 @@ enum Core {
         Request.from(
             try? call("reporting.minigame.fromLine", ["serverId": serverId, "line": line]))
     }
+
+    // MARK: - Over-the-air UI bundles
+
+    /// A manifest whose signature verified, and what to do about it.
+    struct BundleOffer {
+        /// True only when this bundle should be fetched.
+        let install: Bool
+        /// One sentence for the log, worded once in Rust so both hosts say it
+        /// the same way.
+        let reason: String
+        let bundle: String
+        let url: String
+        let sha256: String
+        let minHost: Int
+        let serial: Int
+    }
+
+    /// Verify a manifest's signature and judge it against what is installed.
+    ///
+    /// One call rather than two, and that is load-bearing: there is no way to
+    /// get the fields of a manifest whose signature has not been checked. A
+    /// host that could do that would keep working perfectly against any
+    /// manifest anyone served it — a bug with no symptom until it is an
+    /// incident.
+    ///
+    /// - Throws: ``CoreError`` if the signature does not verify or the
+    ///   manifest is malformed. Both mean the same thing to the caller: fetch
+    ///   nothing.
+    static func evaluateBundle(
+        manifest: String, publicKey: String, installed: [String: Any]
+    ) throws -> BundleOffer {
+        guard
+            let reply = try call(
+                "bundle.evaluate",
+                ["manifest": manifest, "publicKey": publicKey, "installed": installed])
+                as? [String: Any],
+            let verified = reply["manifest"] as? [String: Any],
+            let bundle = verified["bundle"] as? String,
+            let url = verified["url"] as? String,
+            let sha256 = verified["sha256"] as? String
+        else {
+            throw CoreError(message: "The core verified a manifest but returned none.")
+        }
+        return BundleOffer(
+            install: reply["install"] as? Bool ?? false,
+            reason: reply["reason"] as? String ?? "no reason given",
+            bundle: bundle,
+            url: url,
+            sha256: sha256,
+            minHost: verified["minHost"] as? Int ?? 0,
+            serial: verified["serial"] as? Int ?? 0)
+    }
+
+    /// Whether a digest this host computed is the one that was signed.
+    ///
+    /// In the core rather than `==` here, so the comparison cannot be written
+    /// three subtly different ways across three platforms.
+    static func digestMatches(expected: String, actual: String) throws -> Bool {
+        try call("bundle.digestMatches", ["expected": expected, "actual": actual]) as? Bool ?? false
+    }
 }

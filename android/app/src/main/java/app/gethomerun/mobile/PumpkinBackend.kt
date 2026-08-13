@@ -94,9 +94,14 @@ class PumpkinBackend(
      * `filesDir` is app-private and survives updates. Not `cacheDir` — the
      * system may delete that under storage pressure, and it would take the
      * player's world with it.
+     *
+     * Every path this backend builds from an id goes through here, which is
+     * what makes it the place to check one — same as [JavaServerBackend], so
+     * the two engines cannot come to disagree about which ids are real. See
+     * [requireValidServerId].
      */
     private fun dataDir(serverId: String): File =
-        File(context.filesDir, "servers/$serverId").apply { mkdirs() }
+        File(context.filesDir, "servers/${requireValidServerId(serverId)}").apply { mkdirs() }
 
     override fun create(serverId: String) {
         dataDir(serverId)

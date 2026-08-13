@@ -1072,7 +1072,7 @@
         "clientLauncher": false,
         "windowChrome": false,
         "tray": false,
-        "autoUpdate": false,
+        "autoUpdate": true,
         "privilegeElevation": false,
         "moddedServers": false,
         "minigames": false,
@@ -1137,6 +1137,7 @@
         "open-storage-settings",
         "posthog-capture-event",
         "push-notification",
+        "quit-and-install",
         "server-files-exist",
         "set-api-url",
         "set-appearance",
@@ -1148,7 +1149,9 @@
         "storage-limit-exceeded",
         "storage-limit-ok",
         "system-check-complete",
-        "system-check-failed"
+        "system-check-failed",
+        "update-available",
+        "wait-for-update-check"
       ]
     },
     "android": {
