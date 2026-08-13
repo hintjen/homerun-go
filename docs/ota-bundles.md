@@ -306,12 +306,29 @@ Two things it does that matter here:
 - **A serial that does not climb is a `409` at publish**, not a release that
   publishes cleanly and is declined by every device.
 
+## Publishing
+
+`.github/workflows/publish-ui-bundle.yml`, manual dispatch only and gated on
+the `ui-bundle-publish` environment. It stages the UI with the same
+`build-ui.js` the APK uses, zips that tree, asks the API what serial to sign,
+signs, uploads, and registers the release.
+
+Three things about it worth not undoing:
+
+- **It pins to `package-lock.json`** (`HOMERUN_UI_NO_UPDATE=1`) rather than
+  re-resolving the UI branch. This publishes an interface to every phone and
+  the lockfile is the only record of which commit that was.
+- **Upload happens before the API is told.** The reverse order leaves a window
+  where devices fetch a URL that 403s.
+- **It refuses to overwrite an existing archive**, checked through the CDN
+  because the upload credential is `PutObject`-only and cannot list the bucket.
+
+It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
+`sign-manifest.js keygen`), the AWS upload credential as repository secrets
+*here*, and the API branch deployed.
+
 ## Still to build
 
-- **The publish workflow** in the UI repo: build, zip, upload with the
-  cache-control header, sign, bump the serial. Note the bucket credential is
-  **append-only** — it has `PutObject` and not `DeleteObject`, confirmed — so a
-  workflow that tries to tidy up after itself will fail.
 - **The update modal.** `update-available`, `quit-and-install` and
   `wait-for-update-check` are already optional channels in `bridge-v1.json` that
   neither mobile host answers. Wiring them offers the update sooner, and on

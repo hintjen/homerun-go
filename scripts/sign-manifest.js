@@ -103,7 +103,11 @@ function sign(args) {
     bundle: need("bundle"),
     url: need("url"),
     sha256,
-    minHost: Number(args.minHost ?? 1),
+    // Both spellings: `--minHost` matches the manifest field, `--min-host` is
+    // what anyone writing a shell script will reach for first. Accepting only
+    // one would silently fall back to 1, and a minHost that is too low is a UI
+    // calling channels an old host cannot answer — which hangs rather than errors.
+    minHost: Number(args.minHost ?? args["min-host"] ?? 1),
     // Monotonic, and the client refuses anything not strictly greater than
     // what it is running. Rolling back is therefore a *new* serial carrying
     // older content — which is what stops a replayed old manifest from
