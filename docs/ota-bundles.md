@@ -347,6 +347,18 @@ Three things about it worth not undoing:
   where devices fetch a URL that 403s.
 - **It refuses to overwrite an existing archive**, checked through the CDN
   because the upload credential is `PutObject`-only and cannot list the bucket.
+  Note the check can say "already published" about an object that has since
+  been **deleted from S3**: archives are served `immutable` with a one-year
+  TTL, so CloudFront keeps answering from the edge long after the origin is
+  empty. That fails in the safe direction — it blocks rather than overwrites —
+  but if it ever fires for a key you believe is gone, the fix is a CloudFront
+  invalidation, not another upload.
+
+That caching behaviour matters beyond the guard: **deleting a bad archive from
+S3 does not stop devices fetching it.** The edge will serve it for a year. The
+only thing that actually stops a release is the manifest — set its `rollout` to
+0 so it is no longer offered, and publish a replacement at a higher serial for
+the devices already on it.
 
 Stage publishes under `ui/stage/`, prod under `ui/`. There is one bucket and one
 CloudFront, but stage and prod are separate databases with independent serials —
