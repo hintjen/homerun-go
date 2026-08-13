@@ -336,19 +336,44 @@ class HostingService : Service(), ServerHost.Listener {
         private const val ACTION_STOP = "app.gethomerun.mobile.STOP_HOSTING"
 
         /**
-         * Bring the service up, or refresh it if it is already up.
+         * Bring the service up, or refresh it if it is already up. Returns
+         * whether Android accepted the start.
          *
          * `startForegroundService` from the background is blocked on API 26+,
-         * and that is not a problem this hits: hosting begins because a user
-         * tapped Start in the app, so an activity is in front of us. It is
+         * and mostly that is not a problem this hits: hosting begins because a
+         * user tapped Start in the app, so an activity is in front of us. It is
          * caught rather than allowed to crash because the *refresh* calls
          * arrive later, from a state change that could in principle land after
-         * the service has stood down.
+         * the app has gone away.
+         *
+         * **The return value is load-bearing and must not be dropped.**
+         * [ServerHost.syncHosting] latches "the service is up" so it can skip
+         * redundant starts, and a swallowed failure would latch a service that
+         * never came up: a server still running, with an untimed wake lock, no
+         * foreground protection and no notification — the exact state the
+         * `specialUse` declaration promises cannot happen, and the one most
+         * likely to end with the low-memory killer taking the JVM mid-save.
          */
-        fun start(context: Context) {
+        fun start(context: Context): Boolean {
             val intent = Intent(context, HostingService::class.java)
-            runCatching { context.startForegroundService(intent) }
-                .onFailure { Log.w(TAG, "could not start the hosting service: ${it.message}", it) }
+            return try {
+                context.startForegroundService(intent)
+                true
+            } catch (err: Exception) {
+                // Named rather than lumped in with the rest, because it means
+                // "you asked from the background" rather than "something is
+                // broken", and it is the failure a start racing the app's own
+                // exit actually produces. API 31+; the version guard is what
+                // keeps the class reference off older devices' verify path.
+                val refused = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    err is android.app.ForegroundServiceStartNotAllowedException
+                if (refused) {
+                    Log.e(TAG, "Android refused a foreground-service start from the background", err)
+                } else {
+                    Log.e(TAG, "could not start the hosting service: ${err.message}", err)
+                }
+                false
+            }
         }
 
         fun stop(context: Context) {
