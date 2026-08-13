@@ -291,11 +291,23 @@ The middle two are the ones that matter. A signature that verifies a manifest
 nobody can tamper with is the only reason it is safe to take an entire user
 interface from a CDN.
 
+## The endpoint that answers
+
+Built, on branch `mobile/ota-manifest-endpoint` in the `homerun` repo —
+`api/docs/ota-ui-bundles.md` is the server side in full. `UiBundle` is one row
+per release per platform; the newest row a device qualifies for resolves.
+
+Two things it does that matter here:
+
+- **It never signs.** Manifests are stored and served exactly as CI signed
+  them, so an attacker holding that database cannot forge a bundle — only
+  withhold updates or re-offer something genuinely published once, which the
+  monotonic serial closes.
+- **A serial that does not climb is a `409` at publish**, not a release that
+  publishes cleanly and is declined by every device.
+
 ## Still to build
 
-- **The manifest endpoint on the API** — authenticated, uncached, device-signed,
-  answering the request above. Release metadata lives in a Django model so that
-  rollback and rollout are row edits rather than an upload and an invalidation.
 - **The publish workflow** in the UI repo: build, zip, upload with the
   cache-control header, sign, bump the serial. Note the bucket credential is
   **append-only** — it has `PutObject` and not `DeleteObject`, confirmed — so a
