@@ -18,10 +18,13 @@ Needs only the Python standard library — no `ar`, `xz` or `tar` binary, none o
 which is reliably present on Windows.
 """
 import argparse
+import glob
 import io
 import lzma
 import os
 import shutil
+import struct
+import subprocess
 import sys
 import tarfile
 import urllib.request
@@ -37,14 +40,30 @@ JDK_VERSIONS = {17: "17.0.20", 21: "21.0.12", 25: "25.0.4"}
 # Derived by reading DT_NEEDED across the whole closure, not guessed. libc++ is
 # the one a scan of only the JRE's own libraries misses — libandroid-spawn.so
 # needs it, and without it the VM will not load.
+#
+# libandroid-spawn is NOT here. Termux's published 0.3 binary is 4 KB-page
+# aligned and there is nothing newer, so it is built from vendored source
+# instead — see `build_android_spawn` and third_party/libandroid-spawn/README.md.
 DEPENDENCIES = [
     ("liba/libandroid-shmem", "libandroid-shmem", "0.7"),
-    ("liba/libandroid-spawn", "libandroid-spawn", "0.3"),
     ("z/zlib", "zlib", "1.3.2"),
     ("libc/libc++", "libc++", "29"),
 ]
 
 DEPS_DIR = "termux-lib"
+
+# Android's dynamic linker refuses a library whose LOAD segments are aligned
+# more coarsely than the kernel's page size, and 16 KB pages are the default on
+# new 64-bit hardware. A 4 KB-only object therefore does not fail at build time
+# or install time — it fails at `dlopen` on someone's phone.
+MIN_PAGE_ALIGN = 16 * 1024
+
+SPAWN_SRC = os.path.join(ROOT, "third_party", "libandroid-spawn")
+
+# The NDK API level to build it against. 26 matches the app's minSdk, so the
+# library works everywhere the app installs — including the API 26/27 devices
+# where Bionic has no posix_spawn of its own and this is not merely a shim.
+SPAWN_API = 26
 
 # Termux ships a full JDK. A server needs a runtime, and the difference is
 # ~85 MB of things that never execute here. `legal/` stays — these are
@@ -138,6 +157,130 @@ def unpack(deb_path: str, dest: str, strip: str) -> int:
     return count
 
 
+def ndk_tool(name: str) -> str:
+    """
+    An NDK toolchain binary, by name, or exit saying how to get one.
+
+    `.cmd` first: on Windows the NDK ships both an extensionless wrapper and a
+    `.cmd`, and only the latter is executable from a plain subprocess call.
+    """
+    root = os.environ.get("ANDROID_NDK_HOME") or os.environ.get("ANDROID_NDK_ROOT")
+    if not root:
+        sdk = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+        found = sorted(glob.glob(os.path.join(sdk, "ndk", "*"))) if sdk else []
+        root = found[-1] if found else None
+    if not root:
+        raise SystemExit(
+            "The Android NDK is needed to build libandroid-spawn.\n"
+            "Set ANDROID_NDK_HOME, or install it from Android Studio > SDK Manager > NDK."
+        )
+    hosts = ["windows-x86_64", "linux-x86_64", "darwin-x86_64"]
+    for host in hosts:
+        base = os.path.join(root, "toolchains", "llvm", "prebuilt", host, "bin")
+        for candidate in (name + ".cmd", name + ".exe", name):
+            path = os.path.join(base, candidate)
+            if os.path.isfile(path):
+                return path
+    raise SystemExit(f"No {name} in the NDK at {root}")
+
+
+def load_alignments(path: str) -> list:
+    """
+    The p_align of every PT_LOAD segment in an ELF64 file, or [] if not one.
+
+    Hand-rolled for the same reason `build-restic.js` walks program headers by
+    hand: there is no readelf we can rely on across the three host platforms
+    this script runs on, and the header layout is fixed.
+    """
+    with open(path, "rb") as fh:
+        head = fh.read(64)
+        if len(head) < 64 or head[:4] != b"\x7fELF" or head[4] != 2:
+            return []  # not ELF, or 32-bit — nothing here produces those
+        phoff = struct.unpack_from("<Q", head, 32)[0]
+        phentsize, phnum = struct.unpack_from("<HH", head, 54)
+        fh.seek(phoff)
+        table = fh.read(phentsize * phnum)
+
+    aligns = []
+    for i in range(phnum):
+        entry = table[i * phentsize : (i + 1) * phentsize]
+        if len(entry) < 56 or struct.unpack_from("<I", entry, 0)[0] != 1:  # PT_LOAD
+            continue
+        aligns.append(struct.unpack_from("<Q", entry, 48)[0])
+    return aligns
+
+
+def verify_page_alignment(root: str) -> int:
+    """
+    Refuse to stage a runtime that cannot load on a 16 KB-page device.
+
+    This exists because the failure it catches is invisible everywhere else:
+    the build succeeds, the APK installs, the app runs, and only starting a
+    server fails — with no exception and no output, because the thing that
+    failed to load is the JVM itself. It cost a day to find once.
+    """
+    bad = []
+    checked = 0
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            path = os.path.join(base, name)
+            if ".so" not in name:
+                continue
+            aligns = load_alignments(path)
+            if not aligns:
+                continue
+            checked += 1
+            worst = min(aligns)
+            if worst < MIN_PAGE_ALIGN:
+                bad.append((os.path.relpath(path, root), worst))
+
+    if bad:
+        lines = "\n".join(f"    {p}   aligned to {a} bytes" for p, a in bad)
+        raise SystemExit(
+            f"\n{len(bad)} staged librar{'y' if len(bad) == 1 else 'ies'} cannot load on a "
+            f"16 KB-page device:\n\n{lines}\n\n"
+            "Android's linker refuses a library aligned more coarsely than the page\n"
+            "size, and 16 KB is the default on new 64-bit hardware. Google Play has\n"
+            "required 16 KB support for targetSdk 35+ since 1 November 2025.\n\n"
+            "Rebuild the offender with -Wl,-z,max-page-size=16384."
+        )
+    return checked
+
+
+def build_android_spawn(abi: str, dest: str) -> None:
+    """
+    Build libandroid-spawn.so from the vendored source, 16 KB aligned.
+
+    Built rather than downloaded because Termux publishes only a 4 KB-aligned
+    0.3, and `libjvm.so` has a hard DT_NEEDED on this library — so on a 16 KB
+    device the published binary stops the VM from loading at all. See
+    third_party/libandroid-spawn/README.md.
+    """
+    triple = {"arm64-v8a": "aarch64", "x86_64": "x86_64"}[abi]
+    cxx = ndk_tool(f"{triple}-linux-android{SPAWN_API}-clang++")
+    obj = os.path.join(CACHE, f"posix_spawn-{abi}.o")
+    out = os.path.join(dest, "libandroid-spawn.so")
+    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(dest, exist_ok=True)
+
+    subprocess.run(
+        [cxx, "-O2", "-fPIC", f"-I{SPAWN_SRC}", "-c",
+         os.path.join(SPAWN_SRC, "posix_spawn.cpp"), "-o", obj],
+        check=True,
+    )
+    subprocess.run(
+        [cxx, "-shared", obj, "-o", out,
+         # The whole point. Without it the NDK still emits 4 KB on some
+         # toolchain versions, which is exactly how the shipped one got here.
+         "-Wl,-z,max-page-size=16384",
+         # The JRE's own libraries ask for it by this name, not by a path.
+         "-Wl,-soname,libandroid-spawn.so"],
+        check=True,
+    )
+    os.remove(obj)
+    print(f"  build   libandroid-spawn.so ({os.path.getsize(out) / 1024:.0f} KB, 16 KB aligned)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("abi", choices=["arm64-v8a", "x86_64"])
@@ -167,6 +310,11 @@ def main() -> None:
         url = f"{REPO}/{path}/{name}_{dep_version}_{termux_abi}.deb"
         total += unpack(fetch(url), deps_dir, "data/data/com.termux/files/usr/lib")
 
+    # Not from the pool — the published binary is 4 KB aligned and would stop
+    # the VM loading on a 16 KB-page device.
+    build_android_spawn(args.abi, deps_dir)
+    total += 1
+
     freed = 0
     for relative, why in PRUNE:
         path = os.path.join(ASSETS, *relative.split("/"))
@@ -194,6 +342,9 @@ def main() -> None:
     libjvm = os.path.join(ASSETS, "lib", "server", "libjvm.so")
     if not os.path.isfile(libjvm):
         raise SystemExit(f"staged, but there is no libjvm.so at {libjvm}")
+
+    checked = verify_page_alignment(ASSETS)
+    print(f"  verify  {checked} shared objects, all >= 16 KB page aligned")
 
     size = sum(
         os.path.getsize(os.path.join(base, f))

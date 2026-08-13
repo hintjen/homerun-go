@@ -51,3 +51,6 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Python bytecode from scripts/ (stage-jre.py is importable for its ELF checks).
+__pycache__/
