@@ -103,6 +103,20 @@ class BridgeRouter(
         webView = view
     }
 
+    /**
+     * How `quit-and-install` applies a staged bundle: the activity promotes it
+     * and rebuilds its WebView.
+     *
+     * A hook rather than a direct call because the router deliberately does not
+     * own the activity — it survives the WebView being destroyed and rebuilt,
+     * and reaching into an activity it does not hold would invert that.
+     *
+     * Null before an activity attaches, which is a real state: the router is
+     * constructed before the first page exists.
+     */
+    @Volatile
+    var onApplyUpdate: (() -> Unit)? = null
+
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -460,6 +474,52 @@ class BridgeRouter(
         },
 
         "get-system-language" to { _ -> JsonPrimitive(Locale.getDefault().toLanguageTag()) },
+
+        // --- over-the-air updates -------------------------------------------
+        //
+        // "Update" here is a new UI bundle, not a new binary. The channels are
+        // the desktop's and deliberately so — the modal needs no platform
+        // branch — but what they do underneath is different. See
+        // `docs/ota-bundles.md`.
+
+        // An **invoke**, so it must always answer. Every failure inside
+        // `awaitCheck` is swallowed into null for exactly that reason: a check
+        // that cannot reach the network is no reason to leave a UI promise
+        // unresolved for ever.
+        //
+        // `status` mirrors the desktop's shape — the UI stores this payload and
+        // tests `status !== "not-available"`.
+        "wait-for-update-check" to { _ ->
+            val staged = BundleUpdater.awaitCheck(context)
+            buildJsonObject {
+                put("status", if (staged == null) "not-available" else "available")
+                // The bundle id is the version here. The binary's version has
+                // not changed, and reporting it as though it had would be a
+                // lie the UI writes to localStorage.
+                staged?.let {
+                    put("version", it)
+                    put("bundle", it)
+                }
+            }
+        },
+
+        // Named for what it does on desktop, not for what it does here: this
+        // **must not quit**. Quitting would take the foreground service and any
+        // running Minecraft server with it, and on iOS there is no relaunch API
+        // at all. Rebuilding the WebView is enough — about a second — and
+        // `ServerHost` exists precisely so the engine outlives the page
+        // (plans/ota-updates.md).
+        "quit-and-install" to { _ ->
+            val apply = onApplyUpdate
+            if (apply == null) {
+                // A `send`, so there is no reply to carry this. Logged because
+                // the symptom is otherwise a button that does nothing at all.
+                Log.w(TAG, "quit-and-install with no activity attached; ignoring")
+            } else {
+                apply()
+            }
+            null
+        },
 
         // No install wizard exists on Android: "installed" means first-run
         // setup has produced the data directory and the bundled JRE. Until
@@ -1206,7 +1266,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 1
+        const val HOST_REVISION = 3
 
         /** Protocol-level, deliberately absent from the channel inventory. */
         private const val READY_METHOD = "__bridge:ready"

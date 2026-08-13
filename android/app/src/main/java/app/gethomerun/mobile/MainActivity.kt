@@ -33,6 +33,8 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.util.Locale
 
 /**
@@ -461,6 +463,36 @@ class MainActivity : ComponentActivity() {
         // of network and disk for something that takes effect on the *next*
         // launch, so there is nothing to gain by making the user wait on it.
         BundleUpdater.check(this, lifecycleScope)
+
+        // Offer it as soon as it is ready, rather than waiting for the user to
+        // relaunch of their own accord. `update-available` is what the shared
+        // UI's update prompt subscribes to.
+        BundleUpdater.onBundleStaged = { bundle ->
+            router.emit(
+                "update-available",
+                listOf(
+                    buildJsonObject {
+                        put("status", "available")
+                        put("version", bundle)
+                        put("bundle", bundle)
+                    }
+                ),
+            )
+        }
+
+        // `quit-and-install`, which on this platform installs without quitting.
+        // Promoting is safe here for the same reason it is safe in onCreate —
+        // a page is about to be built either way, so nothing is swapped under a
+        // live one and no bridge call is cancelled mid-flight.
+        router.onApplyUpdate = {
+            runOnUiThread {
+                if (!isFinishing && !isDestroyed) {
+                    Log.i(TAG, "applying a staged bundle at the page's request")
+                    BundleStore.activate(this)
+                    installWebView()
+                }
+            }
+        }
 
         ServerHost.addListener(hostingListener)
 

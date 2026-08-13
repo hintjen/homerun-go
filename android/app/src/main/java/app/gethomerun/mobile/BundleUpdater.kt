@@ -13,6 +13,7 @@ import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Fetching a new UI bundle. The half that goes and looks.
@@ -94,6 +95,17 @@ object BundleUpdater {
     private val checking = AtomicBoolean(false)
 
     /**
+     * Called on the IO thread when a bundle becomes `pending`.
+     *
+     * This is what turns a silent background download into an offer the user
+     * can accept — `MainActivity` wires it to the bridge's `update-available`.
+     * A callback rather than a direct emit because this object has no page and
+     * must keep working when there is no WebView at all.
+     */
+    @Volatile
+    var onBundleStaged: ((String) -> Unit)? = null
+
+    /**
      * Ask, if it is time to ask. Returns immediately; everything happens later.
      *
      * @param force skip the throttle. For the debug-only manual trigger; a
@@ -110,6 +122,26 @@ object BundleUpdater {
                 }
         }
     }
+
+    /**
+     * Check now and answer when it is done: the id of the bundle waiting to go
+     * live, or null.
+     *
+     * Backs `wait-for-update-check`, which is an **invoke** — so this must
+     * always return. Every failure inside is swallowed into null for that
+     * reason: an update check that cannot reach the network is not a reason to
+     * leave a UI promise unresolved, and an unanswered invoke hangs for ever.
+     *
+     * Reports what is *staged*, not what was downloaded on this call, so a
+     * bundle fetched by an earlier background check is still offered.
+     */
+    suspend fun awaitCheck(context: Context, force: Boolean = true): String? =
+        withContext(Dispatchers.IO) {
+            val app = context.applicationContext
+            runCatching { checkNow(app, force) }
+                .onFailure { Log.w(TAG, "update check failed: ${it.message}") }
+            runCatching { BundleStore.pending(app) }.getOrNull()
+        }
 
     private fun checkNow(context: Context, force: Boolean) {
         if (BuildConfig.BUNDLE_PUBLIC_KEY.isBlank()) {
@@ -235,7 +267,12 @@ object BundleUpdater {
 
             val staging = BundleStore.stagingDir(context)
             unpack(archive, staging)
-            BundleStore.stage(context, staging, offer.bundle, offer.minHost, offer.serial)
+            if (BundleStore.stage(context, staging, offer.bundle, offer.minHost, offer.serial)) {
+                // Outside the store on purpose: staging is a disk fact, telling
+                // the user about it is a page fact, and the store has no page.
+                runCatching { onBundleStaged?.invoke(offer.bundle) }
+                    .onFailure { Log.w(TAG, "could not announce ${offer.bundle}: ${it.message}") }
+            }
         } finally {
             // Several megabytes in the cache directory that nothing will ever
             // read again. Android would eventually reclaim it; doing it here

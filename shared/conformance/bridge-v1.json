@@ -2,9 +2,9 @@
   "bridgeVersion": 1,
   "counts": {
     "invoke": 76,
-    "send": 25,
+    "send": 23,
     "event": 52,
-    "total": 153
+    "total": 151
   },
   "channels": [
     {
@@ -472,18 +472,6 @@
       "tier": "core"
     },
     {
-      "channel": "splash-shown",
-      "kind": "send",
-      "tier": "core",
-      "note": "Fired once after the web splash first paints. Mobile: hide the native launch screen. Desktop: no-op."
-    },
-    {
-      "channel": "set-appearance",
-      "kind": "send",
-      "tier": "core",
-      "note": "Fired on boot and on theme change. Mobile: set the status-bar text style to match (dark appearance → light text). Desktop: no-op."
-    },
-    {
       "channel": "minimize-window",
       "kind": "send",
       "tier": "capability",
@@ -899,7 +887,6 @@
         "autoUpdate": true,
         "privilegeElevation": true,
         "moddedServers": true,
-        "minigames": true,
         "fileImport": true,
         "multipleRunningServers": true,
         "backgroundExecution": true,
@@ -1025,7 +1012,6 @@
         "server-upgrade-complete",
         "server-upgrade-failed",
         "set-api-url",
-        "set-appearance",
         "set-distro-tag",
         "set-native-local-network",
         "set-pending-server-upgrade",
@@ -1033,7 +1019,6 @@
         "show-privilege-elevation-required-modal",
         "show-system-requirements-warning",
         "show-system-time-warning",
-        "splash-shown",
         "start-installation-or-check",
         "start-log-stream",
         "start-native-install-additive",
@@ -1075,7 +1060,6 @@
         "autoUpdate": false,
         "privilegeElevation": false,
         "moddedServers": false,
-        "minigames": false,
         "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": false,
@@ -1139,11 +1123,9 @@
         "push-notification",
         "server-files-exist",
         "set-api-url",
-        "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
         "show-system-time-warning",
-        "splash-shown",
         "start-installation-or-check",
         "storage-limit-exceeded",
         "storage-limit-ok",
@@ -1163,10 +1145,9 @@
         "clientLauncher": false,
         "windowChrome": false,
         "tray": false,
-        "autoUpdate": false,
+        "autoUpdate": true,
         "privilegeElevation": false,
         "moddedServers": true,
-        "minigames": false,
         "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": true,
@@ -1229,18 +1210,19 @@
         "open-storage-settings",
         "posthog-capture-event",
         "push-notification",
+        "quit-and-install",
         "server-files-exist",
         "set-api-url",
-        "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
         "show-system-time-warning",
-        "splash-shown",
         "start-installation-or-check",
         "storage-limit-exceeded",
         "storage-limit-ok",
         "system-check-complete",
-        "system-check-failed"
+        "system-check-failed",
+        "update-available",
+        "wait-for-update-check"
       ]
     }
   }

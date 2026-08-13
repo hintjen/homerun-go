@@ -50,7 +50,11 @@ data class HostCapabilities(
             clientLauncher = false,
             windowChrome = false,
             tray = false,
-            autoUpdate = false,
+            // True, and it means something different than on desktop: this app
+            // replaces its *UI bundle* over the air rather than its binary, and
+            // "install" rebuilds the WebView rather than restarting anything.
+            // Same three channels, same modal, no platform branch in the UI.
+            autoUpdate = true,
             privilegeElevation = false,
             // The JVM backend runs Bukkit-family plugins and Forge/Fabric mods.
             moddedServers = true,

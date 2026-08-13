@@ -9,7 +9,7 @@
   "revisions": [
     {
       "revision": 1,
-      "summary": "Baseline \u2014 the bridge as both hosts implemented it when over-the-air bundle delivery was designed.",
+      "summary": "Baseline — the bridge as both hosts implemented it when over-the-air bundle delivery was designed.",
       "adds": {
         "android": [
           "cache-client-nonce",
@@ -115,12 +115,23 @@
     },
     {
       "revision": 2,
-      "summary": "The page tells the host how it looks: set-appearance drives the status bar, and splash-shown says the web splash has painted. Both are sends, so an older host logs them rather than hanging \u2014 but a bundle gated on the appearance channel would leave the clock unreadable on a host that ignores it.",
+      "summary": "The page tells the host how it looks: set-appearance drives the status bar, and splash-shown says the web splash has painted. Both are sends, so an older host logs them rather than hanging — but a bundle gated on the appearance channel would leave the clock unreadable on a host that ignores it.",
       "adds": {
         "ios": [
           "set-appearance",
           "splash-shown"
         ]
+      }
+    },
+    {
+      "revision": 3,
+      "summary": "Android answers the over-the-air update channels, so the shared update modal works on mobile. \"Install\" rebuilds the WebView rather than restarting anything — see homerun-mobile/docs/ota-bundles.md.",
+      "adds": {
+        "android": [
+          "wait-for-update-check",
+          "quit-and-install"
+        ],
+        "ios": []
       }
     }
   ]
