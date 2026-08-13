@@ -316,7 +316,7 @@ interface from a CDN.
 
 ## The endpoint that answers
 
-Built, on branch `mobile/ota-manifest-endpoint` in the `homerun` repo —
+Built, on branch `api/ota-ui-bundles` in the `homerun` repo —
 `api/docs/ota-ui-bundles.md` is the server side in full. `UiBundle` is one row
 per release per platform; the newest row a device qualifies for resolves.
 
