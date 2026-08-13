@@ -5,13 +5,16 @@ both stores explicitly permit replacing that at runtime. `plans/ota-updates.md`
 is the design and the policy argument; this file is what exists, how it behaves
 on a device, and how to break it on purpose.
 
-**Built so far: the whole client.** Android checks for a bundle, verifies its
-signature, downloads it, activates it on the next launch, judges it, and rolls
-it back if it fails. What does not exist yet is the *server*: the manifest
-endpoint is stubbed by a script in `scripts/`, and nothing publishes bundles.
+**Built so far: all of it, on Android.** The client checks for a bundle, verifies
+its signature, downloads it, activates it on the next launch, judges it and rolls
+it back if it fails; the API serves signed manifests; a workflow publishes them.
 
-The order was deliberate — the fallback is what stops a bad bundle bricking the
-app, so it was built and proven before anything could deliver one.
+What is left is switching it on — the API branch deployed, the AWS credential
+proven, and a store release carrying the public key — plus iOS, which is blocked
+on Swift there never having been compiled.
+
+The order was deliberate. The fallback is what stops a bad bundle bricking the
+app, so it was built and proven on a device before anything could deliver one.
 
 ## The number that has to move first
 
@@ -148,8 +151,7 @@ key in it is what switches over-the-air updates on for real.
 `scripts/sign-manifest.js` generates the pair and signs manifests. It is the
 second implementation of the signed payload format, kept in the repo that holds
 the first so a change to one is an obviously incomplete change; a pinned vector
-in `bundle.rs` fails if they ever drift. The private half belongs in the CI
-secret store and nowhere else.
+in `bundle.rs` fails if they ever drift.
 
 ## On disk
 
