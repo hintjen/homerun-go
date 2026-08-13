@@ -203,7 +203,11 @@ object BundleUpdater {
                 return null
             }
             if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                throw IOException("HTTP ${connection.responseCode} asking for a bundle")
+                // The URL belongs in the message. "HTTP 404 asking for a
+                // bundle" is unactionable — a wrong API_URL, an undeployed
+                // endpoint and a typo'd path all look identical, and the one
+                // fact that separates them is the one the message omitted.
+                throw IOException("HTTP ${connection.responseCode} from $url")
             }
             return connection.inputStream.bufferedReader().use { it.readText() }
         } finally {
