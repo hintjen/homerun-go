@@ -117,6 +117,15 @@ class BridgeRouter(
     @Volatile
     var onApplyUpdate: (() -> Unit)? = null
 
+    /**
+     * The page's theme, for the system bars. `"light"` or `"dark"`.
+     *
+     * A hook for the same reason as [onApplyUpdate]: the window belongs to the
+     * activity, and the router outlives any one of them.
+     */
+    @Volatile
+    var onAppearance: ((String) -> Unit)? = null
+
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -474,6 +483,30 @@ class BridgeRouter(
         },
 
         "get-system-language" to { _ -> JsonPrimitive(Locale.getDefault().toLanguageTag()) },
+
+        // --- system chrome ---------------------------------------------------
+
+        // The page's theme, so the status bar's text contrasts with it: a dark
+        // page wants light glyphs. `MainActivity.applyChrome` derives the same
+        // thing from the colours the page sends and is the more precise signal
+        // — whichever arrives last wins, and both are describing one fact.
+        "set-appearance" to { params ->
+            val appearance = (params as? JsonPrimitive)?.contentOrNull
+            if (appearance == "light" || appearance == "dark") {
+                onAppearance?.invoke(appearance)
+            } else {
+                Log.w(TAG, "set-appearance wants \"light\" or \"dark\", got: $appearance")
+            }
+            null
+        },
+
+        // Deliberately nothing to do. There is no `installSplashScreen` here:
+        // the launch screen is the theme's window background, and Android
+        // replaces it with the first frame the activity draws. The channel is
+        // still answered rather than left to the unimplemented-channel warning,
+        // because "handled, and the right thing to do is nothing" and "nobody
+        // wrote this yet" are different states and only one of them is fine.
+        "splash-shown" to { _ -> null },
 
         // --- over-the-air updates -------------------------------------------
         //
@@ -1266,7 +1299,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 3
+        const val HOST_REVISION = 4
 
         /** Protocol-level, deliberately absent from the channel inventory. */
         private const val READY_METHOD = "__bridge:ready"

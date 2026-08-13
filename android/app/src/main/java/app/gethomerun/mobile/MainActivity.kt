@@ -484,6 +484,19 @@ class MainActivity : ComponentActivity() {
         // Promoting is safe here for the same reason it is safe in onCreate —
         // a page is about to be built either way, so nothing is swapped under a
         // live one and no bridge call is cancelled mid-flight.
+        router.onAppearance = { appearance ->
+            runOnUiThread {
+                // A light page wants dark glyphs, and the reverse. The colour
+                // path in applyChrome computes this from luminance; this is the
+                // page saying it outright, which is all we get before it has
+                // sent any colours.
+                WindowInsetsControllerCompat(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = appearance == "light"
+                    isAppearanceLightNavigationBars = appearance == "light"
+                }
+            }
+        }
+
         router.onApplyUpdate = {
             runOnUiThread {
                 if (!isFinishing && !isDestroyed) {

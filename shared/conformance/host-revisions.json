@@ -133,6 +133,17 @@
         ],
         "ios": []
       }
+    },
+    {
+      "revision": 4,
+      "summary": "Android answers the two system-chrome channels. set-appearance sets the status-bar glyph style from the page theme; splash-shown is answered and deliberately does nothing, because the launch screen is a themed window background Android replaces on first frame.",
+      "adds": {
+        "android": [
+          "set-appearance",
+          "splash-shown"
+        ],
+        "ios": []
+      }
     }
   ]
 }
