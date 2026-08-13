@@ -116,11 +116,34 @@ cannot be written three subtly different ways.
 
 ### The key
 
-`BUNDLE_PUBLIC_KEY`, a build config field, 64 hex characters.
+```
+8d44ecfa010fe0136b450baee986a352cd027d3555403f0662dce5eb2ff16f4e
+```
 
-**Empty disables updates entirely.** `BundleUpdater` refuses to fetch what it
-cannot verify, which is the only safe reading of "no key configured" — and it is
-the state of every build made before the signing key existed.
+Checked into `android/app/build.gradle.kts` as the default for
+`BUNDLE_PUBLIC_KEY`. It is public by nature — that is the point of signing
+asymmetrically — and checking it in means no build can be made without it.
+
+That matters more than it looks. An **empty** key disables over-the-air updates
+entirely (`BundleUpdater` refuses to fetch what it cannot verify, the only safe
+reading of "no key configured"), so a release built without the flag would look
+completely healthy while silently never updating again — noticeable months
+later, if at all. A malformed key fails the Gradle build outright, because a
+typo cannot be caught usefully at runtime: the app would reject every manifest
+for ever, which is indistinguishable from "nothing has been published".
+
+**Changing it needs a store release.** A device only accepts manifests signed by
+the key compiled into *it*, so every device keeps the old key until it updates
+through the store. If the private half is ever lost, that is the recovery path —
+a new pair plus a store release — and it is slow.
+
+The private half lives in the `ui-bundle-publish` environment's
+`HOMERUN_BUNDLE_KEY` secret, readable only by a job that has passed the reviewer
+gate, and nowhere else.
+
+**Sequencing:** publishing a bundle before a store release carries this key
+reaches nobody. It is inert rather than harmful, but the first release with the
+key in it is what switches over-the-air updates on for real.
 
 `scripts/sign-manifest.js` generates the pair and signs manifests. It is the
 second implementation of the signed payload format, kept in the repo that holds

@@ -30,13 +30,35 @@ android {
         buildConfigField("String", "GIT_COMMIT", "\"${prop("gitCommit", "")}\"")
 
         // The Ed25519 public key that over-the-air bundle manifests are signed
-        // with, 64 hex characters. **Empty disables updates entirely** —
-        // BundleUpdater refuses to fetch what it cannot verify, which is the
-        // only safe reading of "no key configured". The key is public by
-        // nature, so it belongs in the build rather than a secret store; the
-        // private half signs at publish time and never leaves CI.
-        //   ./gradlew assembleRelease -PbundlePublicKey=<64 hex chars>
-        buildConfigField("String", "BUNDLE_PUBLIC_KEY", "\"${prop("bundlePublicKey", "")}\"")
+        // with. Public by nature — that is the point of signing asymmetrically
+        // — so it is checked in rather than injected, and every build gets it
+        // without anyone remembering a flag.
+        //
+        // That default matters. An empty key disables over-the-air updates
+        // entirely (BundleUpdater refuses to fetch what it cannot verify, the
+        // only safe reading of "no key configured"), and a release built
+        // without the flag would look completely healthy while silently never
+        // updating again. Hard to notice, and only noticeable months later.
+        //
+        // Generated 2026-08-13. Its private half lives in the
+        // `ui-bundle-publish` environment's HOMERUN_BUNDLE_KEY secret and
+        // nowhere else. **Changing this needs a store release** — a device only
+        // accepts manifests signed by the key compiled into it, so every device
+        // keeps the old key until it updates through the store.
+        //
+        // Override for testing against a throwaway key:
+        //   ./gradlew assembleDebug -PbundlePublicKey=<64 hex chars>
+        val bundlePublicKey = prop(
+            "bundlePublicKey",
+            "8d44ecfa010fe0136b450baee986a352cd027d3555403f0662dce5eb2ff16f4e",
+        )
+        // A typo here cannot be caught at runtime in any useful way: the app
+        // would simply reject every manifest for ever, which is indistinguishable
+        // from "no releases published". Fail the build instead.
+        require(Regex("^[0-9a-f]{64}$").matches(bundlePublicKey)) {
+            "bundlePublicKey must be 64 lowercase hex characters, got: $bundlePublicKey"
+        }
+        buildConfigField("String", "BUNDLE_PUBLIC_KEY", "\"$bundlePublicKey\"")
 
         // The staged Java runtime is architecture-specific and ~165 MB, so a
         // build ships exactly one ABI — the same choice Anvil-MC makes. Pass
