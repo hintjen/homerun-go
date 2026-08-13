@@ -3,11 +3,12 @@ name: android-emulator
 description: Drive an Android app on an emulator or device from the shell — build, install, tap through the UI by screenshot, read logcat, and verify behaviour end to end. Use when testing Android changes, reproducing a device-only bug, or confirming a fix on a real device rather than in unit tests.
 ---
 
-# Driving an Android emulator
+# Driving an Android emulator or phone
 
 You can run the whole loop — build, install, tap, read the screen, read the
-logs — from the shell, without the user touching the emulator. This skill is
-the mechanics of that loop and the traps that cost time.
+logs — from the shell, without the user touching the device. This skill is
+the mechanics of that loop and the traps that cost time. It applies to a real
+phone as much as an emulator; where they differ, the phone is called out.
 
 ## First: find your tools and your app
 
@@ -34,11 +35,19 @@ JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
 ```
 
 `sdkmanager` *is* on PATH, so `readlink -f "$(which sdkmanager)"` finds the SDK
-if that path ever moves. That install has `platform-tools/` but **no
-`emulator/` package and no AVDs** — there is no emulator on this machine
-today, only a real device over USB. `:app:compileDebugKotlin` still type-checks
-a change with nothing attached, which is worth doing before you go looking for
-hardware.
+if that path ever moves. `:app:compileDebugKotlin` type-checks a change with
+nothing attached, which is worth doing before you go looking for hardware.
+
+The emulator package is installed and there is one AVD, `homerun_api35`, built
+on an **arm64-v8a** system image rather than the x86_64 one `npm run doctor`
+recommends. That hint is written for an Intel host; on Apple Silicon the arm64
+image runs natively *and* executes the same slice the phone does, so a change
+proven there has not quietly skipped the ABI that ships. The x86_64 Rust
+targets are deliberately absent, which is why `doctor` lists them as MISS. The
+AVD has not been booted yet — treat it as untested until it has.
+
+The real phone is reached over **wireless debugging, not USB** — see the next
+section.
 
 Starting an emulator, if the project has no script for it:
 
@@ -53,6 +62,70 @@ Get the app id and launch activity from the project rather than guessing —
 `applicationId` (plus any `applicationIdSuffix`, commonly `.debug`) in
 `app/build.gradle[.kts]`, and the `LAUNCHER` activity in `AndroidManifest.xml`.
 Or ask the device: `adb shell pm list packages | grep <something>`.
+
+## A physical device over wireless debugging
+
+USB is not the only way in, and on this Mac it is not the way that works —
+plugging the phone in enumerates nothing at all. Wireless debugging is how
+hardware is actually driven here.
+
+**Pairing takes two steps against two different ports.** The pairing port
+exists only while the phone's dialog is open and changes every time; the
+connect port is stable. Discover both rather than asking for them:
+
+```bash
+adb mdns services
+# adb-ZT422CJNT8-VE5DJ6  _adb-tls-pairing._tcp  10.0.0.23:42923  <- only while the dialog is up
+# adb-ZT422CJNT8-VE5DJ6  _adb-tls-connect._tcp  10.0.0.23:34557  <- stable
+adb pair    10.0.0.23:42923 <6-digit-code>
+adb connect 10.0.0.23:34557
+```
+
+The pairing service advertises only while **Developer options → Wireless
+debugging → Pair device with pairing code** is on screen. The six-digit code is
+the one thing that has to come from the user; `adb mdns services` supplies
+everything else, so do not make them read out an address.
+
+**The device then appears twice** — once as `<ip>:<port>` and once under its
+mDNS name — and anything that shells out to `adb` dies on `more than one
+device/emulator`. `adb disconnect` does not stick; mDNS re-adds it within
+seconds. Pin the serial instead, in every command and every wrapper script:
+
+```bash
+export ANDROID_SERIAL=10.0.0.23:34557
+```
+
+That failure is quiet and costs a full cycle: `gradle assembleDebug` succeeds,
+and only the install at the very end fails, so it reads as a build problem.
+
+Wireless debugging also drops on reboot and on network changes, and pairing
+does not survive it — expect to redo the code dance rather than assuming the
+phone died.
+
+### Plugged in, and `adb devices` is still empty
+
+Settle whether the Mac sees the hardware at all before touching Android
+settings. A phone with USB debugging *off* still enumerates as an MTP or
+charging device, so nothing enumerating means the cable or the port, not the OS:
+
+```bash
+ioreg -r -c IOUSBHostDevice -l | grep -i '"USB Product Name"'
+```
+
+Use that class, **not `ioreg -p IOUSB`** — the `IOUSB` plane is legacy and
+returns an empty tree on Apple Silicon no matter what is attached, which reads
+exactly like a missing phone. `system_profiler SPUSBDataType` deserves a control
+run before you trust its silence too (`SPHardwareDataType` should print ~17
+lines; if it does, the tool is not being blocked). A charge-only cable is the
+usual answer and is visually identical to a data one.
+
+If enumeration is fine but Developer options is missing, **Build number is
+usually nested rather than removed** — Samsung hides it under About phone →
+Software information, LG and TCL under Software info, and some OEMs label it
+Version or Build version. Carrier-locked prepaid hardware does sometimes ship
+without it, but that is rarer than the menu being one level down, and a reboot
+has been enough to make it appear. Do not reach for wireless debugging as the
+workaround: it is itself a Developer options toggle.
 
 ## Build and install: prefer the project's own script
 
@@ -357,7 +430,21 @@ up-to-down to scroll toward the top.
 
 **`adb devices` shows nothing.** Emulator not started, or it died; relaunch and
 wait for `sys.boot_completed`. `adb kill-server && adb start-server` clears a
-wedged daemon.
+wedged daemon. For a physical device, it usually means unpaired rather than
+absent — `adb mdns services` and pair, per the wireless-debugging section.
+
+**A command fails with `more than one device/emulator` for one phone.** It is
+attached over both its IP and its mDNS name. `export ANDROID_SERIAL=<ip>:<port>`
+— disconnecting the duplicate does not hold.
+
+**A build reports success but the log ends in a stack trace.** Piping to `tail`
+replaces the command's exit status with `tail`'s, which is always `0`. Anything
+run in the background is reported by that status, so a failed build reads as a
+passing one. Capture the real code before the pipe:
+
+```bash
+npm run build:android > build.log 2>&1; echo "EXIT=$?"; tail -20 build.log
+```
 
 **Install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.** Signed by a
 different key than the installed build — `adb uninstall <appId>` first, which
