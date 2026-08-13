@@ -19,10 +19,17 @@ final class MainViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // Matches the WebView's backing colour so a reload or a content-process
-        // restart does not flash through to a black window on a dark-mode
-        // device; the UI theme is light.
-        view.backgroundColor = .white
+        // Matches the WebView's backing colour and the launch screen's, so
+        // launch, a reload and a content-process restart all show the same
+        // brand blue instead of flashing white — or, on a dark-mode device,
+        // black — on the way to the bundle's splash.
+        view.backgroundColor = Brand.launchBackground
+
+        // The page owns the colour behind the status bar, so it owns the
+        // status bar's own contrast too.
+        bridge.onThemeChanged = { [weak self] _ in
+            self?.setNeedsStatusBarAppearanceUpdate()
+        }
 
         let webView = bridge.webView
         webView.translatesAutoresizingMaskIntoConstraints = false
@@ -39,7 +46,14 @@ final class MainViewController: UIViewController {
         ])
     }
 
-    /// The UI is light-only; without this the status bar text disappears
-    /// against it on a dark-mode device.
-    override var preferredStatusBarStyle: UIStatusBarStyle { .darkContent }
+    /// Follows the page rather than the device, because the two can disagree —
+    /// the UI's theme setting is `system` by default but a player can pin it.
+    /// Hard-coding `.darkContent` here is what left the clock and the battery
+    /// black on a dark page.
+    ///
+    /// Until the page reports (launch, and again across a reload) the backdrop
+    /// is brand blue, which wants white.
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        bridge.pageTheme == .light ? .darkContent : .lightContent
+    }
 }

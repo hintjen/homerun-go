@@ -21,6 +21,25 @@ adb devices                                          # nothing attached? see bel
 If `adb` is missing, `ANDROID_HOME` / `ANDROID_SDK_ROOT` point at the SDK;
 `adb` lives in `platform-tools/`, `emulator` in `emulator/`.
 
+**Neither variable is set on this Mac, and there is no `java` on PATH.** Both
+came from Homebrew rather than Android Studio, which is why nothing is
+exported. Gradle needs both spelled out or it fails twice in a row, on two
+different messages ("Unable to locate a Java Runtime", then "SDK location not
+found"):
+
+```bash
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
+  ./gradlew :app:compileDebugKotlin
+```
+
+`sdkmanager` *is* on PATH, so `readlink -f "$(which sdkmanager)"` finds the SDK
+if that path ever moves. That install has `platform-tools/` but **no
+`emulator/` package and no AVDs** — there is no emulator on this machine
+today, only a real device over USB. `:app:compileDebugKotlin` still type-checks
+a change with nothing attached, which is worth doing before you go looking for
+hardware.
+
 Starting an emulator, if the project has no script for it:
 
 ```bash

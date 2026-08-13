@@ -153,9 +153,49 @@ save-on-suspend, the idle timer) also live naturally on the app delegate.
 The WebView is pinned to the view's edges, **not** its safe area: the UI
 handles insets in CSS with `env(safe-area-inset-*)`, so letting UIKit inset it
 as well double-counts the notch. Rubber-banding and automatic content insets
-are off for the same reason. The backing colour is pinned white because the UI
-theme is light-only and a dark-mode device would otherwise flash black behind
-a reload.
+are off for the same reason.
+
+### Launch colour
+
+Three surfaces have to agree or launch flashes, and they are configured in
+three different places:
+
+| Surface | Set in | When it shows |
+|---|---|---|
+| Launch screen | `Info.plist` → `UILaunchScreen` → `UIColorName` | Before any code runs |
+| Window | `MainViewController.viewDidLoad` | Between the launch screen and the first paint |
+| WebView backing | `BridgeController.init` (`isOpaque = false` + `backgroundColor`) | Any moment the page has not painted |
+
+All three are `Brand.launchBackground` — `#5677DA`, the colour the bundle's
+splash animation sits on. The launch screen can only be given a colour from an
+asset catalog, so the value lives in
+`Assets.xcassets/LaunchBackground.colorset` and `Brand` reads it back out with
+`UIColor(named:)` rather than repeating the hex in Swift.
+
+White was the previous answer to all three, and it was visibly wrong twice: as
+a flash before the splash, and as a white frame behind every reload on a dark
+device — where the system launch background was black on top of that.
+
+### Status bar
+
+`preferredStatusBarStyle` follows **the page**, not the device. The two
+disagree routinely: the UI is next-themes with `defaultTheme: "system"`, and a
+player who pins light or dark gets a page that contradicts
+`traitCollection.userInterfaceStyle`. Hard-coding `.darkContent` — which this
+did — leaves a black clock and battery on a black page.
+
+The page reports through the `__host:theme` message, from a document-start
+user script (`BridgeController.themeWatcherScript`) that watches for the
+`light`/`dark` class next-themes puts on `<html>`, falling back to the media
+query before either class exists. It is a host-internal message on the existing
+`homerun` handler, like `__host:jsError` — **not** a bridge channel, so nothing
+in `shared/conformance/` describes it and nothing needs to.
+
+`BridgeController.pageTheme` goes back to nil only when the **content process
+dies**, because that is the one case where what is on screen becomes the launch
+blue. An ordinary navigation keeps it: WebKit leaves the old page up until the
+new one paints, so clearing it there would flash a white clock over a light
+page for as long as the load takes.
 
 ## File map
 
@@ -165,7 +205,9 @@ a reload.
 | `ios/HomerunHost/Info.plist` | Bundle metadata, `homerun://` URL scheme, no background modes |
 | `ios/HomerunHost/HomerunHost.entitlements` | Empty until there is a team; associated domains land at M2 |
 | `ios/HomerunHost/AppDelegate.swift` | `@main`, window, owns the bridge |
-| `ios/HomerunHost/MainViewController.swift` | Full-screen WebView layout |
+| `ios/HomerunHost/MainViewController.swift` | Full-screen WebView layout, status bar style |
+| `ios/HomerunHost/Brand.swift` | The launch colour, read from the asset catalog |
+| `ios/HomerunHost/Assets.xcassets` | `LaunchBackground` — the one colour `UILaunchScreen` names |
 | `ios/HomerunHost/AppSchemeHandler.swift` | Serves `web/` over `homerun-app://` |
 | `ios/HomerunHost/Capabilities.swift` | Reads `profiles.ios.capabilities`, builds the document-start script |
 | `ios/HomerunHost/FFI/HomerunFFI.h` | Hand-written C header for the Rust library |
@@ -177,6 +219,19 @@ a reload.
 scripts fail with no error. Check that `AppSchemeHandler` is registered on the
 configuration *before* the WebView is constructed, and that the MIME table maps
 `js` to `text/javascript`.
+
+**The clock and battery are invisible against the page.** The status bar style
+is stale. It is driven by `__host:theme`, so either the watcher script did not
+run (check the other document-start scripts arrived — capabilities would be
+missing too) or `MainViewController` lost the `bridge.onThemeChanged` hook that
+calls `setNeedsStatusBarAppearanceUpdate()`. Nothing polls; a missed report
+stays missed until the next navigation.
+
+**A white flash before the splash.** One of the three launch surfaces is not
+`Brand.launchBackground` — see the launch colour table. A flash *only* at cold
+start is the launch screen: `UIColorName` is only honoured when the named
+colour exists in an asset catalog that actually ships, and a typo fails silently
+back to the system background.
 
 **`xcodegen generate` fails on a missing path.** `HomerunHost/web/` is not
 staged. Run `npm run build:ios`.

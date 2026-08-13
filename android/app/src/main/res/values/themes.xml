@@ -1,9 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!--
+      Light-mode variant. The parent matters beyond appearance: WebView reads
+      the theme's `isLightTheme` to answer `prefers-color-scheme`, which is
+      what makes the shared UI's `system` setting follow the device at all.
+
+      The bars start on the launch blue and are recoloured at runtime once the
+      page reports its theme — see MainActivity.applyPageTheme. Everything
+      here is the pre-page state.
+    -->
     <style name="Theme.Homerun" parent="@android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@color/window_background</item>
-        <item name="android:statusBarColor">@color/window_background</item>
-        <item name="android:navigationBarColor">@color/window_background</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/launch_background</item>
+        <item name="android:statusBarColor">@color/launch_background</item>
+        <item name="android:navigationBarColor">@color/launch_background</item>
+        <!-- White clock and battery: the launch blue is a dark background. -->
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

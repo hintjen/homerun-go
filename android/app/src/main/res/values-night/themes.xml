@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Same window as values/themes.xml — only the parent differs, and only
+         because WebView derives `prefers-color-scheme` from the theme's
+         `isLightTheme`. The colours are identical on purpose: what is on
+         screen before the page paints is the launch blue either way. -->
     <style name="Theme.Homerun" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@color/window_background_night</item>
-        <item name="android:statusBarColor">@color/window_background_night</item>
-        <item name="android:navigationBarColor">@color/window_background_night</item>
+        <item name="android:windowBackground">@color/launch_background</item>
+        <item name="android:statusBarColor">@color/launch_background</item>
+        <item name="android:navigationBarColor">@color/launch_background</item>
         <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

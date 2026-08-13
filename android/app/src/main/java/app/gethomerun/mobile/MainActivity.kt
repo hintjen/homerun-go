@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -19,6 +20,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
@@ -98,8 +100,100 @@ class MainActivity : ComponentActivity() {
           window.__homerunHostRevision = ${BridgeRouter.HOST_REVISION};
           var host = window.__homerunHost || (window.__homerunHost = {});
           host.postMessage = function (json) { ${BridgeRouter.JS_INTERFACE}.postMessage(json); };
+
+          // Which colour scheme the page settled on, reported to the host so
+          // it can colour the status and navigation bars to match.
+          //
+          // The UI is next-themes with attribute="class": it puts `light` or
+          // `dark` on <html>, from localStorage when the player has pinned one
+          // and from the media query when they have left it on `system`. The
+          // class is the only honest source — a pinned theme disagrees with
+          // the device, and the system bars have to follow what is on screen.
+          //
+          // This runs at document start, so the observer is watching before
+          // the theme script runs. The media listener covers the device's
+          // appearance changing while a `system` page is open, which the
+          // activity does not otherwise notice: uiMode is in configChanges,
+          // so nothing is recreated and the theme XML is never re-applied.
+          var root = document.documentElement;
+          var query = window.matchMedia('(prefers-color-scheme: dark)');
+          var last = null;
+
+          function report() {
+            var theme = root.classList.contains('dark') ? 'dark'
+              : root.classList.contains('light') ? 'light'
+              : (query.matches ? 'dark' : 'light');
+            if (theme === last) return;
+            last = theme;
+            try { ${CHROME_INTERFACE}.themeChanged(theme); } catch (e) {}
+          }
+
+          new MutationObserver(report).observe(root, {
+            attributes: true, attributeFilter: ['class']
+          });
+          query.addEventListener('change', report);
+          report();
         })();
         """.trimIndent()
+    }
+
+    /**
+     * The page telling the host what it looks like. Called on a binder thread,
+     * like every `@JavascriptInterface` method.
+     *
+     * Deliberately not a bridge channel: this is host chrome, not part of the
+     * `bridge/v1` contract, and putting it through the router would put a
+     * method in the dispatch table that no manifest declares.
+     */
+    private inner class ChromeInterface {
+        @JavascriptInterface
+        fun themeChanged(theme: String) {
+            val light = theme != "dark"
+            runOnUiThread { applyPageTheme(light) }
+        }
+    }
+
+    /**
+     * Paints the system bars for the theme the page is showing.
+     *
+     * The half that was wrong is the icon appearance. It came from the theme,
+     * which resolves once from the device's dark mode — so a player who pins
+     * the UI to dark on a light phone got a black clock on a black page, and
+     * nothing corrected it because uiMode is in `configChanges` and the
+     * activity is never recreated.
+     */
+    private fun applyPageTheme(light: Boolean) = applyChrome(
+        ContextCompat.getColor(
+            this,
+            if (light) R.color.page_background else R.color.page_background_night,
+        ),
+        light = light,
+    )
+
+    /**
+     * Back to what the theme starts on: blue bars, white icons. Used whenever
+     * there is no page — cold start, and again after the render process dies
+     * and the WebView is rebuilt.
+     */
+    private fun applyLaunchChrome() = applyChrome(
+        ContextCompat.getColor(this, R.color.launch_background),
+        light = false,
+    )
+
+    /**
+     * The bar colours are what API 34 and below draws behind the clock; from
+     * API 35 they are ignored and the page shows through instead. The
+     * appearance flag is what matters on every version.
+     */
+    private fun applyChrome(background: Int, light: Boolean) {
+        @Suppress("DEPRECATION")
+        window.statusBarColor = background
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = background
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            isAppearanceLightStatusBars = light
+            isAppearanceLightNavigationBars = light
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -153,11 +247,18 @@ class MainActivity : ComponentActivity() {
         // within one session instead of waiting for relaunches.
         assetLoader = WebBundle.loader(this, BundleStore.resolve(this).root)
 
+        // No page yet: brand blue behind the bars, white clock on it.
+        applyLaunchChrome()
+
         val view = WebView(this)
         view.layoutParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT,
         )
+        // WebView paints white until the document has a background of its own,
+        // which is a flash on every launch and every rebuild. This is the same
+        // blue as the window behind it and as the bundle's splash.
+        view.setBackgroundColor(ContextCompat.getColor(this, R.color.launch_background))
 
         view.settings.apply {
             javaScriptEnabled = true
@@ -178,6 +279,7 @@ class MainActivity : ComponentActivity() {
         view.webViewClient = BundleClient()
         view.webChromeClient = ConsoleClient()
         view.addJavascriptInterface(router, BridgeRouter.JS_INTERFACE)
+        view.addJavascriptInterface(ChromeInterface(), CHROME_INTERFACE)
 
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             WebViewCompat.addDocumentStartJavaScript(view, bootstrapScript, setOf(WebBundle.ORIGIN))
@@ -301,6 +403,9 @@ class MainActivity : ComponentActivity() {
     private companion object {
         const val TAG = "HomerunHost"
         const val TAG_WEB = "HomerunWeb"
+
+        /** The global the injected theme watcher reports through. */
+        const val CHROME_INTERFACE = "HomerunChrome"
 
         /**
          * Process-wide, not per-activity: a rotation must not re-prompt, and

@@ -37,8 +37,17 @@
 		</dict>
 	</array>
 
+	<!-- Brand blue rather than the default system background, which is white
+	     on a light device and black on a dark one — either way a flash of a
+	     colour the app never shows again, before the bundle's own splash
+	     appears. The colour is the one thing the launch screen can be given
+	     without a storyboard, and it has to come from an asset catalog:
+	     Assets.xcassets/LaunchBackground.colorset. -->
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

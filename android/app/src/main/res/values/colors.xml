@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Matches the shared UI's light/dark page background, so the window
-         behind the WebView never flashes a different colour on launch. -->
-    <color name="window_background">#FFFFFF</color>
-    <color name="window_background_night">#0A0A0A</color>
+    <!-- Behind the WebView from launch until the page paints, and the colour
+         the bundle's splash animation sits on — so there is no flash between
+         the window appearing and the UI arriving. -->
+    <color name="launch_background">#5677DA</color>
+
+    <!-- The shared UI's two page backgrounds. Not used by the theme: they are
+         applied at runtime, once the page says which of the two it resolved
+         (MainActivity.applyPageTheme). The theme cannot pick between them,
+         because the UI's own light/dark setting can disagree with the
+         device's. -->
+    <color name="page_background">#FFFFFF</color>
+    <color name="page_background_night">#0A0A0A</color>
+
     <color name="brand_cornflower">#4B6BFB</color>
 </resources>

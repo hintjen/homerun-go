@@ -1,6 +1,17 @@
 import UIKit
 import WebKit
 
+/// Which of the shared UI's two colour schemes is on screen right now.
+///
+/// Not necessarily the device's: the UI's theme setting is `system` by default
+/// but a player can pin it to light or dark, and then the page and the phone
+/// disagree. Only the page knows, which is why the host is told rather than
+/// asking `traitCollection`.
+enum PageTheme: String {
+    case light
+    case dark
+}
+
 /// The `bridge/v1` transport: owns the WebView, carries invokes to the router,
 /// and delivers replies and events back to the page (PROTOCOL.md §3).
 ///
@@ -12,6 +23,16 @@ final class BridgeController: NSObject, BridgeEventSink {
     let webView: WKWebView
 
     private let router: BridgeRouter
+
+    /// The scheme the page has resolved, or nil until it says. Nil means the
+    /// splash is still up, so the status bar is being read against brand blue
+    /// rather than against either theme.
+    private(set) var pageTheme: PageTheme?
+
+    /// Set by the view controller, which owns the status bar. Called on the
+    /// main thread whenever `pageTheme` changes — including back to nil when
+    /// the page goes away and the blue shows through again.
+    var onThemeChanged: ((PageTheme?) -> Void)?
 
     /// Events emitted before the page is listening are lost, so they queue
     /// until it announces itself and then flush in order (PROTOCOL.md §4.2).
@@ -40,6 +61,7 @@ final class BridgeController: NSObject, BridgeEventSink {
         config.setURLSchemeHandler(AppSchemeHandler(), forURLScheme: AppSchemeHandler.scheme)
         config.userContentController.addUserScript(Capabilities.userScript())
         config.userContentController.addUserScript(Self.errorHookScript())
+        config.userContentController.addUserScript(Self.themeWatcherScript())
         #if DEBUG
             config.userContentController.addUserScript(Self.networkErrorHookScript())
         #endif
@@ -92,7 +114,11 @@ final class BridgeController: NSObject, BridgeEventSink {
         webView.scrollView.bounces = false
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.isOpaque = false
-        webView.backgroundColor = .white
+        // What shows until the page paints — a cold start, a reload, a content
+        // process coming back. The bundle's splash is on this blue, so there is
+        // no flash between the two; white here was visible as one, and on a
+        // dark-mode device the system background underneath it was black.
+        webView.backgroundColor = Brand.launchBackground
 
         #if DEBUG
             if #available(iOS 16.4, *) {
@@ -146,6 +172,11 @@ final class BridgeController: NSObject, BridgeEventSink {
         pending.values.forEach { $0.cancel() }
         pending.removeAll()
         delivery = .queuing([])
+        // `pageTheme` is deliberately *not* cleared here. A navigation leaves
+        // the old page on screen until the new one paints, so forgetting the
+        // theme would flash a white clock over a light page for as long as the
+        // load takes. The old page's answer is the best guess for the new one;
+        // the watcher corrects it at document start either way.
     }
 }
 
@@ -177,6 +208,12 @@ extension BridgeController: WKScriptMessageHandler {
 
         if incoming.method == "__host:jsError" {
             logJSError(incoming.params)
+            return
+        }
+
+        if incoming.method == "__host:theme" {
+            let details = incoming.params as? [String: Any] ?? [:]
+            setPageTheme((details["theme"] as? String).flatMap(PageTheme.init(rawValue:)))
             return
         }
 
@@ -268,6 +305,12 @@ extension BridgeController: WKScriptMessageHandler {
         emit("get-api-url", [])
     }
 
+    private func setPageTheme(_ theme: PageTheme?) {
+        guard theme != pageTheme else { return }
+        pageTheme = theme
+        onThemeChanged?(theme)
+    }
+
     private func logJSError(_ params: Any?) {
         let details = params as? [String: Any] ?? [:]
         let message = details["message"] as? String ?? "?"
@@ -294,6 +337,53 @@ extension BridgeController: WKScriptMessageHandler {
                 params: { message: 'Unhandled rejection: ' + String(e.reason), source: '', line: 0 }
               });
             });
+            """
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    /// Reports which colour scheme the page has settled on, so the host can
+    /// colour the status bar to match.
+    ///
+    /// The UI is next-themes with `attribute="class"`: it puts `light` or
+    /// `dark` on `<html>`, from localStorage when the player has chosen one and
+    /// from the media query when they have left it on `system`. Reading the
+    /// class rather than the trait collection is the whole point — a pinned
+    /// theme diverges from the device, and the status bar has to follow what is
+    /// actually on screen.
+    ///
+    /// Injected at document start, so the observer is watching before the
+    /// theme script runs; the media-query listener covers the player changing
+    /// the device's appearance while a `system` page is open.
+    private static func themeWatcherScript() -> WKUserScript {
+        let source = """
+            (function () {
+              var root = document.documentElement;
+              var query = window.matchMedia('(prefers-color-scheme: dark)');
+              var last = null;
+
+              function resolved() {
+                if (root.classList.contains('dark')) return 'dark';
+                if (root.classList.contains('light')) return 'light';
+                return query.matches ? 'dark' : 'light';
+              }
+
+              function report() {
+                var theme = resolved();
+                if (theme === last) return;
+                last = theme;
+                try {
+                  window.webkit.messageHandlers.homerun.postMessage({
+                    v: 1, method: '__host:theme', params: { theme: theme }
+                  });
+                } catch (e) {}
+              }
+
+              new MutationObserver(report).observe(root, {
+                attributes: true, attributeFilter: ['class']
+              });
+              query.addEventListener('change', report);
+              report();
+            })();
             """
         return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
     }
@@ -365,6 +455,9 @@ extension BridgeController: WKNavigationDelegate {
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         HostLog.bridge.error("WebView content process died; reloading")
         resetForNewPage()
+        // This one really does blank the view: what is on screen until the
+        // reload paints is the launch blue, which wants a white clock.
+        setPageTheme(nil)
         load()
     }
 

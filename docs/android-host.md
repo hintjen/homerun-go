@@ -94,6 +94,45 @@ this host never implements. The values describe the *platform*, not today's
 progress: `moddedServers` is true because Android can run a JVM, even while
 the backend that would serve it is still being built.
 
+## Launch colour and the system bars — `MainActivity`, `res/values/`
+
+Two surfaces show before the page does, and both are `@color/launch_background`
+(`#5677DA`, the colour the bundle's splash animation sits on): the window,
+from `Theme.Homerun`, and the WebView itself, which paints **white** until the
+document has a background of its own. Missing the second one leaves the flash
+in place on every launch and every rebuild after a render-process death.
+
+`values-night/themes.xml` sets the same colours as `values/`. It still exists,
+and deleting it would break something unrelated: WebView derives
+`prefers-color-scheme` from the theme's `isLightTheme`, so the night parent is
+what makes the shared UI's `system` setting follow the device at all.
+
+The status and navigation bars are then repainted at runtime, from the theme
+the *page* resolved:
+
+```
+document.documentElement class -> HomerunChrome.themeChanged -> applyPageTheme
+```
+
+Reading the page rather than the device is the point. The UI is next-themes
+with `defaultTheme: "system"`, so a player can pin light or dark and disagree
+with the phone. The theme XML resolves once, at activity creation, and `uiMode`
+is in `configChanges` — so nothing is recreated when the device's appearance
+changes either, and `windowLightStatusBar` stays whatever it was. That is what
+left a black clock on a black page.
+
+`HomerunChrome` is a second `@JavascriptInterface` object, deliberately not a
+bridge channel: this is host chrome, and routing it through `BridgeRouter`
+would put a method in the dispatch table that no manifest declares. The watcher
+that feeds it is part of `bootstrapScript`, so it is injected at document start
+alongside the capabilities.
+
+`applyChrome` sets both the bar colours and the appearance flags. The colours
+are what API 34 and below draws behind the clock; from API 35 they are ignored
+and the page shows through instead. The appearance flags matter on every
+version, which is why they go through `WindowInsetsControllerCompat` rather
+than the theme.
+
 ## The bridge — `BridgeRouter.kt`
 
 Implements `shared/conformance/PROTOCOL.md` §3.3. The wire format and the
@@ -278,6 +317,12 @@ assertion should have caught this; check it still runs.
 document-start script did not run, or it ran without setting
 `__homerunHost.postMessage`. Confirm `DOCUMENT_START_SCRIPT` is supported on
 that WebView build.
+
+**The clock and battery are invisible against the page.** The page's theme
+report never arrived. `HomerunChrome` is added to the WebView in
+`installWebView`, so a rebuilt WebView that missed it has no watcher at all —
+capabilities would be missing too. Nothing polls; a missed report stays missed
+until the next page load.
 
 **A UI action spins forever.** An invoke with no reply. Find the channel in
 logcat — unimplemented ones log a warning — and check `npm run
