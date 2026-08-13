@@ -46,6 +46,7 @@ class PumpkinBackend(
 ) : ServerBackend {
 
     override val kind = "pumpkin"
+    override val engine = "linked"
 
     private val json = Json { ignoreUnknownKeys = true }
 

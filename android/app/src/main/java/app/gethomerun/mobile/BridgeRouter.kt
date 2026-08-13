@@ -1006,10 +1006,20 @@ class BridgeRouter(
                         val deviceId = DeviceRegistry.currentDeviceId()
 
                         try {
-                            if (settings?.gameType == "bedrock") {
-                                throw ServerBackendException.Engine(
-                                    "Homerun for Android cannot host Bedrock servers yet."
-                                )
+                            // Before anything expensive. A modpack is minutes of
+                            // downloading and unpacking, and on a linked engine it
+                            // would then start vanilla and look like it worked.
+                            //
+                            // `rawGameType`, not `gameType` — the reduced form cannot
+                            // tell `native-crossplay` from plain Java, and crossplay
+                            // needs a plugin. `bedrock = false`: no phone ships BDS.
+                            if (settings != null) {
+                                Core.hostingRefusal(
+                                    engine = backend.engine,
+                                    bedrock = false,
+                                    gameType = settings.rawGameType,
+                                    env = settings.env,
+                                )?.let { throw ServerBackendException.Engine(it) }
                             }
 
                             // Refuse to launch while another device is finishing its

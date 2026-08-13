@@ -316,6 +316,29 @@ enum Core {
             }
     }
 
+    /// Why this device will not host this server, or nil to go ahead.
+    ///
+    /// Asked before the launch plan, because everything expensive comes after
+    /// it. This host links its engine, and a linked engine does not refuse a
+    /// modpack — it starts vanilla and looks like it worked, so the player
+    /// sees a world with their mods missing and no error anywhere.
+    ///
+    /// `gameType` must be the API's verbatim value: the reduced java/bedrock
+    /// form cannot tell `native-crossplay` apart, and crossplay needs Geyser.
+    /// `bedrock` is false because no phone ships Bedrock Dedicated Server.
+    static func hostingRefusal(
+        gameType: String, env: [String: Any], engine: String = "linked", bedrock: Bool = false
+    ) throws -> String? {
+        let reply = try call(
+            "minecraft.hosting.refuse",
+            [
+                "host": ["engine": engine, "bedrock": bedrock],
+                "server": ["gameType": gameType, "env": env],
+            ])
+        guard let refusal = reply as? [String: Any] else { return nil }
+        return refusal["message"] as? String
+    }
+
     // MARK: - Who owns a server right now
 
     /// The lifecycle of the servers this device hosts.

@@ -55,6 +55,7 @@ class JavaServerBackend(
 ) : ServerBackend {
 
     override val kind = "javaNative"
+    override val engine = "spawned"
 
     /** The thread the supervisor's blocking `start` runs on. */
     private var engineThread: Thread? = null

@@ -24,6 +24,16 @@ interface ServerBackend {
     /** Engine identity, matching `ServerBackendKind` in the UI's capabilities. */
     val kind: String
 
+    /**
+     * `spawned` or `linked`, in `homerun-core::launch::Engine`'s words.
+     *
+     * Deliberately not [kind]: that one names the engine for the UI, and the
+     * core does not care which engine this is — only whether it is a separate
+     * process (so it can load mods) or compiled in (so it cannot). A third
+     * engine would add a [kind] and reuse one of these two.
+     */
+    val engine: String
+
     // --- Lifecycle ---
 
     /** Create on-disk state. Must be idempotent. */
