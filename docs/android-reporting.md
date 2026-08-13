@@ -53,6 +53,42 @@ with the device token produces a silent success: HTTP 200, nothing changed.
 So `Reporting.syncOps` deliberately **does not fall back** to the device token
 when nobody is signed in; it logs and gives up.
 
+### What kind of device this is
+
+The device token above is issued by `POST /api/init/native/`, and that same
+call is where this device says what it *is*. `DeviceRegistry` sends
+`device_type` alongside the name:
+
+| Host | Sends | API enum |
+|---|---|---|
+| Android | `mobile/android` | `DeviceType.MOBILE_ANDROID` |
+| iOS | `mobile/ios` | `DeviceType.MOBILE_IOS` |
+| Desktop, native path | `native_java` (or omits the field) | `DeviceType.NATIVE` |
+
+The endpoint is still named `native` because that is what it means to the API:
+*hosts a server as a plain process rather than a Docker Compose stack*. Phones
+answer that question exactly the way desktop's native path does, and every
+API-side behaviour keyed on it — no compose file with a state report, no ack of
+a `stopping` transition, process output instead of container logs — applies
+unchanged. Only the identity is new. On the API side that set is
+`DeviceType.hosts_natively()`; test against it rather than `== NATIVE`.
+
+Two things about this that are easy to get wrong:
+
+- **The slash is load-bearing and is not a path.** The API matches the string
+  exactly against its enum, and slash-namespaced type values are the house
+  convention there (`game_type` has `minecraft/native`). `mobile-android`
+  is a 400.
+- **The field is a claim, and the API only half-trusts it.** A client may
+  declare `native_java` or either mobile type; `wsl` and `both` are refused,
+  because those are earned by completing a WSL install and the API awards
+  them itself. Sending one gets a 400 rather than a silent downgrade.
+
+Before this existed both phones registered as `native_java`, indistinguishable
+from a desktop — which is why nothing could count phones. Devices that
+registered then re-type themselves on their next `ensure()` call; there is no
+backfill.
+
 ## `Reporting.kt`
 
 Process-scoped, like `ServerHost` and for the same reason: a page reload must
@@ -249,6 +285,7 @@ The desktop is still exposed to both. See `plans/android-parity.md`.
 | File | Role |
 |---|---|
 | `Reporting.kt` | the listener, the cadence loop, the ops chain |
+| `DeviceRegistry.kt` | registration, the device id/token, `device_type`, the heartbeat |
 | `Session.kt` | the user token, read in one place |
 | `Core.kt` (§Reporting) | wrappers over the core's decisions |
 | `HomerunApi.kt` | `perform`, `serverBody`, `publicIpAddress`, PATCH |
@@ -283,3 +320,14 @@ method, the path and the API's own error text.
 **A crash produced no report.** The tail is empty only if the run printed
 nothing, which is itself worth investigating — look for
 `crashed with an empty console`.
+
+**The phone shows up as a desktop, or as "Native + WSL".** It registered before
+`device_type` was sent, or it re-registered against an API that had not yet
+shipped the mobile types. Registration is cached in SharedPreferences and
+`ensure()` returns early when it is present, so nothing re-sends on its own —
+clear the app's storage, or sign out and back in, to force one call.
+
+**Registration is refused with a 400 naming `device_type`.** The string did not
+match the API's enum. It is `mobile/android`, with a slash; check
+`HomerunApi.DEVICE_TYPE` against `DeviceType` in `fractal_database/models.py`,
+and confirm the API is new enough to know the value at all.

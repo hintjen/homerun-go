@@ -112,6 +112,15 @@ object HomerunApi {
     /** Where the desktop asks too, so both platforms report the same field. */
     private const val PUBLIC_IP_URL = "https://api.ipify.org/?format=json"
 
+    /**
+     * What this device registers as — `DeviceType.MOBILE_ANDROID` on the API.
+     *
+     * The slash is not a path and not a typo: device and game types are both
+     * slash-namespaced on the backend (`minecraft/native`), and the API
+     * matches this string exactly against its enum. iOS sends `mobile/ios`.
+     */
+    private const val DEVICE_TYPE = "mobile/android"
+
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
@@ -318,8 +327,14 @@ object HomerunApi {
      * One call does everything: creates the device, adds it to the user's
      * default group and that group's gateway service, joins it to servers the
      * user already has, and issues a device token. Authorised with the
-     * **user** token — owner, matrix id and device type are all derived
-     * server-side, so the client sends only a name.
+     * **user** token — owner and matrix id are derived server-side, so the
+     * client sends only a name and what kind of device it is.
+     *
+     * [DEVICE_TYPE] is the one thing the backend cannot work out for itself.
+     * Without it a phone registers as `native_java` and is indistinguishable
+     * from a desktop running the native path — which is what shipped first,
+     * and why anything counting phones could not. The API constrains this to
+     * the types a client is allowed to claim; `wsl` and `both` are refused.
      *
      * [existingDeviceId] must be an id the backend issued. It is looked up as
      * a primary key owned by this user, so anything invented locally 404s.
@@ -332,6 +347,7 @@ object HomerunApi {
     ): DeviceRegistry.Registration? = withContext(Dispatchers.IO) {
         val body = buildJsonObject {
             put("device_name", deviceName)
+            put("device_type", DEVICE_TYPE)
             if (existingDeviceId != null) put("existing_device_id", existingDeviceId)
         }
 

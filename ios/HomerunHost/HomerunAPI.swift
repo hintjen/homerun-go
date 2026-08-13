@@ -10,6 +10,14 @@ import Foundation
 /// Deliberately small, and mirrors `HomerunApi.kt` on Android.
 enum HomerunAPI {
 
+    /// What this device registers as — `DeviceType.MOBILE_IOS` on the API.
+    ///
+    /// The slash is not a path and not a typo: device and game types are both
+    /// slash-namespaced on the backend (`minecraft/native`), and the API
+    /// matches this string exactly against its enum. Android sends
+    /// `mobile/android`.
+    static let deviceType = "mobile/ios"
+
     /// What registration hands back. All three are persisted.
     struct Device {
         let id: String
@@ -51,6 +59,12 @@ enum HomerunAPI {
     /// `existingDeviceId` pins it, which is what stops a reinstall from
     /// silently accumulating devices — the backend appends a hex suffix on
     /// name collision rather than failing.
+    ///
+    /// `device_type` is the one thing the backend cannot work out for itself.
+    /// Without it a phone registers as `native_java` and is indistinguishable
+    /// from a desktop running the native path — which is what shipped first,
+    /// and why anything counting phones could not. The API constrains it to
+    /// the types a client may claim; `wsl` and `both` are refused.
     static func registerDevice(
         apiURL: String,
         token: String,
@@ -59,7 +73,10 @@ enum HomerunAPI {
     ) async throws -> Device {
         guard !token.isEmpty else { throw APIError.notAuthenticated }
 
-        var body: [String: Any] = ["device_name": deviceName]
+        var body: [String: Any] = [
+            "device_name": deviceName,
+            "device_type": deviceType,
+        ]
         if let existingDeviceId { body["existing_device_id"] = existingDeviceId }
 
         let object = try await post(apiURL: apiURL, path: "/api/init/native/", body: body, token: token)
