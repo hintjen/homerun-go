@@ -149,6 +149,59 @@ netstack does not compile against anything newer.
 > the fork's own `go.mod` files — a change to a different repository, and
 > precisely the gvisor upgrade that breaks the build.
 
+## Two rules the Go and JRE binaries have to obey
+
+Both were learned by shipping a build that installed, launched, and could not
+host. Neither is visible from the code.
+
+### cgo is mandatory on every Android target
+
+`build-restic.js` and `build-wireproxy.js` set `cgo: true` for **both** ABIs,
+so both need the NDK. That is not about linking. It is about **DNS**.
+
+Android ships no `/etc/resolv.conf`. With cgo off, Go uses its own resolver,
+finds no nameservers, and falls back to `127.0.0.1:53` — where nothing is
+listening. Every hostname lookup fails with `connection refused`, so restic
+cannot reach the backup repository and wireproxy cannot reach the gateway.
+
+On a device that does not look like an error. A server start restores the world
+from backup before launching the JVM, so restic retries with backoff for ever:
+the jar downloads, the card says *Starting up…*, and nothing further happens.
+No crash, no exception, no report — `crash::report` reads a server's console
+output, and there is no server.
+
+**The emulator cannot catch this.** `android-x86_64` has always needed cgo for
+an unrelated reason — Go cannot link android/amd64 internally — so the only
+configuration ever exercised was the one that never ships, while arm64, which
+does ship, was never tested. If you are ever tempted to set cgo off on arm64
+because "Go links it internally and needs no NDK": that is true, and it is
+exactly how this happened.
+
+### Everything must be 16 KB page aligned
+
+New 64-bit devices run 16 KB pages and their linker refuses a library aligned
+more coarsely. Play has required support for targetSdk 35+ since 1 November
+2025 (extended to 31 May 2026), so this blocks a release as well as a device.
+
+The NDK emits 16 KB by default and Go's own linker emits 64 KB, so this is
+mostly free — with one trap. **Turning cgo on hands linking to the NDK's `ld`,
+whose default is 4 KB**, which is why both Go scripts pass
+`-extldflags=-Wl,-z,max-page-size=16384`. The two settings are one change; a
+future edit that keeps cgo and drops the flag re-breaks this silently.
+
+Three checks enforce it, and each has caught something real:
+
+| Where | Covers |
+|---|---|
+| `stage-jre.py` | every `.so` staged into `assets/jre/`; refuses to stage otherwise |
+| `build-restic.js`, `build-wireproxy.js` | the binary just built |
+| `third_party/libandroid-spawn/` | Termux publishes only a 4 KB build of a library `libjvm.so` has a hard `DT_NEEDED` on, so it is compiled from source here |
+
+> Before blaming page alignment for a device failure, run
+> `adb shell getconf PAGE_SIZE`. Most phones still answer `4096`, and a 4 KB
+> library loads perfectly well on them — the alignment work is a Play
+> requirement and a future-device fix, not an explanation for today's bug.
+
 ## Typical loops
 
 **Change Rust, test it** — no device needed, and this is most of the FFI:
@@ -200,8 +253,33 @@ The Gradle build then wants the ABI named explicitly, because the staged
 JRE is architecture-specific and a release must ship exactly one:
 
 ```bash
-./gradlew :app:bundleRelease -Pabi=arm64-v8a
+./gradlew :app:bundleRelease -Pabi=arm64-v8a -PversionCode=N -PversionName=X.Y.Z
 ```
+
+`bundleRelease` produces the `.aab` Play wants; `assembleRelease` produces an
+APK, which is useful for sideloading and is not uploadable for a new app. Play
+rejects a `versionCode` it has already seen, so bump it every upload — and a
+`versionName` must be numeric and period-separated, since Play rejects
+`0.2.0-beta` even though Android accepts it.
+
+**A release build needs the NDK, including for arm64.** That used to be false
+and the note here used to say so; see the cgo rule above for why it changed.
+
+Signing comes from `android/keystore.properties` (gitignored). Without it the
+build still completes and the artifact is **unsigned** — deliberate, so CI
+smoke builds and local audit builds work without a copy of the key, but it
+means "unsigned" has to be caught somewhere. `verifyReleaseConfig` warns, and
+`publish-android.yml` runs `jarsigner -verify` before it uploads.
+
+Prove what you built before uploading it, rather than after Play rejects it:
+
+```bash
+jarsigner -verify app/build/outputs/bundle/release/app-release.aab
+unzip -l app/build/outputs/bundle/release/app-release.aab | grep base/lib/
+```
+
+The second should list exactly one ABI. Two means the `-Pabi` flag was lost,
+and half the payload will not match the one JRE in `assets/`.
 
 ## Conformance
 
@@ -253,3 +331,36 @@ blank screen.
 **App shows a blank screen** — the bundle is missing, or being served over
 `file://`. See the host docs; module scripts from an opaque origin fail
 silently.
+
+**A server downloads its jar and then nothing happens, on a device** — almost
+certainly DNS. Check with the app running:
+
+```bash
+adb -s <serial> logcat --pid=$(adb -s <serial> shell pidof app.gethomerun.mobile)
+```
+
+`lookup … on [::1]:53: connection refused` from `HomerunBackup` means a Go
+binary was built without cgo — see the cgo rule above. Note the tag: filtering
+logcat on `HomerunJava` or `HomerunHost` misses this entirely, because the line
+comes from restic.
+
+A single component can be tested without reinstalling anything. The staged
+binaries are executable, so push one and run it:
+
+```bash
+adb push android/app/src/main/jniLibs/arm64-v8a/librestic.so /data/local/tmp/restic
+adb shell "chmod 755 /data/local/tmp/restic && RESTIC_PASSWORD=x \
+  /data/local/tmp/restic cat config -r rest:https://backups.gethomerun.app/nope/"
+```
+
+`401 Unauthorized` is the healthy answer — DNS resolved, TLS completed, the
+server replied. A `lookup` error is the broken one.
+
+**`No aarch64-linux-android26-clang in the NDK`** — every Android target needs
+the NDK now, not just the emulator's. Set `ANDROID_NDK_HOME`, or install it
+from Android Studio → SDK Manager → NDK.
+
+**`N staged libraries cannot load on a 16 KB-page device`** — `stage-jre.py`
+refusing to stage a runtime that would fail to load. The message names the
+files; rebuild them with `-Wl,-z,max-page-size=16384`. This is a real refusal,
+not a warning to work around.

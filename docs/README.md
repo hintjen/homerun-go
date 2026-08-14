@@ -23,10 +23,29 @@ each platform's assets, and the Rust FFI compiled for its targets.
 - Staging the shared UI, and the env overrides for local checkouts
 - Per-target Rust builds, triples, and where each artifact must land
 - Why Android native libraries must live in `jniLibs`
+- The two rules the Go and JRE binaries obey — cgo for DNS, 16 KB alignment —
+  and why the emulator cannot catch either
 - Typical loops, and a triage list for the usual toolchain failures
 
 **Read this for**: Setting up a machine, wiring CI, or decoding a toolchain
 error.
+
+---
+
+### 📦 [Publishing to Play](./publishing-android.md)
+
+Getting a build in front of testers, and the parts of Play that are not
+discoverable from the Console.
+
+**Contains**:
+- The account, the upload key, and why an upload key is not the signing key
+- Publishing by hand, and why saving a release is not rolling one out
+- The CI workflow, its five secrets, and the two things still blocking it
+- What Play asks for: foreground-service review, account deletion, data safety
+- The targetSdk 36 deadline, and what any of this actually costs
+
+**Read this for**: Shipping a build, setting up CI publishing, or answering a
+policy questionnaire.
 
 ---
 

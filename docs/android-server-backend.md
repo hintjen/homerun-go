@@ -731,6 +731,21 @@ any build without a JRE — see the packaging section. It falls back to Pumpkin.
 **`EACCES` launching the JVM.** The launcher is not in `nativeLibraryDir`, or
 `useLegacyPackaging` was flipped to false so nothing was extracted there.
 
+**The jar downloads and then nothing happens — no JVM, no error, no crash
+report.** Usually DNS in restic rather than anything about the JVM. `start`
+restores the world from the backup repository *before* it launches, so a
+restic that cannot resolve `backups.gethomerun.app` retries with backoff for
+ever and the launch never proceeds. Nothing crashes, so nothing is reported,
+and `crash::report` has no console output to read because no server ever ran.
+
+Confirm with `adb logcat --pid=$(adb shell pidof app.gethomerun.mobile)` and
+look for **`HomerunBackup`** — filtering on `HomerunJava` or `HomerunHost`
+misses it completely. `lookup … on [::1]:53: connection refused` means a Go
+binary was built without cgo; see
+[`building.md`](building.md#cgo-is-mandatory-on-every-android-target).
+
+This cannot reproduce on the emulator, which is why it shipped.
+
 **"Homerun for Android cannot host <loader> servers yet".** Working as
 intended — only vanilla and Paper resolve. The server's `TYPE` comes from the
 API, so this is what a Fabric or Forge server created on desktop does when
