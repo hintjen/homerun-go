@@ -26,8 +26,12 @@ final class MainViewController: UIViewController {
         view.backgroundColor = Brand.launchBackground
 
         // The page owns the colour behind the status bar, so it owns the
-        // status bar's own contrast too.
-        bridge.onThemeChanged = { [weak self] _ in
+        // status bar's own contrast — and the backdrop this controller paints,
+        // which sits under the WebView and shows wherever that is not opaque.
+        // Both follow the page rather than the device: the theme setting
+        // defaults to `system` but a player can pin it.
+        bridge.onThemeChanged = { [weak self] theme in
+            self?.view.backgroundColor = Brand.backdrop(for: theme)
             self?.setNeedsStatusBarAppearanceUpdate()
         }
 

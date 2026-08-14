@@ -355,6 +355,13 @@ extension BridgeController: WKScriptMessageHandler {
     private func setPageTheme(_ theme: PageTheme?) {
         guard theme != pageTheme else { return }
         pageTheme = theme
+        // The WebView is deliberately not opaque, so this colour is what
+        // composites through anywhere the page is not painting: before first
+        // paint, during a keyboard pan that reveals past the body box, and in
+        // the gap between screens on a view transition. Left on the launch
+        // blue it is not a flash on the way into the app — it is a blue edge
+        // behind every screen for the life of the process.
+        webView.backgroundColor = Brand.backdrop(for: theme)
         onThemeChanged?(theme)
     }
 

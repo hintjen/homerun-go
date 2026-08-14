@@ -235,6 +235,28 @@ handler looks like — or `MainViewController` lost the `bridge.onThemeChanged`
 hook that calls `setNeedsStatusBarAppearanceUpdate()`. Nothing polls; a missed
 send stays missed until the theme changes again.
 
+**Brand blue shows behind or around the page, or flashes between screens.**
+The backdrop is stale, in the same way and from the same cause. The WebView is
+deliberately **not opaque** (`BridgeController.installWebView`), so whatever
+sits behind it composites through everywhere the page is not painting: before
+first paint, past the body box when the keyboard pans, and in the gap between
+screens during a view transition. Two things paint there —
+`webView.backgroundColor` and `MainViewController.view.backgroundColor` — and
+both *start* on `Brand.launchBackground`, which is the point at launch and a
+blue edge behind every screen forever if nothing moves them off it.
+
+`Brand.backdrop(for:)` is what moves them, driven by the same theme report as
+the status bar. So if the blue persists, the report is not arriving — same
+first check as above. If the colour is *wrong* rather than blue, `Brand.pageLight`
+and `Brand.pageDark` have drifted from `--background` in the shared UI's
+`globals.css`; they are second copies by necessity, because the host has to
+paint before it is in a position to ask.
+
+> Not covered by this: `WKWebView.underPageBackgroundColor`, which governs the
+> over-scroll area specifically and is left to WebKit's own derivation. If the
+> pan-past-the-body case is still wrong once the backdrop is right, that
+> property is the next thing to pin.
+
 **A white flash before the splash.** One of the three launch surfaces is not
 `Brand.launchBackground` — see the launch colour table. A flash *only* at cold
 start is the launch screen: `UIColorName` is only honoured when the named
