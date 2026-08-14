@@ -5,6 +5,21 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!--
+      Haptics, and only for two of the six patterns.
+
+      Four of them play through `View.performHapticFeedback`, which needs no
+      permission at all. `success` and `error` have no HapticFeedbackConstants
+      equivalent — nothing in that vocabulary means "the thing you asked for
+      finished" — so those two go through Vibrator, and this is what for.
+
+      Install-time, and it does not prompt. `Haptics.kt` tags every Vibrator
+      call with a touch usage so the OS still applies the owner's haptics
+      setting to it; without that the permission would buy the ability to
+      ignore them, which is not what it is here for.
+    -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <!--
       Hosting while the app is not in front of the user.
 
       None of these three prompts. They are install-time permissions, granted

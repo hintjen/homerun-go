@@ -95,9 +95,14 @@ node shared/conformance/check-coverage.js android android/app/src/main/java/app/
 ```
 
 `npm run conformance:ios` and `conformance:android` wrap those. Both pass
-today: iOS requires 43 handlers (52 declared), Android 44. The checker reads
-the router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END` markers —
-keep those markers around the real table, not a duplicate list.
+today: iOS requires 48 handlers (57 declared), Android 49 of 49. The checker
+reads the router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END`
+markers — keep those markers around the real table, not a duplicate list.
+
+Two more gates run beside them, all four in `.github/workflows/conformance.yml`:
+`npm run test:host-revision` (a channel answered without a ledger entry is one
+an over-the-air bundle can hang on) and `npm run test:capabilities` (Android
+transcribes its capability record by hand and had already drifted).
 
 If a channel is missing, the fix is a handler, not an exclusion. **An
 unanswered invoke hangs a UI promise forever** — that is the worst failure

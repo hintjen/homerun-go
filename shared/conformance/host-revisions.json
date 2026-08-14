@@ -155,6 +155,18 @@
           "quit-and-install"
         ]
       }
+    },
+    {
+      "revision": 6,
+      "summary": "Both hosts play haptics. The page sends what the user just did — selection, navigate, commit, success, warning, error — and each host maps it onto its own generators. Both arrive in one revision because the contract and the vocabulary landed together, unlike the staggered pairs above. Android jumps 4 to 6: revision 5 introduced nothing for it.",
+      "adds": {
+        "android": [
+          "haptic"
+        ],
+        "ios": [
+          "haptic"
+        ]
+      }
     }
   ]
 }

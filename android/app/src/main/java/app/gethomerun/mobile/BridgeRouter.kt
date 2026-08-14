@@ -91,13 +91,13 @@ private data class BridgeError(val message: String, val code: String? = null)
  *    manifest read out of a 40–60 MB jar, `Process.waitFor(5, SECONDS)`, a
  *    250 ms JNI poll held for up to five minutes, and two statfs calls.
  *
- * Three handlers hop back to the main thread and each says why in place:
- * `clipboard-write-text`, `set-appearance` and `quit-and-install`. The test
- * for a fourth is narrow — a handler needs the main thread only if it touches
- * the WebView, the window, or a framework object that builds a `Handler` from
- * the *calling* thread's Looper. `SharedPreferences`, `ActivityManager`,
- * `NotificationManager`, `startActivity` and the JNI calls into
- * `homerun-core` are all safe where they are, and most of them block.
+ * Four handlers hop back to the main thread and each says why in place:
+ * `clipboard-write-text`, `set-appearance`, `quit-and-install` and `haptic`.
+ * The test for a fifth is narrow — a handler needs the main thread only if it
+ * touches the WebView, the window, or a framework object that builds a
+ * `Handler` from the *calling* thread's Looper. `SharedPreferences`,
+ * `ActivityManager`, `NotificationManager`, `startActivity` and the JNI calls
+ * into `homerun-core` are all safe where they are, and most of them block.
  *
  * The consequence to know about: handlers no longer run in arrival order.
  * They did, by accident — on `Main.immediate` a handler ran inline until its
@@ -163,6 +163,9 @@ class BridgeRouter(
     }
 
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Resolves the device's vibrator once; the `haptic` channel plays through it. */
+    private val haptics = Haptics(context)
 
     /**
      * The local server engine, owned by the process rather than by this
@@ -596,6 +599,23 @@ class BridgeRouter(
         // because "handled, and the right thing to do is nothing" and "nobody
         // wrote this yet" are different states and only one of them is fine.
         "splash-shown" to { _ -> null },
+
+        // What the user just did, for the motor. The payload is a meaning —
+        // "selection", "commit" — and [Haptics] owns the translation into
+        // Android's own feedback vocabulary.
+        //
+        // Main, because `performHapticFeedback` touches the view, and the view
+        // is read inside the hop for the same reason `evaluate` does it: the
+        // field belongs to whichever WebView currently exists.
+        "haptic" to { params ->
+            val pattern = (params as? JsonPrimitive)?.contentOrNull
+            if (pattern == null) {
+                Log.w(TAG, "haptic wants a pattern string, got: $params")
+            } else {
+                withContext(Dispatchers.Main) { haptics.play(pattern, webView) }
+            }
+            null
+        },
 
         // --- over-the-air updates -------------------------------------------
         //
@@ -1494,7 +1514,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 4
+        const val HOST_REVISION = 6
 
         /** Protocol-level, deliberately absent from the channel inventory. */
         private const val READY_METHOD = "__bridge:ready"

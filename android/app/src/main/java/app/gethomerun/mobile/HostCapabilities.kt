@@ -25,11 +25,13 @@ data class HostCapabilities(
     val autoUpdate: Boolean,
     val privilegeElevation: Boolean,
     val moddedServers: Boolean,
+    val minigames: Boolean,
     val fileImport: Boolean,
     val multipleRunningServers: Boolean,
     val backgroundExecution: Boolean,
     val backups: Boolean,
     val deviceWebsocket: Boolean,
+    val haptics: Boolean,
 ) {
     companion object {
         /**
@@ -58,6 +60,12 @@ data class HostCapabilities(
             privilegeElevation = false,
             // The JVM backend runs Bukkit-family plugins and Forge/Fabric mods.
             moddedServers = true,
+            // Mods yes, the Minigames Hub not yet — its lobby flows have not
+            // been validated on this host. Backfilled: this field was in the
+            // contract from the start and missing here, which is exactly the
+            // drift the note above warns about. `scripts/check-capabilities.js`
+            // now fails the build on the next one.
+            minigames = false,
             // Mods and modpacks come from the in-app browser. Being handed a
             // file — a world .zip, a .mrpack — is a desktop flow, and SAF
             // import is deliberately not being built.
@@ -89,6 +97,12 @@ data class HostCapabilities(
             // above warns about, pointing the other way. See
             // `plans/device-websocket.md`.
             deviceWebsocket = true,
+            // The page says what the user just did and `Haptics` decides what
+            // it feels like. True because the platform can, not because every
+            // device will: `performHapticFeedback` is a no-op when the owner
+            // has touch feedback switched off, and that is the setting doing
+            // its job rather than something for this flag to second-guess.
+            haptics = true,
         )
     }
 }

@@ -94,6 +94,16 @@ this host never implements. The values describe the *platform*, not today's
 progress: `moddedServers` is true because Android can run a JVM, even while
 the backend that would serve it is still being built.
 
+**`scripts/check-capabilities.js` enforces that, and it had to.** iOS reads
+`profiles.ios.capabilities` out of the vendored manifest at runtime and so
+cannot drift; this host transcribes the same record by hand, and a hand copy of
+seventeen fields is one that falls behind. It already had — `minigames` was in
+the contract from the beginning and simply absent here, unnoticed, because the
+UI reads a missing field as `undefined`, `undefined` is falsy, and the contract
+happened to say `false`. That is the failure mode worth remembering: a drifted
+capability does not break, it takes the wrong branch, and it takes the right one
+often enough to look fine.
+
 ## Launch colour and the system bars — `MainActivity`, `res/values/`
 
 Three surfaces show before the page does, and all three are
@@ -278,6 +288,37 @@ binder thread** — not the main thread, and not one we own.
 Blocking the binder thread ANRs the app, and the trace points at the WebView
 rather than at the handler that actually did it.
 
+Handlers run on `Dispatchers.IO`, and four hop back with
+`withContext(Dispatchers.Main)`: `clipboard-write-text`, `set-appearance`,
+`quit-and-install` and `haptic`. The test for a fifth is narrow — a handler
+needs the main thread only if it touches the WebView, the window, or a
+framework object that builds a `Handler` from the *calling* thread's Looper.
+`haptic` qualifies on the first count: `View.performHapticFeedback` is called
+on the WebView, and the `webView` field is read *inside* the hop rather than
+before it, because it belongs to whichever view currently exists and is
+replaced when the render process dies.
+
+### Haptics — `Haptics.kt`
+
+The `haptic` send carries what the user just did, not what the motor should do.
+Four of the six patterns map onto `HapticFeedbackConstants` and play through
+`View.performHapticFeedback`, which needs no permission and honours Settings →
+Sound & vibration → Touch feedback for free.
+
+`success` and `error` have no constant — nothing in that vocabulary means "the
+thing you asked for finished" — so those two go through `Vibrator`, which is
+the whole reason `VIBRATE` is in the manifest. **Every `Vibrator` call declares
+a touch usage** (`VibrationAttributes.USAGE_TOUCH`, or `AudioAttributes` with
+`CONTENT_TYPE_SONIFICATION` below API 33). Without that the OS treats the buzz
+as an alarm and plays it regardless of the owner's haptics setting, which is a
+bug invisible to anyone who has never turned haptics off.
+
+`minSdk` is 26 and most of the useful constants arrived in 30 (one in 34), so
+every branch falls back. This is load-bearing: `compileSdk` is 35 so the newer
+symbols resolve at compile time, and `abortOnError = false` in the app's lint
+config means a missing `Build.VERSION.SDK_INT` guard is **not** a build
+failure — it is a `NoSuchFieldError` on a real API-30 phone.
+
 ### Answering is mandatory
 
 An invoke with no reply leaves a promise pending forever and the UI hangs with
@@ -433,6 +474,22 @@ bypassing it.
 **Blank white screen, no console errors.** The bundle is not being served.
 Check that `assets/web/index.html` exists in the APK, then that the asset
 loader's domain matches the URL being loaded.
+
+**Nothing buzzes.** `adb logcat -s HomerunHaptics` says which of the three it
+is. A `performHapticFeedback(...) -> false` line means the owner has touch
+feedback switched off, which is the setting working. `no vibrator on this
+device` means exactly that, and an emulator always says it. No line at all
+means the send never arrived — check the page is on a build new enough to have
+haptics, and that `haptics` is true in the injected capabilities.
+
+**It buzzes for taps but not for a completed action, or the reverse.**
+`success` and `error` take the `Vibrator` path and the other four take
+`performHapticFeedback`; a split like that is one of the two paths failing, not
+the channel. The log names which ran.
+
+**It buzzes on a phone whose owner turned haptics off.** A `Vibrator` call lost
+its usage attributes. Untagged vibrations are treated as alarms and ignore the
+setting.
 
 **`Uncaught SyntaxError: Unexpected token '<'` on every chunk.** `_next/` was
 stripped from the APK — see the asset filter section. The merge-task

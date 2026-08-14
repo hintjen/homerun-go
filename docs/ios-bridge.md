@@ -156,6 +156,32 @@ Two things WKWebView does silently, both handled in `BridgeController`:
   implements them — the call never returns to the page. `WKUIDelegate` backs
   them with `UIAlertController`.
 
+## Haptics — `HapticsPlayer.swift`
+
+The `haptic` send carries a word for what the user just did — `selection`,
+`navigate`, `commit`, `success`, `warning`, `error` — never an instruction for
+the Taptic Engine. The page cannot play these itself: WKWebView does not
+implement `navigator.vibrate` at all, so without this channel the phone is
+silent.
+
+The mapping from those six words to generators is
+`homerun-app-ui/lib/haptics.ts` (`HAPTIC_MAPPINGS`), which names itself the
+specification for this host. `docs/style.md` §16 there says which surfaces may
+send which, and the UI rate-limits to one every 50 ms *before* sending, so this
+host does not debounce.
+
+- **The generators are held, not made per call.** Creating a
+  `UIFeedbackGenerator` warms the engine, and paying that spin-up at the instant
+  of the tap is latency on the one thing whose whole value is arriving *with*
+  the touch. Each play re-`prepare()`s for the next.
+- **An unknown pattern is dropped, not raised.** `bridge/v1` is additive, so a
+  seventh pattern has to reach an older host as silence. Throwing would be
+  invisible anyway — a send has no `id`, so `respond` returns before the error
+  reaches anyone.
+- **Nothing here needs a view.** That is why it is a `@MainActor enum` called
+  straight from the handler rather than routed through `BridgeEventSink`: that
+  protocol exists for the things that need the WebView.
+
 ## Channel map
 
 Extended at M2 as handlers land. Today: `get-app-version`.
@@ -168,6 +194,7 @@ Extended at M2 as handlers land. Today: `get-app-version`.
 | `ios/HomerunHost/BridgeRouter.swift` | The channel table CI reads, and the handlers |
 | `ios/HomerunHost/BridgeEnvelope.swift` | Envelope encode/decode, the U+2028/9 escaper |
 | `ios/HomerunHost/WeakScriptMessageHandler.swift` | Breaks the message-handler retain cycle |
+| `ios/HomerunHost/HapticsPlayer.swift` | The six patterns, and the generators they play on |
 
 ## Triage
 
@@ -197,3 +224,11 @@ the marker block is not a real handler — a stub, or a stray string literal.
 
 **A long-running start fails after a fixed interval.** Someone added a timeout.
 There is none by design.
+
+**Nothing buzzes.** Three innocent explanations before it is a bug, in the order
+worth checking: the Simulator has no Taptic Engine and never will; Low Power
+Mode silences every generator; and Settings → Sounds & Haptics → System Haptics
+is a switch the owner may have turned off. All three are correct behaviour the
+host must not route around. If none of them apply, look for
+`haptic sent an unknown pattern` in the log — that is the page and the host
+disagreeing about the vocabulary, which means the contract needs re-syncing.

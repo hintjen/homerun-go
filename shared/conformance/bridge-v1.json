@@ -2,9 +2,9 @@
   "bridgeVersion": 1,
   "counts": {
     "invoke": 76,
-    "send": 25,
+    "send": 26,
     "event": 52,
-    "total": 153
+    "total": 154
   },
   "channels": [
     {
@@ -484,6 +484,12 @@
       "note": "Fired on boot and on theme change. Mobile: set the status-bar text style to match (dark appearance → light text). Desktop: no-op."
     },
     {
+      "channel": "haptic",
+      "kind": "send",
+      "tier": "core",
+      "note": "Fired on user-initiated interactions only. Mobile: play the mapped native generator (see lib/haptics.ts HAPTIC_MAPPINGS); ignore an unrecognised pattern rather than error. Desktop: no-op — the `haptics` capability is false there, so the UI never sends it."
+    },
+    {
       "channel": "minimize-window",
       "kind": "send",
       "tier": "capability",
@@ -904,7 +910,8 @@
         "multipleRunningServers": true,
         "backgroundExecution": true,
         "backups": true,
-        "deviceWebsocket": true
+        "deviceWebsocket": true,
+        "haptics": false
       },
       "required": [
         "cache-client-nonce",
@@ -945,6 +952,7 @@
         "get-storage-info",
         "get-system-language",
         "get-system-memory",
+        "haptic",
         "import-minecraft-modpack",
         "import-minecraft-world",
         "install-type-changed",
@@ -1080,7 +1088,8 @@
         "multipleRunningServers": false,
         "backgroundExecution": false,
         "backups": true,
-        "deviceWebsocket": true
+        "deviceWebsocket": true,
+        "haptics": true
       },
       "required": [
         "cache-client-nonce",
@@ -1106,6 +1115,7 @@
         "get-storage-info",
         "get-system-language",
         "get-system-memory",
+        "haptic",
         "install-type-changed",
         "is-installed",
         "journey-modals-get",
@@ -1174,7 +1184,8 @@
         "multipleRunningServers": false,
         "backgroundExecution": true,
         "backups": true,
-        "deviceWebsocket": true
+        "deviceWebsocket": true,
+        "haptics": true
       },
       "required": [
         "cache-client-nonce",
@@ -1200,6 +1211,7 @@
         "get-storage-info",
         "get-system-language",
         "get-system-memory",
+        "haptic",
         "install-type-changed",
         "is-installed",
         "journey-modals-get",

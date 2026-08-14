@@ -27,18 +27,21 @@ jobs:
       - name: iOS
         run: node shared/conformance/check-coverage.js ios ios/HomerunHost/BridgeRouter.swift
 
-      # Guarded until the Android host exists: without the guard the checker
-      # dies on a missing file, which reads as a broken workflow rather than
-      # as work not yet started. Delete the guard with the router's first
-      # commit.
       - name: Android
-        run: |
-          router=android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
-          if [ -f "$router" ]; then
-            node shared/conformance/check-coverage.js android "$router"
-          else
-            echo "No Android router yet — skipping."
-          fi
+        run: node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
+
+      # Coverage proves a channel is answered; this proves the host admits to
+      # answering it. A router that gains a channel without a ledger entry is
+      # a host an over-the-air bundle can call something unanswerable on, and
+      # the ledger is the only thing that knows.
+      - name: Host revision ledger
+        run: node scripts/check-host-revision.js
+
+      # And this one proves the host tells the truth about what it supports.
+      # Not covered by either of the above: capabilities are injected, not
+      # dispatched, so nothing that reads the router can see them drift.
+      - name: Capability parity
+        run: node scripts/check-capabilities.js
 
   rust:
     name: FFI tests

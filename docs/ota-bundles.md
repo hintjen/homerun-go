@@ -19,7 +19,12 @@ app, so it was built and proven on a device before anything could deliver one.
 ## The number that has to move first
 
 `BRIDGE_HOST_REVISION` — `BridgeRouter.HOST_REVISION` on Android,
-`BridgeRouter.hostRevision` on iOS, both currently **1**.
+`BridgeRouter.hostRevision` on iOS, both currently **6**.
+
+They do not have to move together, and mostly have not: the ledger's entries 2
+through 5 are one host at a time catching up with the other. Revision 6 is the
+exception — haptics landed on both at once — and it is why Android went from 4
+straight to 6, which is legal because revision 5 introduced nothing for it.
 
 `PROTOCOL.md` §7 versions the protocol and says changes are additive, so every
 host answers `v: 1` for ever and a bundle cannot tell a January host from a July

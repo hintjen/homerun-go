@@ -56,6 +56,24 @@ extension BridgeRouter {
         nil
     }
 
+    /// What the user just did, for the Taptic Engine.
+    ///
+    /// The payload is a meaning rather than an instruction — `selection`,
+    /// `commit` — and ``HapticsPlayer`` owns the translation into generators.
+    ///
+    /// An unrecognised value is dropped rather than raised, and that is the
+    /// contract rather than laziness: `bridge/v1` is additive, so a pattern
+    /// added later has to reach an older host as silence instead of an error.
+    /// Throwing would be invisible anyway — a send has no `id` to answer.
+    func haptic(_ params: Any?) async throws -> Any? {
+        guard let value = params as? String, let pattern = HapticPattern(rawValue: value) else {
+            HostLog.bridge.error("haptic sent an unknown pattern; ignoring")
+            return nil
+        }
+        HapticsPlayer.play(pattern)
+        return nil
+    }
+
     func setPosthogDistinctID(_ params: Any?) async throws -> Any? {
         HostStore.posthogDistinctID = params as? String
         return nil
