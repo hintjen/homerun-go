@@ -35,8 +35,20 @@ const TARGETS = {
     label: "Android arm64 (devices)",
     goarch: "arm64",
     abi: "arm64-v8a",
-    // Go links android/arm64 internally, so this one needs no NDK.
-    cgo: false,
+    // cgo, and it is not optional: **DNS does not work without it.**
+    //
+    // Android ships no /etc/resolv.conf, so Go's pure-Go resolver has no
+    // nameservers to read and falls back to 127.0.0.1:53 — every lookup fails
+    // with "connection refused", and the gateway is reached by hostname.
+    //
+    // Go links android/arm64 internally and needs no C toolchain, so this was
+    // `false` and looked right. It was only ever exercised on the emulator,
+    // which is x86_64 and had cgo forced on for an unrelated linking reason —
+    // so the configuration that worked was the one that never ships. The same
+    // mistake in build-restic.js is what stopped a server ever starting on a
+    // real phone.
+    cgo: true,
+    ndkTriple: "aarch64-linux-android26-clang",
     interpreter: "/system/bin/linker64",
     machine: "AArch64",
   },
@@ -122,8 +134,9 @@ function goBinary() {
 }
 
 /**
- * The NDK's clang for the emulator build. Only android/amd64 needs it, which
- * is why a device build works on a machine with no NDK at all.
+ * The NDK's clang. Every Android target needs one now — cgo is what gives Go
+ * a working DNS resolver on Android, so a device build no longer builds on a
+ * machine with no NDK. See the `cgo` note in TARGETS.
  */
 function ndkCompiler() {
   const home =
@@ -307,7 +320,13 @@ try {
     go,
     [
       "build", "-trimpath",
-      "-ldflags", `"-s -w -X 'main.version=${version}'"`,
+      // `-extldflags` because cgo hands linking to the NDK's ld, whose default
+      // is 4 KB pages — Go's own linker emits 64 KB and needs no help. Turning
+      // cgo on for DNS therefore silently loses the alignment, which the check
+      // after the build catches. The two belong together.
+      "-ldflags",
+      `"-s -w -X 'main.version=${version}'` +
+        (target.cgo ? " -extldflags=-Wl,-z,max-page-size=16384" : "") + `"`,
       "-o", `"${outFile}"`,
       "./cmd/wireproxy",
     ],

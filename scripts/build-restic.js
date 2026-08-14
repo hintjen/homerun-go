@@ -39,17 +39,33 @@ const TARGETS = {
     label: "Android arm64 (devices)",
     goarch: "arm64",
     abi: "arm64-v8a",
-    // Go links android/arm64 internally; no NDK needed.
-    cgo: false,
+    // cgo, and it is not optional: **DNS does not work without it.**
+    //
+    // Android ships no /etc/resolv.conf. Go's pure-Go resolver has nowhere to
+    // read nameservers from, so it falls back to 127.0.0.1:53 and every lookup
+    // dies with "connection refused" — restic then retries the backup
+    // repository with backoff, for ever, and a server start that waits on the
+    // world restore never finishes. What the player sees is a jar that
+    // downloads and then nothing at all.
+    //
+    // Go links android/arm64 internally and does not *need* a C toolchain, so
+    // this was `false` and looked correct. It was only ever exercised on the
+    // emulator, which is x86_64 and had cgo forced on for the unrelated
+    // linking reason below — so the one configuration that worked was the one
+    // that never ships.
+    cgo: true,
+    ndkTriple: "aarch64-linux-android26-clang",
     machine: "AArch64",
   },
   "android-x86_64": {
     label: "Android x86_64 (emulator)",
     goarch: "amd64",
     abi: "x86_64",
-    // "android/amd64 requires external (cgo) linking" — the one target that
-    // needs a C toolchain. Emulator-only, so it never touches the ship path.
+    // "android/amd64 requires external (cgo) linking" — this target could not
+    // be built without a C toolchain even before DNS made cgo mandatory
+    // everywhere.
     cgo: true,
+    ndkTriple: "x86_64-linux-android26-clang",
     machine: "x86-64",
   },
 };
@@ -75,22 +91,29 @@ function goBinary() {
   fail("Go is not installed.\n\n  Install Go 1.25+, or unpack a release into ~/tools/go.");
 }
 
-/** The NDK's clang, needed only by the emulator target. */
-function ndkCompiler() {
+/**
+ * The NDK's clang for a target. Every Android target needs one now.
+ *
+ * It used to be the emulator's alone, because android/amd64 cannot link
+ * internally. arm64 could, and did — which is how it ended up shipping a
+ * binary whose DNS never worked. See the `cgo` note in TARGETS.
+ */
+function ndkCompiler(target) {
   const home =
     process.env.ANDROID_NDK_HOME ||
     latestNdkUnderSdk() ||
     fail(
-      "The x86_64 target needs a C compiler:\n\n" +
-        "  android/amd64 requires external (cgo) linking\n\n" +
-        "Set ANDROID_NDK_HOME, or build the arm64 target, which needs no NDK."
+      "Building restic for Android needs a C compiler.\n\n" +
+        "cgo is required on every Android target: without it Go uses its own DNS\n" +
+        "resolver, which has no nameservers to read on Android and fails every\n" +
+        "lookup. Set ANDROID_NDK_HOME, or install the NDK from Android Studio."
     );
   const host = process.platform === "win32" ? "windows-x86_64"
     : process.platform === "darwin" ? "darwin-x86_64" : "linux-x86_64";
   const base = path.join(home, "toolchains", "llvm", "prebuilt", host, "bin");
   const suffix = process.platform === "win32" ? ".cmd" : "";
-  const compiler = path.join(base, `x86_64-linux-android26-clang${suffix}`);
-  if (!fs.existsSync(compiler)) fail(`No clang for x86_64 at:\n  ${compiler}`);
+  const compiler = path.join(base, `${target.ndkTriple}${suffix}`);
+  if (!fs.existsSync(compiler)) fail(`No ${target.ndkTriple} in the NDK at:\n  ${compiler}`);
   return compiler;
 }
 
@@ -180,15 +203,23 @@ const env = {
   CGO_ENABLED: target.cgo ? "1" : "0",
 };
 if (target.cgo) {
-  const compiler = ndkCompiler();
+  const compiler = ndkCompiler(target);
   env.CC = compiler;
   console.log(`  cc      ${compiler}`);
 }
 
+// `-extldflags` because cgo hands linking to the NDK's ld, whose default is
+// 4 KB — Go's own linker emits 64 KB and needs no help. Turning cgo on for DNS
+// therefore silently lost the page alignment, which the check below caught
+// immediately. Keep the two changes together; they are one change.
+const ldflags = target.cgo
+  ? "-ldflags=-s -w -extldflags=-Wl,-z,max-page-size=16384"
+  : "-ldflags=-s -w";
+
 try {
   execFileSync(
     go,
-    ["build", "-trimpath", "-ldflags=-s -w", "-o", outFile, PACKAGE],
+    ["build", "-trimpath", ldflags, "-o", outFile, PACKAGE],
     { cwd: MODULE_DIR, env, stdio: "inherit" }
   );
 } catch {
