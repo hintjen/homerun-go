@@ -882,6 +882,21 @@ class BridgeRouter(
             // provisioned against that registration, so leaving it up would
             // serve the next user's traffic over the previous one's tunnel.
             DeviceWebsocket.stop()
+            // The Minecraft account belongs to the person who signed it in, and
+            // this is the worst of the three to leave behind. `get-profile`
+            // would hand the next user the previous one's identity, and
+            // `useMinecraftAccount` reports every profile it learns to
+            // `/minecraft-account/link/` — so simply opening the Minigames Hub
+            // would attach someone else's Minecraft account, and every stat
+            // accumulated under it, to whoever logged in next.
+            //
+            // Local only, like the rest of this handler: nothing is revoked at
+            // Microsoft. Signing back in is a fresh sign-in.
+            minecraftAuth.signOut()
+            // Told, not just forgotten. Consumers keep their own state from
+            // these events, and a hub left mounted across a logout would go on
+            // showing the previous player until something remounted it.
+            emit("minecraft:auth:signed-out")
             null
         },
 
