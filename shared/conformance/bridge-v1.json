@@ -45,8 +45,9 @@
     {
       "channel": "share-content",
       "kind": "invoke",
-      "tier": "core",
-      "note": "Mobile: present the OS share sheet (UIActivityViewController / Intent.createChooser) and resolve completed:false when the user dismisses it — that is an outcome, not an error. Desktop: return completed:false — the `nativeShare` capability is false there, so the UI never calls it."
+      "tier": "capability",
+      "capability": "nativeShare",
+      "note": "Present the OS share sheet (UIActivityViewController / Intent.createChooser) and resolve completed:false when the user dismisses it — that is an outcome, not an error. Only required of a host that reports `nativeShare`; desktop shares end at the clipboard, and a mobile host falls back to it until the sheet is implemented."
     },
     {
       "channel": "push-notification",
@@ -1056,7 +1057,6 @@
         "set-native-local-network",
         "set-pending-server-upgrade",
         "set-posthog-distinct-id",
-        "share-content",
         "show-privilege-elevation-required-modal",
         "show-system-requirements-warning",
         "show-system-time-warning",
@@ -1111,7 +1111,7 @@
         "backups": true,
         "deviceWebsocket": true,
         "haptics": true,
-        "nativeShare": true
+        "nativeShare": false
       },
       "required": [
         "cache-client-nonce",
@@ -1175,7 +1175,6 @@
         "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
-        "share-content",
         "show-system-time-warning",
         "splash-shown",
         "start-installation-or-check",
@@ -1288,7 +1287,6 @@
         "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
-        "share-content",
         "show-system-time-warning",
         "splash-shown",
         "start-installation-or-check",
