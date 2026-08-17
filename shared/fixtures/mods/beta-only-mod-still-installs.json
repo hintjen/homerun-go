@@ -1,0 +1,42 @@
+{
+  "name": "beta-only-mod-still-installs",
+  "why": "Some mods never publish a stable build for a Minecraft version — Geyser is beta-only, C2ME alpha-only. Filtering version resolution to `release` resolved them to nothing and silently installed nothing at all.",
+  "inputs": {
+    "loader": "fabric",
+    "gameVersion": "1.21.4",
+    "projects": "geyser"
+  },
+  "modrinth": {
+    "/project/geyser/version": [
+      {
+        "id": "beta-new",
+        "project_id": "gey01",
+        "version_type": "beta",
+        "files": [{ "primary": true, "url": "https://cdn/geyser-2.4.jar", "filename": "geyser-2.4.jar" }],
+        "dependencies": []
+      },
+      {
+        "id": "beta-old",
+        "project_id": "gey01",
+        "version_type": "beta",
+        "files": [{ "primary": true, "url": "https://cdn/geyser-2.3.jar", "filename": "geyser-2.3.jar" }],
+        "dependencies": []
+      }
+    ],
+    "/projects?ids=": [{ "id": "gey01", "server_side": "required", "client_side": "optional" }]
+  },
+  "expect": {
+    "installed": ["geyser"],
+    "downloaded": ["geyser-2.4.jar"],
+    "failed": [],
+    "remove": [],
+    "records": {
+      "geyser": {
+        "versionId": "beta-new",
+        "mcVersion": "1.21.4",
+        "loader": "fabric",
+        "filePath": "mods/geyser-2.4.jar"
+      }
+    }
+  }
+}

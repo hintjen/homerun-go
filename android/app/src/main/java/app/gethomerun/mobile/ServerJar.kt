@@ -140,21 +140,40 @@ object ServerJar {
         }
     }
 
-    /** What is on disk right now. */
+    /**
+     * What is on disk right now.
+     *
+     * [requiredJava] is this host's addition and is **not** part of the core's
+     * `OnDisk` shape — [toJson] does not send it. It exists for the offline
+     * path below: starting a server with no network means no artifact, and
+     * without one there is nothing to tell [Core.selectRuntime] which runtime
+     * the jar needs. Recording it at download time answers that from disk.
+     *
+     * Null on a marker written before this field existed, and on one written
+     * by an older build. [Prepared] says what happens then.
+     */
     @Serializable
     private data class JarMeta(
         val loader: String,
         val version: String,
         val checksum: String? = null,
+        val requiredJava: Int? = null,
     )
 
     /**
-     * Put the right server jar in [dir] and return it.
+     * The jar to run, the staged runtime that should run it, and the version
+     * it turned out to be — `null` and `LATEST` are both a number by now, and
+     * [ModInstaller] cannot ask Modrinth what fits without one.
+     */
+    data class Prepared(val jar: File, val javaMajor: Int, val mcVersion: String)
+
+    /**
+     * Put the right server jar in [dir] and say which runtime should run it.
      *
      * Does nothing when the jar there is already the one asked for, so a
-     * restart is free. [bundledJava] is [JavaRuntime.javaMajor]; when it is
-     * lower than the jar needs this fails with that stated, rather than
-     * letting the JVM die on `UnsupportedClassVersionError`.
+     * restart is free. [bundled] is [JavaRuntime.available]; the core picks
+     * the lowest of them that satisfies the jar, and fails with that stated
+     * rather than letting the JVM die on `UnsupportedClassVersionError`.
      *
      * Blocking and potentially minutes long — `native-server-start` has no
      * bridge timeout for exactly this reason.
@@ -164,9 +183,9 @@ object ServerJar {
         cacheDir: File,
         version: String?,
         loader: String,
-        bundledJava: Int?,
+        bundled: List<Int>,
         onLog: (String) -> Unit,
-    ): File = withContext(Dispatchers.IO) {
+    ): Prepared = withContext(Dispatchers.IO) {
         val jar = File(dir, JAR_NAME)
         val onDisk = readMeta(dir)
 
@@ -181,7 +200,7 @@ object ServerJar {
             if (jar.isFile && onDisk != null && onDisk.couldSatisfy(version, loader)) {
                 Log.w(TAG, "version lookup failed (${err.message}) — using the jar on disk")
                 onLog("[Homerun] Could not reach the version servers — starting the Minecraft ${onDisk.version} jar already downloaded.")
-                return@withContext jar
+                return@withContext Prepared(jar, offlineRuntime(onDisk, bundled), onDisk.version)
             }
             throw ServerBackendException.Engine(
                 "Could not look up the $loader server for Minecraft ${version ?: "latest"}: " +
@@ -189,10 +208,10 @@ object ServerJar {
             )
         }
 
-        // The core owns the comparison and the wording, so the desktop and
-        // this app refuse the same jars for the same stated reason.
-        runCatching { Core.checkJava(artifact.toJson(), bundledJava) }
-            .onFailure { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
+        // The core owns the choice and the wording, so the desktop and this app
+        // refuse the same jars for the same stated reason.
+        val javaMajor = runCatching { Core.selectRuntime(artifact.toJson(), loader, bundled) }
+            .getOrElse { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
 
         val entry = Core.jarCacheKey(artifact.toJson())?.let { File(cacheDir, it) }
 
@@ -205,7 +224,7 @@ object ServerJar {
             "use" -> {
                 Log.i(TAG, "${artifact.loader} ${artifact.version} already downloaded")
                 share(entry, jar)
-                return@withContext jar
+                return@withContext Prepared(jar, javaMajor, artifact.version)
             }
 
             "adopt" -> {
@@ -213,9 +232,9 @@ object ServerJar {
                 // wrong. Rewrite it so the next launch takes the cheap path.
                 Log.i(TAG, "${artifact.loader} ${artifact.version} is already on disk — adopting it")
                 onLog("[Homerun] ${label(artifact)} is already downloaded.")
-                writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
+                writeMeta(dir, artifact.marker())
                 share(entry, jar)
-                return@withContext jar
+                return@withContext Prepared(jar, javaMajor, artifact.version)
             }
         }
 
@@ -226,8 +245,8 @@ object ServerJar {
         if (entry != null && entry.isFile && adoptFromCache(entry, jar, artifact)) {
             Log.i(TAG, "${artifact.loader} ${artifact.version} came from the shared cache")
             onLog("[Homerun] ${label(artifact)} is already downloaded.")
-            writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
-            return@withContext jar
+            writeMeta(dir, artifact.marker())
+            return@withContext Prepared(jar, javaMajor, artifact.version)
         }
 
         val size = artifact.sizeBytes?.let { " (${it / 1024 / 1024} MB)" } ?: ""
@@ -263,10 +282,61 @@ object ServerJar {
 
         if (entry != null) copyIn(entry, jar)
 
-        writeMeta(dir, JarMeta(artifact.loader, artifact.version, artifact.checksum?.hex))
+        writeMeta(dir, artifact.marker())
         onLog("[Homerun] ${label(artifact)} ready.")
         dropUnusedCacheEntries(cacheDir, dir.parentFile)
-        jar
+        Prepared(jar, javaMajor, artifact.version)
+    }
+
+    /** What to record beside a jar we have just put in place. */
+    private fun Artifact.marker() = JarMeta(loader, version, checksum?.hex, requiredJava)
+
+    /**
+     * Turn a requested version into a concrete one, and say what Java it needs.
+     *
+     * This is all a loader that installs itself takes from this file: Fabric's
+     * installer downloads the server jar, so there is no artifact to fetch —
+     * but "latest" still has to become a number, and the Java level still has
+     * to come from somewhere. Mojang's manifest is that somewhere for every
+     * loader, which is why the desktop's `fetchServerJarMeta` is called
+     * unconditionally too.
+     *
+     * The artifact returned describes the **vanilla** jar for that version.
+     * That is not a lie by omission: it is exactly what it is used for, which
+     * is the version string and [Artifact.requiredJava].
+     */
+    suspend fun resolveVanilla(version: String?): Artifact = withContext(Dispatchers.IO) {
+        try {
+            resolve(version, "vanilla")
+        } catch (err: ServerBackendException) {
+            throw err
+        } catch (err: Exception) {
+            throw ServerBackendException.Engine(
+                "Could not look up Minecraft ${version ?: "latest"}: " +
+                    (err.message ?: "no connection")
+            )
+        }
+    }
+
+    /**
+     * Which runtime to use when the version servers cannot be reached.
+     *
+     * The marker answers it when the jar was downloaded by a build that
+     * recorded [JarMeta.requiredJava]. When it does not — an older marker, or
+     * a jar adopted from a restore — the honest answer is that we do not know,
+     * and the **newest** staged runtime is the better guess than the oldest: a
+     * too-new JVM runs a vanilla server perfectly well, while a too-old one
+     * cannot start it at all. Getting this wrong costs a failed offline start,
+     * which the next online start repairs by rewriting the marker.
+     */
+    private fun offlineRuntime(onDisk: JarMeta, bundled: List<Int>): Int {
+        val newest = bundled.maxOrNull()
+            ?: throw ServerBackendException.Engine(
+                "This version of Homerun ships no Java runtime, so it cannot host a " +
+                    "Java server. Reinstall the app."
+            )
+        val required = onDisk.requiredJava ?: return newest
+        return bundled.filter { it >= required }.minOrNull() ?: newest
     }
 
     private fun label(artifact: Artifact): String =

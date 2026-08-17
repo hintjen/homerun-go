@@ -97,6 +97,31 @@ const ABI_TARGETS = {
 };
 
 /**
+ * The ABI of the one attached device, or null when there is no single answer.
+ *
+ * Two callers need this and they must agree: [abisToBuild], to build only the
+ * native library that device can load, and [gradle], which passes it on as
+ * `-Pabi` so `verifyJavaRuntime` knows which architecture the staged Java
+ * runtime has to match.
+ *
+ * Cached because it is a round trip to the device and the answer cannot change
+ * within one invocation.
+ */
+let cachedDeviceAbi;
+function deviceAbi() {
+  if (cachedDeviceAbi === undefined) {
+    try {
+      const abi = adb(["shell", "getprop", "ro.product.cpu.abi"]).trim();
+      cachedDeviceAbi = ABI_TARGETS[abi] ? abi : null;
+    } catch (_) {
+      // No device attached, or more than one.
+      cachedDeviceAbi = null;
+    }
+  }
+  return cachedDeviceAbi;
+}
+
+/**
  * Which ABIs to refresh before gradle packages them.
  *
  * A connected device narrows it to the one that will actually run, which is
@@ -104,18 +129,14 @@ const ABI_TARGETS = {
  * rebuild arm64 too, for minutes, to produce a library nothing here can load.
  */
 function abisToBuild() {
+  const only = deviceAbi();
+  if (only) return [only];
+
   const staged = Object.keys(ABI_TARGETS).filter((abi) =>
     fs.existsSync(path.join(JNI_LIBS, abi))
   );
-  const fallback = staged.length ? staged : Object.keys(ABI_TARGETS);
-
-  try {
-    const abi = adb(["shell", "getprop", "ro.product.cpu.abi"]).trim();
-    if (ABI_TARGETS[abi]) return [abi];
-  } catch (_) {
-    // No device attached, or more than one. Refresh what is already staged.
-  }
-  return fallback;
+  // No device attached. Refresh what is already staged.
+  return staged.length ? staged : Object.keys(ABI_TARGETS);
 }
 
 /**
@@ -174,11 +195,25 @@ function gradle(tasks) {
 
   stageNative();
 
+  // Tell gradle which architecture this build is for, so `verifyJavaRuntime`
+  // can refuse a Java runtime staged for the other one.
+  //
+  // This is not a nicety. The JRE lives in `assets/`, where the ABI filter
+  // never looks, and it is staged one architecture at a time — so an APK built
+  // after `npm run jre:android-x86_64` installs on a phone, launches, shows
+  // every screen, and then cannot start a single server: the only `libjvm.so`
+  // in it is for the wrong CPU, and you find out from a `dlopen` failure deep
+  // in a server log. Without `-Pabi` that check is skipped entirely, which
+  // made it useless in exactly the loop that switches between an emulator and
+  // a phone. Found by installing on a real device.
+  const abi = deviceAbi();
+  const args = abi ? [...tasks, `-Pabi=${abi}`] : tasks;
+
   const wrapper = path.join(ANDROID_DIR, process.platform === "win32" ? "gradlew.bat" : "gradlew");
   const jdk = resolveJdk();
-  console.log(`JDK:  ${jdk}\nTask: ${tasks.join(" ")}\n`);
+  console.log(`JDK:  ${jdk}\nTask: ${args.join(" ")}\n`);
 
-  const result = spawnSync(wrapper, tasks, {
+  const result = spawnSync(wrapper, args, {
     cwd: ANDROID_DIR,
     stdio: "inherit",
     env: { ...process.env, JAVA_HOME: jdk },

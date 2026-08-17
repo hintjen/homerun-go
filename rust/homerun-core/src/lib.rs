@@ -62,7 +62,12 @@ pub mod tunnel;
 // crate is under here and nothing above depends on it except the registry.
 pub mod minecraft;
 
+// Two hashes, both private, both here for the same reason: a derivation this
+// crate has to reproduce byte-for-byte and neither of them trusted with
+// anything that matters. Each module's header has the argument for why it is
+// hand-rolled rather than a dependency.
 mod md5;
+mod sha1;
 
 /// Anything this crate can refuse to do.
 ///

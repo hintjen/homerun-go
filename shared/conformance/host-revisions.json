@@ -9,7 +9,7 @@
   "revisions": [
     {
       "revision": 1,
-      "summary": "Baseline — the bridge as both hosts implemented it when over-the-air bundle delivery was designed.",
+      "summary": "Baseline \u00e2\u20ac\u201d the bridge as both hosts implemented it when over-the-air bundle delivery was designed.",
       "adds": {
         "android": [
           "cache-client-nonce",
@@ -115,7 +115,7 @@
     },
     {
       "revision": 2,
-      "summary": "The page tells the host how it looks: set-appearance drives the status bar, and splash-shown says the web splash has painted. Both are sends, so an older host logs them rather than hanging — but a bundle gated on the appearance channel would leave the clock unreadable on a host that ignores it.",
+      "summary": "The page tells the host how it looks: set-appearance drives the status bar, and splash-shown says the web splash has painted. Both are sends, so an older host logs them rather than hanging \u00e2\u20ac\u201d but a bundle gated on the appearance channel would leave the clock unreadable on a host that ignores it.",
       "adds": {
         "ios": [
           "set-appearance",
@@ -125,7 +125,7 @@
     },
     {
       "revision": 3,
-      "summary": "Android answers the over-the-air update channels, so the shared update modal works on mobile. \"Install\" rebuilds the WebView rather than restarting anything — see homerun-mobile/docs/ota-bundles.md.",
+      "summary": "Android answers the over-the-air update channels, so the shared update modal works on mobile. \"Install\" rebuilds the WebView rather than restarting anything \u00e2\u20ac\u201d see homerun-mobile/docs/ota-bundles.md.",
       "adds": {
         "android": [
           "wait-for-update-check",
@@ -147,7 +147,7 @@
     },
     {
       "revision": 5,
-      "summary": "iOS answers the over-the-air update channels. Same two as Android gained at revision 3, arriving later because the iOS host is behind — the ledger records what each host answers, not when the feature was designed.",
+      "summary": "iOS answers the over-the-air update channels. Same two as Android gained at revision 3, arriving later because the iOS host is behind \u00e2\u20ac\u201d the ledger records what each host answers, not when the feature was designed.",
       "adds": {
         "android": [],
         "ios": [
@@ -158,7 +158,7 @@
     },
     {
       "revision": 6,
-      "summary": "Both hosts play haptics. The page sends what the user just did — selection, navigate, commit, success, warning, error — and each host maps it onto its own generators. Both arrive in one revision because the contract and the vocabulary landed together, unlike the staggered pairs above. Android jumps 4 to 6: revision 5 introduced nothing for it.",
+      "summary": "Both hosts play haptics. The page sends what the user just did \u00e2\u20ac\u201d selection, navigate, commit, success, warning, error \u00e2\u20ac\u201d and each host maps it onto its own generators. Both arrive in one revision because the contract and the vocabulary landed together, unlike the staggered pairs above. Android jumps 4 to 6: revision 5 introduced nothing for it.",
       "adds": {
         "android": [
           "haptic"
@@ -166,6 +166,30 @@
         "ios": [
           "haptic"
         ]
+      }
+    },
+    {
+      "revision": 7,
+      "summary": "Both hosts can run an OAuth redirect in a real browser. Google refuses to authenticate inside an embedded WebView, so sign-in with Google or Apple cannot happen in our own page; the host opens a system browser and reports the callback URL back. The host knows nothing about OAuth \u00e2\u20ac\u201d PKCE, the authorize URL and the code exchange stay in the shared UI.",
+      "adds": {
+        "android": [
+          "auth:web-session"
+        ],
+        "ios": [
+          "auth:web-session"
+        ]
+      }
+    },
+    {
+      "revision": 8,
+      "summary": "Android can sign in to a Minecraft account. Minigame stats are keyed on a Minecraft uuid and every read of them takes one as input, so a phone could only ever show a signed-in user zero of their own numbers. No new channels: the three invokes and two events already existed and were re-tiered onto the `minecraftAccount` capability, so this is a host learning to answer what the contract already described. The flow is OAuth device code against the public Xbox client rather than a redirect, because the only redirect that client accepts is a Microsoft-hosted page a phone cannot intercept without an App Link it cannot verify. iOS is unchanged and still reports the capability false.",
+      "adds": {
+        "android": [
+          "minecraft:auth:get-profile",
+          "minecraft:auth:login",
+          "minecraft:auth:logout"
+        ],
+        "ios": []
       }
     }
   ]

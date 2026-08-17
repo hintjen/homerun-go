@@ -1,0 +1,50 @@
+{
+  "name": "a-transient-failure-keeps-a-working-mod",
+  "why": "A mod that fails to re-resolve — a Modrinth blip, a temporary incompatibility — keeps its record and has its jar shielded from the stale sweep. Deleting a working mod because a lookup failed is worse than doing nothing.",
+  "inputs": {
+    "loader": "paper",
+    "gameVersion": "1.21.4",
+    "projects": "essentialsx,vault",
+    "existing": {
+      "essentialsx": {
+        "versionId": "ess-v1",
+        "mcVersion": "1.21.4",
+        "loader": "paper",
+        "filePath": "plugins/essentialsx.jar"
+      }
+    },
+    "present": ["essentialsx.jar"]
+  },
+  "modrinth": {
+    "/project/vault/version": [
+      {
+        "id": "vault-v1",
+        "project_id": "vau01",
+        "version_type": "release",
+        "files": [{ "primary": true, "url": "https://cdn/vault.jar", "filename": "vault.jar" }],
+        "dependencies": []
+      }
+    ],
+    "/projects?ids=": [{ "id": "vau01", "server_side": "required", "client_side": "unsupported" }]
+  },
+  "expect": {
+    "installed": ["vault"],
+    "downloaded": ["vault.jar"],
+    "failed": [{ "slug": "essentialsx", "reason": "download_failed" }],
+    "remove": [],
+    "records": {
+      "essentialsx": {
+        "versionId": "ess-v1",
+        "mcVersion": "1.21.4",
+        "loader": "paper",
+        "filePath": "plugins/essentialsx.jar"
+      },
+      "vault": {
+        "versionId": "vault-v1",
+        "mcVersion": "1.21.4",
+        "loader": "paper",
+        "filePath": "plugins/vault.jar"
+      }
+    }
+  }
+}

@@ -15,17 +15,13 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.add
 import kotlinx.serialization.json.boolean
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
-import kotlinx.serialization.json.put
 import java.io.File
 import java.time.Instant
 
@@ -74,6 +70,24 @@ class JavaServerBackend(
      * caller's `ServerConfig` is long out of scope.
      */
     private val backupOnStop = java.util.concurrent.ConcurrentHashMap<String, BackupContext>()
+
+    /**
+     * Servers whose directory goes when they stop, recorded at the spawn.
+     *
+     * A minigame lobby is generated for one session and the API soft-deletes
+     * the server record behind it, so the world it made is worth nothing to
+     * anybody the moment the JVM exits. The exit handler is where that gets
+     * acted on and by then the caller's `ServerConfig` is long out of scope,
+     * which is the same reason [backupOnStop] exists.
+     *
+     * On a phone this is not tidiness. A Paper server with a generated world
+     * is a gigabyte or two, and a player who hosts three games in an evening
+     * has given up several gigabytes to worlds nobody will ever open again —
+     * on a device whose storage they cannot expand and where nothing in this
+     * app would have told them where it went.
+     */
+    private val ephemeral: MutableSet<String> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
 
     /**
      * On-stop backups still running, so a relaunch can cancel one.
@@ -158,6 +172,17 @@ class JavaServerBackend(
      */
     private fun jarCacheDir(): File = File(context.filesDir, "jars").apply { mkdirs() }
 
+    /**
+     * Downloaded `.mrpack` archives, keyed by version id.
+     *
+     * A sibling of `servers/` for the same reason as [jarCacheDir]: shared
+     * between servers on the same pack, and in `filesDir` because Android may
+     * delete `cacheDir` under a running app — which here would cost a
+     * several-hundred-megabyte download on the next start.
+     */
+    private fun modpackCacheDir(): File =
+        File(context.filesDir, "modpacks").apply { mkdirs() }
+
     override fun create(serverId: String) {
         dataDir(serverId)
     }
@@ -187,8 +212,30 @@ class JavaServerBackend(
     private data class Launch(
         val javaHome: File,
         val libjvm: File,
-        val jar: File,
+        /**
+         * Empty for Forge and NeoForge: their argfile supplies a module path
+         * instead, and putting a jar on the class path alongside it is how
+         * you get two copies of the same classes.
+         */
+        val classpath: List<File>,
         val mainClass: String,
+        /**
+         * What the launch actually resolved to — the pack's loader when there
+         * is a pack, and the server's `TYPE` otherwise. [ModInstaller] must be
+         * told the same one, or a Fabric pack on a server declared `paper`
+         * would resolve its mods against the wrong facet.
+         */
+        val loader: String,
+        /** Whatever an argfile carried, already in the form the VM accepts. */
+        val extraJvmOptions: List<String> = emptyList(),
+        /** `--launchTarget neoforgeserver` and friends, before `nogui`. */
+        val extraProgramArgs: List<String> = emptyList(),
+        /**
+         * The version that was actually resolved, not the one requested —
+         * `null` and `LATEST` both become a number here. [ModInstaller] needs
+         * it to ask Modrinth what fits.
+         */
+        val mcVersion: String,
     )
 
     /**
@@ -239,6 +286,20 @@ class JavaServerBackend(
         // in one burst at the end of the wait rather than as they happened.
         startLogPump(serverId)
 
+        // Said out loud, because the alternative is what actually happened: a
+        // settings lookup threw, this launched vanilla-latest with no loader,
+        // no mods and no plugins, and every surface reported a healthy server
+        // — the console included. The fallback is deliberate and stays, but a
+        // server that is not the one the player configured has to say so
+        // somewhere the player can see.
+        if (config.settingsEnv == null) {
+            note(
+                serverId,
+                "[Homerun] Could not read this server's settings — starting with " +
+                    "defaults. Its version, loader, mods and plugins are not applied.",
+            )
+        }
+
         // Started now and awaited after the JVM is up. The gateway provisions
         // the peer asynchronously and the poll runs up to a minute, so doing
         // it here overlaps that with the download and the world generating,
@@ -267,22 +328,107 @@ class JavaServerBackend(
         )
 
         val prepared = runCatching {
-            // Blocking the first time — a hundred megabytes out of the APK —
-            // and the first start on a device pays for it. The bridge has no
-            // call timeout precisely so this is allowed to take as long as it
-            // takes.
-            val javaHome = withContext(Dispatchers.IO) { JavaRuntime.ensure(context) }
-            val libjvm = JavaRuntime.libjvm(context)
-                ?: throw ServerBackendException.Engine(Core.refusal("brokenJavaRuntime"))
+            val bundled = JavaRuntime.available(context)
 
-            val jar = ServerJar.ensure(
-                dir = dir,
-                cacheDir = jarCacheDir(),
-                version = config.version,
-                loader = config.loader,
-                bundledJava = JavaRuntime.javaMajor(context),
-                onLog = { note(serverId, it) },
-            )
+            // A modpack goes first and outranks the server's own settings: the
+            // manifest decides the loader, the Minecraft version *and* the
+            // loader build, because a pack is built and tested against one
+            // revision and a different one breaks its mixins at boot. The
+            // desktop orders it the same way, running `setupModrinthModpack`
+            // before `setupServerLoader` and using what it returned.
+            val pack = ModpackInstaller.configured(config.settingsEnv)?.let { modpack ->
+                ModpackInstaller.install(
+                    dir = dir,
+                    cacheDir = modpackCacheDir(),
+                    modpack = modpack,
+                    env = config.settingsEnv,
+                    onLog = { note(serverId, it) },
+                )
+            }
+            val wantedLoader = pack?.loader ?: config.loader
+            val wantedVersion = pack?.mcVersion ?: config.version
+
+            // Two shapes of loader, and the core says which this is: vanilla
+            // and Paper publish a jar to download, Fabric publishes an
+            // installer to run. Asking the core rather than matching on a name
+            // here means there is no second loader list to drift.
+            val installs = Core.loaderIsInstalled(wantedLoader)
+
+            // Whichever shape, resolving comes first, and the ordering is
+            // load-bearing now that the build ships more than one runtime:
+            // which runtime to unpack follows from what is being launched. It
+            // also means the ~170 MB unpack is only ever paid for a runtime
+            // this server actually needs.
+            // Three shapes now, and only the first two need a jar: a
+            // downloaded server jar, an installed launch jar (Fabric), or an
+            // argfile that names its own main class (Forge, NeoForge).
+            var installed: ServerLoader.Installed? = null
+            var jar: File? = null
+            val mcVersion: String
+            var javaMajor: Int
+            var javaHome: File
+            var libjvm: File
+
+            if (installs) {
+                // An installed loader has no artifact of its own — its
+                // installer fetches the server jar — so the version and the
+                // Java level come from Mojang's manifest, exactly as the
+                // desktop takes them for every loader. The loader is passed
+                // alongside it because *how strictly* that Java level binds is
+                // the loader's business: Forge and NeoForge want it exactly.
+                val resolved = ServerJar.resolveVanilla(wantedVersion)
+                mcVersion = resolved.version
+                javaMajor = Core.selectRuntime(resolved.toJson(), wantedLoader, bundled)
+                javaHome = unpackRuntime(javaMajor)
+                libjvm = libjvmOrRefuse(javaMajor)
+
+                installed = ServerLoader.ensure(
+                    dir = dir,
+                    loader = wantedLoader,
+                    mcVersion = resolved.version,
+                    // The pack's pin, when there is a pack. Without one an
+                    // install keeps whatever it has rather than chasing the
+                    // newest loader on every start.
+                    loaderVersion = pack?.loaderVersion,
+                    runtime = ServerLoader.Runtime(launcher, javaHome, libjvm, tmpDir(dir)),
+                    onLog = { note(serverId, it) },
+                )
+                jar = (installed as? ServerLoader.Installed.LaunchJar)?.jar
+
+                // The installer has now produced a server jar, and that jar can
+                // need a newer Java than Mojang's manifest claimed. The jar
+                // wins, because it is the thing that fails.
+                val needs = ServerLoader.bundlerJavaMajor(dir)
+                if (needs != null && needs > javaMajor) {
+                    Log.i(TAG, "$serverId: the bundler needs Java $needs, not $javaMajor")
+                    note(serverId, "[Homerun] This version needs Java $needs.")
+                    javaMajor = Core.selectRuntimeFor(
+                        needs, "The server jar", wantedLoader, bundled,
+                    )
+                    javaHome = unpackRuntime(javaMajor)
+                    libjvm = libjvmOrRefuse(javaMajor)
+                }
+            } else {
+                val downloaded = ServerJar.ensure(
+                    dir = dir,
+                    cacheDir = jarCacheDir(),
+                    version = wantedVersion,
+                    loader = wantedLoader,
+                    bundled = bundled,
+                    onLog = { note(serverId, it) },
+                )
+                jar = downloaded.jar
+                mcVersion = downloaded.mcVersion
+                javaMajor = downloaded.javaMajor
+                javaHome = unpackRuntime(javaMajor)
+                libjvm = libjvmOrRefuse(javaMajor)
+
+                // A downloaded-jar server never runs an installer, so this is
+                // the only place it gets a marker — and its mod records need
+                // one to live in. The desktop reaches the same state by
+                // running `setupServerLoader` for every loader, vanilla too.
+                LoaderMarker.putLoader(dir, wantedLoader, mcVersion, pack?.loaderVersion)
+            }
 
             // Accept Mojang's EULA on the user's behalf, on every start —
             // byte-for-byte what the desktop app does in
@@ -291,13 +437,42 @@ class JavaServerBackend(
             // product; `docs/android-server-backend.md` records that.
             File(dir, jvm.eulaFile).writeText(jvm.eulaContents)
 
-            // The jar names the class to run. Doing this here keeps the native
-            // launcher free of zip parsing.
-            val mainClass = mainClassOf(jar)
-                ?: throw ServerBackendException.Engine(
-                    Core.refusal("noMainClass")
+            // Where the main class comes from is the last thing that differs
+            // between the three shapes. A jar carries it in its manifest;
+            // Forge and NeoForge put it in the middle of an argfile, between
+            // the module path and the launch target.
+            val launch = when (val what = installed) {
+                is ServerLoader.Installed.Argfiles -> Launch(
+                    javaHome = javaHome,
+                    libjvm = libjvm,
+                    // Empty on purpose: the argfile supplies a module path,
+                    // and adding a jar to the class path beside it is how you
+                    // get two copies of the same classes.
+                    classpath = emptyList(),
+                    mainClass = what.expanded.mainClass!!,
+                    loader = wantedLoader,
+                    extraJvmOptions = what.expanded.jvmOptions,
+                    extraProgramArgs = what.expanded.programArgs,
+                    mcVersion = mcVersion,
                 )
-            Launch(javaHome, libjvm, jar, mainClass)
+                else -> {
+                    val runnable = jar ?: (what as ServerLoader.Installed.LaunchJar).jar
+                    // The jar names the class to run. Doing this here keeps the
+                    // native launcher free of zip parsing.
+                    val mainClass = JavaProcess.mainClassOf(runnable)
+                        ?: throw ServerBackendException.Engine(Core.refusal("noMainClass"))
+                    Launch(
+                        javaHome = javaHome,
+                        libjvm = libjvm,
+                        classpath = listOf(runnable),
+                        mainClass = mainClass,
+                        loader = wantedLoader,
+                        mcVersion = mcVersion,
+                    )
+                }
+            }
+            Log.i(TAG, "$serverId: launching ${launch.mainClass} on Java $javaMajor")
+            launch
         }.getOrElse { err ->
             // Nothing was spawned, so no exit will arrive to tidy up after
             // this one.
@@ -323,7 +498,6 @@ class JavaServerBackend(
         order.at("awaitPreviousExit")
         if (lifecycle.awaitPreviousExit(serverId)) awaitPreviousExit(serverId)
 
-        val (javaHome, libjvm, jar, mainClass) = prepared
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
 
         // Written on every launch, after the jar is in place and before the
@@ -360,64 +534,82 @@ class JavaServerBackend(
             )
         }
 
+        // After settings and before the spawn, which is where the desktop puts
+        // it (`startServer`: loader, properties, mods, spawn). It is deliberately
+        // outside the `prepared` block above: a mod that cannot be fetched must
+        // not stop a server starting, and `sync` never throws for a mod-shaped
+        // reason. Every loader gets this — a Paper server's plugins go through
+        // exactly the same resolver as a Fabric server's mods.
+        ModInstaller.sync(
+            dir = dir,
+            loader = prepared.loader,
+            mcVersion = prepared.mcVersion,
+            env = config.settingsEnv,
+            onLog = { note(serverId, it) },
+        )
+
+        // Immediately after the mods, and that order is load-bearing rather
+        // than stylistic: `mods::sweep` deletes jars in the directory it does
+        // not recognise, and these are jars it has never heard of. The desktop
+        // sequences it the same way, for the same reason.
+        //
+        // Unlike the line above, this one can stop a launch. A mod is
+        // decoration on a world that exists without it; these jars *are* the
+        // game, and a BedWars lobby with no BedWars in it is not a server
+        // anybody asked for. See [PluginInstaller].
+        PluginInstaller.sync(
+            dir = dir,
+            loader = prepared.loader,
+            env = config.settingsEnv,
+            onLog = { note(serverId, it) },
+        )
+
         if (order.at("spawn")) return
 
         // Everything the supervisor needs to run this server, and nothing it
-        // could work out for itself. Composing it is the genuinely
-        // platform-specific part: which launcher may be exec'd, which
-        // `libjvm.so` was unpacked, and what a Termux-built runtime needs on
-        // `LD_LIBRARY_PATH` before the linker reads it at exec.
-        val invocation = buildJsonObject {
-            put("program", launcher.absolutePath)
-            put("args", buildJsonArray {
-                add(libjvm.absolutePath)
-                add(mainClass.replace('.', '/'))
-                // No `-jar`: the VM is created through JNI, so the jar goes
-                // on the classpath and the main class is named.
-                add("-Djava.class.path=${jar.absolutePath}")
-                add("-Djava.home=${javaHome.absolutePath}")
-                // The JRE's own natives live here; without it the VM starts
-                // but java.nio cannot load libnio.so.
-                add("-Djava.library.path=${javaHome.absolutePath}/lib")
-                // These builds are Termux's and carry Termux's prefix
-                // compiled in as the temp directory — a path that does not
-                // exist outside Termux, so anything writing a temp file fails
-                // on a path no one can explain.
-                add("-Djava.io.tmpdir=${tmpDir(dir).absolutePath}")
-                add("-Duser.dir=${dir.absolutePath}")
-                // Everything above is Android's. Everything below is what any
-                // host running this server would pass, so the core says it.
-                jvm.options.forEach { add(it) }
-                add("--")
-                jvm.programArgs.forEach { add(it) }
-            })
-            put("env", buildJsonObject {
-                put("JAVA_HOME", javaHome.absolutePath)
-                // The runtime's .so files carry DT_NEEDED entries for each
-                // other (libnio -> libnet) and Android's linker will not find
-                // them without this. It has to be in the environment: the
-                // linker reads it at process start, so setting it later is
-                // too late.
-                put(
-                    "LD_LIBRARY_PATH",
-                    listOfNotNull(
-                        "${javaHome.absolutePath}/lib",
-                        "${javaHome.absolutePath}/lib/server",
-                        // Termux's libandroid-shmem, libandroid-spawn and
-                        // libz.so.1. The runtime's DT_RUNPATH points at
-                        // Termux's own prefix, which does not exist here —
-                        // LD_LIBRARY_PATH is searched first, so this resolves.
-                        "${javaHome.absolutePath}/${JavaRuntime.DEPS_DIR}",
-                        System.getenv("LD_LIBRARY_PATH"),
-                    ).joinToString(":"),
-                )
-                put("HOME", dir.absolutePath)
-                config.extra.forEach { (k, v) -> if (v is String) put(k, v) }
-            })
-        }
+        // could work out for itself. What makes a JVM start on Android is
+        // [JavaProcess]'s, because a loader installer is the same launch with
+        // a different classpath; what a *Minecraft server* is given is the
+        // core's. This line is where those two meet and nothing else decides
+        // either half.
+        //
+        // A loader's argfile contributes to both halves — its module path is a
+        // JVM option and its `--launchTarget` is a program argument — and its
+        // program arguments go **before** the core's, because `nogui` is the
+        // last thing a Minecraft server expects to be told.
+        val invocation = JavaProcess.invocation(
+            launcher = launcher,
+            javaHome = prepared.javaHome,
+            libjvm = prepared.libjvm,
+            classpath = prepared.classpath,
+            mainClass = prepared.mainClass,
+            jvmOptions = jvm.options + prepared.extraJvmOptions,
+            programArgs = prepared.extraProgramArgs + jvm.programArgs,
+            workDir = dir,
+            tmpDir = tmpDir(dir),
+            // Two sources, and the second one is not obvious. A server's
+            // settings are written into files, never into this map — that is
+            // the rule [ServerConfig.extra] exists to state. But our own
+            // plugins read theirs with `System.getenv`, so the handful of keys
+            // in our namespace have to cross over, and the core decides which
+            // those are: [Core.pluginEnv] forwards `MINIGAME*`/`BEDWARS*` and
+            // refuses everything else. Without it the host's chosen match size
+            // never reached the game and every match started at the plugin's
+            // built-in default of two.
+            extraEnv = config.extra.mapNotNull { (k, v) ->
+                (v as? String)?.let { k to it }
+            }.toMap() + Core.pluginEnv(config.settingsEnv),
+        ).toJson()
 
         currentServerId = serverId
         currentPort = port
+
+        // Recorded here rather than at the top of the launch, so it describes
+        // a run that actually happened. A launch that failed before this line
+        // leaves its directory alone: the next start reuses it, and deleting
+        // the world a failed launch had already restored would turn a retry
+        // into a loss.
+        if (Core.isMinigame(config.settingsEnv)) ephemeral += serverId else ephemeral -= serverId
 
         // From here the supervisor in `homerun-pumpkin-ffi` owns the process:
         // it spawns it, reads its console, climbs the stop ladder and reports
@@ -882,7 +1074,42 @@ class JavaServerBackend(
             } else {
                 stopLogPump()
             }
+
+            // Last, and only once nothing else is going to read the directory.
+            // A minigame never has a backup to wait for — it is excluded from
+            // them at the source, in the bridge — so the `backup != null`
+            // branch above is unreachable for one, and this cannot pull the
+            // world out from under restic. Sequenced after the branch anyway,
+            // because "unreachable today" is not a thing to build a delete on.
+            if (ephemeral.remove(serverId)) discardEphemeral(serverId)
         }
+    }
+
+    /**
+     * Give back the storage a finished lobby was using.
+     *
+     * Best effort by design. A directory that will not delete is worth a log
+     * line and nothing more — the alternative is failing a stop the player
+     * already watched succeed, over a world neither of us wants.
+     */
+    private fun discardEphemeral(serverId: String) {
+        val dir = dataDir(serverId)
+        val freed = runCatching { dir.walkBottomUp().sumOf { if (it.isFile) it.length() else 0L } }
+            .getOrDefault(0L)
+
+        if (!dir.deleteRecursively()) {
+            Log.w(TAG, "$serverId: could not delete the finished minigame directory")
+            return
+        }
+        Log.i(TAG, "$serverId: discarded a finished minigame, freeing ${freed / (1024 * 1024)} MB")
+
+        // The same reason [delete] does it: the server jar's bytes are in the
+        // cache as well as in the directory just removed, and a lobby is
+        // exactly the short-lived server that would otherwise leave a Paper
+        // jar pinned in the cache for nothing.
+        runCatching {
+            ServerJar.dropUnusedCacheEntries(jarCacheDir(), File(context.filesDir, "servers"))
+        }.onFailure { Log.w(TAG, "$serverId: could not sweep the jar cache: ${it.message}") }
     }
 
     /**
@@ -1064,9 +1291,31 @@ class JavaServerBackend(
     }.getOrNull()
 
     /** `Main-Class` from the jar manifest, which is what `java -jar` reads. */
-    private fun mainClassOf(jar: File): String? = runCatching {
-        java.util.jar.JarFile(jar).use { it.manifest?.mainAttributes?.getValue("Main-Class") }
-    }.getOrNull()
+    /**
+     * Unpack one staged runtime, and collect any this build no longer ships.
+     *
+     * Blocking the first time — a hundred and seventy megabytes out of the
+     * APK — and the first start on a device pays for it. The bridge has no
+     * call timeout precisely so this is allowed to take as long as it takes.
+     *
+     * Called more than once per launch on the loader path: the installer runs
+     * on the runtime Mojang's manifest asked for, and the jar it produces can
+     * then ask for a different one. Both calls are cheap after the first.
+     */
+    private suspend fun unpackRuntime(major: Int): File = withContext(Dispatchers.IO) {
+        JavaRuntime.ensure(context, major).also {
+            // An app updated from a build that staged a different set leaves
+            // half a gigabyte of unpacked runtime that nothing will ever
+            // launch again. Nothing else would collect it: the unpack is keyed
+            // by major, so a runtime that stopped being staged simply stops
+            // being asked for.
+            JavaRuntime.dropUnusedRuntimes(context)
+        }
+    }
+
+    private fun libjvmOrRefuse(major: Int): File =
+        JavaRuntime.libjvm(context, major)
+            ?: throw ServerBackendException.Engine(Core.refusal("brokenJavaRuntime"))
 
     private fun transition(
         serverId: String,

@@ -10,10 +10,17 @@
 //! "Done (12.431s)!" means; this module does. A second game is an addition
 //! here and a line in [`crate::game::all`], not a change anywhere else.
 
+pub mod account;
+pub mod argfile;
 pub mod console;
 pub mod hosting;
 pub mod jar;
 pub mod jvm;
+pub mod loader;
+pub mod minigame;
+pub mod modjar;
+pub mod modpack;
+pub mod mods;
 pub mod ops;
 pub mod settings;
 pub mod slp;
@@ -51,8 +58,8 @@ impl Game for Minecraft {
         }
     }
 
-    fn config_inputs(&self, _env: &Value) -> Vec<ConfigInput> {
-        vec![
+    fn config_inputs(&self, env: &Value) -> Vec<ConfigInput> {
+        let mut inputs = vec![
             // Read so the merge preserves what the server wrote itself, and
             // latin-1 both ways — a MOTD's `§` does not survive a UTF-8
             // round trip.
@@ -66,7 +73,20 @@ impl Game for Minecraft {
                 path: BANNED.into(),
                 encoding: Encoding::Utf8,
             },
-        ]
+        ];
+
+        // Read only to find out whether it is there: a minigame writes its own
+        // `spigot.yml` into a fresh directory and never over Paper's. Asking
+        // for it unconditionally would make every ordinary launch read a file
+        // it has no intention of touching.
+        if minigame::is_minigame(env) {
+            inputs.push(ConfigInput {
+                path: minigame::SPIGOT_YML.into(),
+                encoding: Encoding::Utf8,
+            });
+        }
+
+        inputs
     }
 
     fn required_lookups(&self, env: &Value, game_type: &str) -> Vec<Lookup> {
@@ -137,6 +157,20 @@ impl Game for Minecraft {
             contents: settings::whitelist_json(&players(&resolved.whitelisted_users)).to_string(),
             encoding: Encoding::Utf8,
         });
+
+        // Boot-time config, so it must be on disk before the JVM reads it —
+        // the plugin cannot disable an advancement that has already been
+        // granted. See `minigame::disable_advancements` for why this only ever
+        // writes into a directory that has no `spigot.yml` yet.
+        if let Some(contents) =
+            minigame::disable_advancements(&ctx.env, ctx.existing(minigame::SPIGOT_YML))
+        {
+            files.push(FileWrite {
+                path: minigame::SPIGOT_YML.into(),
+                contents,
+                encoding: Encoding::Utf8,
+            });
+        }
 
         // Append-only, and only when there is something new to add.
         let existing_bans = ctx.existing(BANNED);

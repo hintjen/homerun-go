@@ -162,6 +162,62 @@ adb shell "ps -A | grep -E '<appId>|<childProcessName>'"
 Watch for **child processes** the app spawned, not just the app. Those are the
 ones with state worth losing. Stop them through the UI before you install.
 
+### Installing your UI change is not the same as running it
+
+**A downloaded OTA bundle outranks the one in the APK**, so a freshly built,
+freshly installed app can serve web assets from days ago and your change is
+simply absent from the screen. `BundleStore` serves `files/ui/current` in
+preference to `assets/web`, deliberately — its docstring explains that a
+bundle which cannot be overridden by the binary is the whole point, because
+otherwise a fatal bundle would brick the app in a way no store update could
+fix.
+
+This reads exactly like a build problem, and it will send you to check the
+staging path, the APK contents and the branch you built from — all of which
+are fine. Ask the device instead. One line settles it:
+
+```bash
+adb logcat -d -s HomerunBundle:* | tail -3
+#  serving bundle 2026-08-13.2   <- an OTA bundle; your change is NOT running
+#  serving the shipped bundle    <- the APK's assets; your change IS running
+```
+
+Drop back to the assets floor, which is never deleted:
+
+```bash
+adb shell "run-as app.gethomerun.mobile.debug rm -rf files/ui/current"
+```
+
+`docs/ota-bundles.md` documents pushing to `files/ui/pending` with a MANIFEST
+instead, which is the faithful path for testing the updater itself. For merely
+iterating on a local UI build it is the wrong tool — a hand-staged bundle gets
+serial `0` and any real release outranks it.
+
+Confirm what actually shipped in the APK rather than trusting the staging log,
+too — the assets are just a zip entry:
+
+```bash
+unzip -p app-debug.apk assets/web/_next/static/chunks/<chunk>.js | grep -c <marker>
+```
+
+### Two builds, one scheme, one name
+
+`app.gethomerun.mobile` and `app.gethomerun.mobile.debug` can both be
+installed, and both declare the `homerun://` intent filter. A deep link then
+raises an **"Open with" chooser listing two entries both labelled "Homerun
+Go"** — indistinguishable, so picking is a coin flip, and the wrong choice
+hands the callback to an app with no pending session, which drops it in
+silence. Check before driving any deep-link flow:
+
+```bash
+adb shell "cmd package query-activities -a android.intent.action.VIEW \
+  -d 'homerun://auth/callback'" | grep packageName= | sort -u
+```
+
+`pm disable-user --user 0 app.gethomerun.mobile` removes the ambiguity without
+touching that install's data; `pm enable` restores it. Prefer it to
+`adb uninstall`, which wipes everything the other build owned.
+
 ## Seeing the screen
 
 ```bash
@@ -482,6 +538,18 @@ npm run build:android > build.log 2>&1; echo "EXIT=$?"; tail -20 build.log
 **Install fails with `INSTALL_FAILED_UPDATE_INCOMPATIBLE`.** Signed by a
 different key than the installed build — `adb uninstall <appId>` first, which
 also wipes its data.
+
+**A UI change is missing from the screen after a clean build and install.** An
+OTA bundle in `files/ui/current` is outranking the APK. `adb logcat -d -s
+HomerunBundle:*` says which is being served; delete `current` to fall back.
+
+**A deep link raises an "Open with" chooser with two identical entries.** Both
+the release and debug builds are installed and both claim the scheme.
+`pm disable-user --user 0 <releaseAppId>`.
+
+**A browser-based flow stalls on a fresh emulator.** Chrome's first-run
+onboarding ("Welcome to Chrome", then a notifications dialog) sits in front of
+the Custom Tab and eats taps. Clear it once per AVD.
 
 **Blank screen in a WebView app.** Web assets missing from the APK; check the
 project's asset-packaging step and `chrome://inspect` for the real error.

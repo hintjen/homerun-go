@@ -40,7 +40,69 @@ type CreateJavaVm = unsafe extern "system" fn(
     *mut c_void,
 ) -> jni::sys::jint;
 
+/// Turn off heap pointer tagging for this process, or the JVM will abort.
+///
+/// # The crash
+///
+/// Android 11 gives every heap pointer a non-zero tag in its top byte and
+/// `free()` checks it. HotSpot stores its own bits in that byte, so the pointer
+/// it hands back no longer carries the tag it was given, and bionic aborts:
+///
+/// ```text
+/// Pointer tag for 0x766180fdb0 was truncated
+/// #00 abort+160        libc.so
+/// #01 free+108         libc.so
+/// #02 ...              libjvm.so
+/// ```
+///
+/// The VM starts and runs simple code fine — this only fires once something
+/// frees enough to matter, which is why it surfaced running an installer
+/// rather than at boot. Found on a Pixel 9 Pro XL (arm64, API 37); every
+/// arm64 device since Android 11 is affected.
+///
+/// # Why here, and not in the manifest
+///
+/// `android:allowNativeHeapPointerTagging="false"` would also work and is what
+/// Termux does, but it disables the mitigation for the *whole app* — every
+/// process, including this codebase's own native libraries, to accommodate one
+/// third-party library that misbehaves. This call scopes it to the one process
+/// that needs it: the JVM's. Nothing else in the app gives up anything.
+///
+/// A no-op below API 31 and on non-scudo allocators, and the JVM was fine on
+/// those anyway — tagging is what changed.
+#[cfg(target_os = "android")]
+fn disable_heap_tagging() {
+    // Both opcodes are from the NDK's `malloc.h`, not from memory.
+    const M_BIONIC_SET_HEAP_TAGGING_LEVEL: std::ffi::c_int = -204;
+    const M_HEAP_TAGGING_LEVEL_NONE: std::ffi::c_int = 0;
+    type Mallopt = unsafe extern "C" fn(std::ffi::c_int, std::ffi::c_int) -> std::ffi::c_int;
+
+    // Looked up at run time rather than linked against. `mallopt` only enters
+    // the NDK's link stubs at API 26 and these opcodes at 31, so linking it
+    // directly fails to build — and dlsym happens to give exactly the right
+    // behaviour on a device too old to have it: nothing, which is correct,
+    // because tagging is not on there either.
+    let libc = match unsafe { libloading::os::unix::Library::new("libc.so") } {
+        Ok(lib) => lib,
+        Err(_) => return,
+    };
+    if let Ok(mallopt) = unsafe { libc.get::<Mallopt>(b"mallopt\0") } {
+        // Deliberately unchecked: a device that refuses is a device where
+        // tagging is off, so there is nothing to report and nothing to do.
+        unsafe { (*mallopt)(M_BIONIC_SET_HEAP_TAGGING_LEVEL, M_HEAP_TAGGING_LEVEL_NONE) };
+    }
+    // libc outlives us; unloading it would be absurd.
+    std::mem::forget(libc);
+}
+
+#[cfg(not(target_os = "android"))]
+fn disable_heap_tagging() {}
+
 fn main() -> ExitCode {
+    // Before the VM exists, and before anything it will later free is
+    // allocated.
+    disable_heap_tagging();
+
     let argv: Vec<String> = std::env::args().collect();
     if argv.len() < 3 {
         eprintln!(

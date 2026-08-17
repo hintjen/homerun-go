@@ -5,7 +5,9 @@
 # The shared UI bundle, fetched or built at package time — never committed
 /ios/HomerunHost/web/
 /android/app/src/main/assets/web/
-# The Java runtime, staged by `npm run jre:android` — 100+ MB, never committed
+# The Java runtimes, staged by `npm run jre:android` — 160+ MB each, one
+# directory per major (`jre-21`, `jre-25`), never committed
+/android/app/src/main/assets/jre-*/
 /android/app/src/main/assets/jre/
 /.jre-cache/
 

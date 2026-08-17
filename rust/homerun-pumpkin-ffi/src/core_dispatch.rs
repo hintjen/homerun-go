@@ -35,7 +35,9 @@
 use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
-use homerun_core::minecraft::{self, hosting, jar, jvm, ops, settings};
+use homerun_core::minecraft::{
+    self, account, argfile, hosting, jar, jvm, loader, modjar, modpack, mods, ops, settings,
+};
 use homerun_core::reporting::{crash, minigame, stats};
 use homerun_core::{
     backup, bundle, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
@@ -233,15 +235,50 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             .map(|l| Value::from(l.as_str()))
             .map_err(|e| e.to_string()),
 
-        "minecraft.jar.checkJava" => {
+        "minecraft.jar.selectRuntime" => {
             let artifact: jar::Artifact = serde_json::from_value(field("artifact")?.clone())
                 .map_err(|e| format!("bad artifact: {e}"))?;
-            let bundled = args
-                .get("bundledJava")
+            let bundled: Vec<u16> = args
+                .get("bundled")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|v| v as u16)
+                        .collect()
+                })
+                .unwrap_or_default();
+            // The loader is passed separately rather than read from the
+            // artifact: a loader that installs itself is judged against the
+            // *vanilla* artifact for the version it targets, so the artifact's
+            // own `loader` field would say "vanilla" and lose the policy that
+            // refuses NeoForge a runtime it cannot use.
+            let kind = jar::Loader::parse(optional_text("loader").as_deref())
+                .map_err(|e| e.to_string())?;
+            jar::select_runtime(&artifact, kind, &bundled)
+                .map(Value::from)
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.jar.selectRuntimeFor" => {
+            let bundled: Vec<u16> = args
+                .get("bundled")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|v| v as u16)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let required = args
+                .get("requiredJava")
                 .and_then(|v| v.as_u64())
-                .map(|v| v as u16);
-            jar::check_java(&artifact, bundled)
-                .map(|_| Value::Bool(true))
+                .ok_or("requiredJava is required")? as u16;
+            let kind = jar::Loader::parse(optional_text("loader").as_deref())
+                .map_err(|e| e.to_string())?;
+            jar::select_runtime_for(required, &text("what")?, kind, &bundled)
+                .map(Value::from)
                 .map_err(|e| e.to_string())
         }
 
@@ -311,6 +348,434 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 optional_text("version").as_deref(),
                 loader,
             )))
+        }
+
+        // --- loaders that install by running an installer ------------------
+
+        // What the host advertises as `HostCapabilities.serverLoaders`, so the
+        // create flow offers exactly what the launch will accept.
+        "minecraft.loader.hostable" => Ok(Value::Array(
+            jar::Loader::hostable()
+                .iter()
+                .map(|l| Value::from(l.as_str()))
+                .collect(),
+        )),
+
+        "minecraft.loader.isInstalled" => jar::Loader::parse(optional_text("loader").as_deref())
+            .map(|l| Value::Bool(l.is_installed()))
+            .map_err(|e| e.to_string()),
+
+        "minecraft.loader.launchJar" => jar::Loader::parse(optional_text("loader").as_deref())
+            .map(|l| match loader::launch_jar(l) {
+                Some(name) => Value::from(name),
+                None => Value::Null,
+            })
+            .map_err(|e| e.to_string()),
+
+        // The endpoints, so the host has no copy of them to drift from.
+        // `jar`'s equivalents predate this and are still spelled on both sides.
+        "minecraft.loader.fabricInstallerMeta" => Ok(Value::from(loader::FABRIC_INSTALLER_META)),
+        "minecraft.loader.quiltInstallerMeta" => Ok(Value::from(loader::QUILT_INSTALLER_META)),
+        "minecraft.loader.neoforgeMetadata" => Ok(Value::from(loader::NEOFORGE_METADATA)),
+        "minecraft.loader.forgeMetadata" => Ok(Value::from(loader::FORGE_METADATA)),
+
+        "minecraft.loader.resolveVersion" => {
+            let kind = jar::Loader::parse(optional_text("loader").as_deref())
+                .map_err(|e| e.to_string())?;
+            let xml = text("metadata")?;
+            let mc = text("mcVersion")?;
+            let pinned = optional_text("pinned");
+            match kind {
+                jar::Loader::NeoForge => {
+                    loader::resolve_neoforge_version(&xml, &mc, pinned.as_deref())
+                }
+                jar::Loader::Forge => loader::resolve_forge_version(&xml, &mc, pinned.as_deref()),
+                other => Err(homerun_core::Error::Unsupported(format!(
+                    "{} has no versioned metadata",
+                    other.as_str()
+                ))),
+            }
+            .map(Value::from)
+            .map_err(|e| e.to_string())
+        }
+
+        "minecraft.loader.installerUrl" => {
+            let kind = jar::Loader::parse(optional_text("loader").as_deref())
+                .map_err(|e| e.to_string())?;
+            loader::installer_url(kind, &text("version")?)
+                .map(Value::from)
+                .map_err(|e| e.to_string())
+        }
+
+        // --- argfiles ------------------------------------------------------
+        //
+        // Forge and NeoForge launch entirely through `@argfile`s, and
+        // expanding one is a feature of the `java` binary this platform does
+        // not have. See `minecraft::argfile`.
+
+        "minecraft.argfile.expand" => {
+            let contents: Vec<String> = args
+                .get("contents")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            serde_json::to_value(argfile::expand(&contents)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.argfile.referenced" => Ok(Value::from(argfile::referenced_argfiles(&text(
+            "runScript",
+        )?))),
+
+        "minecraft.argfile.runScript" => {
+            let present: Vec<String> = args
+                .get("present")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(match argfile::preferred_run_script(&present) {
+                Some(name) => Value::from(name),
+                None => Value::Null,
+            })
+        }
+
+        "minecraft.argfile.fallback" => {
+            let paths: Vec<String> = args
+                .get("paths")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(match argfile::fallback_argfile(&paths) {
+                Some(path) => Value::from(path),
+                None => Value::Null,
+            })
+        }
+
+        "minecraft.loader.fabricInstallerUrl" => loader::fabric_installer_url(field("meta")?)
+            .map(Value::from)
+            .map_err(|e| e.to_string()),
+
+        // Separate from Fabric's because the selection rule is different, not
+        // just the URL — Quilt's index has no `stable` flag. See
+        // `loader::quilt_installer_url`.
+        "minecraft.loader.quiltInstallerUrl" => loader::quilt_installer_url(field("meta")?)
+            .map(Value::from)
+            .map_err(|e| e.to_string()),
+
+        "minecraft.loader.quiltIntermediaryUrl" => {
+            Ok(Value::from(loader::quilt_intermediary_url(&text("mcVersion")?)))
+        }
+
+        // Returns null on success and an error otherwise, so the refusal text
+        // reaches the player through the same path every other refusal does.
+        "minecraft.loader.ensureQuiltSupports" => {
+            loader::ensure_quilt_supports(&text("mcVersion")?, field("intermediary")?)
+                .map(|()| Value::Null)
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.loader.needsReinstall" => {
+            // Absent and unparseable are the same answer — reinstall — and
+            // that is the safe direction: a marker we cannot read is one we
+            // cannot trust to describe what is on disk.
+            let installed: Option<loader::Installed> = args
+                .get("installed")
+                .filter(|v| !v.is_null())
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
+            let kind = jar::Loader::parse(optional_text("loader").as_deref())
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Bool(loader::needs_reinstall(
+                installed.as_ref(),
+                kind,
+                &text("mcVersion")?,
+                optional_text("loaderVersion").as_deref(),
+            )))
+        }
+
+        "minecraft.loader.filesToClean" => {
+            let entries: Vec<String> = args
+                .get("entries")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(Value::from(loader::files_to_clean(&entries)))
+        }
+
+        // --- which mods a server gets --------------------------------------
+        //
+        // A driver, not a function: installing mods is three phases of
+        // interleaved HTTP with a graph search in the middle, and this crate
+        // has no I/O. `begin` says what to fetch, `advance` says what the
+        // answers meant and what to fetch next. See `minecraft::mods`.
+
+        "minecraft.mods.begin" => {
+            let inputs: mods::Inputs = serde_json::from_value(field("inputs")?.clone())
+                .map_err(|e| format!("bad mod inputs: {e}"))?;
+            serde_json::to_value(mods::begin(inputs)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.mods.advance" => {
+            let session: mods::Session = serde_json::from_value(field("state")?.clone())
+                .map_err(|e| format!("bad mod session: {e}"))?;
+            let replies: Vec<mods::Reply> = args
+                .get("replies")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("bad mod replies: {e}"))?
+                .unwrap_or_default();
+            serde_json::to_value(mods::advance(session, replies)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.mods.subDir" => Ok(Value::from(mods::sub_dir(&text("loader")?))),
+
+        // --- minigames ------------------------------------------------------
+        //
+        // Our own plugin jars, and what makes a lobby different from a world
+        // somebody lives in. `minecraft::minigame`, not the `reporting::minigame`
+        // imported above — one decides what to install and how to launch it, the
+        // other reads a finished match off the console. Spelled out in full here
+        // rather than aliased, so nobody has to go and check which is which.
+
+        "minecraft.minigame.isMinigame" => {
+            Ok(Value::Bool(minecraft::minigame::is_minigame(field("env")?)))
+        }
+
+        "minecraft.minigame.customPlugins" => serde_json::to_value(
+            minecraft::minigame::custom_plugins(&text("loader")?, field("env")?),
+        )
+        .map_err(|e| e.to_string()),
+
+        "minecraft.minigame.pluginEnv" => {
+            serde_json::to_value(minecraft::minigame::forwarded_env(field("env")?))
+                .map_err(|e| e.to_string())
+        }
+
+        // --- Minecraft accounts ---------------------------------------------
+        //
+        // The Microsoft sign-in chain, as a set of "build this request" /
+        // "read that response" pairs. Same division as `mods` above and for the
+        // same reason: five sequential HTTP calls whose bodies are full of
+        // details that fail silently when wrong, and two hosts that would
+        // otherwise each get them wrong differently. See `minecraft::account`.
+
+        "minecraft.account.deviceCodeRequest" => {
+            serde_json::to_value(account::device_code_request()).map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.deviceCodeFrom" => {
+            let code = account::device_code_from(field("body")?).map_err(|e| e.to_string())?;
+            let mut value = serde_json::to_value(&code).map_err(|e| e.to_string())?;
+            // Attached here so every host opens the same URL rather than each
+            // one reassembling it from the parts.
+            value["approvalUrl"] = Value::from(code.approval_url());
+            Ok(value)
+        }
+
+        "minecraft.account.pollRequest" => {
+            serde_json::to_value(account::poll_request(&text("deviceCode")?))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.pollOutcome" => {
+            serde_json::to_value(account::poll_outcome(field("body")?).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
+        }
+
+        // Needed on the refresh path, where the body is Microsoft's own
+        // snake_case rather than a `Poll` this crate already normalised.
+        "minecraft.account.msaTokensFrom" => {
+            serde_json::to_value(account::msa_tokens_from(field("body")?).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.refreshRequest" => {
+            serde_json::to_value(account::refresh_request(&text("refreshToken")?))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.xblRequest" => {
+            serde_json::to_value(account::xbl_request(&text("msaAccessToken")?))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.xstsRequest" => {
+            serde_json::to_value(account::xsts_request(&text("xblToken")?))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.xboxTokenFrom" => {
+            serde_json::to_value(account::xbox_token_from(field("body")?).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.xstsRefusal" => Ok(Value::from(account::xsts_refusal(field("body")?))),
+
+        "minecraft.account.minecraftLoginRequest" => {
+            let xsts: account::XboxToken = serde_json::from_value(field("xsts")?.clone())
+                .map_err(|e| format!("bad xsts token: {e}"))?;
+            serde_json::to_value(account::minecraft_login_request(&xsts))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.minecraftTokenFrom" => Ok(Value::from(
+            account::minecraft_token_from(field("body")?).map_err(|e| e.to_string())?,
+        )),
+
+        "minecraft.account.profileRequest" => {
+            serde_json::to_value(account::profile_request(&text("minecraftToken")?))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.account.sessionFrom" => {
+            let msa: account::MsaTokens = serde_json::from_value(field("msa")?.clone())
+                .map_err(|e| format!("bad msa tokens: {e}"))?;
+            let session = account::session_from(
+                field("profile")?,
+                &text("minecraftToken")?,
+                &msa,
+                args.get("nowMs").and_then(Value::as_i64).unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
+            serde_json::to_value(session).map_err(|e| e.to_string())
+        }
+
+        // The only shape of a session that may cross into JavaScript.
+        "minecraft.account.redacted" => {
+            let session: account::Session = serde_json::from_value(field("session")?.clone())
+                .map_err(|e| format!("bad session: {e}"))?;
+            Ok(session.redacted())
+        }
+
+        "minecraft.account.needsRefresh" => Ok(Value::Bool(account::needs_refresh(
+            args.get("expiresAt").and_then(Value::as_i64).unwrap_or(0),
+            args.get("nowMs").and_then(Value::as_i64).unwrap_or(0),
+        ))),
+
+        // --- modpacks -------------------------------------------------------
+        //
+        // Same shape as `mods`: the core says what to fetch and what the
+        // answers meant, the host moves bytes and reads the zip.
+
+        "minecraft.modpack.plan" => {
+            serde_json::to_value(modpack::plan(&text("modpack")?)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.modpack.sourceFrom" => {
+            let of: modpack::Lookup = serde_json::from_value(field("of")?.clone())
+                .map_err(|e| format!("bad lookup kind: {e}"))?;
+            modpack::source_from(of, field("json")?)
+                .map_err(|e| e.to_string())
+                .and_then(|source| match source {
+                    Some(source) => serde_json::to_value(source).map_err(|e| e.to_string()),
+                    None => Ok(Value::Null),
+                })
+        }
+
+        "minecraft.modpack.fallbackUrl" => Ok(
+            match modpack::fallback_versions_url(&text("modpack")?) {
+                Some(url) => Value::from(url),
+                None => Value::Null,
+            },
+        ),
+
+        "minecraft.modpack.requires" => modpack::requires(field("manifest")?)
+            .and_then(|r| {
+                serde_json::to_value(r).map_err(|e| homerun_core::Error::Malformed(e.to_string()))
+            })
+            .map_err(|e| e.to_string()),
+
+        "minecraft.modpack.begin" => {
+            let inputs: modpack::Inputs = serde_json::from_value(field("inputs")?.clone())
+                .map_err(|e| format!("bad modpack inputs: {e}"))?;
+            serde_json::to_value(modpack::begin(inputs)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.modpack.advance" => {
+            let session: modpack::Session = serde_json::from_value(field("state")?.clone())
+                .map_err(|e| format!("bad modpack session: {e}"))?;
+            let replies: Vec<mods::Reply> = args
+                .get("replies")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| format!("bad modpack replies: {e}"))?
+                .unwrap_or_default();
+            serde_json::to_value(modpack::advance(session, replies)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.modpack.reconcile" => {
+            let jars: Vec<modpack::Assembled> = serde_json::from_value(field("jars")?.clone())
+                .map_err(|e| format!("bad assembled jars: {e}"))?;
+            Ok(Value::from(modpack::reconcile(&jars)))
+        }
+
+        "minecraft.modpack.excluded" => {
+            let patterns: Vec<String> = args
+                .get("patterns")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let path = text("path")?;
+            Ok(Value::Bool(
+                patterns.iter().any(|p| modpack::ant_matches(p, &path)),
+            ))
+        }
+
+        "minecraft.modjar.read" => {
+            let tomls: Vec<String> = args
+                .get("tomls")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            serde_json::to_value(modjar::read(optional_text("fabric").as_deref(), &tomls))
+                .map_err(|e| e.to_string())
+        }
+
+        "minecraft.loader.bundlerJavaMajor" => {
+            let head: Vec<u8> = args
+                .get("head")
+                .and_then(|v| v.as_array())
+                .map(|vs| {
+                    vs.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|v| v as u8)
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(match loader::bundler_java_major(&head) {
+                Some(major) => Value::from(major),
+                None => Value::Null,
+            })
         }
 
         // --- running the JVM ----------------------------------------------
@@ -1782,6 +2247,72 @@ mod tests {
         assert_eq!(absent["action"], "download");
     }
 
+    /// The mod driver survives the JSON boundary, which is the risky part.
+    ///
+    /// `minecraft::mods` tests the pipeline directly, in Rust. What that
+    /// cannot catch is a session that resolves perfectly and then fails to
+    /// round-trip: the host holds the state as opaque JSON and hands it back,
+    /// so a field that does not serialise breaks the second call and nothing
+    /// earlier. This drives a whole install through `homerun_core_call`.
+    #[test]
+    fn a_mod_install_round_trips_through_the_json_boundary() {
+        let mut progress = ok(
+            "minecraft.mods.begin",
+            json!({ "inputs": {
+                "loader": "fabric",
+                "gameVersion": "1.21.4",
+                "projects": "lithium",
+            }}),
+        );
+        assert_eq!(progress["kind"], "steps");
+
+        // Resolve, sides, download — the host answers each batch in turn.
+        for _ in 0..8 {
+            if progress["kind"] == "done" {
+                break;
+            }
+            let replies: Vec<serde_json::Value> = progress["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| {
+                    let id = step["id"].as_str().unwrap();
+                    let body = match step["kind"].as_str().unwrap() {
+                        "download" => serde_json::Value::Null,
+                        _ if step["url"].as_str().unwrap().contains("/projects?ids=") => {
+                            json!([{ "id": "lith01", "server_side": "required" }])
+                        }
+                        _ => json!([{
+                            "id": "v1",
+                            "project_id": "lith01",
+                            "version_type": "release",
+                            "files": [{
+                                "primary": true,
+                                "url": "https://cdn/lithium.jar",
+                                "filename": "lithium.jar",
+                            }],
+                        }]),
+                    };
+                    json!({ "id": id, "json": body })
+                })
+                .collect();
+
+            progress = ok(
+                "minecraft.mods.advance",
+                json!({ "state": progress["state"], "replies": replies }),
+            );
+        }
+
+        assert_eq!(progress["kind"], "done", "{progress}");
+        let outcome = &progress["outcome"];
+        assert_eq!(outcome["installed"][0], "lithium");
+        assert_eq!(outcome["subDir"], "mods");
+        assert_eq!(
+            outcome["records"]["lithium"]["filePath"],
+            "mods/lithium.jar"
+        );
+    }
+
     /// The order the Android host actually runs, pinned against the core's.
     ///
     /// This is the point of the module: the host may add platform detail
@@ -1906,5 +2437,221 @@ mod tests {
             json!({ "event": "restarted", "serverId": "s" }),
         );
         assert!(message.contains("restarted"), "{message}");
+    }
+
+    /// The contract the Android host ships must advertise exactly the loaders
+    /// this library will accept at launch.
+    ///
+    /// `HostCapabilities.serverLoaders` is a hand-written list in Kotlin,
+    /// mirrored from `bridge-v1.json`, and `scripts/check-capabilities.js`
+    /// checks those two against each other — but nothing checked either against
+    /// the code that does the refusing. That gap is how the create flow came to
+    /// offer Spigot and Quilt on a phone while `Loader::parse` refused both.
+    ///
+    /// This closes it from the Rust side, where the answer actually lives. The
+    /// contract is read off disk rather than restated, so the assertion is
+    /// against the bytes that ship.
+    #[test]
+    fn the_android_contract_advertises_exactly_the_loaders_this_core_hosts() {
+        const CONTRACT: &str = include_str!("../../../shared/conformance/bridge-v1.json");
+        let doc: Value = serde_json::from_str(CONTRACT).expect("the contract is JSON");
+
+        let advertised = doc["profiles"]["android"]["capabilities"]["serverLoaders"]
+            .as_array()
+            .expect("android advertises serverLoaders");
+
+        let hostable = ok("minecraft.loader.hostable", json!({}));
+        assert_eq!(
+            advertised,
+            hostable.as_array().unwrap(),
+            "the Android contract and the core disagree about hostable loaders"
+        );
+
+        // And the whole point of the exercise: the two BuildTools loaders are
+        // not in it, so the UI stops offering them.
+        for refused in ["spigot", "bukkit"] {
+            assert!(
+                !advertised.iter().any(|l| l == refused),
+                "{refused} is still advertised to the Android UI"
+            );
+        }
+    }
+
+    // ─── minigames ──────────────────────────────────────────────────────────
+
+    /// The three calls a launch makes, over one server's env, in the order the
+    /// host makes them. Together they are the whole minigame contract across
+    /// the FFI, so a change to any of them fails here rather than on a phone.
+    #[test]
+    fn a_minigame_servers_env_yields_its_jars_its_flag_and_its_plugin_env() {
+        let env = json!({
+            "TYPE": "PAPER",
+            "VERSION": "1.21.4",
+            "MINIGAME": "bedwars",
+            "MINIGAME_MIN_PLAYERS": "4",
+            "CUSTOM_PLUGINS":
+                "https://api.gethomerun.app/api/minigame/plugins/homerun-minigames/download/?channel=release",
+        });
+
+        assert_eq!(ok("minecraft.minigame.isMinigame", json!({ "env": env })), true);
+
+        let plugins = ok(
+            "minecraft.minigame.customPlugins",
+            json!({ "loader": "paper", "env": env }),
+        );
+        assert_eq!(plugins.as_array().unwrap().len(), 1);
+        assert_eq!(plugins[0]["filename"], "homerun-plugin-dafc06fcd9c7.jar");
+
+        let forwarded = ok("minecraft.minigame.pluginEnv", json!({ "env": env }));
+        assert_eq!(forwarded["MINIGAME_MIN_PLAYERS"], "4");
+        // The rule that matters: nothing outside our own namespace crosses
+        // into the server process's environment.
+        assert_eq!(forwarded.as_object().unwrap().len(), 2);
+        assert!(forwarded.get("VERSION").is_none());
+    }
+
+    /// An ordinary world asks for none of it, and says so without an error —
+    /// the host calls these on every launch, not only on minigame launches.
+    #[test]
+    fn an_ordinary_server_is_not_a_minigame_and_wants_no_plugins() {
+        let env = json!({ "TYPE": "PAPER", "VERSION": "1.21.4" });
+
+        assert_eq!(ok("minecraft.minigame.isMinigame", json!({ "env": env })), false);
+        assert_eq!(
+            ok("minecraft.minigame.customPlugins", json!({ "loader": "paper", "env": env })),
+            json!([])
+        );
+        assert_eq!(ok("minecraft.minigame.pluginEnv", json!({ "env": env })), json!({}));
+    }
+
+    // ─── Minecraft accounts ─────────────────────────────────────────────────
+
+    /// The whole sign-in, driven across the FFI exactly as the host drives it.
+    ///
+    /// Each step alone is covered in `minecraft::account`; what this adds is
+    /// that the output of one call is accepted as the input of the next
+    /// *through JSON*. That is the seam a host actually runs on, and a field
+    /// renamed on one side of it would pass every unit test in the core.
+    #[test]
+    fn a_sign_in_can_be_driven_one_call_at_a_time_across_the_bridge() {
+        // 1. Start it, and read Microsoft's answer.
+        let start = ok("minecraft.account.deviceCodeRequest", json!({}));
+        assert_eq!(start["url"], "https://login.live.com/oauth20_connect.srf");
+
+        let code = ok(
+            "minecraft.account.deviceCodeFrom",
+            json!({ "body": {
+                "user_code": "MWNYUL2R",
+                "device_code": "secret-half",
+                "verification_uri": "https://www.microsoft.com/link",
+                "interval": 5,
+                "expires_in": 900,
+            }}),
+        );
+        assert_eq!(code["approvalUrl"], "https://www.microsoft.com/link?otc=MWNYUL2R");
+
+        // 2. Poll — waiting is the normal answer and must not read as failure.
+        let poll = ok(
+            "minecraft.account.pollRequest",
+            json!({ "deviceCode": code["deviceCode"] }),
+        );
+        assert!(poll["body"].as_str().unwrap().contains("secret-half"));
+        assert_eq!(
+            ok("minecraft.account.pollOutcome", json!({ "body": { "error": "authorization_pending" }}))["kind"],
+            "pending",
+        );
+
+        // 3. Approved.
+        let approved = ok(
+            "minecraft.account.pollOutcome",
+            json!({ "body": {
+                "access_token": "ms-access",
+                "refresh_token": "ms-refresh",
+                "expires_in": 3600,
+            }}),
+        );
+        assert_eq!(approved["kind"], "approved");
+        let msa = &approved["fields"];
+        // serde's adjacent tagging puts the payload under the variant's own
+        // key; take it however it landed rather than assuming.
+        let msa = if msa.is_null() { &approved } else { msa };
+        assert_eq!(msa["accessToken"], "ms-access");
+
+        // 4. Xbox Live, then XSTS.
+        let xbl = ok(
+            "minecraft.account.xblRequest",
+            json!({ "msaAccessToken": "ms-access" }),
+        );
+        assert!(xbl["body"].as_str().unwrap().contains("d=ms-access"));
+
+        let xbox = ok(
+            "minecraft.account.xboxTokenFrom",
+            json!({ "body": { "Token": "xbl", "DisplayClaims": { "xui": [{ "uhs": "hash" }] } }}),
+        );
+        assert_eq!(xbox["userHash"], "hash");
+
+        let login = ok("minecraft.account.minecraftLoginRequest", json!({ "xsts": xbox }));
+        assert!(login["body"]
+            .as_str()
+            .unwrap()
+            .contains("XBL3.0 x=hash;xbl"));
+
+        // 5. Profile in, session out.
+        let session = ok(
+            "minecraft.account.sessionFrom",
+            json!({
+                "profile": { "id": "069a79f444e94726a5befca90e38aaf5", "name": "Notch" },
+                "minecraftToken": "header.eyJ4dWlkIjoiMjUzNTQyODM5NCJ9.sig",
+                "msa": { "accessToken": "ms-access", "refreshToken": "ms-refresh", "expiresInSecs": 3600 },
+                "nowMs": 1_700_000_000_000i64,
+            }),
+        );
+        assert_eq!(session["uuid"], "069a79f4-44e9-4726-a5be-fca90e38aaf5");
+        assert_eq!(session["xuid"], "2535428394");
+
+        // 6. And the only shape of it the web view is allowed to see.
+        let view = ok("minecraft.account.redacted", json!({ "session": session }));
+        assert_eq!(view["accessToken"], "0");
+        assert_eq!(view["refreshToken"], "0");
+        assert_eq!(view["username"], "Notch");
+    }
+
+    /// The account-shaped failures, which are the common ones and the only ones
+    /// a player can do anything about.
+    #[test]
+    fn an_xbox_refusal_crosses_the_bridge_as_something_a_player_can_act_on() {
+        let message = ok(
+            "minecraft.account.xstsRefusal",
+            json!({ "body": { "XErr": 2148916233u64 }}),
+        );
+        assert!(message.as_str().unwrap().contains("xbox.com"));
+    }
+
+    /// Minigames ship as Paper plugins. A contract that offers to host one on a
+    /// host that will not start Paper is not a contract anybody can honour, and
+    /// the two flags live far enough apart that nothing else would catch it.
+    #[test]
+    fn a_host_that_advertises_minigames_advertises_the_loader_they_run_on() {
+        const CONTRACT: &str = include_str!("../../../shared/conformance/bridge-v1.json");
+        let doc: Value = serde_json::from_str(CONTRACT).expect("the contract is JSON");
+
+        for (name, profile) in doc["profiles"].as_object().expect("profiles is an object") {
+            let capabilities = &profile["capabilities"];
+            if capabilities["minigames"] != json!(true) {
+                continue;
+            }
+            let loaders = capabilities["serverLoaders"].as_array();
+            assert!(
+                // An absent list means "no narrowing" — every loader — which
+                // includes Paper. Present, it has to say so.
+                loaders.is_none_or(|l| l.iter().any(|loader| loader == "paper")),
+                "{name} offers to host minigames but does not advertise Paper"
+            );
+            assert_eq!(
+                capabilities["moddedServers"],
+                json!(true),
+                "{name} offers to host minigames with plugins switched off"
+            );
+        }
     }
 }

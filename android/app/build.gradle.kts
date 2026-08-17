@@ -23,14 +23,27 @@ fun prop(name: String, fallback: String): String =
 val requestedAbi: String? = (project.findProperty("abi") as String?)?.takeIf { it.isNotBlank() }
 
 /**
- * Per ABI: the `OS_ARCH` its Java runtime reports in `assets/jre/release`, and
- * the command that stages one. Both belong to `scripts/stage-jre.py`, the only
- * thing that ever writes into `assets/jre/`; it takes the same two ABI names.
+ * Per ABI: the `OS_ARCH` a Java runtime reports in its `release` file, and the
+ * command that stages one. Both belong to `scripts/stage-jre.py`, the only
+ * thing that ever writes into `assets/jre-*`; it takes the same two ABI names.
  */
 val jreForAbi = mapOf(
     "arm64-v8a" to Pair("aarch64", "npm run jre:android"),
     "x86_64" to Pair("x86_64", "npm run jre:android-x86_64"),
 )
+
+/**
+ * The Java runtimes a **release** has to carry, as `assets/jre-<major>`.
+ *
+ * 25 runs the current Minecraft release; 21 is what the mod loaders want, and
+ * running them on 25 is a failure rather than an upgrade. `homerun-core`'s
+ * `jar::select_runtime` picks between them per server and can only pick from
+ * what shipped — so a release missing one silently loses every server that
+ * needed it. Debug builds may stage whichever subset is convenient.
+ *
+ * Kept in step with `DEFAULT_JAVA` in `scripts/stage-jre.py`.
+ */
+val releaseJavaRuntimes = listOf(21, 25)
 
 android {
     namespace = "app.gethomerun.mobile"
@@ -253,51 +266,92 @@ val verifyUiBundle by tasks.registering {
  * refuse the build when the two disagree.
  */
 val verifyJavaRuntime by tasks.registering {
-    val jre = layout.projectDirectory.dir("src/main/assets/jre")
-    val marker = jre.file("java-major")
-    val releaseFile = jre.file("release")
-    inputs.file(marker).optional(true)
-    inputs.file(releaseFile).optional(true)
+    val assets = layout.projectDirectory.dir("src/main/assets")
+    inputs.dir(assets).optional(true)
     // Captured here, not read in the action: the action must not reach back
     // into the project while it runs.
     val abi = requestedAbi
     val expected = abi?.let { jreForAbi[it] }
+    val assetsDir = assets.asFile
     doFirst {
-        if (!marker.asFile.exists()) {
+        val staged = (assetsDir.listFiles { f: File -> f.isDirectory } ?: emptyArray())
+            .filter { it.name.startsWith("jre-") && File(it, "java-major").isFile }
+            .sortedBy { it.name }
+
+        if (staged.isEmpty()) {
             logger.warn(
                 """
-                WARNING: no Java runtime staged in app/src/main/assets/jre/.
-                         This build cannot host a Java server. Stage one with:
+                WARNING: no Java runtime staged in app/src/main/assets/jre-*/.
+                         This build cannot host a Java server. Stage them with:
                            npm run jre:android         (arm64, what ships)
                            npm run jre:android-x86_64  (emulator)
                 """.trimIndent(),
             )
             return@doFirst
         }
+        logger.lifecycle(
+            "Java runtimes staged: ${staged.joinToString(", ") { it.name.removePrefix("jre-") }}",
+        )
+
         // No `-Pabi` means every ABI is packaged and there is nothing to
         // contradict; a release always passes one, see `verifyReleaseConfig`.
         if (expected == null) return@doFirst
         val (wantedArch, stageCommand) = expected
 
-        // Every JDK image ships `release`, a shell-sourceable file of KEY="value".
-        val staged = releaseFile.asFile.takeIf { it.exists() }?.readText()?.let {
-            Regex("""^OS_ARCH="?([^"\n]+)"?$""", RegexOption.MULTILINE).find(it)
-        }?.groupValues?.get(1)
-            ?: throw GradleException(
-                "The staged Java runtime does not say what architecture it is for " +
-                    "(no OS_ARCH in app/src/main/assets/jre/release).\n" +
-                    "Restage it:  $stageCommand",
-            )
+        // Every runtime is unpacked and dlopen'd on its own, so every runtime
+        // has to be right on its own. One staged for the wrong CPU alongside a
+        // correct one is the worse failure of the two: the app hosts fine until
+        // someone picks the Minecraft version that selects the broken runtime.
+        for (runtime in staged) {
+            // Every JDK image ships `release`, a shell-sourceable file of KEY="value".
+            val arch = File(runtime, "release").takeIf { it.isFile }?.readText()?.let {
+                Regex("""^OS_ARCH="?([^"\n]+)"?$""", RegexOption.MULTILINE).find(it)
+            }?.groupValues?.get(1)
+                ?: throw GradleException(
+                    "The staged Java runtime in assets/${runtime.name} does not say what " +
+                        "architecture it is for (no OS_ARCH in its `release` file).\n" +
+                        "Restage it:  $stageCommand",
+                )
 
-        if (staged != wantedArch) {
+            if (arch != wantedArch) {
+                throw GradleException(
+                    "A staged Java runtime is for the wrong architecture.\n" +
+                        "  staged:    $arch  (app/src/main/assets/${runtime.name}/release)\n" +
+                        "  requested: $wantedArch  (-Pabi=$abi)\n" +
+                        "This would build an APK that installs and can never host a " +
+                        "server on that runtime: the JRE lives in assets/, so nothing " +
+                        "at install time notices the CPU is wrong.\n" +
+                        "Restage the runtimes:  $stageCommand",
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A release carries every runtime [releaseJavaRuntimes] names.
+ *
+ * Separate from [verifyJavaRuntime], which is about a runtime being *wrong*;
+ * this one is about a runtime being *absent*. The failure is quiet and remote:
+ * the app installs, hosts most servers perfectly, and refuses exactly the ones
+ * whose Minecraft version selects the runtime that never shipped.
+ */
+val verifyReleaseRuntimes by tasks.registering {
+    val assets = layout.projectDirectory.dir("src/main/assets")
+    inputs.dir(assets).optional(true)
+    val wanted = releaseJavaRuntimes
+    val assetsDir = assets.asFile
+    doFirst {
+        val missing = wanted.filter { !File(assetsDir, "jre-$it/java-major").isFile }
+        if (missing.isNotEmpty()) {
             throw GradleException(
-                "The staged Java runtime is for the wrong architecture.\n" +
-                    "  staged:    $staged  (app/src/main/assets/jre/release)\n" +
-                    "  requested: $wantedArch  (-Pabi=$abi)\n" +
-                    "This would build an APK that installs and can never host a " +
-                    "server: the JRE lives in assets/, so nothing at install time " +
-                    "notices the CPU is wrong.\n" +
-                    "Restage the runtime:  $stageCommand",
+                "This release is missing the Java ${missing.joinToString(" and ")} " +
+                    "runtime${if (missing.size > 1) "s" else ""}.\n" +
+                    "`homerun-core` chooses a runtime per server and can only choose from " +
+                    "what shipped, so every server needing " +
+                    "${if (missing.size > 1) "one of these" else "this one"} would be " +
+                    "refused on a device.\n" +
+                    "Stage them all:  npm run jre:android",
             )
         }
     }
@@ -388,7 +442,7 @@ tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach { dependsOn(verifyJavaRuntime) }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("ReleaseAssets") }
-    .configureEach { dependsOn(verifyReleaseConfig, verifyNativePayload) }
+    .configureEach { dependsOn(verifyReleaseConfig, verifyNativePayload, verifyReleaseRuntimes) }
 
 tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
     .configureEach {

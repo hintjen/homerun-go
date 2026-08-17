@@ -11,6 +11,8 @@
     "ui:android": "node scripts/build-ui.js android",
     "jre:android": "python3 scripts/stage-jre.py arm64-v8a",
     "jre:android-x86_64": "python3 scripts/stage-jre.py x86_64",
+    "jre:android-25": "python3 scripts/stage-jre.py arm64-v8a --java 25",
+    "jre:android-x86_64-25": "python3 scripts/stage-jre.py x86_64 --java 25",
     "wireproxy:android": "node scripts/build-wireproxy.js android",
     "wireproxy:android-x86_64": "node scripts/build-wireproxy.js android-x86_64",
     "restic:android": "node scripts/build-restic.js android",

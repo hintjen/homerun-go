@@ -159,7 +159,7 @@ These moved out of Kotlin entirely:
 | Was | Now |
 |---|---|
 | `ServerJar.resolveVanilla` / `resolvePaper` | `minecraft::jar::resolve_version`, `vanilla`, `paper` |
-| `ServerJar`'s Java-version check and on-disk comparison | `minecraft::jar::check_java`, `OnDisk::satisfies` |
+| which staged Java runtime runs a jar, and on-disk comparison | `minecraft::jar::select_runtime`, `OnDisk::satisfies` |
 | whether the jar already on disk can be kept | `minecraft::jar::cache_decision` |
 | what to call a jar in the device-wide cache | `minecraft::jar::cache_key` |
 | `WireProxy.render`'s string list | `tunnel::Config::render` |

@@ -652,6 +652,9 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         router.resyncServerState()
+        // A dismissed sign-in tab reports nothing, so being visible again with
+        // one outstanding is the only evidence the user backed out.
+        router.onForegrounded()
         // The other half of "launch and resume". A phone that is never closed
         // would otherwise check once and stay on that bundle for weeks; the
         // throttle inside means most resumes cost nothing.

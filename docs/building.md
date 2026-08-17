@@ -193,7 +193,7 @@ Three checks enforce it, and each has caught something real:
 
 | Where | Covers |
 |---|---|
-| `stage-jre.py` | every `.so` staged into `assets/jre/`; refuses to stage otherwise |
+| `stage-jre.py` | every `.so` staged into each `assets/jre-<major>/`, checked per runtime; refuses to stage otherwise |
 | `build-restic.js`, `build-wireproxy.js` | the binary just built |
 | `third_party/libandroid-spawn/` | Termux publishes only a 4 KB build of a library `libjvm.so` has a hard `DT_NEEDED` on, so it is compiled from source here |
 
@@ -248,6 +248,17 @@ That adds the four pieces a release needs and a debug build does not:
 Every one of those fails open: the build succeeds and the failure surfaces
 on a device, a long way from the cause. That is why this is a separate
 script rather than a note in a checklist.
+
+**The last row used to fail open in the debug loop too.** `verifyJavaRuntime`
+compares the staged runtime's own `OS_ARCH` against the ABI being built and
+refuses a mismatch — but only when `-Pabi` is passed, and `scripts/android-app.js`
+never passed it. So `npm run android:install` after
+`npm run jre:android-x86_64` produced an APK that installed on a phone, launched,
+showed every screen, and could not host a thing; the first sign was a `dlopen`
+failure reading `is for EM_X86_64 (62) instead of EM_AARCH64 (183)`, deep in a
+server log. The script already knew the device's ABI — it resolves one to decide
+which native libraries to rebuild — so it now passes the same answer to Gradle,
+and the check fires in the loop where emulator and phone actually alternate.
 
 The Gradle build then wants the ABI named explicitly, because the staged
 JRE is architecture-specific and a release must ship exactly one:

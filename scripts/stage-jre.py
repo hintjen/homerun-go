@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Stage a Java runtime into the Android assets, at build time.
+"""Stage the Java runtimes into the Android assets, at build time.
 
     python3 scripts/stage-jre.py arm64-v8a
     python3 scripts/stage-jre.py x86_64 --java 21
+    python3 scripts/stage-jre.py arm64-v8a --java 21,25
 
 Google Play forbids an app downloading executable code — "dex, JAR, .so files"
 — from anywhere but Play itself, so the runtime cannot be fetched at first run.
@@ -13,6 +14,20 @@ packages files ending in `.so`, which silently drops `libz.so.1` (a versioned
 soname the linker asks for by name) and flattens a tree the JVM expects to walk
 from `java.home`. Assets keep the layout intact. Only `libjavabin.so` has to be
 in jniLibs, because it is the one thing that gets `exec`'d.
+
+# Why more than one
+
+Minecraft needs a Java at least as new as the version it names; mod loaders
+need one that is *exactly* right, because modlauncher breaks on JDKs newer than
+it was built against. One runtime cannot serve both, so this stages a directory
+per major — `assets/jre-21/`, `assets/jre-25/` — and `homerun-core` picks which
+one a given server launches on. See `plans/android-mod-loaders.md`.
+
+Each directory is **self-contained**: its own `termux-lib/`, its own
+`java-major`, its own `release`. The duplicated dependency libraries cost about
+1.6 MB per runtime, which buys a `java.home` the host can point at without any
+cross-runtime path fixing — and a runtime it can unpack on its own, without
+dragging the other one out of the APK with it.
 
 Needs only the Python standard library — no `ar`, `xz` or `tar` binary, none of
 which is reliably present on Windows.
@@ -31,11 +46,22 @@ import urllib.request
 
 REPO = "https://packages.termux.dev/apt/termux-main/pool/main"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ASSETS = os.path.join(ROOT, "android", "app", "src", "main", "assets", "jre")
+ASSET_ROOT = os.path.join(ROOT, "android", "app", "src", "main", "assets")
 CACHE = os.path.join(ROOT, ".jre-cache")
 
 # Pinned: an upstream bump must not silently change what ships.
 JDK_VERSIONS = {17: "17.0.20", 21: "21.0.12", 25: "25.0.4"}
+
+# What a release ships, and what `verifyJavaRuntime` in app/build.gradle.kts
+# insists on. 25 runs the current Minecraft release; 21 is what the mod loaders
+# want, and running them on 25 is not an upgrade but a failure. 17 would unlock
+# Forge 1.20.1 and is deliberately not here — see `plans/android-mod-loaders.md`
+# for what that costs and why the answer is still two.
+DEFAULT_JAVA = [21, 25]
+
+# One staged runtime lives in `assets/jre-<major>/`. The host lists the asset
+# root to discover them, so the prefix is load-bearing on both sides.
+ASSET_PREFIX = "jre-"
 
 # Derived by reading DT_NEEDED across the whole closure, not guessed. libc++ is
 # the one a scan of only the JRE's own libraries misses — libandroid-spawn.so
@@ -281,43 +307,38 @@ def build_android_spawn(abi: str, dest: str) -> None:
     print(f"  build   libandroid-spawn.so ({os.path.getsize(out) / 1024:.0f} KB, 16 KB aligned)")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("abi", choices=["arm64-v8a", "x86_64"])
-    # 25 by default: the current Minecraft release requires it, and it runs
-    # older targets too.
-    parser.add_argument("--java", type=int, default=25, choices=sorted(JDK_VERSIONS))
-    args = parser.parse_args()
+def stage_one(abi: str, java: int) -> tuple[int, int]:
+    """Stage one runtime into its own asset directory. Returns (files, bytes)."""
+    termux_abi = {"arm64-v8a": "aarch64", "x86_64": "x86_64"}[abi]
+    version = JDK_VERSIONS[java]
+    assets = os.path.join(ASSET_ROOT, f"{ASSET_PREFIX}{java}")
 
-    termux_abi = {"arm64-v8a": "aarch64", "x86_64": "x86_64"}[args.abi]
-    version = JDK_VERSIONS[args.java]
+    print(f"\nStaging OpenJDK {version} ({abi}) into assets/{ASSET_PREFIX}{java}\n")
 
-    print(f"\nStaging OpenJDK {version} ({args.abi}) into assets\n")
+    if os.path.isdir(assets):
+        shutil.rmtree(assets)
+    os.makedirs(assets, exist_ok=True)
 
-    if os.path.isdir(ASSETS):
-        shutil.rmtree(ASSETS)
-    os.makedirs(ASSETS, exist_ok=True)
-
-    jre_url = f"{REPO}/o/openjdk-{args.java}/openjdk-{args.java}_{version}_{termux_abi}.deb"
+    jre_url = f"{REPO}/o/openjdk-{java}/openjdk-{java}_{version}_{termux_abi}.deb"
     total = unpack(
         fetch(jre_url),
-        ASSETS,
-        f"data/data/com.termux/files/usr/lib/jvm/java-{args.java}-openjdk",
+        assets,
+        f"data/data/com.termux/files/usr/lib/jvm/java-{java}-openjdk",
     )
 
-    deps_dir = os.path.join(ASSETS, DEPS_DIR)
+    deps_dir = os.path.join(assets, DEPS_DIR)
     for path, name, dep_version in DEPENDENCIES:
         url = f"{REPO}/{path}/{name}_{dep_version}_{termux_abi}.deb"
         total += unpack(fetch(url), deps_dir, "data/data/com.termux/files/usr/lib")
 
     # Not from the pool — the published binary is 4 KB aligned and would stop
     # the VM loading on a 16 KB-page device.
-    build_android_spawn(args.abi, deps_dir)
+    build_android_spawn(abi, deps_dir)
     total += 1
 
     freed = 0
     for relative, why in PRUNE:
-        path = os.path.join(ASSETS, *relative.split("/"))
+        path = os.path.join(assets, *relative.split("/"))
         if not os.path.exists(path):
             continue
         if os.path.isdir(path):
@@ -336,22 +357,90 @@ def main() -> None:
     # What the host reads to know which runtime it is holding. NOT dot-prefixed:
     # aapt's asset filter includes `.*`, so a hidden file is silently dropped
     # from the APK — the same trap as the `_next/` directory in the UI bundle.
-    with open(os.path.join(ASSETS, "java-major"), "w", encoding="utf-8") as fh:
-        fh.write(str(args.java))
+    with open(os.path.join(assets, "java-major"), "w", encoding="utf-8") as fh:
+        fh.write(str(java))
 
-    libjvm = os.path.join(ASSETS, "lib", "server", "libjvm.so")
+    libjvm = os.path.join(assets, "lib", "server", "libjvm.so")
     if not os.path.isfile(libjvm):
         raise SystemExit(f"staged, but there is no libjvm.so at {libjvm}")
 
-    checked = verify_page_alignment(ASSETS)
+    # Per runtime, not once at the end: each is unpacked and loaded on its own,
+    # so each has to be able to load on its own.
+    checked = verify_page_alignment(assets)
     print(f"  verify  {checked} shared objects, all >= 16 KB page aligned")
 
     size = sum(
         os.path.getsize(os.path.join(base, f))
-        for base, _dirs, files in os.walk(ASSETS)
+        for base, _dirs, files in os.walk(assets)
         for f in files
     )
-    print(f"\n{total} files, {size / 1024 / 1024:.0f} MB -> {ASSETS}")
+    print(f"  staged  {total} files, {size / 1024 / 1024:.0f} MB -> {assets}")
+    return total, size
+
+
+def requested_majors(raw: str) -> list[int]:
+    """`21,25` -> [21, 25], rejecting anything not pinned in JDK_VERSIONS."""
+    majors = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        try:
+            major = int(piece)
+        except ValueError:
+            raise SystemExit(f"not a Java major version: {piece!r}")
+        if major not in JDK_VERSIONS:
+            known = ", ".join(str(v) for v in sorted(JDK_VERSIONS))
+            raise SystemExit(f"no pinned OpenJDK {major}; this script knows {known}")
+        if major not in majors:
+            majors.append(major)
+    if not majors:
+        raise SystemExit("--java named no versions")
+    return sorted(majors)
+
+
+def drop_stale_runtimes(keep: list[int]) -> None:
+    """
+    Remove runtime directories this run did not stage.
+
+    Without this, dropping a version from `--java` leaves the old directory in
+    `assets/`, the host discovers it, and the app offers a runtime the build no
+    longer intends to ship. Also clears the pre-multi-runtime `assets/jre/`.
+    """
+    wanted = {f"{ASSET_PREFIX}{major}" for major in keep}
+    for name in sorted(os.listdir(ASSET_ROOT)):
+        path = os.path.join(ASSET_ROOT, name)
+        if not os.path.isdir(path):
+            continue
+        stale = name == "jre" or (name.startswith(ASSET_PREFIX) and name not in wanted)
+        if stale:
+            shutil.rmtree(path)
+            print(f"  drop    assets/{name} (not in this build)")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("abi", choices=["arm64-v8a", "x86_64"])
+    parser.add_argument(
+        "--java",
+        default=",".join(str(v) for v in DEFAULT_JAVA),
+        help="comma-separated Java majors to stage (default: %(default)s)",
+    )
+    args = parser.parse_args()
+
+    majors = requested_majors(args.java)
+    os.makedirs(ASSET_ROOT, exist_ok=True)
+    drop_stale_runtimes(majors)
+
+    files = 0
+    size = 0
+    for major in majors:
+        staged_files, staged_size = stage_one(args.abi, major)
+        files += staged_files
+        size += staged_size
+
+    runtimes = ", ".join(f"Java {m}" for m in majors)
+    print(f"\n{runtimes}: {files} files, {size / 1024 / 1024:.0f} MB total")
     print(f"Build with:  ./gradlew installDebug -Pabi={args.abi}\n")
 
 

@@ -21,8 +21,9 @@ Google Play has required 16 KB support for apps targeting Android 15+ since
 1 November 2025 (extended to 31 May 2026), so this also blocks a production
 release regardless of any particular phone.
 
-Every other object staged into `assets/jre/` — including `libjvm.so` itself,
-`libc++_shared.so` and zlib — is already 16 KB aligned. This was the only one.
+Every other object staged into `assets/jre-<major>/` — including `libjvm.so`
+itself, `libc++_shared.so` and zlib — is already 16 KB aligned. This was the
+only one, and it is built once per staged runtime.
 
 ## What the JVM actually needs from it
 

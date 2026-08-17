@@ -1,10 +1,10 @@
 {
   "bridgeVersion": 1,
   "counts": {
-    "invoke": 76,
+    "invoke": 77,
     "send": 26,
     "event": 52,
-    "total": 154
+    "total": 155
   },
   "channels": [
     {
@@ -41,6 +41,12 @@
       "channel": "open-external-url",
       "kind": "invoke",
       "tier": "core"
+    },
+    {
+      "channel": "share-content",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: present the OS share sheet (UIActivityViewController / Intent.createChooser) and resolve completed:false when the user dismisses it — that is an outcome, not an error. Desktop: return completed:false — the `nativeShare` capability is false there, so the UI never calls it."
     },
     {
       "channel": "push-notification",
@@ -329,19 +335,19 @@
       "channel": "minecraft:auth:get-profile",
       "kind": "invoke",
       "tier": "capability",
-      "capability": "clientLauncher"
+      "capability": "minecraftAccount"
     },
     {
       "channel": "minecraft:auth:login",
       "kind": "invoke",
       "tier": "capability",
-      "capability": "clientLauncher"
+      "capability": "minecraftAccount"
     },
     {
       "channel": "minecraft:auth:logout",
       "kind": "invoke",
       "tier": "capability",
-      "capability": "clientLauncher"
+      "capability": "minecraftAccount"
     },
     {
       "channel": "minecraft:get-setup",
@@ -856,13 +862,13 @@
       "channel": "minecraft:auth:ready",
       "kind": "event",
       "tier": "capability",
-      "capability": "clientLauncher"
+      "capability": "minecraftAccount"
     },
     {
       "channel": "minecraft:auth:signed-out",
       "kind": "event",
       "tier": "capability",
-      "capability": "clientLauncher"
+      "capability": "minecraftAccount"
     },
     {
       "channel": "device-ws-ready",
@@ -900,18 +906,30 @@
         "installation": true,
         "moveInstallation": true,
         "clientLauncher": true,
+        "minecraftAccount": true,
         "windowChrome": true,
         "tray": true,
         "autoUpdate": true,
         "privilegeElevation": true,
         "moddedServers": true,
+        "serverLoaders": [
+          "vanilla",
+          "paper",
+          "fabric",
+          "quilt",
+          "neoforge",
+          "forge",
+          "spigot",
+          "bukkit"
+        ],
         "minigames": true,
         "fileImport": true,
         "multipleRunningServers": true,
         "backgroundExecution": true,
         "backups": true,
         "deviceWebsocket": true,
-        "haptics": false
+        "haptics": false,
+        "nativeShare": false
       },
       "required": [
         "cache-client-nonce",
@@ -1038,6 +1056,7 @@
         "set-native-local-network",
         "set-pending-server-upgrade",
         "set-posthog-distinct-id",
+        "share-content",
         "show-privilege-elevation-required-modal",
         "show-system-requirements-warning",
         "show-system-time-warning",
@@ -1078,18 +1097,21 @@
         "installation": false,
         "moveInstallation": false,
         "clientLauncher": false,
+        "minecraftAccount": false,
         "windowChrome": false,
         "tray": false,
         "autoUpdate": true,
         "privilegeElevation": false,
         "moddedServers": false,
+        "serverLoaders": [],
         "minigames": false,
         "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": false,
         "backups": true,
         "deviceWebsocket": true,
-        "haptics": true
+        "haptics": true,
+        "nativeShare": true
       },
       "required": [
         "cache-client-nonce",
@@ -1153,6 +1175,7 @@
         "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
+        "share-content",
         "show-system-time-warning",
         "splash-shown",
         "start-installation-or-check",
@@ -1174,18 +1197,28 @@
         "installation": false,
         "moveInstallation": false,
         "clientLauncher": false,
+        "minecraftAccount": true,
         "windowChrome": false,
         "tray": false,
         "autoUpdate": true,
         "privilegeElevation": false,
         "moddedServers": true,
-        "minigames": false,
+        "serverLoaders": [
+          "vanilla",
+          "paper",
+          "fabric",
+          "quilt",
+          "neoforge",
+          "forge"
+        ],
+        "minigames": true,
         "fileImport": false,
         "multipleRunningServers": false,
         "backgroundExecution": true,
         "backups": true,
         "deviceWebsocket": true,
-        "haptics": true
+        "haptics": true,
+        "nativeShare": false
       },
       "required": [
         "cache-client-nonce",
@@ -1218,6 +1251,11 @@
         "journey-modals-set",
         "logout",
         "measure-region-latency",
+        "minecraft:auth:get-profile",
+        "minecraft:auth:login",
+        "minecraft:auth:logout",
+        "minecraft:auth:ready",
+        "minecraft:auth:signed-out",
         "native-get-latest-bedrock-version",
         "native-server-active-ids",
         "native-server-backup-lease-blocked",
@@ -1250,6 +1288,7 @@
         "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
+        "share-content",
         "show-system-time-warning",
         "splash-shown",
         "start-installation-or-check",

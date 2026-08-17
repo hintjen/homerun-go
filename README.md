@@ -129,6 +129,7 @@ The two platform tracks are built in parallel by different developers.
 | [`plans/shared-milestones.md`](plans/shared-milestones.md) | **Read first.** Ownership, the shared M0–M5 milestones, cross-cutting rules |
 | [`plans/ios.md`](plans/ios.md) | Swift host, Pumpkin engine wiring |
 | [`plans/android.md`](plans/android.md) | Kotlin host, JVM backend, foreground service |
+| [`plans/android-mod-loaders.md`](plans/android-mod-loaders.md) | Fabric/NeoForge/Forge, and the desktop mod resolver ported into the core |
 
 ## Getting started
 

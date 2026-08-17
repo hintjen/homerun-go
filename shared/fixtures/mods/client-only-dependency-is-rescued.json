@@ -1,0 +1,62 @@
+{
+  "name": "client-only-dependency-is-rescued",
+  "why": "A naive 'drop everything client-only' pass breaks servers a different way: a kept server mod often hard-depends on a client-only library, and removing it fails loader resolution with 'requires X, which is missing!'. Real case: chipped -> athena.",
+  "inputs": {
+    "loader": "fabric",
+    "gameVersion": "1.21.4",
+    "projects": "chipped\nsodium"
+  },
+  "modrinth": {
+    "/project/chipped/version": [
+      {
+        "id": "chip-v1",
+        "project_id": "chip01",
+        "version_type": "release",
+        "files": [{ "primary": true, "url": "https://cdn/chipped.jar", "filename": "chipped.jar" }],
+        "dependencies": [{ "dependency_type": "required", "project_id": "ath01" }]
+      }
+    ],
+    "/project/sodium/version": [
+      {
+        "id": "sod-v1",
+        "project_id": "sod01",
+        "version_type": "release",
+        "files": [{ "primary": true, "url": "https://cdn/sodium.jar", "filename": "sodium.jar" }],
+        "dependencies": []
+      }
+    ],
+    "/project/ath01/version": [
+      {
+        "id": "ath-v1",
+        "project_id": "ath01",
+        "version_type": "release",
+        "files": [{ "primary": true, "url": "https://cdn/athena.jar", "filename": "athena.jar" }],
+        "dependencies": []
+      }
+    ],
+    "/projects?ids=": [
+      { "id": "chip01", "server_side": "required", "client_side": "required" },
+      { "id": "sod01", "server_side": "unsupported", "client_side": "required" }
+    ]
+  },
+  "expect": {
+    "installed": ["chipped"],
+    "downloaded": ["chipped.jar", "athena.jar"],
+    "failed": [],
+    "remove": [],
+    "records": {
+      "chipped": {
+        "versionId": "chip-v1",
+        "mcVersion": "1.21.4",
+        "loader": "fabric",
+        "filePath": "mods/chipped.jar"
+      },
+      "dep:ath01": {
+        "versionId": "ath-v1",
+        "mcVersion": "1.21.4",
+        "loader": "fabric",
+        "filePath": "mods/athena.jar"
+      }
+    }
+  }
+}

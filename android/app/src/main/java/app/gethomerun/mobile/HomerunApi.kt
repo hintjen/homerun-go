@@ -5,14 +5,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -124,12 +124,38 @@ object HomerunApi {
     private val json = Json { ignoreUnknownKeys = true }
 
     /**
+     * This element as an object, or null — including when it is JSON `null`.
+     *
+     * `element?.jsonObject` looks like it does this and does not. A missing key
+     * is a Kotlin `null` and `?.` handles it; a key present with the value
+     * `null` is `JsonNull`, which is a perfectly non-null Kotlin object, so
+     * `?.` sails past it and `jsonObject` throws
+     * `Element class JsonNull is not a JsonObject`.
+     *
+     * That difference cost a whole feature. `backup` is `null` on any server
+     * with no repository — which is *every* minigame lobby, since they are
+     * ephemeral and deliberately never backed up — so reading its settings
+     * threw, [serverSettings] returned null, and the caller took its
+     * "settings could not be read" path: vanilla, latest version, no plugins.
+     * The server started, the UI said the game was live, and the game was not
+     * in it. A launch that silently ignores everything the server was
+     * configured with is the worst possible way for this to fail, and it is
+     * what an exception in this function buys.
+     */
+    private fun JsonElement?.objectOrNull(): JsonObject? = this as? JsonObject
+
+    /**
      * Read a server's settings, or null if they could not be read.
      *
      * Null is a normal outcome, not an error: no token yet, no signal, a
      * backend hiccup. The caller falls back to vanilla-latest exactly as the
      * desktop does — refusing to start a server because a settings lookup
      * failed would be worse than starting the default one.
+     *
+     * It is a *bad* outcome all the same, and one worth being loud about: the
+     * fallback is a different server from the one the player configured. Every
+     * field below is therefore read defensively rather than optimistically —
+     * one absent key must not cost the other fifteen.
      */
     suspend fun serverSettings(
         apiUrl: String,
@@ -145,11 +171,12 @@ object HomerunApi {
             val body = get(apiUrl, "/api/server/$serverId/", token)
                 ?: return@withContext null
 
-            val env = body["config"]?.jsonObject?.get("environment_variables")?.jsonObject
+            val config = body["config"].objectOrNull()
+            val env = config?.get("environment_variables").objectOrNull()
             val type = env?.get("TYPE")?.jsonPrimitive?.contentOrNull?.lowercase()
             val gameType = (
                 body["game_type"]?.jsonPrimitive?.contentOrNull
-                    ?: body["config"]?.jsonObject?.get("game_type")?.jsonPrimitive?.contentOrNull
+                    ?: config?.get("game_type")?.jsonPrimitive?.contentOrNull
                 ).orEmpty()
 
             ServerSettings(
@@ -158,7 +185,10 @@ object HomerunApi {
                 gameType = if (gameType == "bedrock" || gameType == "native-bedrock") "bedrock" else "java",
                 rawGameType = gameType,
                 env = env ?: JsonObject(emptyMap()),
-                backup = body["backup"]?.jsonObject,
+                // Null for every server with no repository, and that is not an
+                // edge case — a minigame lobby never has one. See
+                // [objectOrNull]; this line read `?.jsonObject` and threw.
+                backup = body["backup"].objectOrNull(),
                 backupLeaseDevice = body["backup_lease_device"]?.jsonPrimitive?.contentOrNull
                     ?.takeIf { it.isNotBlank() },
                 restoreFromSnapshot = env?.get("RESTORE_FROM_SNAPSHOT")?.jsonPrimitive
@@ -293,9 +323,13 @@ object HomerunApi {
 
     /** Pull the tunnel out of a `/api/server/<id>/` body. */
     private fun linkOf(body: JsonObject): PolledLink? {
-        val link = body["config"]?.jsonObject?.get("links")?.jsonArray
-            ?.firstOrNull()?.jsonObject ?: return null
-        val native = link["native_config"]?.takeIf { it !is JsonNull }?.jsonObject ?: return null
+        // `as?` throughout for the reason [objectOrNull] gives: a key whose
+        // value is JSON `null` is not a missing key, and `?.jsonObject` on one
+        // throws rather than yielding null. `native_config` already knew that;
+        // the two above it did not.
+        val link = (body["config"].objectOrNull()?.get("links") as? JsonArray)
+            ?.firstOrNull().objectOrNull() ?: return null
+        val native = link["native_config"].objectOrNull() ?: return null
 
         fun str(key: String) = native[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 

@@ -117,6 +117,25 @@ window.__homerunCapabilities = { platform: "ios", serverBackends: ["pumpkin"], /
 Every field in `HostCapabilities` must be present. Missing fields are a
 host bug, not a default.
 
+**With one qualification, because capabilities are additive.** A host built
+before a field existed cannot send it, so every new field needs a defined
+meaning for *absent*, chosen so that an older host stays correct:
+
+| Kind of field | Absent must mean | Why |
+|---|---|---|
+| A boolean that reveals a feature | `false` | The surface hides. `minigames` and `nativeShare` both rely on this. |
+| An allowlist that *narrows* something | **no narrowing** | The host supports what it always did. Filtering on a list it never sent would retract working features. `serverLoaders` is this. |
+
+`serverLoaders` is worth naming because it is the second kind and the two read
+in opposite directions. It lists which Minecraft loaders the host can host, and
+absent means show them all, while `[]` is a real answer meaning none. Getting
+that backwards would have hidden every loader from every host older than the
+field — a worse bug than the one it was added to fix, which was Android offering
+Spigot and then refusing it at launch.
+
+So: a *new* host must send every field. A *reader* must still define what
+absence means, and the type says which fields can be absent.
+
 ### 4.2 The `ready` handshake
 
 Events emitted before the page's JS is listening are lost. So:

@@ -101,7 +101,13 @@ pub fn pinned(command: &str, loader: Loader) -> String {
         // The desktop pins spigot and bukkit too; this crate cannot host them
         // (see `jar::Loader::parse`), and Paper is the same command map.
         Loader::Paper => format!("minecraft:{command}"),
-        Loader::Vanilla => command.to_string(),
+        // Fabric, Quilt, NeoForge and Forge are Brigadier with no command map
+        // for a mod to shadow, so they take the bare command exactly as vanilla
+        // does. Pinning them would fail the command outright rather than
+        // degrade its output — the "getting it backwards" the doc warns about.
+        Loader::Vanilla | Loader::Fabric | Loader::Quilt | Loader::NeoForge | Loader::Forge => {
+            command.to_string()
+        }
     }
 }
 
@@ -809,6 +815,11 @@ mod tests {
         // would break the command it was meant to protect.
         assert_eq!(pinned(LIST_UUIDS, Loader::Vanilla), "list uuids");
         assert_eq!(pinned(GAMETIME, Loader::Vanilla), "time query gametime");
+        // Fabric is Brigadier too, and has no command map for a mod to shadow.
+        // The exhaustive match is what forced this question to be answered
+        // when the loader was added rather than discovered as blank stats.
+        assert_eq!(pinned(LIST_UUIDS, Loader::Fabric), "list uuids");
+        assert_eq!(pinned(GAMETIME, Loader::Fabric), "time query gametime");
     }
 
     // --- the payload -------------------------------------------------------

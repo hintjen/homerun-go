@@ -26,24 +26,47 @@ pub fn paper_builds_url(version: &str) -> String {
 pub enum Loader {
     Vanilla,
     Paper,
+    Fabric,
+    Quilt,
+    NeoForge,
+    Forge,
 }
 
 impl Loader {
     /// Parse the API's `TYPE` environment variable.
     ///
-    /// The desktop accepts fabric, forge, neoforge, quilt, spigot and bukkit
-    /// too. Those install by *running* an installer, which is a separate piece
-    /// of work, so they are refused by name here rather than silently treated
-    /// as vanilla — a Forge server quietly started as vanilla would eat the
-    /// world's mods.
+    /// The desktop also accepts spigot and bukkit. Both are refused here by
+    /// name rather than silently treated as vanilla — a Forge server quietly
+    /// started as vanilla would eat the world's mods — and the message says
+    /// why: they are **compiled** on the device by BuildTools, which needs a
+    /// JDK with `javac`, and `scripts/stage-jre.py` prunes the staged runtime
+    /// to a runtime. Paper is a superset of both and does run here, so nothing
+    /// is actually lost.
+    ///
+    /// That is a capability limit, and it is the only one. Quilt was refused
+    /// here too until it was measured on a device: its installer is Fabric's
+    /// shape, it produces a `quilt-server-launch.jar` carrying `Main-Class` and
+    /// `Class-Path`, and it boots. There was no technical reason left.
+    ///
+    /// Forge and NeoForge *are* accepted, but only where the Minecraft version
+    /// they target uses a Java this build ships — see [`Loader::java_policy`],
+    /// which is what refuses Forge 1.20.1 by naming the Java 17 it wants.
     pub fn parse(raw: Option<&str>) -> Result<Loader> {
         match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
             None | Some("") | Some("vanilla") => Ok(Loader::Vanilla),
             Some("paper") => Ok(Loader::Paper),
+            Some("fabric") => Ok(Loader::Fabric),
+            Some("quilt") => Ok(Loader::Quilt),
+            Some("neoforge") => Ok(Loader::NeoForge),
+            Some("forge") => Ok(Loader::Forge),
+            Some(other @ ("spigot" | "bukkit")) => Err(Error::Unsupported(format!(
+                "Homerun cannot host {other} servers on a phone: they are compiled on the \
+                 device by BuildTools, which needs a full JDK. Paper runs {other} plugins \
+                 and works here."
+            ))),
             Some(other) => Err(Error::Unsupported(format!(
-                "Homerun cannot host {other} servers on this device yet — those install by \
-                 running an installer. Vanilla and Paper both work, and Paper runs Bukkit \
-                 and Spigot plugins."
+                "Homerun cannot host {other} servers on this device. Vanilla, Paper, Fabric, \
+                 Quilt, NeoForge and Forge all work, and Paper runs Bukkit and Spigot plugins."
             ))),
         }
     }
@@ -52,8 +75,84 @@ impl Loader {
         match self {
             Loader::Vanilla => "vanilla",
             Loader::Paper => "paper",
+            Loader::Fabric => "fabric",
+            Loader::Quilt => "quilt",
+            Loader::NeoForge => "neoforge",
+            Loader::Forge => "forge",
         }
     }
+
+    /// Every loader this build can host, for a host to advertise.
+    ///
+    /// # Why this exists rather than a list in the host
+    ///
+    /// The UI decides what to *offer* from `HostCapabilities.serverLoaders`,
+    /// and [`Loader::parse`] decides what to *accept* at launch. When those two
+    /// disagree the failure is the worst shape available: a player configures a
+    /// server the app offered, waits for it to start, and gets a refusal. That
+    /// happened — the create flow offered Spigot and Quilt on a phone while
+    /// this refused both.
+    ///
+    /// So the offer is generated from the same enum that answers the accept,
+    /// and [`tests::the_hostable_list_is_exactly_what_parse_accepts`] is what
+    /// keeps a new variant from being added to one and not the other.
+    pub fn hostable() -> &'static [Loader] {
+        &[
+            Loader::Vanilla,
+            Loader::Paper,
+            Loader::Fabric,
+            Loader::Quilt,
+            Loader::NeoForge,
+            Loader::Forge,
+        ]
+    }
+
+    /// True when a loader is installed by running an installer jar rather than
+    /// by downloading a server jar.
+    ///
+    /// The two take different paths on the host: a downloaded artifact goes
+    /// through [`crate::minecraft::jar`], an installed one through
+    /// [`crate::minecraft::loader`]. Nothing else distinguishes them, so this
+    /// is the single question the host asks.
+    pub fn is_installed(self) -> bool {
+        matches!(
+            self,
+            Loader::Fabric | Loader::Quilt | Loader::NeoForge | Loader::Forge
+        )
+    }
+
+    /// How strictly this loader binds to a Java version.
+    ///
+    /// Minecraft names a *minimum* and runs happily on anything newer, so
+    /// vanilla, Paper, Fabric and Quilt are [`JavaPolicy::AtLeast`]. Forge and
+    /// NeoForge are not: modlauncher and securejarhandler reach into
+    /// `java.base` internals through `--add-opens`, and a JDK past the one
+    /// they were built against moves those internals. The failure is not a
+    /// warning — it is a stack trace during boot-layer initialisation that
+    /// names none of this.
+    ///
+    /// So they get [`JavaPolicy::Exact`]: 21 means 21, and 25 is a refusal
+    /// rather than an upgrade.
+    ///
+    /// Quilt sits with Fabric rather than with Forge because it launches the
+    /// same way: an ordinary main class off a `Class-Path`, with no module
+    /// path and no `--add-opens` into `java.base`. Nothing it does is
+    /// sensitive to the JDK being newer than it was built against.
+    pub fn java_policy(self) -> JavaPolicy {
+        match self {
+            Loader::NeoForge | Loader::Forge => JavaPolicy::Exact,
+            Loader::Vanilla | Loader::Paper | Loader::Fabric | Loader::Quilt => JavaPolicy::AtLeast,
+        }
+    }
+}
+
+/// Whether a newer Java than a jar asks for is an upgrade or a failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JavaPolicy {
+    /// Anything at least this new will do.
+    AtLeast,
+    /// This version, and no other.
+    Exact,
 }
 
 /// A digest the publisher gave us, and what produced it.
@@ -274,18 +373,115 @@ pub fn paper(builds: &serde_json::Value, version: &str, required_java: u16) -> R
     })
 }
 
-/// Can the runtime this build ships actually run that jar?
+/// Which of the runtimes this build ships should run that jar.
 ///
 /// Answering before launch turns a cryptic `UnsupportedClassVersionError` deep
-/// in a JVM log into a sentence the player can act on.
-pub fn check_java(artifact: &Artifact, bundled_java: Option<u16>) -> Result<()> {
-    match bundled_java {
-        Some(have) if artifact.required_java > have => Err(Error::Unsupported(format!(
-            "Minecraft {} needs Java {}, and this version of Homerun ships Java {}. \
-             Update the app, or choose an older Minecraft version.",
-            artifact.version, artifact.required_java, have
-        ))),
-        _ => Ok(()),
+/// in a JVM log into a sentence the player can act on. Answering *which*, and
+/// not merely yes-or-no, is what lets the host ship more than one runtime and
+/// unpack only the one it is about to use.
+///
+/// # Why the lowest that satisfies, and not the newest
+///
+/// A jar needing Java 21 runs on 21, even when 25 is also installed. Mojang
+/// tests against the version it names, and every JDK past it is somewhere the
+/// jar has never been run. For vanilla that is close to a free choice; for the
+/// mod loaders arriving in M3 it is not a choice at all, and picking "the
+/// newest we have" is how you get a server that dies in modlauncher with a
+/// stack trace no player can act on.
+///
+/// # What this does not do yet
+///
+/// Forge and NeoForge bind to a Java version **exactly** rather than
+/// at-least — 21 means 21, and 25 is a failure rather than an upgrade. Every
+/// loader this build can host is at-least, so the policy that expresses that
+/// is deliberately not written here yet: see `plans/android-mod-loaders.md`
+/// M3, which adds it to [`Loader`] where it belongs.
+pub fn select_runtime(artifact: &Artifact, loader: Loader, bundled: &[u16]) -> Result<u16> {
+    let what = match loader {
+        Loader::Vanilla => format!("Minecraft {}", artifact.version),
+        other => format!(
+            "{} for Minecraft {}",
+            capitalise(other.as_str()),
+            artifact.version
+        ),
+    };
+    select_runtime_for(artifact.required_java, &what, loader, bundled)
+}
+
+fn capitalise(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// [`select_runtime`], for a Java requirement that did not come from an
+/// artifact.
+///
+/// The one caller that needs this is the bundler check: a server jar's own
+/// `net/minecraft/bundler/Main.class` can require a newer Java than Mojang's
+/// manifest claimed, and the jar wins because it is what fails. By then there
+/// is no artifact left to consult — the loader's installer produced the jar —
+/// only a number. [`what`] is the subject of the refusal sentence.
+pub fn select_runtime_for(
+    required_java: u16,
+    what: &str,
+    loader: Loader,
+    bundled: &[u16],
+) -> Result<u16> {
+    let policy = loader.java_policy();
+    let mut usable: Vec<u16> = bundled
+        .iter()
+        .copied()
+        .filter(|&have| match policy {
+            JavaPolicy::AtLeast => have >= required_java,
+            JavaPolicy::Exact => have == required_java,
+        })
+        .collect();
+    usable.sort_unstable();
+
+    usable.first().copied().ok_or_else(|| {
+        Error::Unsupported(if bundled.is_empty() {
+            // Not the player's problem and not phrased as though it were: a
+            // build with no runtime staged is a build that should not exist,
+            // and `verifyJavaRuntime` in `app/build.gradle.kts` is what stops
+            // one shipping.
+            "This version of Homerun ships no Java runtime, so it cannot host a \
+             Java server. Reinstall the app."
+                .to_string()
+        } else {
+            match policy {
+                JavaPolicy::AtLeast => format!(
+                    "{what} needs Java {required_java}, and this version of Homerun ships {}. \
+                     Update the app, or choose an older Minecraft version.",
+                    describe_runtimes(bundled),
+                ),
+                // Said differently on purpose. "Needs Java 17" alongside "ships
+                // Java 21 and 25" reads like a bug unless the sentence explains
+                // that newer is not better here.
+                JavaPolicy::Exact => format!(
+                    "{what} needs Java {required_java} exactly — mod loaders do not run on a \
+                     newer one — and this version of Homerun ships {}. Choose a Minecraft \
+                     version that uses Java {}.",
+                    describe_runtimes(bundled),
+                    describe_runtimes(bundled),
+                ),
+            }
+        })
+    })
+}
+
+/// `Java 21`, or `Java 21 and 25` — for a sentence a player reads.
+fn describe_runtimes(bundled: &[u16]) -> String {
+    let mut sorted: Vec<u16> = bundled.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let names: Vec<String> = sorted.iter().map(|v| v.to_string()).collect();
+    match names.split_last() {
+        None => "no Java runtime".to_string(),
+        Some((last, [])) => format!("Java {last}"),
+        Some((last, rest)) => format!("Java {} and {}", rest.join(", "), last),
     }
 }
 
@@ -580,12 +776,149 @@ mod tests {
         );
     }
 
+    /// The property this test exists to protect is **by name**, not the list.
+    /// A loader we cannot host must be refused explicitly, because the
+    /// alternative — quietly treating it as vanilla — starts a modded world
+    /// with no mods and eats it.
     #[test]
-    fn loaders_that_need_an_installer_are_refused_by_name() {
-        for loader in ["fabric", "forge", "neoforge", "quilt", "spigot", "bukkit"] {
+    fn loaders_this_build_cannot_host_are_refused_by_name() {
+        for loader in ["spigot", "bukkit"] {
             let err = Loader::parse(Some(loader)).unwrap_err();
             assert!(format!("{err}").contains(loader), "{loader}: {err}");
         }
+    }
+
+    /// The offer must never exceed the accept.
+    ///
+    /// That is the asymmetry worth pinning. A loader in `hostable()` that
+    /// `parse` refuses is the bug this pair exists to prevent — the app offers
+    /// it, the player configures it, and the launch refuses. A loader `parse`
+    /// accepts that `hostable()` omits is merely a feature not offered yet, and
+    /// nothing breaks.
+    ///
+    /// So this asserts the dangerous direction exhaustively, and states the
+    /// boundary on the loaders the API can actually send.
+    #[test]
+    fn the_hostable_list_is_exactly_what_parse_accepts() {
+        for loader in Loader::hostable() {
+            // Round-trips: the name advertised is a name the launch accepts,
+            // and it means the same loader.
+            assert_eq!(
+                Loader::parse(Some(loader.as_str())).unwrap(),
+                *loader,
+                "advertised {} but the launch refuses it",
+                loader.as_str()
+            );
+        }
+
+        // No duplicates, or the UI renders one twice.
+        let mut names: Vec<&str> = Loader::hostable().iter().map(|l| l.as_str()).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "hostable() repeats a loader");
+
+        // The boundary, over every `TYPE` the API sends. Spigot and Bukkit are
+        // the two the UI must stop offering on a phone.
+        for refused in ["spigot", "bukkit"] {
+            assert!(
+                !names.contains(&refused),
+                "{refused} is advertised but cannot be hosted"
+            );
+            assert!(Loader::parse(Some(refused)).is_err());
+        }
+        for hosted in ["vanilla", "paper", "fabric", "quilt", "neoforge", "forge"] {
+            assert!(
+                names.contains(&hosted),
+                "{hosted} can be hosted but is not advertised"
+            );
+        }
+    }
+
+    /// Quilt was on the list above until it was measured on a device. It is
+    /// here to record that the refusal was a policy choice and not a capability
+    /// one, so that reintroducing it would have to be deliberate.
+    ///
+    /// It sits with Fabric on every axis that matters: an installer produces
+    /// its launch jar, and the jar launches without a module path, so a newer
+    /// Java is an upgrade rather than a failure.
+    #[test]
+    fn quilt_is_hosted_and_behaves_like_fabric_not_like_forge() {
+        assert_eq!(Loader::parse(Some("quilt")).unwrap(), Loader::Quilt);
+        assert_eq!(Loader::parse(Some("Quilt")).unwrap(), Loader::Quilt);
+        assert_eq!(Loader::Quilt.as_str(), "quilt");
+
+        assert!(Loader::Quilt.is_installed());
+        assert_eq!(Loader::Quilt.java_policy(), JavaPolicy::AtLeast);
+
+        // A newer runtime than asked for is taken, which is what `AtLeast`
+        // buys and what `Exact` would refuse.
+        assert_eq!(
+            select_runtime_for(21, "Quilt", Loader::Quilt, &[25]).unwrap(),
+            25
+        );
+    }
+
+    /// Each refusal says why, because the reasons are genuinely different and
+    /// "unsupported" tells a player nothing they can act on.
+    #[test]
+    fn a_refusal_names_the_reason_and_what_to_use_instead() {
+        for loader in ["spigot", "bukkit"] {
+            let err = format!("{}", Loader::parse(Some(loader)).unwrap_err());
+            assert!(err.contains("BuildTools"), "{loader}: {err}");
+            assert!(err.contains("Paper"), "{loader}: {err}");
+        }
+    }
+
+    /// Forge and NeoForge are not refused at parse time — they are refused, if
+    /// at all, by the Java they need. `Loader::parse` saying yes and
+    /// `select_runtime` saying no is the split that lets the message name
+    /// Java 17 rather than shrugging at the loader.
+    #[test]
+    fn forge_and_neoforge_parse_and_are_judged_on_their_java() {
+        assert_eq!(Loader::parse(Some("neoforge")).unwrap(), Loader::NeoForge);
+        assert_eq!(Loader::parse(Some("Forge")).unwrap(), Loader::Forge);
+
+        // MC 1.21.x wants Java 21, which this build ships.
+        assert_eq!(
+            select_runtime_for(
+                21,
+                "NeoForge for Minecraft 1.21.4",
+                Loader::NeoForge,
+                &[21, 25]
+            )
+            .unwrap(),
+            21
+        );
+
+        // MC 1.20.1 wants 17, which it does not — and 21 is not a substitute.
+        let err = format!(
+            "{}",
+            select_runtime_for(17, "Forge for Minecraft 1.20.1", Loader::Forge, &[21, 25])
+                .unwrap_err()
+        );
+        assert!(err.contains("needs Java 17 exactly"), "{err}");
+        assert!(err.contains("Java 21 and 25"), "{err}");
+    }
+
+    /// The rule the whole policy exists for. A loader that wants 21 must get
+    /// 21, never 25 — modlauncher reaches into `java.base` internals a newer
+    /// JDK has moved, and the failure is a boot-layer stack trace.
+    #[test]
+    fn a_mod_loader_never_gets_a_newer_runtime_than_it_asked_for() {
+        assert_eq!(
+            select_runtime_for(21, "NeoForge", Loader::NeoForge, &[21, 25]).unwrap(),
+            21
+        );
+        assert!(
+            select_runtime_for(21, "NeoForge", Loader::NeoForge, &[25]).is_err(),
+            "25 satisfies >= 21 and must still be refused"
+        );
+        // Where vanilla in the same position is perfectly happy.
+        assert_eq!(
+            select_runtime_for(21, "Minecraft", Loader::Vanilla, &[25]).unwrap(),
+            25
+        );
     }
 
     #[test]
@@ -595,25 +928,99 @@ mod tests {
         assert_eq!(Loader::parse(Some("  ")).unwrap(), Loader::Vanilla);
         assert_eq!(Loader::parse(Some("VANILLA")).unwrap(), Loader::Vanilla);
         assert_eq!(Loader::parse(Some("Paper")).unwrap(), Loader::Paper);
+        assert_eq!(Loader::parse(Some("Fabric")).unwrap(), Loader::Fabric);
     }
 
+    /// The one question the host asks to know which path a loader takes:
+    /// download an artifact, or run an installer.
     #[test]
-    fn a_newer_jar_than_the_bundled_runtime_is_refused_before_launch() {
-        let artifact = Artifact {
+    fn only_fabric_installs_by_running_something() {
+        assert!(Loader::Fabric.is_installed());
+        assert!(!Loader::Vanilla.is_installed());
+        assert!(!Loader::Paper.is_installed());
+    }
+
+    fn needing(required_java: u16) -> Artifact {
+        Artifact {
             url: "https://x".into(),
             loader: "vanilla".into(),
             version: "26.2".into(),
             checksum: None,
-            required_java: 25,
+            required_java,
             size_bytes: None,
-        };
-        let err = check_java(&artifact, Some(21)).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn a_newer_jar_than_every_bundled_runtime_is_refused_before_launch() {
+        let err = select_runtime(&needing(25), Loader::Vanilla, &[21]).unwrap_err();
         assert!(format!("{err}").contains("needs Java 25"), "{err}");
         assert!(format!("{err}").contains("ships Java 21"), "{err}");
+    }
 
-        check_java(&artifact, Some(25)).expect("exactly enough is enough");
-        check_java(&artifact, Some(26)).expect("newer is fine");
-        check_java(&artifact, None).expect("unknown runtime cannot be judged");
+    #[test]
+    fn exactly_enough_is_enough_and_newer_is_fine() {
+        assert_eq!(
+            select_runtime(&needing(25), Loader::Vanilla, &[25]).unwrap(),
+            25
+        );
+        assert_eq!(
+            select_runtime(&needing(21), Loader::Vanilla, &[25]).unwrap(),
+            25
+        );
+    }
+
+    /// The rule the whole two-runtime design turns on. A jar needing 21 runs on
+    /// 21 even though 25 would also satisfy it — the version it was tested
+    /// against is the one least likely to surprise us, and for the mod loaders
+    /// in M3 it is the difference between booting and not.
+    #[test]
+    fn the_lowest_runtime_that_satisfies_wins() {
+        assert_eq!(
+            select_runtime(&needing(21), Loader::Vanilla, &[21, 25]).unwrap(),
+            21
+        );
+        assert_eq!(
+            select_runtime(&needing(21), Loader::Vanilla, &[25, 21]).unwrap(),
+            21
+        );
+        assert_eq!(
+            select_runtime(&needing(25), Loader::Vanilla, &[21, 25]).unwrap(),
+            25
+        );
+    }
+
+    /// A build with nothing staged says so as a build problem, not as though
+    /// the player picked a bad Minecraft version.
+    #[test]
+    fn no_staged_runtime_is_refused_as_a_broken_build() {
+        let err = select_runtime(&needing(21), Loader::Vanilla, &[]).unwrap_err();
+        assert!(format!("{err}").contains("ships no Java runtime"), "{err}");
+        assert!(
+            !format!("{err}").contains("older Minecraft"),
+            "a build with no runtime is not the player's fault: {err}"
+        );
+    }
+
+    #[test]
+    fn the_refusal_names_every_runtime_the_build_has() {
+        let err = select_runtime(&needing(30), Loader::Vanilla, &[25, 21]).unwrap_err();
+        assert!(format!("{err}").contains("Java 21 and 25"), "{err}");
+    }
+
+    /// The bundler check has a number and no artifact, and its refusal has to
+    /// name the jar rather than a Minecraft version it cannot see.
+    #[test]
+    fn a_requirement_without_an_artifact_selects_and_refuses_the_same_way() {
+        assert_eq!(
+            select_runtime_for(21, "The server jar", Loader::Vanilla, &[21, 25]).unwrap(),
+            21
+        );
+        let err = select_runtime_for(30, "The server jar", Loader::Vanilla, &[21, 25]).unwrap_err();
+        assert!(
+            format!("{err}").contains("The server jar needs Java 30"),
+            "{err}"
+        );
     }
 
     #[test]

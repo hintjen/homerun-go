@@ -311,6 +311,54 @@ came back on an older UI than the one it downloaded.
 
 ---
 
+### 🔑 [Sign in with Google and Apple](./social-login.md)
+
+One bridge channel, two host implementations, and a browser — because Google
+refuses to authenticate inside the WebView both hosts are built on.
+
+**Contains**:
+- Why the sign-in cannot happen in our WebView, and what that forces
+- The split: why the host owns only "open a browser", and the OAuth lives in
+  the shared UI
+- `auth:web-session`, revision 7, and why `canceled` is not an error
+- Android: Custom Tabs without the `androidx.browser` dependency, and why the
+  callback must be claimed *before* the deep-link emit
+- The 700 ms cancel grace, and why a dismissed Custom Tab is invisible
+- iOS: the three lines that break silently — the ARC capture, the cookie jar,
+  the file-scope anchor
+- Why PKCE is hashed in JavaScript, and the iOS secure-context rule behind it
+- The realm state the hosts assume and cannot check
+
+**Read this for**: Working on social sign-in, adding a provider, or a sign-in
+that spins for ever.
+
+---
+
+### ⛏️ [The Minecraft account on Android](./minecraft-account.md)
+
+Which Minecraft player a phone belongs to. Stats are keyed on a Minecraft uuid
+and every read of them takes one as input, so without this the Minigames Hub
+could only ever show a signed-in user zero of their own numbers.
+
+**Contains**:
+- The two independent paths — an account linked on the desktop (no sign-in at
+  all, and the one most users take) and a Microsoft sign-in on the phone
+- Why `linkedAccount` is kept apart from `credentials`: an identity is not a
+  credential and has nothing to sign out of
+- Why device code rather than a redirect, and what the public Xbox client id
+  buys us
+- The two failure modes that are not failures: pending polls arriving as HTTP
+  400, and Android cutting a backgrounded app's DNS mid-sign-in
+- Why the sign-in completes when the user comes back, not when they approve
+- Why no token crosses into the WebView, and what goes over instead
+- Registering our own Azure app: the three settings that decide whether it works
+  at all, how to frame the review, and what changes in the code if it lands
+
+**Read this for**: A phone showing zero stats, a sign-in that never resolves, or
+applying for Minecraft API access.
+
+---
+
 ### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
 
 Not a subsystem doc — the full sweep behind "no", so it does not get
@@ -330,6 +378,54 @@ re-researched every time someone notices Android can and iOS cannot.
 
 **Read this for**: Being asked why iOS cannot do what Android does, or
 deciding how far to push it.
+
+---
+
+### 🧱 [Mods and plugins on Android](./android-mods.md)
+
+How a server gets the mods it is configured with — and the gap it closed:
+**before this, Android installed no mods and no plugins at all**, on any
+loader, while advertising that it could.
+
+**Contains**:
+- Why the logic is in `homerun-core` and not in Kotlin, and what that is worth
+- The step machine, and why downloads are steps rather than a final pass
+- Why a failed step is data rather than an exception
+- Where the sync runs in a launch, and why it cannot fail one
+- `.homerun-loader.json`'s two writers, and why every write is a merge
+- The one rule the stale sweep must not break
+- The shared fixtures, and what they are for
+- Why a **Quilt** server resolves almost no mods, and why that is left alone
+- What a real Modrinth run installed on a phone, and what it correctly skipped
+
+**Read this for**: Touching mod resolution, or wondering why a plugin did not
+install.
+
+---
+
+### 🧩 [Mod loaders and mod resolution on Android](../plans/android-mod-loaders.md)
+
+How a phone comes to host Fabric, Quilt, NeoForge and modern Forge, and how the
+desktop's mod resolver stops being three implementations. **Built and run on
+hardware** — M0–M7.
+
+**Contains**:
+- What actually runs today, and the live bug it started from: **no mod
+  installation existed on Android at all**, so a Paper server started without
+  its plugins
+- Why the JNI launch path cannot expand `@argfiles`, and what replaces it
+- The measured cost of a second Java runtime (53 MB compressed), and why that
+  is affordable exactly once
+- Why the runtimes are 21 and 25, what that rules out, and why "lowest that
+  satisfies" is the selection rule rather than "newest we ship"
+- Why a pure core can still own an I/O-driven resolver — the step machine
+- The rules that must survive the port, and the two that must not be re-added
+- Shared fixtures as the anti-drift mechanism, and why that is the real prize
+- **M6: what a real device found** — including a bug that stops every Java
+  server on arm64, and a build guard that was never armed
+- **M7: Quilt**, and why the UI no longer offers loaders the host refuses
+
+**Read this for**: Adding a loader, or touching mod resolution anywhere.
 
 ---
 

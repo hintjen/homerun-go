@@ -269,7 +269,7 @@ rather than promoted.
 | `minecraft.jar.vanilla` | `metadata`, `version` | `Artifact` |
 | `minecraft.jar.paper` | `builds`, `version`, `requiredJava?` (default 21) | `Artifact` |
 | `minecraft.jar.parseLoader` | `type?` | `"vanilla"` or `"paper"`; anything needing an installer **errors by name** |
-| `minecraft.jar.checkJava` | `artifact`, `bundledJava?` | `true`, or errors with a sentence for the player |
+| `minecraft.jar.selectRuntime` | `artifact`, `bundled` (Java majors staged) | the major to launch — the **lowest** that satisfies the jar — or errors with a sentence for the player |
 | `minecraft.jar.satisfies` | `onDisk`, `artifact` | bool — is the jar on disk exactly this artifact |
 | `minecraft.jar.couldSatisfy` | `onDisk`, `version?`, `loader?` | bool — the looser offline fallback |
 | `minecraft.settings.fromEnv` | `env`, `gameType?`, `loader?`, `fallbackMotd?` | resolved `Settings` |

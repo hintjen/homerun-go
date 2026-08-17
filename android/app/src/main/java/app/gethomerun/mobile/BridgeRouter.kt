@@ -14,6 +14,8 @@ import android.webkit.WebView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -166,6 +168,15 @@ class BridgeRouter(
 
     /** Resolves the device's vibrator once; the `haptic` channel plays through it. */
     private val haptics = Haptics(context)
+
+    /**
+     * The signed-in Minecraft account, if there is one.
+     *
+     * Router-scoped rather than process-scoped, unlike [backend]: nothing here
+     * outlives a page, because the session itself lives in [SecretStore] and a
+     * new router reads the same one back.
+     */
+    private val minecraftAuth = MinecraftAuth(context)
 
     /**
      * The local server engine, owned by the process rather than by this
@@ -487,10 +498,62 @@ class BridgeRouter(
     /**
      * A link that arrived while the app was already running. The UI is mounted
      * and subscribed, so push it.
+     *
+     * An OAuth callback is *not* a deep link and must not be emitted as one:
+     * `lib/deepLink.ts` returns null for intents it does not recognise, so an
+     * auth callback pushed here would be parsed, rejected and dropped in
+     * silence while the sign-in call waited for ever. It goes to whoever is
+     * awaiting the browser session instead.
      */
     fun deliverDeepLink(url: String) {
+        if (completeAuthSession(url)) return
         emit("deep-link", listOf(JsonPrimitive(url)))
     }
+
+    // ---------------------------------------------------------------------
+    // Browser-based sign-in
+    // ---------------------------------------------------------------------
+
+    /**
+     * The sign-in currently waiting on a browser, if any.
+     *
+     * Google refuses to authenticate inside an embedded WebView, so the page
+     * cannot run this itself; it hands us a URL and waits. One at a time by
+     * construction — a second call while one is outstanding cancels the first,
+     * because there is only one browser and only one user.
+     */
+    private val pendingAuthSession = AtomicReference<CompletableDeferred<String>?>(null)
+
+    /** True when [url] belonged to a waiting sign-in and was handed to it. */
+    private fun completeAuthSession(url: String): Boolean {
+        if (!url.startsWith("$AUTH_CALLBACK_PREFIX")) return false
+        val waiting = pendingAuthSession.getAndSet(null) ?: return false
+        Log.i(TAG, "auth:web-session -> callback received")
+        waiting.complete(url)
+        return true
+    }
+
+    /**
+     * Called when the activity comes back to the foreground.
+     *
+     * A dismissed Custom Tab reports nothing at all — there is no cancel
+     * callback — so the only signal that the user backed out is that we are
+     * visible again with a session still outstanding. The delay is what
+     * separates "they closed it" from "the redirect is a beat behind us",
+     * since returning via the callback also resumes the activity.
+     */
+    fun onForegrounded() {
+        val waiting = pendingAuthSession.get() ?: return
+        scope.launch {
+            delay(AUTH_CANCEL_GRACE_MS)
+            if (pendingAuthSession.compareAndSet(waiting, null)) {
+                Log.i(TAG, "auth:web-session -> dismissed without a callback")
+                waiting.completeExceptionally(AuthSessionCanceled())
+            }
+        }
+    }
+
+    private class AuthSessionCanceled : Exception("Sign-in was cancelled.")
 
     // ---------------------------------------------------------------------
     // Page lifecycle
@@ -615,6 +678,69 @@ class BridgeRouter(
                 withContext(Dispatchers.Main) { haptics.play(pattern, webView) }
             }
             null
+        },
+
+        // --- the Minecraft account ------------------------------------------
+        //
+        // Which Minecraft player this phone belongs to. Minigame stats are
+        // keyed on a Minecraft uuid and every read of them takes one as input,
+        // so without these the hub could only ever show a signed-in user zero
+        // of their own numbers. [MinecraftAuth] has the flow and the reason it
+        // is device-code rather than a redirect.
+        //
+        // The two events are not optional and are the detail most likely to be
+        // missed: several `useMinecraftAccount` consumers mount at once — the
+        // profile banner and the leaderboard's "You" row are both on `/games` —
+        // and each keeps its own state from them. A login that only answered
+        // its caller would leave the other consumers signed out until reload.
+
+        "minecraft:auth:get-profile" to { _ ->
+            // Refreshes silently when the token has aged out. Null covers "not
+            // signed in" and "the session could not be recovered" alike, which
+            // is what the UI does with both anyway.
+            minecraftAuth.profile()?.let { Core.accountRedacted(it) } ?: JsonNull
+        },
+
+        "minecraft:auth:login" to { _ ->
+            try {
+                val session = minecraftAuth.signIn { code ->
+                    // Opened as soon as there is a code, before the poll that
+                    // waits up to a quarter of an hour for approval.
+                    //
+                    // The code is not sent to the UI, and deliberately: the URL
+                    // carries it as `?otc=`, so Microsoft fills it in and the
+                    // user only has to confirm. Telling the page about it would
+                    // mean a channel `bridge/v1` does not have — and the whole
+                    // reason this feature needed no protocol change is that the
+                    // three invokes and two events already existed.
+                    minecraftAuth.openApproval(code)
+                }
+                val credentials = Core.accountRedacted(session)
+                emit("minecraft:auth:ready", listOf(credentials))
+                buildJsonObject {
+                    put("success", true)
+                    put("credentials", credentials)
+                }
+            } catch (err: Exception) {
+                if (err is CancellationException) throw err
+                // Written for a player: `MinecraftAuth.AuthException` messages
+                // already are, and anything else would be a stack trace.
+                Log.w(TAG, "Minecraft sign-in failed: ${err.message}")
+                buildJsonObject {
+                    put("success", false)
+                    put(
+                        "error",
+                        (err as? MinecraftAuth.AuthException)?.message
+                            ?: "Could not sign in to Microsoft.",
+                    )
+                }
+            }
+        },
+
+        "minecraft:auth:logout" to { _ ->
+            minecraftAuth.signOut()
+            emit("minecraft:auth:signed-out")
+            buildJsonObject { put("success", true) }
         },
 
         // --- over-the-air updates -------------------------------------------
@@ -831,6 +957,50 @@ class BridgeRouter(
         "cache-client-nonce" to { params ->
             prefs.edit().putString(KEY_CLIENT_NONCE, params?.jsonPrimitive?.content).apply()
             null
+        },
+
+        /*
+         * Run an OAuth redirect in a real browser and hand back where it
+         * landed. A Custom Tab, never our own WebView: Google answers
+         * `disallowed_useragent` to android.webkit.WebView, which is the
+         * whole reason this channel exists.
+         *
+         * Suspends until the callback arrives through the activity's
+         * `homerun://` intent filter, or until the user is seen to have
+         * dismissed the tab. The bridge has no blanket call timeout by
+         * design, and this is a case where that is right — the user may take
+         * minutes to sign in, and the cancel path is what ends it.
+         */
+        "auth:web-session" to { params ->
+            val obj = params as? JsonObject
+            val url = obj?.get("url")?.jsonPrimitive?.contentOrNull
+            if (url.isNullOrBlank()) {
+                authFailure("No sign-in address was provided.")
+            } else {
+                val waiter = CompletableDeferred<String>()
+                // A second sign-in supersedes the first; the old one can never
+                // complete now that its callback would be routed here.
+                pendingAuthSession.getAndSet(waiter)
+                    ?.completeExceptionally(AuthSessionCanceled())
+                try {
+                    openInBrowser(url)
+                    val callbackUrl = waiter.await()
+                    buildJsonObject {
+                        put("success", true)
+                        put("callbackUrl", callbackUrl)
+                    }
+                } catch (_: AuthSessionCanceled) {
+                    buildJsonObject {
+                        put("success", false)
+                        put("error", "Sign-in was cancelled.")
+                        put("canceled", true)
+                    }
+                } catch (e: Exception) {
+                    pendingAuthSession.compareAndSet(waiter, null)
+                    Log.w(TAG, "auth:web-session failed", e)
+                    authFailure("Could not open the sign-in page.")
+                }
+            }
         },
 
         // The pull half of deep-link delivery. Read-and-clear: the UI calls
@@ -1064,11 +1234,23 @@ class BridgeRouter(
                                 )?.let { throw ServerBackendException.Engine(it) }
                             }
 
+                            // A minigame lobby is generated for one session and the
+                            // API soft-deletes the server behind it, so there is no
+                            // world here worth keeping. That makes it exempt from the
+                            // whole backup lifecycle below — not merely "it happens to
+                            // have no repository", which is what would otherwise be
+                            // true and would put an ephemeral lobby into a player's
+                            // restic repo, cost them the upload, and then hand the
+                            // next launch a stale lobby to restore.
+                            val ephemeral = Core.isMinigame(settings?.env)
+
                             // Refuse to launch while another device is finishing its
                             // backup: starting now would build a second world from a
                             // snapshot that is still being written. `force` is the UI's
-                            // data-loss-warning takeover.
-                            if (settings != null && deviceId != null) {
+                            // data-loss-warning takeover. A server that will never be
+                            // backed up cannot be the one being written, so it does not
+                            // queue behind anybody.
+                            if (settings != null && deviceId != null && !ephemeral) {
                                 val force = obj["force"]?.jsonPrimitive?.booleanOrNull == true
                                 BackupManager(context).leaseBlockedReason(settings, deviceId, force)?.let {
                                     throw ServerBackendException.Engine(it)
@@ -1086,10 +1268,13 @@ class BridgeRouter(
                                     settingsEnv = settings?.env,
                                     gameType = settings?.rawGameType ?: "java",
                                     // Null when the server has no repository, backups are
-                                    // off for it, or this device is not registered — all
-                                    // of which mean "host without backups" rather than
-                                    // "refuse to host".
-                                    backupContext = if (settings?.backup != null && deviceId != null) {
+                                    // off for it, this device is not registered, or it is
+                                    // a lobby — all of which mean "host without backups"
+                                    // rather than "refuse to host". Null here is also
+                                    // what keeps `RestoreWorld` out of the launch plan
+                                    // entirely, so the exemption is one decision rather
+                                    // than a check repeated at each step.
+                                    backupContext = if (settings?.backup != null && deviceId != null && !ephemeral) {
                                         BackupContext(settings, deviceId)
                                     } else null,
                                     // A closure, so the token stays here. The backend
@@ -1368,6 +1553,38 @@ class BridgeRouter(
         false
     }
 
+    /**
+     * Open a sign-in page in a Custom Tab, falling back to whatever browser
+     * the device has.
+     *
+     * A Custom Tab is preferred over a plain `ACTION_VIEW` because it shares
+     * the browser's cookie jar — a user already signed in to Google is one tap
+     * from done — while still being a real browser as far as Google's
+     * embedded-WebView rule is concerned. `FLAG_ACTIVITY_NEW_TASK` is
+     * deliberately absent: the tab belongs to our task, so the redirect
+     * returns to this activity rather than starting a second one.
+     */
+    private fun openInBrowser(url: String) {
+        val uri = Uri.parse(url)
+        val customTab = Intent(Intent.ACTION_VIEW, uri).apply {
+            // The Custom Tabs extras, set literally so the class is not a
+            // dependency: androidx.browser is not on this host's classpath and
+            // a browser that does not understand them just opens normally.
+            putExtra("android.support.customtabs.extra.SESSION", null as android.os.Bundle?)
+            putExtra("android.support.customtabs.extra.TITLE_VISIBILITY", 1)
+        }
+        try {
+            context.startActivity(customTab)
+        } catch (_: Exception) {
+            if (!openExternal(url)) throw IllegalStateException("no browser available")
+        }
+    }
+
+    private fun authFailure(message: String): JsonElement = buildJsonObject {
+        put("success", false)
+        put("error", message)
+    }
+
     /** The desktop shape: a `memory` string in MB, or an error. */
     /**
      * Free bytes on the volume holding app-private storage.
@@ -1514,7 +1731,22 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 6
+        const val HOST_REVISION = 8
+
+        /**
+         * Auth callbacks come home on this prefix rather than one of the
+         * deep-link intents, so `lib/deepLink.ts` never sees them — it returns
+         * null for anything it does not recognise, which would drop a
+         * sign-in silently.
+         */
+        const val AUTH_CALLBACK_PREFIX = "homerun://auth/"
+
+        /**
+         * How long after returning to the foreground to wait for a callback
+         * before calling a sign-in dismissed. A Custom Tab gives no cancel
+         * signal, so the absence of a redirect is the only evidence there is.
+         */
+        const val AUTH_CANCEL_GRACE_MS = 700L
 
         /** Protocol-level, deliberately absent from the channel inventory. */
         private const val READY_METHOD = "__bridge:ready"

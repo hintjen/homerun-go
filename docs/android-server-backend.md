@@ -133,23 +133,87 @@ with the runtime inside it, fetching server software at runtime.
 #### Staging it
 
 ```bash
-npm run jre:android          # arm64-v8a, what ships
-npm run jre:android-x86_64   # emulator
+npm run jre:android          # arm64-v8a, Java 21 and 25 — what ships
+npm run jre:android-x86_64   # emulator, both
+npm run jre:android-25       # just 25, for a faster debug loop
 ```
 
 `scripts/stage-jre.py` pulls OpenJDK from
 [Termux](https://packages.termux.dev/apt/termux-main/) — the only source
 publishing current OpenJDK for Android on both architectures (17.0.20, 21.0.12,
-25.0.4) — and unpacks it into `assets/jre/`. Pinned by exact version, so an
-upstream bump cannot silently change what ships. It needs only the Python
-standard library: `ar`, `xz` and `tar` are none of them reliably present on
-Windows.
+25.0.4) — and unpacks each major into its own `assets/jre-<major>/`. Pinned by
+exact version, so an upstream bump cannot silently change what ships. It needs
+only the Python standard library: `ar`, `xz` and `tar` are none of them
+reliably present on Windows.
 
-It prunes ~85 MB the runtime never uses on a phone — `jmods/` (jlink input),
-`demo/`, `man/`, `include/`, `lib/ct.sym`. `legal/` stays: these are GPLv2+CE
-builds and the notices ship with them.
+It prunes ~85 MB per runtime that is never used on a phone — `jmods/` (jlink
+input), `demo/`, `man/`, `include/`, `lib/ct.sym`. `legal/` stays: these are
+GPLv2+CE builds and the notices ship with them.
 
-Result: **~167 MB staged, a 79.5 MB APK.**
+Result: **162 MB staged for Java 21 and 167 MB for 25** — 53 MB and 58 MB
+compressed, which is what they cost in the download.
+
+#### Why there are two, and which one runs
+
+Minecraft names a *minimum* Java version; a mod loader wants an *exact* one,
+because modlauncher breaks on JDKs newer than it was built against. One runtime
+cannot serve both, so the build stages two and chooses per server.
+
+The choice is `homerun-core`'s — `jar::select_runtime`, reached through
+`Core.selectRuntime` — and the rule is **the lowest staged runtime that
+satisfies the jar**, not the newest available:
+
+| Loader wants | Staged | Launches on | Why |
+|---|---|---|---|
+| Java 21, at least | 21, 25 | **21** | The version it was tested against |
+| Java 25, at least | 21, 25 | **25** | 21 cannot run it |
+| Java 25, at least | 21 | *refused* | Said as a sentence, before the JVM starts |
+| Java 21, **exactly** | 21, 25 | **21** | Forge and NeoForge; 25 would boot and then break |
+| Java 17, **exactly** | 21, 25 | *refused* | Forge 1.20.1. Nothing staged is 17, and 21 is not a substitute |
+
+Picking the newest would be the intuitive rule and it is the wrong one: a mod
+loader that wants 21 and gets 25 does not fail at selection time, it fails deep
+inside a JVM log.
+
+Which of the two rules applies is `Loader::java_policy`. Vanilla, Paper, Fabric
+and Quilt are `AtLeast` — they launch an ordinary main class off a `Class-Path`
+and a newer JDK is simply an upgrade. Forge and NeoForge are `Exact`, because
+modlauncher and securejarhandler reach into `java.base` internals through
+`--add-opens` and a JDK past the one they were built against has moved those
+internals.
+
+**Both paths are confirmed on hardware.** On a Pixel 9 Pro XL (arm64, API 37) a
+Fabric server on Minecraft 26.2 selected Java 25 and a Quilt server on 1.21.11
+selected Java 21 — and only the runtime each needed was unpacked, which is the
+lazy-unpack claim below holding in practice rather than in principle.
+
+Three things follow from staging more than one:
+
+- **Unpacking is lazy and per major.** `JavaRuntime.ensure(context, major)`
+  touches only what it was asked for, so a player who hosts nothing but vanilla
+  never pays the ~170 MB unpack for the runtime they do not use. That is why
+  the jar is resolved *before* a runtime is unpacked in `JavaServerBackend` —
+  the jar is what decides which runtime to unpack.
+- **`JavaRuntime.dropUnusedRuntimes`** collects an unpacked runtime this build
+  no longer ships. Nothing else would: the unpack is keyed by major, so a
+  runtime that stops being staged simply stops being asked for, and half a
+  gigabyte sits in `filesDir` for ever.
+- **A server started offline has no artifact to judge**, so the jar marker
+  (`homerun-jar.json`) records `requiredJava` at download time. When it is
+  absent — an older marker, or a jar restored from another device — the
+  *newest* staged runtime is used, because a too-new JVM runs a vanilla server
+  and a too-old one cannot start it at all.
+
+Two Gradle guards, catching different failures:
+
+- **`verifyJavaRuntime`** walks every staged runtime and refuses one built for
+  the wrong CPU. Two runtimes make this matter more than it did: a build with
+  one correct and one wrong hosts perfectly until somebody picks the Minecraft
+  version that selects the broken one.
+- **`verifyReleaseRuntimes`** fails a *release* missing either major. What it
+  prevents is quiet and remote — an app that installs, hosts most servers, and
+  refuses exactly the ones whose version selects the runtime that never
+  shipped.
 
 #### Why assets rather than jniLibs
 
@@ -200,14 +264,22 @@ referenced but only by things a headless server never touches — `libasound`,
 `libz.so.1` as a link, which is exactly the soname the linker wants; keeping
 them as links also fails on Windows, where this may well be built.
 
-#### Verified on the emulator
+#### Verified on the emulator, then on a phone
 
 | Configuration | Result |
 |---|---|
 | Java 21.0.12, x86_64 | Minecraft 1.21.11 boots to the EULA gate (`Thread.java:1583`) |
 | Java 25.0.4, x86_64 | same, on the newer runtime (`Thread.java:1474`) |
 | Java 21, **networking disabled** | still boots — the runtime is genuinely self-contained |
-| Java 25.0.4, **arm64** | stages and verifies (`OS_ARCH="aarch64"`, ELF `Machine: AArch64`), **not** runtime-tested — no arm64 device here |
+| Java 21 and 25, **arm64** | both create a VM on a Pixel 9 Pro XL (API 37), through the shipping `libjavabin.so` |
+| Fabric, MC 26.2, arm64 | installs and boots on Java 25, through the app |
+| Quilt, MC 1.21.11, arm64 | installs and boots on Java 21, through the app |
+| NeoForge 21.4.157, MC 1.21.4, arm64 | installer runs on the device; core-expanded argfiles boot it |
+
+The arm64 row used to read "stages and verifies, **not** runtime-tested — no
+arm64 device here". It is worth remembering that it stayed that way through five
+milestones, because the first thing a real device did was find a bug that no
+amount of staging verification could have.
 
 Two things only a real run found:
 
@@ -219,6 +291,43 @@ Two things only a real run found:
   exist outside Termux, so anything writing a temp file fails on a path no one
   can explain. `JavaServerBackend` overrides it to `<serverDir>/tmp`.
 
+#### Heap pointer tagging aborts the JVM, and the launcher turns it off
+
+The bug a device found, and it is not a mod-loader bug — **it stops every Java
+server on every arm64 phone since Android 11**, vanilla included.
+
+Android 11 gives each heap pointer a non-zero tag in its top byte and `free()`
+checks it. HotSpot keeps its own bits in that byte, so the pointer it hands back
+no longer carries the tag it was given, and bionic aborts the process:
+
+```text
+Pointer tag for 0x766180fdb0 was truncated
+#00 abort+160        libc.so
+#01 free+108         libc.so
+#02 ...              libjvm.so
+```
+
+**The VM boots fine and dies later**, which is what made this expensive to see.
+A trivial main class runs to completion; the abort needs enough allocation and
+freeing to hit a tagged pointer, so it first appeared partway through running an
+*installer*, not at startup. Anything that only checks "does the VM start" passes.
+
+`homerun-java-launcher` now calls
+`mallopt(M_BIONIC_SET_HEAP_TAGGING_LEVEL, M_HEAP_TAGGING_LEVEL_NONE)` before it
+creates the VM. Three notes on that:
+
+- **The launcher, not the manifest.** `android:allowNativeHeapPointerTagging="false"`
+  would also work and is what Termux does, but it disables the mitigation for
+  *every* process in the app to accommodate one third-party library. The
+  `mallopt` call scopes it to the JVM's own process; nothing else gives anything up.
+- **Resolved with `dlsym`, not linked.** `mallopt` only enters the NDK's link
+  stubs at API 26 and these opcodes at 31, so linking it directly fails to
+  build. dlsym also happens to behave correctly on a device too old to have it:
+  nothing happens, which is right, because tagging is not on there either.
+- **The opcodes come from the NDK's `malloc.h`**, not from memory — `-204` and
+  `0`. A wrong constant here fails silently, which is the worst way for this to
+  be wrong.
+
 #### The JNA stack trace at boot is expected
 
 Every Java server start logs a wall of `com.sun.jna` / `oshi` stack traces
@@ -227,6 +336,62 @@ this host and it is not fixable here: JNA ships a **glibc** `libjnidispatch.so`
 and Android is bionic, so it will not load wherever it is unpacked. Minecraft
 wraps that probe in `ignoreErrors` and boots regardless. The cost is no
 hardware detail in crash reports.
+
+### Starting a JVM at all — `JavaProcess`
+
+A server is not the only JVM this app runs. Every mod loader in
+[`plans/android-mod-loaders.md`](../plans/android-mod-loaders.md) installs by
+*running an installer jar*, so the knowledge of how a JVM starts on Android
+lives in `JavaProcess` rather than inside the server backend, where only a
+server could reach it.
+
+The launcher's contract, from `rust/homerun-java-launcher/src/main.rs`:
+
+```text
+libjavabin.so <libjvm.so> <main-class> [jvm-option ...] -- [program arg ...]
+```
+
+**There is no `-jar`.** The VM is created through JNI — `JNI_CreateJavaVM`
+takes its options directly — so the jar goes on the classpath and the main
+class is named separately, read from the manifest by Kotlin so the launcher
+stays free of zip parsing.
+
+That JNI detail has a consequence worth knowing before it bites: **an
+`@argfile` cannot be passed through.** Expanding one is a feature of the `java`
+launcher *binary*, and there is no `java` binary here. Forge and NeoForge launch
+entirely through argfiles, which is why expanding them is its own milestone.
+
+`JavaProcess.invocation` composes a launch — the launcher path, the unpacked
+`libjvm.so`, the classpath, `java.home`, `java.library.path`, a real
+`java.io.tmpdir` (Termux builds compile in a prefix that does not exist here,
+so anything writing a temp file fails on a path nobody can explain), and the
+`LD_LIBRARY_PATH` the Termux runtime needs *in the environment*, because the
+linker reads it at exec and setting it later is too late.
+
+What a launch is composed *of* splits cleanly in two, and neither half decides
+the other:
+
+| | Decided by |
+|---|---|
+| That a JVM needs `LD_LIBRARY_PATH`, a tmpdir, a classpath | `JavaProcess` — it is an Android question |
+| What a *Minecraft server* is given: heap, `nogui`, EULA | `homerun-core`, `jvm::launch` |
+
+Two ways a composed invocation is used, and they are not interchangeable:
+
+- **A server** goes to the supervisor in `homerun-pumpkin-ffi` as JSON. It owns
+  the console, the stop ladder and what an exit meant — the same state machine
+  that runs the linked engine on iOS.
+- **Everything else** goes to `JavaProcess.run`, which executes it to
+  completion and returns the exit code. Output is merged and streamed a line at
+  a time, so a slow installer shows progress rather than going quiet for
+  minutes; cancelling the coroutine destroys the process, because a stop during
+  a loader install has to take effect at once rather than after the download
+  finishes.
+
+`run` filters the launcher's own `[launcher] pid=` line. The supervisor needs
+it — it is how the host learns a pid to sample `/proc/<pid>` for the metrics
+graph, since `Process.pid()` does not resolve against the Android SDK — but
+nothing supervises an unsupervised run, so to a reader it is only noise.
 
 ### Getting a server jar onto the device — `ServerJar`
 
@@ -239,11 +404,18 @@ cannot use it; `server.jar` is not and can.
 "resolve the Mojang manifest first" order — it names the required Java for
 every loader, not just vanilla, and it is what turns "latest" into a version.
 
-| Loader | Resolved from |
+| Loader | How it arrives |
 |---|---|
 | vanilla | `launchermeta.mojang.com` version manifest → per-version meta → `downloads.server` |
 | paper | `fill.papermc.io/v3` builds for the resolved version |
-| everything else | refused, with the reason — Fabric, Forge, NeoForge and Quilt install by *running* an installer, which is a separate piece of work |
+| fabric, quilt | an **installer** is run — see [Loaders that install themselves](#loaders-that-install-themselves--serverloader) |
+| forge, neoforge | an **installer** is run, and the Java it wants is `Exact` |
+| spigot, bukkit | refused by name, with the reason: BuildTools *compiles* them on the device and needs a JDK with `javac`. Paper is a superset and runs their plugins |
+
+Every loader still resolves its Minecraft version and required Java through
+Mojang's manifest first, installed ones included — an installer has no artifact
+to download, but "latest" still has to become a number and the Java level has to
+come from somewhere.
 
 If the jar needs a newer Java than the build ships, that is said plainly before
 anything launches, rather than surfacing as `UnsupportedClassVersionError`.
@@ -253,13 +425,17 @@ anything launches, rather than surfacing as `UnsupportedClassVersionError`.
 asks whether this *device* can host this server at all — it is where Bedrock is
 turned away, and it is shared with iOS so the two apps refuse the same things in
 the same words. The table above is narrower: given that the device could host
-it, can this build get a jar for that loader. Forge passes the first gate here
-(a spawned engine can load mods; iOS's linked one cannot) and is refused by the
-second, with a reason about installers rather than about phones.
+it, can this build get a jar for that loader.
 
 Keeping them separate is deliberate. Folding the loader table into the hosting
-rule would put "we have not written the Forge installer yet" — a fact about this
-build, changeable next release — into the crate that iOS also asks.
+rule would put a fact about *this build* — which loaders it has installers for —
+into the crate that iOS also asks.
+
+**And a third gate now sits in front of both.** `HostCapabilities.serverLoaders`
+tells the UI which loaders to *offer*, so Spigot never reaches a refusal in the
+first place. See [`android-host.md`](./android-host.md#which-loaders-the-ui-offers).
+That is the important shape: a refusal is the last line of defence, not the
+user-facing design.
 
 Three deliberate differences from the desktop, all because this is a phone:
 
@@ -347,6 +523,162 @@ version changed on the web dashboard then takes effect on the next start. The
 lookup lives in the router rather than the backend so the access token never
 reaches the server process's environment. If it fails, vanilla-latest, which
 is the desktop's fallback too.
+
+### Loaders that install themselves — `ServerLoader`
+
+Vanilla and Paper publish a **server jar**: resolve a URL, download it, check a
+digest, launch it — all of the section above. Fabric publishes an **installer**:
+a jar run once that fetches what it needs and leaves a launchable server behind.
+The two share a version resolver and nothing else, which is why they are
+separate files.
+
+`Core.loaderIsInstalled` decides which path a server takes. The host has no
+loader list of its own, so there is nothing to drift.
+
+#### What an installer-based loader does
+
+Four loaders take this path — Fabric, Quilt, Forge and NeoForge — and the steps
+are the same for all of them:
+
+1. Resolve the Minecraft version from Mojang's manifest — `ServerJar.resolveVanilla`. An installed loader has no artifact to download, but "latest" still has to become a number and the Java level still has to come from somewhere. The desktop calls `fetchServerJarMeta` for every loader for the same reason.
+2. Select and unpack a runtime, because **the installer itself needs a JVM**.
+3. Install, unless what is already installed matches. `.homerun-loader.json` — the desktop's name and shape, so a directory restored from a desktop backup is understood rather than reinstalled — records the loader, the Minecraft version and any pinned loader build.
+4. Re-check the Java version, because the installer has now produced a `server.jar` and that jar's own bundler can need a newer Java than Mojang's manifest claimed. The jar wins; it is the thing that fails.
+
+Step 3 asks **two** questions and both must say no: does the marker match, *and*
+are the files actually there. A marker can be right while the tree is gone — a
+failed install, or a restore that brought one and not the other — and believing
+it alone would launch a jar that is not there.
+
+#### Where the four installers differ
+
+Three different command lines, because three different installers. Read off each
+installer's own `help` output on the device rather than inferred from the others
+— every argument of Quilt's differs from Fabric's, so a guess would have failed
+on the first one.
+
+| Loader | Installer arguments |
+|---|---|
+| fabric | `server -mcversion <v> [-loader <l>] -dir <d> -downloadMinecraft` |
+| quilt | `install server <v> [<l>] --install-dir=<d> --download-server` |
+| forge, neoforge | `--installServer` — the version is baked into the installer, which is why the build is resolved *before* the URL |
+
+And two different ways of naming the installer to download:
+
+| Loader | Installer chosen by |
+|---|---|
+| fabric | its index's **first `stable`** entry, else the first |
+| quilt | its index's **first** entry — Quilt marks no entry stable, so there is nothing to prefer |
+| forge, neoforge | a versioned maven URL, from the build resolved out of maven metadata |
+
+Fabric's and Quilt's rules live in separate functions on purpose. Reading
+Fabric's onto Quilt's data would fall through to "first" every single time and
+look like it was choosing.
+
+**Quilt is asked one extra question first.** Quilt trails Minecraft releases by
+weeks and its installer does not fail helpfully when handed a version it cannot
+map, so `meta.quiltmc.org/v3/versions/intermediary/<version>` is checked before
+anything is deleted or downloaded. A non-empty array means mapped; an empty one,
+a 404 object, or a request that failed all mean no. The refusal names the two
+things a player can do — use Fabric, or pick an older Minecraft version.
+
+Deliberately **before** the clean step, which the desktop is not: the desktop
+unlinks the launch jar and finds out afterwards. Refusing first leaves a working
+server exactly as it was, which matters most for the case this fires on — a
+Minecraft version bumped to one Quilt has not reached yet.
+
+#### Why Fabric and Quilt need no argfile handling
+
+Both installers produce a tiny launch jar — `fabric-server-launch.jar` at 638
+bytes, `quilt-server-launch.jar` at 481 — whose manifest carries both
+`Main-Class` and a `Class-Path` naming every library it put in `libraries/`. The
+JVM's application class loader honours that, so the existing
+classpath-plus-main-class launch works unchanged.
+
+This is the whole reason Quilt was cheap to add and Forge was not.
+
+#### Forge and NeoForge, which have no jar at all
+
+They produce `run.sh`, `user_jvm_args.txt`, and a
+`libraries/**/unix_args.txt`, and the launch is:
+
+```text
+java @user_jvm_args.txt @libraries/net/neoforged/neoforge/21.4.157/unix_args.txt nogui
+```
+
+The argfile carries the module path, the main class *and* the program
+arguments. The `server.jar` sitting in their directory is a placeholder nothing
+runs.
+
+**Expanding the file is not enough**, and this is the part that is not obvious.
+The `java` launcher also *rewrites* what it forwards: it accepts `-p <path>` as
+two arguments and hands the VM `--module-path=<path>`. The VM accepts only the
+joined form. Checked against a real `JNI_CreateJavaVM`, not reasoned about:
+
+```text
+-p libraries/…             ->  Unrecognized option: -p, the VM does not start
+--module-path=libraries/…  ->  boots
+```
+
+`homerun_core::minecraft::argfile` does both jobs — tokenising (the JDK's
+grammar, which is not shell: `#` comments, partial quotes, escapes only inside
+them) and rewriting. The main class is found the way the launcher finds it: the
+first argument that is neither an option nor the value of one.
+
+Three things that follow:
+
+- **`run.sh` is read, never `run.bat`.** Both are generated. The Windows one names `win_args.txt`, whose module path uses `;` separators and `\` paths, and feeding that to a VM here fails with `InvalidPathException: Illegal char <:>` or a missing `BootstrapLauncher` depending which way round you get it. The desktop hit this and reordered for it.
+- **`user_jvm_args.txt` is deliberately not read.** The desktop needs it because it invokes the `java` binary and that is the only way to hand it a heap; this host passes `homerun-core`'s heap options straight to the VM, so reading the file too would set `-Xmx` twice. The generated one is nothing but comments anyway.
+- **The classpath is empty for these loaders.** The argfile supplies a module path; putting a jar beside it loads the same classes twice.
+
+The whole chain is pinned by
+[`shared/fixtures/argfiles/`](../shared/fixtures/argfiles/): the run script,
+argfile and heap file a real `neoforge-21.4.157-installer.jar --installServer`
+produced, plus `neoforge-21.4.157-expected-argv.txt` — the **exact argument
+vector that booted**, one line per argument. A change that keeps every asserted
+property and still alters one option fails against it.
+
+#### Which Java a loader may have
+
+Minecraft names a *minimum* and runs on anything newer. Forge and NeoForge do
+not: modlauncher and securejarhandler reach into `java.base` internals through
+`--add-opens`, and a JDK past the one they were built against has moved them.
+
+So `Loader::java_policy` splits them — `AtLeast` for vanilla, Paper and Fabric,
+`Exact` for Forge and NeoForge — and `select_runtime` honours it. A NeoForge
+server for 1.21.x gets Java 21 and **is refused Java 25**, even though 25
+satisfies "at least 21".
+
+That is also what refuses Forge 1.20.1, which wants Java 17: the loader parses
+fine and the runtime selection is what says no, so the message can name Java 17
+rather than shrugging at the loader. The refusal is worded differently on
+purpose — "needs Java 17 exactly" alongside "ships Java 21 and 25" reads like a
+bug unless the sentence says newer is not better here.
+
+#### What a reinstall deletes
+
+`Core.loaderFilesToClean` returns the list, and it is the desktop's
+`cleanLoaderFiles` **including entries for loaders this build cannot host**.
+That is deliberate: a server directory can arrive from a desktop backup
+carrying a Forge install, and switching it to Fabric has to remove those jars or
+the next start finds two servers to run. It also removes `homerun-jar.json` —
+this host's record of a *downloaded* jar — because `server.jar` is on the list
+and a marker describing a file that is gone costs a digest to disprove.
+
+Installers are excluded from the sweep by name, so a failed install cannot
+delete the installer it was about to run.
+
+#### What it does not do
+
+**Mods.** A Fabric server starts with no mods on it, and a Paper server starts
+with no plugins, because nothing on this host installs either yet. That is M4
+of [`plans/android-mod-loaders.md`](../plans/android-mod-loaders.md) and it is
+the milestone that makes `moddedServers: true` true in practice rather than in
+principle.
+
+Pinned loader builds are accepted by the core and always passed as `null` here.
+They arrive with modpacks in M5; until then an unpinned install keeps whatever
+it has rather than chasing the newest loader on every start.
 
 ### Reaching the server from outside — `WireProxy`
 
@@ -746,10 +1078,14 @@ binary was built without cgo; see
 
 This cannot reproduce on the emulator, which is why it shipped.
 
-**"Homerun for Android cannot host <loader> servers yet".** Working as
-intended — only vanilla and Paper resolve. The server's `TYPE` comes from the
-API, so this is what a Fabric or Forge server created on desktop does when
-someone tries to start it on a phone.
+**"Homerun cannot host <loader> servers…".** Working as intended — vanilla,
+Paper and Fabric resolve, and everything else is refused **by name** with its
+own reason. The server's `TYPE` comes from the API, so this is what a Forge or
+Spigot server created on desktop does when someone tries to start it on a
+phone. The three refusals are different and the message says which: Spigot and
+Bukkit are compiled on the device by BuildTools and never will be hosted here
+(Paper runs their plugins), Forge and NeoForge are waiting on argfile
+expansion, and Quilt is out on audience size rather than capability.
 
 **The jar re-downloads on every start.** `homerun-jar.json` is missing or its
 digest does not match what the endpoint now publishes. For Paper that is

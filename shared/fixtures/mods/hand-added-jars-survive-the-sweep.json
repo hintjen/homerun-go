@@ -1,0 +1,57 @@
+{
+  "name": "hand-added-jars-survive-the-sweep",
+  "why": "Stale-jar cleanup is scoped to files Homerun installed on a previous run — mod records plus modpack files — so a jar the player added by hand is never deleted. Getting this wrong deletes somebody's mods, which is the worst thing this pipeline can do.",
+  "inputs": {
+    "loader": "fabric",
+    "gameVersion": "1.21.4",
+    "projects": "lithium",
+    "existing": {
+      "lithium": {
+        "versionId": "lith-old",
+        "mcVersion": "1.21.3",
+        "loader": "fabric",
+        "filePath": "mods/lithium-1.21.3.jar"
+      },
+      "dep:gone01": {
+        "versionId": "gone-v1",
+        "mcVersion": "1.21.3",
+        "loader": "fabric",
+        "filePath": "mods/no-longer-required.jar"
+      }
+    },
+    "modpackFiles": ["from-the-pack.jar"],
+    "present": [
+      "lithium-1.21.3.jar",
+      "no-longer-required.jar",
+      "from-the-pack.jar",
+      "someone-put-this-here.jar",
+      "notes.txt"
+    ]
+  },
+  "modrinth": {
+    "/project/lithium/version": [
+      {
+        "id": "lith-new",
+        "project_id": "lith01",
+        "version_type": "release",
+        "files": [{ "primary": true, "url": "https://cdn/lithium-1.21.4.jar", "filename": "lithium-1.21.4.jar" }],
+        "dependencies": []
+      }
+    ],
+    "/projects?ids=": [{ "id": "lith01", "server_side": "required", "client_side": "optional" }]
+  },
+  "expect": {
+    "installed": ["lithium"],
+    "downloaded": ["lithium-1.21.4.jar"],
+    "failed": [],
+    "remove": ["lithium-1.21.3.jar", "no-longer-required.jar"],
+    "records": {
+      "lithium": {
+        "versionId": "lith-new",
+        "mcVersion": "1.21.4",
+        "loader": "fabric",
+        "filePath": "mods/lithium-1.21.4.jar"
+      }
+    }
+  }
+}

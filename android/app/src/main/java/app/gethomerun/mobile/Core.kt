@@ -12,10 +12,12 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
@@ -113,13 +115,39 @@ object Core {
             type?.let { put("type", it) }
         }).jsonPrimitive.content
 
-    /** Throws with a sentence for the player if the bundled runtime is too old. */
-    fun checkJava(artifact: JsonObject, bundledJava: Int?) {
-        call("minecraft.jar.checkJava", buildJsonObject {
+    /**
+     * Which staged runtime should run this jar.
+     *
+     * The lowest of [bundled] that satisfies the jar, not the newest — the core
+     * explains why, and it is the rule the two-runtime build turns on. Throws
+     * with a sentence for the player when none of them will do.
+     */
+    fun selectRuntime(artifact: JsonObject, loader: String, bundled: List<Int>): Int =
+        call("minecraft.jar.selectRuntime", buildJsonObject {
             put("artifact", artifact)
-            bundledJava?.let { put("bundledJava", it) }
-        })
-    }
+            put("loader", loader)
+            put("bundled", buildJsonArray { bundled.forEach { add(it) } })
+        }).jsonPrimitive.int
+
+    /**
+     * [selectRuntime] for a Java requirement with no artifact behind it.
+     *
+     * The bundler check is the caller: a server jar can need a newer Java than
+     * Mojang's manifest claimed, and by the time that is known the loader's
+     * installer has produced the jar and there is no artifact left to consult.
+     * [what] becomes the subject of the refusal a player reads.
+     */
+    fun selectRuntimeFor(
+        requiredJava: Int,
+        what: String,
+        loader: String,
+        bundled: List<Int>,
+    ): Int = call("minecraft.jar.selectRuntimeFor", buildJsonObject {
+        put("requiredJava", requiredJava)
+        put("what", what)
+        put("loader", loader)
+        put("bundled", buildJsonArray { bundled.forEach { add(it) } })
+    }).jsonPrimitive.int
 
     fun jarSatisfies(onDisk: JsonObject, artifact: JsonObject): Boolean =
         call("minecraft.jar.satisfies", buildJsonObject {
@@ -185,6 +213,520 @@ object Core {
             version?.let { put("version", it) }
             put("loader", loader)
         }).jsonPrimitive.boolean
+
+    // -----------------------------------------------------------------------
+    // Loaders that install by running an installer
+    //
+    // Vanilla and Paper publish a server jar; Fabric publishes an installer
+    // that is run once and leaves a launchable server behind. The two share a
+    // version resolver and nothing else, so the host takes one path or the
+    // other and [loaderIsInstalled] is the question that decides which.
+    // -----------------------------------------------------------------------
+
+    /** True when this loader is installed by running something, not downloading it. */
+    fun loaderIsInstalled(loader: String): Boolean =
+        call("minecraft.loader.isInstalled", buildJsonObject {
+            put("loader", loader)
+        }).jsonPrimitive.boolean
+
+    /** The jar to launch once the loader is installed, or null for a plain server jar. */
+    fun loaderLaunchJar(loader: String): String? =
+        call("minecraft.loader.launchJar", buildJsonObject {
+            put("loader", loader)
+        }).jsonPrimitive.contentOrNull
+
+    /**
+     * Fabric's installer index, to fetch and hand back to [fabricInstallerUrl].
+     *
+     * The endpoint comes from the core so there is no second copy to drift.
+     * `ServerJar`'s Mojang and PaperMC URLs predate that and are still spelled
+     * on both sides.
+     */
+    val FABRIC_INSTALLER_META: String
+        get() = call("minecraft.loader.fabricInstallerMeta").jsonPrimitive.content
+
+    /** Quilt's installer index, to fetch and hand back to [quiltInstallerUrl]. */
+    val QUILT_INSTALLER_META: String
+        get() = call("minecraft.loader.quiltInstallerMeta").jsonPrimitive.content
+
+    /** Where a versioned loader publishes its builds. */
+    fun loaderMetadataUrl(loader: String): String = call(
+        when (loader) {
+            "neoforge" -> "minecraft.loader.neoforgeMetadata"
+            else -> "minecraft.loader.forgeMetadata"
+        }
+    ).jsonPrimitive.content
+
+    /**
+     * The loader build to install, from its maven metadata.
+     *
+     * A [pinned] build is honoured when the metadata still has it; otherwise
+     * the newest is used, because a pin that has been deleted upstream should
+     * not stop a server starting.
+     */
+    fun resolveLoaderVersion(
+        loader: String,
+        metadata: String,
+        mcVersion: String,
+        pinned: String?,
+    ): String = call("minecraft.loader.resolveVersion", buildJsonObject {
+        put("loader", loader)
+        put("metadata", metadata)
+        put("mcVersion", mcVersion)
+        pinned?.let { put("pinned", it) }
+    }).jsonPrimitive.content
+
+    /** Where to fetch a resolved loader build's installer. */
+    fun loaderInstallerUrl(loader: String, version: String): String =
+        call("minecraft.loader.installerUrl", buildJsonObject {
+            put("loader", loader)
+            put("version", version)
+        }).jsonPrimitive.content
+
+    /** Which installer to download, from Fabric's installer index. */
+    fun fabricInstallerUrl(meta: JsonElement): String =
+        call("minecraft.loader.fabricInstallerUrl", buildJsonObject {
+            put("meta", meta)
+        }).jsonPrimitive.content
+
+    /**
+     * Which installer to download, from Quilt's installer index.
+     *
+     * Not [fabricInstallerUrl] against a different URL: Quilt's index marks no
+     * entry stable, so the rule for picking from it is genuinely a different
+     * rule. Keeping them separate is what stops Fabric's "first stable, else
+     * first" quietly collapsing into "first" and looking deliberate.
+     */
+    fun quiltInstallerUrl(meta: JsonElement): String =
+        call("minecraft.loader.quiltInstallerUrl", buildJsonObject {
+            put("meta", meta)
+        }).jsonPrimitive.content
+
+    /** Where Quilt says whether it has mapped a Minecraft version at all. */
+    fun quiltIntermediaryUrl(mcVersion: String): String =
+        call("minecraft.loader.quiltIntermediaryUrl", buildJsonObject {
+            put("mcVersion", mcVersion)
+        }).jsonPrimitive.content
+
+    /**
+     * Throws when Quilt has published no mappings for [mcVersion].
+     *
+     * Asked before the installer runs, because Quilt trails Minecraft by weeks
+     * and its installer does not fail in a way anyone could act on.
+     */
+    fun ensureQuiltSupports(mcVersion: String, intermediary: JsonElement) {
+        call("minecraft.loader.ensureQuiltSupports", buildJsonObject {
+            put("mcVersion", mcVersion)
+            put("intermediary", intermediary)
+        })
+    }
+
+    /**
+     * Whether what is installed has to be torn down and installed again.
+     *
+     * A null or unreadable [installed] means yes, which is the safe direction:
+     * a marker we cannot trust is one that cannot vouch for what is on disk.
+     */
+    fun loaderNeedsReinstall(
+        installed: JsonObject?,
+        loader: String,
+        mcVersion: String,
+        loaderVersion: String?,
+    ): Boolean = call("minecraft.loader.needsReinstall", buildJsonObject {
+        installed?.let { put("installed", it) }
+        put("loader", loader)
+        put("mcVersion", mcVersion)
+        loaderVersion?.let { put("loaderVersion", it) }
+    }).jsonPrimitive.boolean
+
+    /**
+     * What to delete before installing a loader, given the directory listing.
+     *
+     * Includes files belonging to loaders this build cannot host: a server
+     * directory restored from a desktop backup can carry a Forge install, and
+     * switching it to Fabric has to clear those jars or the next start finds
+     * two servers to run.
+     */
+    fun loaderFilesToClean(entries: List<String>): List<String> =
+        call("minecraft.loader.filesToClean", buildJsonObject {
+            put("entries", buildJsonArray { entries.forEach { add(it) } })
+        }).jsonArray.map { it.jsonPrimitive.content }
+
+    /**
+     * The Java major a server jar's bundler needs, from the first eight bytes
+     * of `net/minecraft/bundler/Main.class`.
+     *
+     * Mojang's manifest states a version and the jar can disagree; the jar
+     * wins, because it is what fails. Null when those bytes are not a class
+     * file, which is not an error — plenty of jars have no bundler.
+     */
+    fun bundlerJavaMajor(head: ByteArray): Int? =
+        call("minecraft.loader.bundlerJavaMajor", buildJsonObject {
+            put("head", buildJsonArray { head.forEach { add(it.toInt() and 0xFF) } })
+        }).jsonPrimitive.intOrNull
+
+    // -----------------------------------------------------------------------
+    // Argfiles
+    //
+    // Forge and NeoForge launch entirely through `@argfile`s, and expanding
+    // one is a feature of the `java` launcher binary — which this platform
+    // does not have, because the VM is created through JNI. See
+    // `minecraft::argfile`, and `docs/android-server-backend.md`.
+    // -----------------------------------------------------------------------
+
+    /** A launch, split the way `JNI_CreateJavaVM` needs it. */
+    data class Expanded(
+        val jvmOptions: List<String>,
+        val mainClass: String?,
+        val programArgs: List<String>,
+    )
+
+    /**
+     * Expand argfiles, in the order the run script names them.
+     *
+     * Not a passthrough: the `java` launcher rewrites what it forwards, so
+     * `-p <path>` becomes `--module-path=<path>` here. The VM accepts only the
+     * joined form and answers the other with `Unrecognized option`.
+     */
+    fun expandArgfiles(contents: List<String>): Expanded {
+        val reply = call("minecraft.argfile.expand", buildJsonObject {
+            put("contents", buildJsonArray { contents.forEach { add(it) } })
+        }).jsonObject
+        return Expanded(
+            jvmOptions = reply["jvmOptions"]!!.jsonArray.map { it.jsonPrimitive.content },
+            mainClass = reply["mainClass"]?.jsonPrimitive?.contentOrNull,
+            programArgs = reply["programArgs"]!!.jsonArray.map { it.jsonPrimitive.content },
+        )
+    }
+
+    /** The argfiles a run script names, relative to the server directory. */
+    fun referencedArgfiles(runScript: String): List<String> =
+        call("minecraft.argfile.referenced", buildJsonObject {
+            put("runScript", runScript)
+        }).jsonArray.map { it.jsonPrimitive.content }
+
+    /** Which of the generated run scripts to believe. `run.sh`, if there is one. */
+    fun preferredRunScript(present: List<String>): String? =
+        call("minecraft.argfile.runScript", buildJsonObject {
+            put("present", buildJsonArray { present.forEach { add(it) } })
+        }).jsonPrimitive.contentOrNull
+
+    /** The argfile to use when no run script names one. */
+    fun fallbackArgfile(paths: List<String>): String? =
+        call("minecraft.argfile.fallback", buildJsonObject {
+            put("paths", buildJsonArray { paths.forEach { add(it) } })
+        }).jsonPrimitive.contentOrNull
+
+    // -----------------------------------------------------------------------
+    // Which mods a server gets
+    //
+    // A driver rather than a function, because installing mods is three phases
+    // of interleaved HTTP with a graph search in the middle and the core has
+    // no I/O. [modsBegin] says what to fetch; [modsAdvance] says what the
+    // answers meant and what to fetch next. Every decision — which version
+    // wins, what is skipped, which dependency is pulled in, which jar is
+    // swept — is the core's. See `minecraft::mods`.
+    // -----------------------------------------------------------------------
+
+    /** Start resolving. [inputs] is `mods::Inputs`. */
+    fun modsBegin(inputs: JsonObject): JsonObject =
+        call("minecraft.mods.begin", buildJsonObject { put("inputs", inputs) }).jsonObject
+
+    /** Report what the last batch of steps did, and get the next one. */
+    fun modsAdvance(state: JsonElement, replies: JsonArray): JsonObject =
+        call("minecraft.mods.advance", buildJsonObject {
+            put("state", state)
+            put("replies", replies)
+        }).jsonObject
+
+    /** `mods` or `plugins`, by loader. */
+    fun modsSubDir(loader: String): String =
+        call("minecraft.mods.subDir", buildJsonObject {
+            put("loader", loader)
+        }).jsonPrimitive.content
+
+    // -----------------------------------------------------------------------
+    // Minigames
+    //
+    // A minigame server is a public Paper server built from a template in the
+    // Games browser. Three things in its env make it one, and all three are
+    // read here rather than decided by this host: which jars to fetch, whether
+    // it is a minigame at all, and which of its settings its plugins are
+    // allowed to see. See `minecraft::minigame` — a different module from
+    // `reporting::minigame`, which reads a finished match off the console and
+    // is wired in [Reporting].
+    // -----------------------------------------------------------------------
+
+    /** One Homerun-hosted plugin jar: where to get it, what to call it. */
+    data class CustomPlugin(val url: String, val filename: String)
+
+    /**
+     * Is this a minigame server?
+     *
+     * The answer decides three things a host does differently for one: no
+     * world is restored, no backup is pushed, and the directory is deleted
+     * once it stops. A lobby is generated for a single session and nobody's
+     * building is in it.
+     */
+    fun isMinigame(env: JsonObject?): Boolean =
+        call("minecraft.minigame.isMinigame", buildJsonObject {
+            put("env", env ?: JsonNull)
+        }).jsonPrimitive.boolean
+
+    /**
+     * The plugin jars this server needs, in catalog order.
+     *
+     * Ours, not Modrinth's, so [ModInstaller] will never fetch them. Empty for
+     * a loader that would not load a jar out of `plugins/` anyway.
+     */
+    fun customPlugins(loader: String, env: JsonObject?): List<CustomPlugin> =
+        (call("minecraft.minigame.customPlugins", buildJsonObject {
+            put("loader", loader)
+            put("env", env ?: JsonNull)
+        }) as JsonArray).map {
+            CustomPlugin(
+                url = it.jsonObject["url"]!!.jsonPrimitive.content,
+                filename = it.jsonObject["filename"]!!.jsonPrimitive.content,
+            )
+        }
+
+    /**
+     * The env vars our own plugins read, and nothing else.
+     *
+     * A server's settings are **not** the JVM's environment — the supervisor
+     * spawns Java with its own — so a plugin calling `System.getenv` sees none
+     * of them, and the player's chosen match size never reached the game. This
+     * is the curated set that is forwarded, curated rather than passed through
+     * because the rest of that map is whatever the dashboard holds for this
+     * server.
+     */
+    fun pluginEnv(env: JsonObject?): Map<String, String> =
+        call("minecraft.minigame.pluginEnv", buildJsonObject {
+            put("env", env ?: JsonNull)
+        }).jsonObject.mapValues { (_, v) -> v.jsonPrimitive.content }
+
+    // -----------------------------------------------------------------------
+    // Minecraft accounts
+    //
+    // The Microsoft sign-in chain. Every request body and every response shape
+    // is the core's, because the chain is five calls deep and full of details
+    // that fail silently when wrong — the `d=` prefix on the RPS ticket, the
+    // relying party that has to be Minecraft's and not Xbox's, the identity
+    // token's exact spelling. [MinecraftAuth] performs the calls and decides
+    // nothing about them. See `minecraft::account`.
+    // -----------------------------------------------------------------------
+
+    /** One HTTP call, as the core described it. */
+    data class HttpRequest(
+        val method: String,
+        val url: String,
+        val headers: List<Pair<String, String>>,
+        val body: String?,
+    )
+
+    private fun httpRequest(value: JsonElement): HttpRequest {
+        val obj = value.jsonObject
+        return HttpRequest(
+            method = obj["method"]!!.jsonPrimitive.content,
+            url = obj["url"]!!.jsonPrimitive.content,
+            headers = obj["headers"]!!.jsonArray.map {
+                val pair = it.jsonArray
+                pair[0].jsonPrimitive.content to pair[1].jsonPrimitive.content
+            },
+            body = obj["body"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
+    /** A pending device-code sign-in, with the page to send the user to. */
+    data class DeviceCode(
+        val userCode: String,
+        val deviceCode: String,
+        /** `microsoft.com/link` with the code already filled in. */
+        val approvalUrl: String,
+        val intervalSecs: Long,
+        val expiresInSecs: Long,
+    )
+
+    fun accountDeviceCodeRequest(): HttpRequest =
+        httpRequest(call("minecraft.account.deviceCodeRequest", buildJsonObject {}))
+
+    fun accountDeviceCodeFrom(body: JsonElement): DeviceCode =
+        call("minecraft.account.deviceCodeFrom", buildJsonObject { put("body", body) })
+            .jsonObject.let {
+                DeviceCode(
+                    userCode = it["userCode"]!!.jsonPrimitive.content,
+                    deviceCode = it["deviceCode"]!!.jsonPrimitive.content,
+                    approvalUrl = it["approvalUrl"]!!.jsonPrimitive.content,
+                    intervalSecs = it["intervalSecs"]!!.jsonPrimitive.long,
+                    expiresInSecs = it["expiresInSecs"]!!.jsonPrimitive.long,
+                )
+            }
+
+    fun accountPollRequest(deviceCode: String): HttpRequest =
+        httpRequest(call("minecraft.account.pollRequest", buildJsonObject {
+            put("deviceCode", deviceCode)
+        }))
+
+    /**
+     * What one poll meant: `pending`, `slowDown`, `declined`, `expired`, or
+     * `approved` with the tokens.
+     *
+     * Note the first four arrive from Microsoft as HTTP 400. Treating a
+     * non-2xx as a failure here would report a sign-in that is working
+     * perfectly as broken, once every five seconds.
+     */
+    fun accountPollOutcome(body: JsonElement): JsonObject =
+        call("minecraft.account.pollOutcome", buildJsonObject { put("body", body) }).jsonObject
+
+    /**
+     * Microsoft's own token response, normalised.
+     *
+     * Needed on the refresh path only: a poll outcome has already been through
+     * the core and comes back in this crate's spelling, while a refresh returns
+     * Microsoft's raw `snake_case` body. Feeding the second straight into
+     * [accountSessionFrom] silently produced a session with no tokens in it.
+     */
+    fun accountMsaTokensFrom(body: JsonElement): JsonObject =
+        call("minecraft.account.msaTokensFrom", buildJsonObject { put("body", body) }).jsonObject
+
+    fun accountRefreshRequest(refreshToken: String): HttpRequest =
+        httpRequest(call("minecraft.account.refreshRequest", buildJsonObject {
+            put("refreshToken", refreshToken)
+        }))
+
+    fun accountXblRequest(msaAccessToken: String): HttpRequest =
+        httpRequest(call("minecraft.account.xblRequest", buildJsonObject {
+            put("msaAccessToken", msaAccessToken)
+        }))
+
+    fun accountXstsRequest(xblToken: String): HttpRequest =
+        httpRequest(call("minecraft.account.xstsRequest", buildJsonObject {
+            put("xblToken", xblToken)
+        }))
+
+    fun accountXboxTokenFrom(body: JsonElement): JsonObject =
+        call("minecraft.account.xboxTokenFrom", buildJsonObject { put("body", body) }).jsonObject
+
+    /** An XSTS refusal, in words naming what the player has to go and do. */
+    fun accountXstsRefusal(body: JsonElement): String =
+        call("minecraft.account.xstsRefusal", buildJsonObject { put("body", body) })
+            .jsonPrimitive.content
+
+    fun accountMinecraftLoginRequest(xsts: JsonObject): HttpRequest =
+        httpRequest(call("minecraft.account.minecraftLoginRequest", buildJsonObject {
+            put("xsts", xsts)
+        }))
+
+    fun accountMinecraftTokenFrom(body: JsonElement): String =
+        call("minecraft.account.minecraftTokenFrom", buildJsonObject { put("body", body) })
+            .jsonPrimitive.content
+
+    fun accountProfileRequest(minecraftToken: String): HttpRequest =
+        httpRequest(call("minecraft.account.profileRequest", buildJsonObject {
+            put("minecraftToken", minecraftToken)
+        }))
+
+    /** The stored session: identity plus the tokens that keep it alive. */
+    fun accountSessionFrom(
+        profile: JsonElement,
+        minecraftToken: String,
+        msa: JsonElement,
+        nowMs: Long,
+    ): JsonObject =
+        call("minecraft.account.sessionFrom", buildJsonObject {
+            put("profile", profile)
+            put("minecraftToken", minecraftToken)
+            put("msa", msa)
+            put("nowMs", nowMs)
+        }).jsonObject
+
+    /**
+     * The only shape of a session allowed to cross into the WebView.
+     *
+     * The bridge type has token fields because the desktop's client launcher
+     * needs them to start a game. No phone surface reads one, so they go over
+     * as `"0"` and the real tokens stay in [SecretStore].
+     */
+    fun accountRedacted(session: JsonObject): JsonObject =
+        call("minecraft.account.redacted", buildJsonObject { put("session", session) }).jsonObject
+
+    fun accountNeedsRefresh(expiresAt: Long, nowMs: Long): Boolean =
+        call("minecraft.account.needsRefresh", buildJsonObject {
+            put("expiresAt", expiresAt)
+            put("nowMs", nowMs)
+        }).jsonPrimitive.boolean
+
+    // -----------------------------------------------------------------------
+    // Modpacks
+    //
+    // A `.mrpack` is a zip: a manifest naming mods to fetch by URL, plus an
+    // `overrides/` tree copied verbatim. The question it forces is which of
+    // those mods must not be installed on a dedicated server — and the answer
+    // is the core's, because it is the same question `mods` answers, with two
+    // more sources of evidence. See `minecraft::modpack`.
+    // -----------------------------------------------------------------------
+
+    /** What to do about a `MODRINTH_MODPACK` value: fetch it, or ask first. */
+    fun modpackPlan(modpack: String): JsonObject =
+        call("minecraft.modpack.plan", buildJsonObject {
+            put("modpack", modpack)
+        }).jsonObject
+
+    /** The archive URL, from what the plan's request returned. Null means ask again. */
+    fun modpackSourceFrom(of: String, json: JsonElement): JsonObject? =
+        call("minecraft.modpack.sourceFrom", buildJsonObject {
+            put("of", of)
+            put("json", json)
+        }).let { it as? JsonObject }
+
+    /** The unfiltered version list, for a pack with no featured release. */
+    fun modpackFallbackUrl(modpack: String): String? =
+        call("minecraft.modpack.fallbackUrl", buildJsonObject {
+            put("modpack", modpack)
+        }).jsonPrimitive.contentOrNull
+
+    /** The loader, Minecraft version and pinned loader build a pack needs. */
+    fun modpackRequires(manifest: JsonElement): JsonObject =
+        call("minecraft.modpack.requires", buildJsonObject {
+            put("manifest", manifest)
+        }).jsonObject
+
+    /** Start deciding what a pack installs. */
+    fun modpackBegin(inputs: JsonObject): JsonObject =
+        call("minecraft.modpack.begin", buildJsonObject { put("inputs", inputs) }).jsonObject
+
+    /** Report what the last batch of steps did, and get the next one. */
+    fun modpackAdvance(state: JsonElement, replies: JsonArray): JsonObject =
+        call("minecraft.modpack.advance", buildJsonObject {
+            put("state", state)
+            put("replies", replies)
+        }).jsonObject
+
+    /**
+     * Which assembled jars to prune.
+     *
+     * Modrinth's dependency data drifts from what a jar's own metadata says,
+     * and the loader enforces the jar — so the finished directory is checked
+     * against the jars themselves.
+     */
+    fun modpackReconcile(jars: JsonArray): List<String> =
+        call("minecraft.modpack.reconcile", buildJsonObject {
+            put("jars", jars)
+        }).jsonArray.map { it.jsonPrimitive.content }
+
+    /** Does any `MODRINTH_OVERRIDES_EXCLUSIONS` glob match this override path? */
+    fun modpackExcluded(patterns: List<String>, path: String): Boolean =
+        call("minecraft.modpack.excluded", buildJsonObject {
+            put("patterns", buildJsonArray { patterns.forEach { add(it) } })
+            put("path", path)
+        }).jsonPrimitive.boolean
+
+    /** What a mod jar declares about itself, from its own metadata entries. */
+    fun readModJar(fabric: String?, tomls: List<String>): JsonObject =
+        call("minecraft.modjar.read", buildJsonObject {
+            fabric?.let { put("fabric", it) }
+            put("tomls", buildJsonArray { tomls.forEach { add(it) } })
+        }).jsonObject
 
     // -----------------------------------------------------------------------
     // The tunnel

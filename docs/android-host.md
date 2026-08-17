@@ -97,12 +97,52 @@ the backend that would serve it is still being built.
 **`scripts/check-capabilities.js` enforces that, and it had to.** iOS reads
 `profiles.ios.capabilities` out of the vendored manifest at runtime and so
 cannot drift; this host transcribes the same record by hand, and a hand copy of
-seventeen fields is one that falls behind. It already had — `minigames` was in
+eighteen fields is one that falls behind. It already had — `minigames` was in
 the contract from the beginning and simply absent here, unnoticed, because the
 UI reads a missing field as `undefined`, `undefined` is falsy, and the contract
 happened to say `false`. That is the failure mode worth remembering: a drifted
 capability does not break, it takes the wrong branch, and it takes the right one
 often enough to look fine.
+
+### Which loaders the UI offers
+
+`serverLoaders` is the eighteenth field, and it exists because `moddedServers`
+turned out to be too blunt a question.
+
+A phone runs a JVM, so `moddedServers` is true and the create flow showed its
+loader picker — offering all six the desktop offers, **including Spigot**, which
+this host refuses at launch because BuildTools *compiles* Spigot on the device
+and needs a JDK with `javac` while the staged runtime is pruned to a runtime. A
+player could pick it, name a world, wait for the start, and only then be told
+no. A refusal is the last line of defence; it should not be the design.
+
+So the host advertises the list and the UI filters on it
+(`lib/hostableLoaders.ts`):
+
+```
+vanilla  paper  fabric  quilt  neoforge  forge
+```
+
+Three properties are worth knowing, because each is a way this could go wrong:
+
+- **The list is generated from the core.** `Loader::hostable()` sits beside the
+  `Loader::parse` that does the refusing, and a Rust test reads the shipped
+  `bridge-v1.json` off disk and asserts the two agree. `check-capabilities.js`
+  compares this host against the *contract*; nothing compared either against the
+  code that says no, and that gap is exactly how Spigot came to be offered.
+- **Absent means show everything.** A host older than the key never sends it and
+  supports the loaders it always did. Filtering it to nothing would be a worse
+  bug than the one being fixed. `[]` is a different statement and means none —
+  iOS sends that.
+- **The comparison is case-insensitive.** The UI's ids are the API's uppercase
+  `TYPE` values (`"SPIGOT"`); this list is lowercase, because that is how the
+  core spells them. Comparing raw filters everything out, silently.
+
+The same shape of gap is still open one level down: `java_policy` is `Exact` for
+Forge and NeoForge, so Forge on 1.20.1 wants Java 17 and this build ships 21 and
+25 — and the version list is not filtered per loader, so the UI can still offer
+that pair. Closing it needs the bundled-Java list as a capability plus a
+version-to-Java mapping.
 
 ## Launch colour and the system bars — `MainActivity`, `res/values/`
 

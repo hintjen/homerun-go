@@ -1,3 +1,4 @@
+import AuthenticationServices
 import Foundation
 import UIKit
 
@@ -255,4 +256,94 @@ extension BridgeRouter {
     func deepLinkConsume(_ params: Any?) async throws -> Any? {
         deepLinks.consume()
     }
+
+    // MARK: - Browser-based sign-in
+
+    /// Run an OAuth redirect in a real browser and hand back where it landed.
+    ///
+    /// `ASWebAuthenticationSession` rather than our own WebView, because
+    /// Google answers `disallowed_useragent` to `WKWebView` — which is the
+    /// entire reason this channel exists. It is also the right tool
+    /// independently: it shares Safari's cookies, so a user already signed in
+    /// to Google is one tap from done, and it captures its own callback
+    /// without going through the OS URL router. That last part matters —
+    /// nothing here touches `DeepLinkManager`, so an auth callback can never
+    /// be mistaken for a `homerun://` deep link and dropped as an unknown
+    /// intent.
+    ///
+    /// The user dismissing the sheet is an ordinary outcome, not an error;
+    /// Apple reports it as `.canceledLogin` and it is passed through as
+    /// `canceled` so the page can stay quiet about it.
+    @MainActor
+    func authWebSession(_ params: Any?) async throws -> Any? {
+        guard
+            let dict = params as? [String: Any],
+            let urlString = dict["url"] as? String,
+            let url = URL(string: urlString)
+        else {
+            return ["success": false, "error": "No sign-in address was provided."]
+        }
+        let scheme = (dict["callbackScheme"] as? String) ?? "homerun"
+
+        return await withCheckedContinuation { continuation in
+            var session: ASWebAuthenticationSession?
+            session = ASWebAuthenticationSession(
+                url: url,
+                callbackURLScheme: scheme
+            ) { callbackURL, error in
+                // Held until here purely so ARC does not release the session
+                // mid-flight, which silently closes the sheet.
+                _ = session
+                if let callbackURL {
+                    continuation.resume(returning: [
+                        "success": true,
+                        "callbackUrl": callbackURL.absoluteString,
+                    ])
+                    return
+                }
+                if let error = error as? ASWebAuthenticationSessionError,
+                   error.code == .canceledLogin {
+                    continuation.resume(returning: [
+                        "success": false,
+                        "error": "Sign-in was cancelled.",
+                        "canceled": true,
+                    ])
+                    return
+                }
+                continuation.resume(returning: [
+                    "success": false,
+                    "error": "Could not open the sign-in page.",
+                ])
+            }
+            session?.presentationContextProvider = authPresentationAnchor
+            // Use the shared cookie jar. Without this the user is asked to
+            // sign in to Google again even when Safari already knows them,
+            // which is most of the value of not using a WebView.
+            session?.prefersEphemeralWebBrowserSession = false
+            if session?.start() != true {
+                continuation.resume(returning: [
+                    "success": false,
+                    "error": "Could not open the sign-in page.",
+                ])
+            }
+        }
+    }
 }
+
+/// Tells `ASWebAuthenticationSession` which window to hang its sheet on.
+///
+/// File-scope rather than a property because Swift extensions cannot add
+/// stored properties, and it holds no state worth per-router isolation — every
+/// sign-in presents from the same key window.
+private final class AuthPresentationAnchor: NSObject,
+    ASWebAuthenticationPresentationContextProviding
+{
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
+    }
+}
+
+private let authPresentationAnchor = AuthPresentationAnchor()
