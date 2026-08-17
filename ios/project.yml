@@ -30,6 +30,16 @@ settings:
     # above. Apple rejects a duplicate, so this is the upload date plus a
     # counter rather than a 1 someone has to remember to bump: yyyymmddNN.
     CURRENT_PROJECT_VERSION: "2026081201"
+    # The backend a build talks to. Reaches the app through `HomerunAPIURL` in
+    # Info.plist, read by `HostStore.apiURL` when the page has not stored one.
+    # Android's `-PapiUrl` equivalent, with the same production default:
+    #
+    #   xcodebuild … HOMERUN_API_URL=https://api.fractalnetworks.co
+    #
+    # A backend picked inside the app outranks this, so moving a device that has
+    # already run means clearing its data — the same rule as `--fresh` on
+    # Android. See `docs/building.md`.
+    HOMERUN_API_URL: https://api.gethomerun.app
 
 # The only third-party Swift dependency in the app.
 #

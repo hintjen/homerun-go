@@ -261,20 +261,36 @@ something else stored.
 
 ### iOS
 
-**There is no equivalent — an iOS build cannot currently be pointed anywhere.**
-`HostStore.apiURL` is `UserDefaults`-backed and written **only by the page**
-(`set-api-url`, and the credentials handler in `BridgeRouter+Session.swift`). It
-has no build-time default and nothing seeds it.
+`HOMERUN_API_URL` is the build setting, defaulted in `ios/project.yml` and
+overridable per build:
 
-So on a fresh install `get-initial-config` omits `apiUrl` entirely, the page logs
-`Initial API URL not provided by main process`, and falls back to production. The
-only way to move an iOS build today is to set `localStorage.apiUrl` by hand in
-Safari's Web Inspector.
+```bash
+xcodebuild -project ios/Homerun.xcodeproj -scheme Homerun \
+  HOMERUN_API_URL=https://api.fractalnetworks.co
+```
 
-Closing that is small, and worth doing when somebody needs it: give `HostStore` a
-build-time fallback — an `Info.plist` key fed from an xcconfig, read when
-`UserDefaults` holds nothing — so `BridgeRouter+AppShell.swift` always has a
-value to return and iOS behaves like Android.
+In Xcode itself, set it on the scheme or edit the value in `project.yml` before
+`xcodegen generate`.
+
+It reaches the app as the `HomerunAPIURL` key in `Info.plist`, and
+`HostStore.apiURL` returns it **only when the page has not stored one** — so a
+backend picked inside the app outranks the build, which is what somebody pointing
+the app at a laptop expects across a relaunch.
+
+The same first-run rule as Android therefore applies: moving a device that has
+already run means clearing its data, or the stored value wins. Delete and
+reinstall the app, or clear the `apiUrl` key in Safari's Web Inspector.
+
+Two values are treated as "nothing was set", so a missing setting degrades to the
+page's own default rather than to a URL nothing answers: an empty string, which is
+what Xcode substitutes for an undefined setting, and a literal unsubstituted
+`$(…)`.
+
+**This was the one real asymmetry with Android and it is now closed.** Before it,
+`HostStore.apiURL` was written only by the page, so a fresh install had nothing,
+`get-initial-config` omitted `apiUrl` entirely, the page logged
+`Initial API URL not provided by main process`, and iOS always fell back to
+production — reachable only by editing `localStorage` by hand.
 
 ### Reading the value the page actually holds
 

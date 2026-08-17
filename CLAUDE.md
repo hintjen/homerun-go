@@ -151,11 +151,11 @@ targets require macOS.
 not one switch.** Two places hold an API URL — the host's build config and the
 page's `localStorage` — and the page seeds itself from the host *only when its
 key is empty*, so rebuilding with a different backend changes nothing for the
-page until the app's data is wiped. On Android that is
-`npm run android:run:staging:fresh`; iOS has no build-time API URL at all and
-always falls back to production. Never conclude which backend is in play from the
-build log — read the value out of the running page. `docs/building.md` §
-*Which backend a build talks to*, and the `on-device-build` skill.
+page until the app's data is wiped: `npm run android:run:staging:fresh`, or a
+delete-and-reinstall on iOS. The switch is `--api` / `-PapiUrl` on Android and
+`HOMERUN_API_URL` on iOS. Never conclude which backend is in play from the build
+log — read the value out of the running page. `docs/building.md` § *Which backend
+a build talks to*, and the `on-device-build` skill.
 
 ```bash
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android

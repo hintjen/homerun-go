@@ -85,10 +85,16 @@ So rebuilding with a different `--api` changes nothing about where the page send
 requests — the build succeeds and the app keeps talking to the old backend. Wipe
 the data (`--fresh`) to make the seed run again.
 
-**iOS cannot be pointed anywhere today.** `HostStore.apiURL` is written only by
-the page, with no build-time default, so a fresh iOS install always falls back to
-production. Setting `localStorage.apiUrl` in Safari's Web Inspector is the
-workaround; `docs/building.md` describes the small change that would fix it.
+On iOS the switch is a build setting rather than a flag:
+
+```bash
+xcodebuild … HOMERUN_API_URL=https://api.fractalnetworks.co
+```
+
+It arrives as `HomerunAPIURL` in `Info.plist` and is read by `HostStore.apiURL`
+only when the page has stored nothing — same precedence as Android, so the same
+first-run rule applies. There is no `--fresh` equivalent: delete and reinstall the
+app, or clear the `apiUrl` key in Safari's Web Inspector.
 
 Never conclude which backend is in play by reading the build log. Read the value
 out of the running page — the doc gives the commands.

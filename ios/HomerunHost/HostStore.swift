@@ -70,9 +70,40 @@ enum HostStore {
         set { defaults.set(newValue, forKey: Key.deviceGroupId) }
     }
 
+    /// The backend this app talks to.
+    ///
+    /// Whatever the page last told us, and otherwise the value this build was
+    /// compiled with — which is the parity Android has had all along through
+    /// `BuildConfig.API_URL`.
+    ///
+    /// Without the fallback there was no way to point an iOS build anywhere.
+    /// This is written only by the page (`set-api-url`, and the credentials
+    /// handler), so on a fresh install it was nil, `get-initial-config` omitted
+    /// `apiUrl` entirely, and the page fell back to its own compiled-in
+    /// production default. Reaching staging meant editing `localStorage` by hand
+    /// in the Web Inspector.
+    ///
+    /// The page still wins once it has an opinion, deliberately: someone who
+    /// pointed this app at a laptop expects it to stay there across a relaunch.
+    /// See `docs/building.md` § *Which backend a build talks to*.
     static var apiURL: String? {
-        get { defaults.string(forKey: Key.apiURL) }
+        get { defaults.string(forKey: Key.apiURL) ?? buildTimeAPIURL }
         set { defaults.set(newValue, forKey: Key.apiURL) }
+    }
+
+    /// `HOMERUN_API_URL` as it reached `Info.plist` at build time.
+    ///
+    /// Empty counts as absent, because that is what Xcode substitutes for a
+    /// setting nobody defined; the raw `$(…)` is checked for the case where
+    /// substitution did not happen at all. Either would otherwise become a URL
+    /// every request fails against, which is a worse outcome than having none.
+    private static var buildTimeAPIURL: String? {
+        guard
+            let raw = Bundle.main.object(forInfoDictionaryKey: "HomerunAPIURL") as? String,
+            !raw.isEmpty,
+            !raw.hasPrefix("$(")
+        else { return nil }
+        return raw
     }
 
     static var posthogDistinctID: String? {

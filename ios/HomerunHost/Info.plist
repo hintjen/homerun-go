@@ -23,6 +23,16 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 
+	<!-- The backend this build talks to — Android's `-PapiUrl` equivalent.
+	     Defaulted in project.yml and overridable per build:
+
+	       xcodebuild … HOMERUN_API_URL=https://api.fractalnetworks.co
+
+	     Read by `HostStore.apiURL` only when the page has not stored one, so a
+	     backend picked inside the app still outranks the build. -->
+	<key>HomerunAPIURL</key>
+	<string>$(HOMERUN_API_URL)</string>
+
 	<!-- Auth returns through homerun:// (email OTP / magic link). Universal
 	     Links are added alongside this at M2, once a signing team exists. -->
 	<key>CFBundleURLTypes</key>
