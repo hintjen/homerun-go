@@ -13,10 +13,41 @@
  * bundle has been staged, and rebuild the Rust in `jniLibs`, which gradle
  * treats as a checked-in binary and will happily package stale.
  *
+ * Flags, after the command:
+ *
+ *   --api <url>    build against another backend — the staging API, a laptop.
+ *                  Shorthand for `-PapiUrl=<url>`, because that is the only
+ *                  property anybody passes and `--api` is what people try.
+ *   --fresh        wipe the app's data after installing, so it launches as a
+ *                  genuine first run. **Usually wanted with `--api`.**
+ *   -P<name>=<v>   any other gradle property, forwarded untouched.
+ *
+ * ## Why `--api` alone is usually not enough
+ *
+ * `-PapiUrl` sets `BuildConfig.API_URL`, which the *host* reads. The page reads
+ * its own `localStorage.apiUrl`, seeded from the host's value **only on first
+ * run** (`pages/index.tsx`) so a hand-picked backend survives every remount.
+ * Sensible there, and it means rebuilding with a different `--api` changes
+ * nothing about where the page sends anything — which is most requests,
+ * registration and login included. The build succeeds and the app keeps talking
+ * to the old backend, which is a genuinely difficult thing to notice.
+ *
+ * So `--api` reads back what the device actually has stored and says so when the
+ * two disagree. `--fresh` is the fix, and it is needed **once**, when switching
+ * a device from one backend to another:
+ *
+ *   npm run android:run:staging:fresh    switching to staging, or starting over
+ *   npm run android:run:staging          every run after that
+ *
+ * Clearing on every launch would make the target useless for the thing it is
+ * for — iterating against staging while signed in — so the plain target keeps
+ * the data and the warning is what tells you when you need the other one.
+ *
  *   HOMERUN_JAVA_HOME   a JDK to use, ahead of JAVA_HOME
  *   HOMERUN_AVD         which AVD `emulator` starts (default: homerun_api35)
  *   ANDROID_SERIAL      which device adb targets, when several are attached
  *   HOMERUN_SKIP_NATIVE do not refresh jniLibs (Kotlin-only iteration)
+ *   HOMERUN_API_URL     default for `--api`
  */
 const { execFileSync, spawn, spawnSync } = require("child_process");
 const fs = require("fs");
@@ -36,6 +67,119 @@ const die = (message) => {
   console.error(`\n${message}\n`);
   process.exit(1);
 };
+
+// --- flags -----------------------------------------------------------------
+
+/**
+ * Everything after the command: `--api`, `--fresh`, and any `-P` to forward.
+ *
+ * Hand-rolled rather than a dependency, and permissive by design about
+ * `--api=x` versus `--api x` — both are what people type, and refusing one of
+ * them teaches nothing.
+ */
+function parseFlags(argv) {
+  const flags = { apiUrl: process.env.HOMERUN_API_URL || null, fresh: false, props: [] };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--fresh") {
+      flags.fresh = true;
+    } else if (arg === "--api") {
+      flags.apiUrl = argv[++i];
+      if (!flags.apiUrl) die("--api needs a URL, e.g. --api https://api.fractalnetworks.co");
+    } else if (arg.startsWith("--api=")) {
+      flags.apiUrl = arg.slice("--api=".length);
+    } else if (arg.startsWith("-P")) {
+      flags.props.push(arg);
+    } else {
+      die(
+        `Unknown option "${arg}".\n` +
+          "Expected --api <url>, --fresh, or a -P<name>=<value> gradle property."
+      );
+    }
+  }
+
+  if (flags.apiUrl) {
+    let parsed;
+    try {
+      parsed = new URL(flags.apiUrl);
+    } catch {
+      die(`--api needs an absolute URL with a scheme and host, not "${flags.apiUrl}".`);
+    }
+    // The same shape `set-api-url` insists on, so a value that builds here
+    // cannot be one the host would refuse at runtime. Warned rather than
+    // refused for http: a laptop backend is a legitimate thing to point at, and
+    // the host reads `BuildConfig.API_URL` without going through that check.
+    if (parsed.protocol !== "https:") {
+      console.warn(
+        `\nWarning: ${flags.apiUrl} is not https. The host will use it, but the\n` +
+          "page cannot set it at runtime — `set-api-url` refuses anything else.\n"
+      );
+    }
+    flags.props.push(`-PapiUrl=${flags.apiUrl}`);
+  }
+
+  return flags;
+}
+
+/**
+ * The API base the app on the device has actually stored, or null.
+ *
+ * Plaintext on purpose — `SecretStore` encrypts the two bearer tokens and
+ * deliberately not this, so it can be read exactly like this when something is
+ * pointed at the wrong backend.
+ */
+function deviceApiUrl() {
+  try {
+    const prefs = adb(
+      ["shell", "run-as", APPLICATION_ID, "cat", "shared_prefs/homerun.xml"],
+      { stdio: ["ignore", "pipe", "ignore"] }
+    );
+    return prefs.match(/name="api-url">([^<]+)</)?.[1] ?? null;
+  } catch {
+    // No app installed yet, no prefs file, or a release build that `run-as`
+    // cannot read. None of those is worth failing a build over.
+    return null;
+  }
+}
+
+/**
+ * Say where this build points, and that the page may not agree.
+ *
+ * Printed unconditionally rather than only on a detected mismatch, because the
+ * thing that decides is the page's `localStorage`, and that is not readable from
+ * here — it lives in the WebView's LevelDB. [deviceApiUrl] sees only the host's
+ * copy, which the host stores *only* when the page's value differs from
+ * `BuildConfig`, so it goes from absent to present a run later than would be
+ * useful. Rather than dress that up as detection, this states the rule every
+ * time and escalates when there is something concrete to show.
+ */
+function announceApiUrl(apiUrl) {
+  const stored = deviceApiUrl();
+
+  if (stored && stored !== apiUrl) {
+    console.warn(
+      `\n  Built for ${apiUrl}\n` +
+        `  The app has  ${stored}  stored, and that wins: the page seeds its\n` +
+        "  API URL on first run only, so its requests — registration and login\n" +
+        "  included — still go to the old backend.\n\n" +
+        "  Re-run with --fresh to wipe the data and let it re-seed.\n"
+    );
+    return;
+  }
+
+  console.log(
+    `\n  Built for ${apiUrl}\n` +
+      "  The page keeps its own copy, seeded on first run. If this device has\n" +
+      "  run against a different backend, add --fresh or it will keep using it.\n"
+  );
+}
+
+/** Wipe the app's data, so the next launch is a genuine first run. */
+function clearAppData() {
+  console.log("Clearing app data (worlds, credentials, staged runtimes) ...");
+  adb(["shell", "pm", "clear", APPLICATION_ID], { stdio: "inherit" });
+}
 
 // --- SDK -------------------------------------------------------------------
 
@@ -207,7 +351,7 @@ function gradle(tasks) {
   // made it useless in exactly the loop that switches between an emulator and
   // a phone. Found by installing on a real device.
   const abi = deviceAbi();
-  const args = abi ? [...tasks, `-Pabi=${abi}`] : tasks;
+  const args = [...tasks, ...(abi ? [`-Pabi=${abi}`] : []), ...flags.props];
 
   const wrapper = path.join(ANDROID_DIR, process.platform === "win32" ? "gradlew.bat" : "gradlew");
   const jdk = resolveJdk();
@@ -367,6 +511,22 @@ function logs() {
 // --- entry point -----------------------------------------------------------
 
 const command = process.argv[2] || "run";
+const flags = parseFlags(process.argv.slice(3));
+
+/**
+ * Install, then reset the data if asked, then say so if the API URL will not
+ * take effect.
+ *
+ * `--fresh` runs *after* the install because installing over an existing app
+ * keeps its data; clearing first would only wipe the old build's. The warning
+ * runs last so it is the final thing on screen rather than scrolled away by
+ * gradle, and it is skipped when `--fresh` has already made it moot.
+ */
+function installAndPrepare() {
+  install();
+  if (flags.fresh) clearAppData();
+  else if (flags.apiUrl) announceApiUrl(flags.apiUrl);
+}
 
 switch (command) {
   case "build":
@@ -374,11 +534,11 @@ switch (command) {
     break;
   case "install":
     gradle(["assembleDebug"]);
-    install();
+    installAndPrepare();
     break;
   case "run":
     gradle(["assembleDebug"]);
-    install();
+    installAndPrepare();
     launch();
     logs();
     break;

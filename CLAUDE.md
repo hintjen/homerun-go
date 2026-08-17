@@ -14,6 +14,7 @@ was worked out from scratch more than once.
 
 | Skill | When |
 |---|---|
+| `on-device-build` | getting a build onto a phone, either platform: what to stage before Gradle/Xcode touches anything, and pointing a build at a backend that is not production |
 | `android-emulator` | testing on a device: build, install, tap by screenshot, logcat, verifying a flow end to end |
 | `ffi-abi-change` | adding or changing a `homerun_*` C export — seven touchpoints, most failing silently |
 | `tests-that-bite` | writing a test, or working out why a green suite missed a real bug |
@@ -145,6 +146,16 @@ npm test        # core + FFI (with process-engine) + the ABI check
 
 Cross-compiling: Android targets work from any host with `cargo-ndk`; iOS
 targets require macOS.
+
+**A build talks to production unless you say otherwise, and saying otherwise is
+not one switch.** Two places hold an API URL — the host's build config and the
+page's `localStorage` — and the page seeds itself from the host *only when its
+key is empty*, so rebuilding with a different backend changes nothing for the
+page until the app's data is wiped. On Android that is
+`npm run android:run:staging:fresh`; iOS has no build-time API URL at all and
+always falls back to production. Never conclude which backend is in play from the
+build log — read the value out of the running page. `docs/building.md` §
+*Which backend a build talks to*, and the `on-device-build` skill.
 
 ```bash
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android

@@ -25,6 +25,8 @@ each platform's assets, and the Rust FFI compiled for its targets.
 - Why Android native libraries must live in `jniLibs`
 - The two rules the Go and JRE binaries obey — cgo for DNS, 16 KB alignment —
   and why the emulator cannot catch either
+- **Which backend a build talks to**: the two places that hold an API URL, why
+  `--api` alone does not move the page, and why iOS cannot be pointed at all yet
 - Typical loops, and a triage list for the usual toolchain failures
 
 **Read this for**: Setting up a machine, wiring CI, or decoding a toolchain

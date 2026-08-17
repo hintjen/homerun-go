@@ -226,6 +226,90 @@ npm run doctor
 npm run build:android      # or build:ios on a Mac
 ```
 
+## Which backend a build talks to
+
+Production, unless you say otherwise. Two places decide, and they are not the
+same place — which is the whole reason this section exists.
+
+| | Where the value lives | Default |
+|---|---|---|
+| **The host** | `BuildConfig.API_URL` (Android) / `HostStore.apiURL` (iOS) | `https://api.gethomerun.app` on Android; **nothing** on iOS |
+| **The page** | `localStorage.apiUrl` | seeded from the host on first run, else the compiled-in production default |
+
+The page's copy is the one that matters for almost everything — registration,
+login, server settings, every `clientApi` call. The host's copy is for what the
+host does itself: the device registration, the report tokens, the OTA bundle
+check.
+
+### Android
+
+```bash
+node scripts/android-app.js run --api https://api.fractalnetworks.co --fresh
+npm run android:run:staging          # the same, without the wipe
+npm run android:run:staging:fresh
+```
+
+`--api` is shorthand for `-PapiUrl=…`, which sets `BuildConfig.API_URL`.
+
+**`--fresh` is not optional the first time.** The page seeds `localStorage.apiUrl`
+from the host's value **only when the key is empty** (`pages/index.tsx`), so a
+hand-picked backend survives every remount. A rebuild with a different `--api`
+therefore changes nothing for the page: the build succeeds and the app keeps
+talking to the old backend. `--fresh` wipes the app's data so the seed runs
+again. The script prints what it built for, and warns when the device has
+something else stored.
+
+### iOS
+
+**There is no equivalent — an iOS build cannot currently be pointed anywhere.**
+`HostStore.apiURL` is `UserDefaults`-backed and written **only by the page**
+(`set-api-url`, and the credentials handler in `BridgeRouter+Session.swift`). It
+has no build-time default and nothing seeds it.
+
+So on a fresh install `get-initial-config` omits `apiUrl` entirely, the page logs
+`Initial API URL not provided by main process`, and falls back to production. The
+only way to move an iOS build today is to set `localStorage.apiUrl` by hand in
+Safari's Web Inspector.
+
+Closing that is small, and worth doing when somebody needs it: give `HostStore` a
+build-time fallback — an `Info.plist` key fed from an xcconfig, read when
+`UserDefaults` holds nothing — so `BridgeRouter+AppShell.swift` always has a
+value to return and iOS behaves like Android.
+
+### Reading the value the page actually holds
+
+Do not infer it. Both times this has gone wrong, the inference was the problem.
+On Android, over the WebView debugger (debug builds enable it):
+
+```bash
+PID=$(adb shell pidof app.gethomerun.mobile.debug | tr -d '\r')
+adb forward tcp:9222 localabstract:webview_devtools_remote_$PID
+curl -s http://localhost:9222/json | grep webSocketDebuggerUrl
+```
+
+then `Runtime.evaluate` `localStorage.getItem('apiUrl')` over that socket. On iOS
+the same answer comes from Safari → Develop → the device → the WebView.
+
+To ask the *host* instead, invoke `get-initial-config` across the bridge and read
+its `apiUrl`. When the two disagree, the page wins.
+
+### Two bugs that made this harder than it should have been
+
+Both fixed, and both worth knowing because they explain the shape above:
+
+- **`clientApi.getApiUrl()` used to persist its own default.** It is called at
+  startup by the token refresh, before the seeding effect runs, so production
+  landed in `localStorage` and the seed was skipped — silently, because the
+  "not provided by main process" warning lives inside the same `if`. A reader now
+  returns the fallback without writing it.
+- **`handleFailedRefresh()` called `localStorage.clear()`.** On any fresh install
+  the refresh fails, so this ran and wiped the seeded `apiUrl` — and because the
+  seed only fires on an empty key, that made it unrecoverable for the session.
+  Signing out now forgets credentials and keeps settings.
+
+Either one alone made `--api` useless on every device, which is why the flag
+looked broken rather than the page.
+
 ## Building a release
 
 `build:android` is the debug loop's staging step. It covers the UI bundle,

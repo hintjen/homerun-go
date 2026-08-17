@@ -30,6 +30,8 @@
     "android:build": "node scripts/android-app.js build",
     "android:install": "node scripts/android-app.js install",
     "android:run": "node scripts/android-app.js run",
+    "android:run:staging": "node scripts/android-app.js run --api https://api.fractalnetworks.co",
+    "android:run:staging:fresh": "node scripts/android-app.js run --api https://api.fractalnetworks.co --fresh",
     "android:emulator": "node scripts/android-app.js emulator",
     "android:logs": "node scripts/android-app.js logs",
     "test": "npm run test:core && npm run test:rust && npm run test:abi && npm run test:host-revision && npm run test:capabilities",
