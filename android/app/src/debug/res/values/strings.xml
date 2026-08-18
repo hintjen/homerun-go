@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!--
+      A different name for the debug build, because the two can be installed
+      side by side.
+
+      applicationIdSuffix already keeps them apart as packages, but nothing the
+      owner of the phone looks at is the package. The launcher shows the label,
+      and so does the "Open with" chooser Android raises when a homerun:// link
+      matches both installs — two identical rows, no way to tell which one is
+      the build under test. Overriding app_name here is enough: the debug
+      source set outranks main in resource merging, and the release APK cannot
+      pick this file up.
+    -->
+    <string name="app_name">Homerun Go (debug)</string>
+
+</resources>
