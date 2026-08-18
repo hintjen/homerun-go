@@ -968,7 +968,11 @@
         "deviceWebsocket": true,
         "haptics": false,
         "nativeShare": false,
-        "remotePush": false
+        "remotePush": false,
+        "socialProviders": [
+          "google",
+          "apple"
+        ]
       },
       "required": [
         "auth:web-session",
@@ -1151,7 +1155,11 @@
         "deviceWebsocket": true,
         "haptics": true,
         "nativeShare": false,
-        "remotePush": false
+        "remotePush": false,
+        "socialProviders": [
+          "google",
+          "apple"
+        ]
       },
       "required": [
         "auth:web-session",
@@ -1259,7 +1267,10 @@
         "deviceWebsocket": true,
         "haptics": true,
         "nativeShare": false,
-        "remotePush": true
+        "remotePush": true,
+        "socialProviders": [
+          "google"
+        ]
       },
       "required": [
         "auth:web-session",

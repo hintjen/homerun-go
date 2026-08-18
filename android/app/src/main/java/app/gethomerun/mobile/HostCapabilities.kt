@@ -36,6 +36,14 @@ data class HostCapabilities(
     val haptics: Boolean,
     val nativeShare: Boolean,
     val remotePush: Boolean,
+    /**
+     * Identity providers this host offers on the auth screens and in the
+     * claim dialog. Google only here: Sign in with Apple works on Android —
+     * it is a plain web OAuth flow through the same broker — but Apple's
+     * guidelines are about offering it, and a Google-only screen is one
+     * fewer thing for a player to weigh.
+     */
+    val socialProviders: List<String>,
 ) {
     companion object {
         /**
@@ -170,6 +178,7 @@ data class HostCapabilities(
             // own JWT — the same split as social sign-in, and the reason no
             // identity appears anywhere in the push path here.
             remotePush = true,
+            socialProviders = listOf("google"),
         )
     }
 }
