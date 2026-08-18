@@ -1,6 +1,7 @@
 import FirebaseCore
 import FirebaseMessaging
 import Foundation
+import UIKit
 import UserNotifications
 
 /// The host's half of remote push: the FCM token, and nothing else.

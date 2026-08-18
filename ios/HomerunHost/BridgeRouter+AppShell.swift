@@ -371,7 +371,11 @@ extension BridgeRouter {
     /// for ever without breaking anything. `push:token-changed` announces a
     /// token arriving later.
     func pushGetToken(_ params: Any?) async throws -> Any? {
-        ["token": await PushMessaging.shared.currentToken() ?? NSNull()]
+        // Spelled through an `Any` binding rather than inline: `String? ??
+        // NSNull()` has no common type for Swift to infer, so the operands
+        // have to meet as `Any` before `??` sees them.
+        let token: Any = await PushMessaging.shared.currentToken() ?? NSNull()
+        return ["token": token]
     }
 
     // MARK: - Deep links

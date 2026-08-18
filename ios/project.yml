@@ -29,7 +29,7 @@ settings:
     # The build number, invisible to players and unrelated to the version
     # above. Apple rejects a duplicate, so this is the upload date plus a
     # counter rather than a 1 someone has to remember to bump: yyyymmddNN.
-    CURRENT_PROJECT_VERSION: "2026081201"
+    CURRENT_PROJECT_VERSION: "2026081801"
     # The backend a build talks to. Reaches the app through `HomerunAPIURL` in
     # Info.plist, read by `HostStore.apiURL` when the page has not stored one.
     # Android's `-PapiUrl` equivalent, with the same production default:
@@ -113,13 +113,34 @@ targets:
       #
       # The pairing that matters is app Firebase project <-> backend FCM
       # credential — crossing them fails at send time as SENDER_ID_MISMATCH,
-      # far from the mistake (docs/building.md, "Push credentials"). Optional,
-      # and the app treats its absence as push-disabled rather than an error,
-      # so a build without it still runs; a missing plist is why a device's
-      # token stays null.
-      - path: HomerunHost/GoogleService-Info.plist
-        buildPhase: resources
-        optional: true
+      # far from the mistake (docs/building.md, "Push credentials"). It is
+      # genuinely optional, but not as a source entry: XcodeGen's `optional`
+      # only forgives the file at *generation* time and still emits the build
+      # input, so a plist-less build failed with "Build input file cannot be
+      # found" rather than running with push inert. It is copied by the
+      # postBuildScripts phase below instead, which is what makes the absence
+      # a runtime condition (`configureIfPossible`) the way the plan intends.
+
+    # Copies GoogleService-Info.plist into the app when one is staged, and
+    # does nothing when one is not. This is the whole reason the plist is not
+    # a `sources:` entry — see the note above it. Runs before Xcode signs, so
+    # the copy is inside the signature rather than invalidating it.
+    postBuildScripts:
+      - name: Stage GoogleService-Info.plist (optional)
+        # No inputFiles/outputFiles deliberately: declaring an output that a
+        # plist-less build never produces makes Xcode report a phase that
+        # "did not produce its expected output" on every build.
+        script: |
+          set -eu
+          SRC="$SRCROOT/HomerunHost/GoogleService-Info.plist"
+          DEST="$BUILT_PRODUCTS_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH"
+          if [ -f "$SRC" ]; then
+            cp "$SRC" "$DEST/GoogleService-Info.plist"
+            echo "note: staged GoogleService-Info.plist — remote push is live"
+          else
+            rm -f "$DEST/GoogleService-Info.plist"
+            echo "note: no GoogleService-Info.plist — remote push inert in this build"
+          fi
 
     settings:
       base:
