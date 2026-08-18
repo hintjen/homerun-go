@@ -535,6 +535,48 @@ window.__homerunHost.postMessage(JSON.stringify({
 This drives the same code path the UI does, so it tests the host rather than
 bypassing it.
 
+## Picking a file — `MainActivity.ConsoleClient.onShowFileChooser`
+
+A WebView does **nothing** when an `<input type="file">` is clicked unless the
+host overrides this. The default implementation returns false and drops the
+callback: no error, no console line, no permission prompt, and the tap simply
+has no effect. That is what picking a server icon did on Android until this
+landed, and it is invisible from the UI side — the same page works in Chrome.
+
+`fileChooserParams.createIntent()` builds the picker from the input's own
+`accept` and `multiple` attributes, so the page keeps deciding what it will
+take. No storage permission is involved: the picker runs in its own process and
+returns a content URI already granted to us.
+
+**The callback must be answered exactly once on every path.** A dropped
+`filePathCallback` leaves the WebView believing a chooser is still open, and it
+refuses to raise another for the life of the page — so the *second* tap is dead
+too, with nothing in the log. `settleFileChooser` is the single place that
+answers it, including for a cancelled picker (which needs `null`, not an empty
+array) and for a device with no app that can satisfy the intent.
+
+The shared UI helps here too: its file inputs are hidden with a zero-size
+absolute box rather than `display: none`, because `.click()` on an element that
+was never laid out is another way to reach the same dead end.
+
+## The share sheet — `Sharing.kt`
+
+`Intent.createChooser` over `ACTION_SEND`. The awkward half is the contract's
+`completed` flag, because a chooser reports no result: `startActivityForResult`
+comes back `RESULT_CANCELED` whether the user shared or not, since the app they
+picked never sets one.
+
+So two signals are read and whichever arrives first wins:
+
+| Signal | Means |
+|---|---|
+| The chooser's `IntentSender` fires | A target was picked — the only positive signal the platform offers |
+| Our activity is resumed, having been paused | The sheet was dismissed |
+
+The pick fires *before* the target app opens, so it always beats the resume that
+follows the user coming back. The `PendingIntent` must be `FLAG_MUTABLE` on API
+31+ or the system never fires it, which reads as every share being dismissed.
+
 ## Known gaps
 
 | Symptom | Cause |

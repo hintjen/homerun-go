@@ -93,6 +93,102 @@ extension BridgeRouter {
         return nil
     }
 
+    /// Present the OS share sheet.
+    ///
+    /// `UIActivityViewController`, which is what a share glyph promises on a
+    /// phone: the system ranks targets by who this person actually shares with,
+    /// and it does that better than a menu of our own could.
+    ///
+    /// The UI sends the sentence and the link apart — `text` carries the invite
+    /// without the address — because `UIActivityViewController` composes the
+    /// items itself. Handing it a URL as a `URL` rather than as more text is
+    /// what lets Messages show a link preview and Safari offer a bookmark;
+    /// flattened into one string it is just characters.
+    ///
+    /// Dismissal is an ordinary outcome. `completed: false` is what the UI
+    /// reads to stay quiet — no toast, and no success haptic for something that
+    /// did not happen.
+    @MainActor
+    func shareContent(_ params: Any?) async throws -> Any? {
+        let payload = params as? [String: Any]
+        let title = (payload?["title"] as? String)?.nonEmpty
+        let text = (payload?["text"] as? String)?.nonEmpty
+        let urlString = (payload?["url"] as? String)?.nonEmpty
+
+        var items: [Any] = []
+        // The sentence carries the subject with it. `setValue(_:forKey: "subject")`
+        // is the shorter-looking way and it throws `NSUnknownKeyException` at
+        // runtime — `UIActivityViewController` has no such property, and the
+        // subject is only ever offered through an item source.
+        if let text { items.append(ShareTextItem(text: text, subject: title)) }
+        // Only a real web URL becomes a URL item; anything else stays a string
+        // rather than handing the share extensions something they will try to
+        // open. A URL that fails to parse is still worth sharing as text.
+        if let urlString {
+            if let url = URL(string: urlString), url.scheme?.hasPrefix("http") == true {
+                items.append(url)
+            } else {
+                items.append(urlString)
+            }
+        }
+        if items.isEmpty, let title { items.append(ShareTextItem(text: title, subject: title)) }
+        guard !items.isEmpty else { return ["completed": false] }
+
+        guard let presenter = Self.topViewController() else {
+            // Nothing on screen to hang a sheet from. Answering rather than
+            // throwing keeps this on the UI's ordinary path, and answering at
+            // all is the part that matters: an unresolved invoke hangs the
+            // page's promise for ever (PROTOCOL.md §5).
+            return ["completed": false]
+        }
+
+        let activity = UIActivityViewController(activityItems: items, applicationActivities: nil)
+
+        // iPad presents this as a popover and *crashes* without an anchor. The
+        // page's own button is not reachable from here, so it hangs off the
+        // middle of the presenter — the same place a sheet would appear.
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = presenter.view
+            popover.sourceRect = CGRect(
+                x: presenter.view.bounds.midX,
+                y: presenter.view.bounds.midY,
+                width: 0,
+                height: 0)
+            popover.permittedArrowDirections = []
+        }
+
+        // The continuation's type is spelled out rather than inferred from the
+        // resume below, which is inside an escaping handler the compiler cannot
+        // reach back through.
+        return await withCheckedContinuation { (continuation: CheckedContinuation<[String: Bool], Never>) in
+            // Called for both outcomes, and exactly once. `completed` is false
+            // for a dismissal and also for an extension that failed, which the
+            // UI treats the same way and should.
+            activity.completionWithItemsHandler = { _, completed, _, _ in
+                continuation.resume(returning: ["completed": completed])
+            }
+            presenter.present(activity, animated: true)
+        }
+    }
+
+    /// The view controller a sheet should be presented from.
+    ///
+    /// Walks past anything already presented: the share can be raised from a
+    /// screen that is itself inside a modal, and presenting from underneath one
+    /// is silently ignored by UIKit.
+    @MainActor
+    static func topViewController() -> UIViewController? {
+        let key = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+            .first { $0.isKeyWindow }
+        var top = key?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
+    }
+
     /// Returns false rather than throwing when the URL cannot be opened — the
     /// contract's result type is a plain boolean and the UI reads it.
     func openExternalURL(_ params: Any?) async throws -> Any? {
@@ -347,3 +443,51 @@ private final class AuthPresentationAnchor: NSObject,
 }
 
 private let authPresentationAnchor = AuthPresentationAnchor()
+
+/// One line of shared text, with the subject a mail target should start with.
+///
+/// `UIActivityViewController` only asks for a subject through this protocol.
+/// Handing it a plain `String` item — which is all the share payload's `text`
+/// is — means Mail composes with an empty subject line, and there is no
+/// property on the controller to set instead.
+private final class ShareTextItem: NSObject, UIActivityItemSource {
+    private let text: String
+    private let subject: String?
+
+    init(text: String, subject: String?) {
+        self.text = text
+        self.subject = subject
+    }
+
+    /// Shown while the sheet works out what can accept the item. It must be the
+    /// same *type* as the real item; the value is never used.
+    func activityViewControllerPlaceholderItem(_ controller: UIActivityViewController) -> Any {
+        text
+    }
+
+    func activityViewController(
+        _ controller: UIActivityViewController,
+        itemForActivityType activityType: UIActivity.ActivityType?
+    ) -> Any? {
+        text
+    }
+
+    func activityViewController(
+        _ controller: UIActivityViewController,
+        subjectForActivityType activityType: UIActivity.ActivityType?
+    ) -> String {
+        subject ?? ""
+    }
+}
+
+extension String {
+    /// The string, or nil when it is blank.
+    ///
+    /// The share payload's three fields are all optional and the UI omits what
+    /// it has nothing to say for — but an empty string arrives as a present
+    /// value, and passing one to `UIActivityViewController` puts an empty item
+    /// in the sheet.
+    fileprivate var nonEmpty: String? {
+        trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : self
+    }
+}

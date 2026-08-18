@@ -161,16 +161,14 @@ data class HostCapabilities(
             // has touch feedback switched off, and that is the setting doing
             // its job rather than something for this flag to second-guess.
             haptics = true,
-            // False because this host does not implement `share-content`, not
-            // because the platform cannot — `Intent.createChooser` over
-            // ACTION_SEND is exactly what this would be. Every share surface
-            // in the UI falls back to the clipboard when this is false, which
-            // is what a lobby invite does today.
-            //
-            // Reporting the truth is the whole job of this constant. A `true`
-            // here would produce a Share row that reaches a channel nothing
-            // answers, which is worse than a Copy row that works.
-            nativeShare = false,
+            // True now that [Sharing] answers `share-content` with
+            // `Intent.createChooser` over ACTION_SEND. It moved in the same
+            // change as the handler, which is the rule this constant exists to
+            // keep: reporting the truth is its whole job, and a `true` ahead of
+            // the handler produces a Share row that reaches a channel nothing
+            // answers — worse than a Copy row that works, because an
+            // unanswered invoke hangs the promise rather than failing it.
+            nativeShare = true,
             // Flipped true at revision 9, in the same change as the handlers.
             // The host's half is the OS permission and the FCM token
             // ([PushMessaging] and the three push:* handlers); registering

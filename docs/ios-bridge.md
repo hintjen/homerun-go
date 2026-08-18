@@ -182,6 +182,44 @@ host does not debounce.
   straight from the handler rather than routed through `BridgeEventSink`: that
   protocol exists for the things that need the WebView.
 
+## The share sheet — `share-content`
+
+`UIActivityViewController`, presented from whatever is topmost. Two details are
+runtime traps rather than compile errors, so neither shows up until somebody
+taps Share:
+
+- **The subject goes through `UIActivityItemSource`.** The shorter-looking
+  `setValue(subject, forKey: "subject")` appears in most examples and raises
+  `NSUnknownKeyException` — the controller has no such property. `ShareTextItem`
+  in `BridgeRouter+AppShell.swift` is what supplies it.
+- **A popover needs an anchor or iPad crashes.** `sourceView` and `sourceRect`
+  are set to the middle of the presenter, because the page's own button is not
+  reachable from here. Untested — there is no iPad build.
+
+The URL is passed as a `URL` rather than folded into the text, which is what
+lets Messages draw a link preview. The UI deliberately sends the sentence
+without the link for the same reason: flattened together it would be sent twice.
+
+`completed: false` covers a dismissal *and* an extension that failed. The UI
+treats both the same way and should: no toast, and no success haptic for
+something that did not happen.
+
+## The Minecraft account — `minecraft:auth:*`
+
+Three invokes and two events, answered by `BridgeRouter+Session.swift` over
+``MinecraftAuth``. The flow, and why it is device code rather than a redirect,
+is [the Minecraft account on mobile](./minecraft-account.md) — it is shared with
+Android and documented once.
+
+What belongs to this host: `MinecraftAuth` is an `actor` while `BridgeRouter` is
+`@MainActor`, so the handlers hop. That is also why `openApproval` uses
+`await MainActor.run` instead of being declared `@MainActor` — an actor's own
+instance methods cannot be isolated to a different global actor.
+
+**The login invoke can legitimately take a quarter of an hour**, because that is
+how long the user has to approve. Do not add a timeout to it; §*No call timeout*
+above is exactly this case.
+
 ## Channel map
 
 Extended at M2 as handlers land. Today: `get-app-version`.
@@ -195,6 +233,7 @@ Extended at M2 as handlers land. Today: `get-app-version`.
 | `ios/HomerunHost/BridgeEnvelope.swift` | Envelope encode/decode, the U+2028/9 escaper |
 | `ios/HomerunHost/WeakScriptMessageHandler.swift` | Breaks the message-handler retain cycle |
 | `ios/HomerunHost/HapticsPlayer.swift` | The six patterns, and the generators they play on |
+| `ios/HomerunHost/MinecraftAuth.swift` | The Microsoft sign-in: polls, transport, Keychain |
 
 ## Triage
 

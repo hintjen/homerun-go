@@ -61,7 +61,7 @@ final class BridgeRouter {
     /// So: bump this whenever the table below gains a channel, and add the
     /// matching ledger entry. `scripts/check-host-revision.js` compares the two
     /// and fails the build if you do one without the other.
-    static let hostRevision = 7
+    static let hostRevision = 11
 
     private(set) var handlers: [String: Handler] = [:]
 
@@ -115,9 +115,13 @@ final class BridgeRouter {
             "cache-client-nonce": cacheClientNonce,
             "clipboard-write-text": clipboardWriteText,
             "open-external-url": openExternalURL,
+            "share-content": shareContent,
             "push-notification": pushNotification,
             "deep-link:consume": deepLinkConsume,
             "auth:web-session": authWebSession,
+            "minecraft:auth:get-profile": minecraftAuthGetProfile,
+            "minecraft:auth:login": minecraftAuthLogin,
+            "minecraft:auth:logout": minecraftAuthLogout,
             "check-system-time": checkSystemTime,
             "get-device-id": getDeviceID,
             "get-device-ws-port": getDeviceWSPort,

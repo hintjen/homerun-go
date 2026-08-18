@@ -204,5 +204,31 @@
         "ios": []
       }
     }
+    ,
+    {
+      "revision": 10,
+      "summary": "Both hosts present the OS share sheet. `share-content` is a capability-tiered channel, so it was declared long before either host answered it, and both reported `nativeShare: false` in the meantime while every share surface in the UI fell back to the clipboard. iOS presents a UIActivityViewController and Android an Intent.createChooser over ACTION_SEND. The capability flags moved in the same change as the handlers, which is the rule: a `true` ahead of a handler produces a Share button that reaches a channel nothing answers, and an unanswered invoke hangs rather than fails.",
+      "adds": {
+        "android": [
+          "share-content"
+        ],
+        "ios": [
+          "share-content"
+        ]
+      }
+    }
+    ,
+    {
+      "revision": 11,
+      "summary": "iOS can sign in to a Minecraft account. The same three invokes and two events Android gained at revision 8, arriving later because the iOS host was behind; the ledger records what each host answers, not when the feature was designed. Same device-code flow against the public Xbox client, and the same reason for it: the only redirect that client accepts is a Microsoft-hosted page, which a phone cannot intercept without a Universal Link it cannot register. The whole five-call chain is `homerun_core::minecraft::account` for both hosts, so this host only opens sockets and writes to the Keychain. iOS now reports `minecraftAccount: true`.",
+      "adds": {
+        "android": [],
+        "ios": [
+          "minecraft:auth:get-profile",
+          "minecraft:auth:login",
+          "minecraft:auth:logout"
+        ]
+      }
+    }
   ]
 }

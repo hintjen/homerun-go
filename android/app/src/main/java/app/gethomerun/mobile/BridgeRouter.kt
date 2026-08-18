@@ -956,6 +956,23 @@ class BridgeRouter(
             JsonPrimitive(openExternal(url))
         },
 
+        // `Intent.createChooser` over ACTION_SEND. Suspends until the user
+        // picks a target or dismisses the sheet — a dismissal is an outcome
+        // here, not an error, and the UI stays quiet about it. See [Sharing]
+        // for how the two are told apart, which Android does not make obvious.
+        "share-content" to { params ->
+            val payload = params as? JsonObject
+            fun field(name: String) =
+                payload?.get(name)?.jsonPrimitive?.contentOrNull
+            val completed = Sharing.share(
+                context,
+                title = field("title"),
+                text = field("text"),
+                url = field("url"),
+            )
+            buildJsonObject { put("completed", completed) }
+        },
+
         // The **backend's** id for this device, not a local one. A native
         // server is hosted on a device and the API binds it by this id, so an
         // invented value fails server creation with "does not exist" — which
@@ -1835,7 +1852,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 9
+        const val HOST_REVISION = 10
 
         /**
          * Auth callbacks come home on this prefix rather than one of the
