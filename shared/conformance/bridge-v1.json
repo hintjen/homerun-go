@@ -1,10 +1,10 @@
 {
   "bridgeVersion": 1,
   "counts": {
-    "invoke": 77,
+    "invoke": 81,
     "send": 26,
-    "event": 52,
-    "total": 155
+    "event": 54,
+    "total": 161
   },
   "channels": [
     {
@@ -58,6 +58,12 @@
       "channel": "deep-link:consume",
       "kind": "invoke",
       "tier": "core"
+    },
+    {
+      "channel": "auth:web-session",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Must be a real browser — ASWebAuthenticationSession, a Custom Tab, or the system browser. Never our own WebView: Google rejects embedded ones."
     },
     {
       "channel": "check-system-time",
@@ -349,6 +355,24 @@
       "kind": "invoke",
       "tier": "capability",
       "capability": "minecraftAccount"
+    },
+    {
+      "channel": "push:permission",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "remotePush"
+    },
+    {
+      "channel": "push:request-permission",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "remotePush"
+    },
+    {
+      "channel": "push:get-token",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "remotePush"
     },
     {
       "channel": "minecraft:get-setup",
@@ -872,6 +896,19 @@
       "capability": "minecraftAccount"
     },
     {
+      "channel": "push:token-changed",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "remotePush"
+    },
+    {
+      "channel": "push:opened",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "remotePush",
+      "note": "Must be queued through the ready handshake: a cold-start tap arrives before the page exists."
+    },
+    {
       "channel": "device-ws-ready",
       "kind": "event",
       "tier": "capability",
@@ -930,9 +967,11 @@
         "backups": true,
         "deviceWebsocket": true,
         "haptics": false,
-        "nativeShare": false
+        "nativeShare": false,
+        "remotePush": false
       },
       "required": [
+        "auth:web-session",
         "cache-client-nonce",
         "can-move-installation",
         "cancel-download",
@@ -1111,9 +1150,11 @@
         "backups": true,
         "deviceWebsocket": true,
         "haptics": true,
-        "nativeShare": false
+        "nativeShare": false,
+        "remotePush": false
       },
       "required": [
+        "auth:web-session",
         "cache-client-nonce",
         "check-homerun-storage-limit",
         "check-system-time",
@@ -1217,9 +1258,11 @@
         "backups": true,
         "deviceWebsocket": true,
         "haptics": true,
-        "nativeShare": false
+        "nativeShare": false,
+        "remotePush": false
       },
       "required": [
+        "auth:web-session",
         "cache-client-nonce",
         "check-homerun-storage-limit",
         "check-system-time",

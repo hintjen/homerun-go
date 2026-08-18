@@ -35,6 +35,7 @@ data class HostCapabilities(
     val deviceWebsocket: Boolean,
     val haptics: Boolean,
     val nativeShare: Boolean,
+    val remotePush: Boolean,
 ) {
     companion object {
         /**
@@ -162,6 +163,11 @@ data class HostCapabilities(
             // here would produce a Share row that reaches a channel nothing
             // answers, which is worse than a Copy row that works.
             nativeShare = false,
+            // False until this host answers the push:* channels — the flip is
+            // what makes conformance require them, so it lands in the same
+            // change as the handlers (M3 of plans/push-notifications.md in
+            // this repo). Same staging as minecraftAccount before revision 8.
+            remotePush = false,
         )
     }
 }
