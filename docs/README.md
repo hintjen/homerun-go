@@ -365,6 +365,29 @@ applying for Minecraft API access.
 
 ---
 
+### 🔔 [Remote push on Android](./android-push.md)
+
+How a message sent by the API lands in this phone's tray — FCM behind the
+`remotePush` capability, bridge host revision 9.
+
+**Contains**:
+- The split that is the whole architecture: the host owns the OS permission
+  and the token, the shared UI owns the API registration over the user's JWT
+- Why background delivery involves no app code, and why the channel must
+  exist before the process does
+- The permission vocabulary, and why "was it ever asked" is a prefs flag
+- The tap: `google.message_id` as the discriminator, and the ready-handshake
+  queue it must ride
+- `google-services.json` staged **by backend, not build type**, and the
+  `SENDER_ID_MISMATCH` that punishes crossing them
+- Triage, symptom first — including the two silences (denied permission,
+  force-stopped app) that read exactly like non-delivery
+
+**Read this for**: Working on push, a notification that never arrived, or a
+token the API keeps deleting. API half: `homerun/api/docs/push-notifications.md`.
+
+---
+
 ### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
 
 Not a subsystem doc — the full sweep behind "no", so it does not get

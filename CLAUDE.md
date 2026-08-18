@@ -96,7 +96,7 @@ node shared/conformance/check-coverage.js android android/app/src/main/java/app/
 ```
 
 `npm run conformance:ios` and `conformance:android` wrap those. Both pass
-today: iOS requires 48 handlers (57 declared), Android 49 of 49. The checker
+today: iOS requires 49 handlers (58 declared), Android 56 of 56. The checker
 reads the router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END`
 markers — keep those markers around the real table, not a duplicate list.
 
