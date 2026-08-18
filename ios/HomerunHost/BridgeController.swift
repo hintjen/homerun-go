@@ -80,6 +80,15 @@ final class BridgeController: NSObject, BridgeEventSink {
             self?.emit("deep-link", [url])
         }
 
+        // Remote push rides the same queue, and depends on it harder: a
+        // cold-start notification tap is delivered by UNUserNotificationCenter
+        // during launch, long before the page's handshake, and `push:opened`
+        // must survive that gap — the same shape as the cold-start deep link.
+        // Token rotations are merely convenient to queue.
+        PushMessaging.shared.emit = { [weak self] event, args in
+            self?.emit(event, args)
+        }
+
         // The contract's state event carries only these three; `starting` and
         // `stopping` are host-internal and the UI infers them from its own
         // pending call.

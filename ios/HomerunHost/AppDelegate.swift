@@ -1,3 +1,4 @@
+import FirebaseMessaging
 import UIKit
 
 /// UIKit, window-based, no scenes and no SwiftUI.
@@ -39,6 +40,21 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // Before the WebView exists, because the UI asks `is-installed` on its
         // post-login path and a false answer strands it on the splash screen.
         HostStore.ensureFirstRunSetup()
+
+        // Remote push. Before the bridge, so a cold-start notification tap —
+        // which UNUserNotificationCenter delivers during launch — reaches a
+        // delegate that already exists; the controller's pre-ready queue holds
+        // the resulting `push:opened` until the page can hear it. Quietly does
+        // nothing on a build without GoogleService-Info.plist.
+        PushMessaging.shared.configureIfPossible()
+        if PushMessaging.shared.configured {
+            // Registration is separate from the *permission*: APNs hands out
+            // device tokens regardless, and FCM needs one to mint its own.
+            // The permission only governs whether anything is displayed, and
+            // the UI asks for it over the bridge at a moment the user
+            // understands.
+            application.registerForRemoteNotifications()
+        }
 
         // A backup report that never reached the API leaves the backup lease
         // open, and the lease has no timeout — every other device stays locked
@@ -85,5 +101,25 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         deepLinks.handle(url: url)
         return true
+    }
+
+    /// APNs granted a device token; FCM swaps it for the registration token
+    /// the bridge deals in (`MessagingDelegate` on `PushMessaging` fires when
+    /// that arrives).
+    func application(
+        _ application: UIApplication,
+        didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+    ) {
+        Messaging.messaging().apnsToken = deviceToken
+    }
+
+    /// Expected on the simulator (no APNs) and in aeroplane mode. The token
+    /// stays null, which the contract calls a state — the UI shows nothing
+    /// and asks again next launch.
+    func application(
+        _ application: UIApplication,
+        didFailToRegisterForRemoteNotificationsWithError error: Error
+    ) {
+        HostLog.host.info("push: APNs registration failed: \(error.localizedDescription, privacy: .public)")
     }
 }

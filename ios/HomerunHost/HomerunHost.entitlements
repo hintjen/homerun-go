@@ -2,9 +2,16 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Empty until there is a signing team. M2 adds
-	     com.apple.developer.associated-domains for Universal Links; the
-	     multicast entitlement stays out — v1 shows the IP instead of
-	     broadcasting to Minecraft's LAN list. -->
+	<!-- Remote push (bridge revision 9). `development` routes a debug build to
+	     sandbox APNs; App Store / TestFlight signing rewrites this to
+	     `production` automatically. Both APNs keys live in both Firebase
+	     projects (docs/building.md, "Push credentials"), so either environment
+	     can deliver regardless of which backend the build talks to.
+
+	     Still deliberately absent: com.apple.developer.associated-domains
+	     (M2 adds it for Universal Links) and the multicast entitlement —
+	     v1 shows the IP instead of broadcasting to Minecraft's LAN list. -->
+	<key>aps-environment</key>
+	<string>development</string>
 </dict>
 </plist>

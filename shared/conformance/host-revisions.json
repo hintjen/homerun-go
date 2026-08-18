@@ -194,14 +194,18 @@
     },
     {
       "revision": 9,
-      "summary": "Android receives remote push. Firebase Cloud Messaging, behind the new `remotePush` capability: the host answers the three push:* invokes (permission state, the prompt, the FCM token) and emits push:token-changed and push:opened. The host owns only what must be native — the OS permission sheet and the token Firebase mints; registering that token with the API is the shared UI's job over the user's own JWT, the same split as social sign-in, so no identity passes through the host. push:opened rides the ready-handshake queue because a cold-start tap arrives before the page exists — the same shape as the cold-start deep link. iOS is unchanged, still reports remotePush false, and gains these at its own M4.",
+      "summary": "Android receives remote push. Firebase Cloud Messaging, behind the new `remotePush` capability: the host answers the three push:* invokes (permission state, the prompt, the FCM token) and emits push:token-changed and push:opened. The host owns only what must be native — the OS permission sheet and the token Firebase mints; registering that token with the API is the shared UI's job over the user's own JWT, the same split as social sign-in, so no identity passes through the host. push:opened rides the ready-handshake queue because a cold-start tap arrives before the page exists — the same shape as the cold-start deep link. iOS gained the same three at its M4, landing in the same release as revisions 10 and 11 (the host declared 7 before it and 11 after — revision 8 introduced nothing for iOS, so no intermediate state ever shipped). On iOS there is no activity to borrow a permission launcher from: the sheet is a global system call, so the handlers are thinner than Android's. Swift written to the repo's uncompiled-until-a-Mac convention; plans/ios-handoff.md tracks the on-device verification.",
       "adds": {
         "android": [
           "push:get-token",
           "push:permission",
           "push:request-permission"
         ],
-        "ios": []
+        "ios": [
+          "push:get-token",
+          "push:permission",
+          "push:request-permission"
+        ]
       }
     }
     ,

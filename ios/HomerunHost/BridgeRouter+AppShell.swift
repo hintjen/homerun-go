@@ -347,6 +347,33 @@ extension BridgeRouter {
         return nil
     }
 
+    // MARK: - Remote push (`remotePush` capability, revision 9)
+
+    /// The host's half is the OS permission and the FCM token; registering
+    /// the token with the API is the shared UI's job over the user's JWT —
+    /// the same split as social sign-in, so no identity passes through here.
+    /// Unlike Android there is no activity to borrow a launcher from: the
+    /// permission sheet is a global system call.
+
+    func pushPermission(_ params: Any?) async throws -> Any? {
+        ["status": await PushMessaging.shared.permissionStatus()]
+    }
+
+    /// Prompts — because the UI asked, at a moment the user understands. A
+    /// permission already decided resolves immediately with the truth: iOS
+    /// shows the sheet exactly once per install and cannot re-prompt.
+    func pushRequestPermission(_ params: Any?) async throws -> Any? {
+        ["status": await PushMessaging.shared.requestPermission()]
+    }
+
+    /// Null is a state, not an error: the simulator has no APNs and a build
+    /// without GoogleService-Info.plist has no Firebase, and both stay null
+    /// for ever without breaking anything. `push:token-changed` announces a
+    /// token arriving later.
+    func pushGetToken(_ params: Any?) async throws -> Any? {
+        ["token": await PushMessaging.shared.currentToken() ?? NSNull()]
+    }
+
     // MARK: - Deep links
 
     func deepLinkConsume(_ params: Any?) async throws -> Any? {
