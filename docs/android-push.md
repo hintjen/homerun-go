@@ -15,10 +15,13 @@ passes through the host's push path, which is why nothing in it can leak one.
 
 Delivery is mostly not our code either. A message to a *backgrounded* app is
 drawn by the system tray from the message's `notification` block — the
-process may not even be running. Only a *foregrounded* app receives the
-message in code. Both cases end on the `homerun` notification channel, the
-same one the local `push-notification` bridge channel posts on, so the user
-has exactly one mute switch for Homerun alerts.
+process may not even be running — on the `homerun` channel, the same one the
+local `push-notification` bridge channel posts on, so the user has exactly
+one mute switch for Homerun alerts. A *foregrounded* app receives the message
+in code and **shows nothing, deliberately**: the app being open is the
+notification surface — the bell and the server card already say it — and a
+system banner over a page saying the same thing is noise. "Foreground" means
+our activity is actually visible; a minimized app takes the tray path.
 
 The API half is `homerun/docs/push-notifications.md`; the plan and milestones
 are [`../plans/push-notifications.md`](../plans/push-notifications.md).
@@ -35,11 +38,12 @@ error.
 `PushMessagingService` is FCM's entry point. `onNewToken` re-emits as
 `push:token-changed`; the UI re-upserts to the API on every firing, because a
 rotation the API never hears about is a phone that silently stops receiving.
-`onMessageReceived` — foreground only — logs receipt and posts the tray
-notification itself. The receipt log is load-bearing: a foreground message
-whose notification cannot be posted leaves no other trace, and "delivered but
-silent" is indistinguishable from "never delivered" without it. That line is
-what located a dropped permission grant in minutes after theories had failed.
+`onMessageReceived` — foreground only — logs receipt and suppresses the
+banner (see Overview). The receipt log is load-bearing twice over: with no
+banner it is the only evidence a foreground delivery happened at all, and
+"delivered but suppressed" must stay distinguishable from "never delivered".
+An earlier version of that line is also what located a dropped permission
+grant in minutes after theories had failed.
 
 ## The channel, and why `HomerunApplication` creates it
 
@@ -110,16 +114,17 @@ types. `docs/building.md` § *Push credentials* has the full flow.
 
 ## Triage
 
-**A send succeeds and nothing appears, no log lines at all.** The permission.
-`postNotification` is deliberately silent when notifications are disabled —
-denied means silence, per the contract — and that covers the *foreground*
-path; the background tray path needs the permission too on 13+. Check
-`dumpsys package … | grep POST_NOTIFICATIONS`. Reinstalls can drop the grant
-on an emulator, which is how this was first diagnosed.
+**A send succeeds and nothing appears, no log lines at all.** Either the app
+was backgrounded and the permission is missing — the tray path needs
+`POST_NOTIFICATIONS` on 13+; check `dumpsys package … | grep
+POST_NOTIFICATIONS` (reinstalls can drop the grant on an emulator, which is
+how this was first diagnosed) — or delivery never happened at all (dead
+token, force-stopped app).
 
-**A send succeeds, `HomerunPush: message received` logs, still nothing.**
-Same as above but proven to reach our code — the receipt line exists exactly
-to split these two cases.
+**A send succeeds, `HomerunPush: message received … banner suppressed`
+logs, no banner.** Working as designed: the app was foregrounded, and a
+foregrounded app shows no banner — the page is the surface. If a banner was
+expected, the app was open; background the app and resend.
 
 **Nothing arrives after `am force-stop`.** Force-stop puts the app in the
 *stopped state* and the platform refuses FCM delivery to it — the send still

@@ -1806,9 +1806,11 @@ class BridgeRouter(
          * whatever the player was doing costs more than the notification is
          * worth. Denied means silence, which is what the contract allows.
          *
-         * Companion rather than instance because the FCM service posts
-         * through it too, for a foreground push — one code path, one icon,
-         * one channel, whoever the author is.
+         * Companion, like [ensureNotificationChannel], so nothing here needs
+         * a router instance — the local `push-notification` channel is its
+         * only caller today (a foreground FCM message deliberately shows
+         * nothing; see PushMessaging), but the channel and icon rules live in
+         * one place for whoever posts next.
          */
         fun postNotification(context: Context, title: String, body: String) {
             runCatching {

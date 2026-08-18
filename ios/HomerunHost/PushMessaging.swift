@@ -108,15 +108,22 @@ extension PushMessaging: MessagingDelegate {
 }
 
 extension PushMessaging: UNUserNotificationCenterDelegate {
-    /// Foregrounded delivery: without a delegate iOS suppresses the banner
-    /// entirely. The player may be in the app but on another screen, and
-    /// "your server crashed" must not be droppable — same call Android makes
-    /// in its `onMessageReceived`.
+    /// Foregrounded delivery: **suppressed, deliberately** — the app being
+    /// open is the notification surface. The bell and the server card are
+    /// already showing the event, and a system banner on top of a page that
+    /// says the same thing is noise. A backgrounded app never reaches this
+    /// method; the system draws its banner, which is the case push exists
+    /// for. Same rule as Android's `onMessageReceived`.
+    ///
+    /// The log line is load-bearing: with no banner it is the only evidence
+    /// a foreground delivery happened, and "delivered but suppressed" must
+    /// stay distinguishable from "never delivered".
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        HostLog.host.info("push: received in foreground, banner suppressed")
+        return []
     }
 
     /// A tap, cold start included. `push:opened` rides the controller's

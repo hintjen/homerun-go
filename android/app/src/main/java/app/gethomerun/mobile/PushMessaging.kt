@@ -92,27 +92,23 @@ class PushMessagingService : FirebaseMessagingService() {
 
     /**
      * Only reached while the app is foregrounded (background messages with a
-     * `notification` block never get here — the tray draws them). The player
-     * is already looking at the screen, and the page in front of them is the
-     * surface that should react; still post the tray notification, because a
-     * foregrounded app on another screen is exactly when "your server
-     * crashed" must not be droppable.
+     * `notification` block never get here — the tray draws them). And a
+     * foregrounded app **suppresses the banner, deliberately**: the app being
+     * open is the notification surface — the bell and the server card are
+     * already showing the event — and a system banner on top of a page that
+     * says the same thing is noise. "Foreground" here means our activity is
+     * actually visible; a minimized app takes the tray path and the banner
+     * shows, which is the case the push exists for.
+     *
+     * The receipt log is load-bearing: with no banner, this line is the only
+     * evidence a foreground delivery happened at all, and "delivered but
+     * suppressed" must stay distinguishable from "never delivered".
      */
     override fun onMessageReceived(message: RemoteMessage) {
-        // Receipt is otherwise invisible: a foreground message that goes
-        // wrong leaves no trace anywhere else, and "delivered but nothing
-        // happened" is indistinguishable from "never delivered" without it.
         Log.i(
             "HomerunPush",
-            "message received: notification=${message.notification != null} " +
-                "data=${message.data.keys}",
-        )
-        val title = message.notification?.title
-        val body = message.notification?.body ?: return
-        BridgeRouter.postNotification(
-            applicationContext,
-            title = title ?: getString(R.string.app_name),
-            body = body,
+            "message received in foreground, banner suppressed: " +
+                "notification=${message.notification != null} data=${message.data.keys}",
         )
     }
 }
