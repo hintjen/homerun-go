@@ -61,6 +61,16 @@ class MainActivity : ComponentActivity() {
     @Volatile
     private var bars: Insets = Insets.NONE
 
+    /**
+     * How much of the window the soft keyboard covers; zero when it is down.
+     *
+     * Same threading as [bars], and read for the same reason: while the
+     * keyboard is up it is over the navigation bar, so the page must stop
+     * holding space for a bar nobody can see.
+     */
+    @Volatile
+    private var keyboard: Int = 0
+
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
             // Hosting is unaffected either way — this is the notification, not
@@ -356,11 +366,20 @@ class MainActivity : ComponentActivity() {
          * a `device-width` viewport, so one CSS pixel is one dp. Fractional on
          * purpose. Rounding a 21.33dp gesture inset to 21 leaves a sliver of
          * page under the pill on exactly the phones where it is tightest.
+         *
+         * The keyboard comes off the bottom, because the WebView has already
+         * been shortened to sit on top of it and the navigation bar it would
+         * otherwise be avoiding is *behind* the keys. Left in, the page would
+         * hold 24dp clear of a pill it cannot reach and every sheet would float
+         * that far above the keyboard. Clamped rather than assumed one-sided: a
+         * floating or split keyboard reports less than the bar, and the bar is
+         * then still there to avoid.
          */
         @JavascriptInterface
         fun safeArea(): String {
             val density = resources.displayMetrics.density
             val bars = bars
+            val bottom = (bars.bottom - keyboard).coerceAtLeast(0)
             // Locale.US, not the default: a device set to a comma-decimal
             // locale would format 21.33 as "21,33px", which is not a CSS
             // length. The page would silently keep its zeroes and draw under
@@ -369,7 +388,7 @@ class MainActivity : ComponentActivity() {
                 Locale.US,
                 bars.top / density,
                 bars.right / density,
-                bars.bottom / density,
+                bottom / density,
                 bars.left / density,
             )
         }
@@ -466,16 +485,50 @@ class MainActivity : ComponentActivity() {
      * cutout of its own. `env(safe-area-inset-*)` therefore stays 0 and the
      * variables below are the single source of the numbers.
      *
-     * The IME is deliberately not in this: `adjustResize` in the manifest
-     * already shrinks the window when the keyboard opens. Adding `Type.ime()`
-     * would take the keyboard's height out a second time and leave a gap the
-     * size of the keyboard above it.
+     * ## The keyboard is part of this, and used not to be
+     *
+     * `adjustResize` in the manifest does **not** shrink the window, because
+     * this app targets SDK 35 and is therefore edge-to-edge: the platform only
+     * insets a window's content while it fits system windows, and an
+     * edge-to-edge window by definition does not. An earlier version of this
+     * comment asserted the opposite and excluded `Type.ime()` to avoid
+     * double-counting a resize that never happens. Nothing counted it at all,
+     * and the symptom was precise: open the claim-account sheet, the keyboard
+     * comes up over it, and the field being typed into is behind the keys.
+     * `innerHeight` stayed at its full 997 with `mInputShown=true`.
+     *
+     * So the host resizes the WebView by hand, which is the one place the
+     * numbers exist — a page cannot see an Android keyboard.
+     *
+     * Padding on the container rather than a report to the page, because a real
+     * resize is what the shared UI already asks for: its viewport tag carries
+     * `interactive-widget=resizes-content`, whose entire job is to shrink the
+     * layout viewport for the keyboard rather than pan it, and which is inert
+     * while the window it sits in never changes size. Honour that and `100dvh`,
+     * `bottom-0`, `--visual-vh` and `.pb-keyboard` all come right at once, for
+     * every sheet in the bundle, with nothing to keep in step. Reporting a
+     * height instead would mean teaching ~40 call sites about a variable one
+     * platform sets, to reach the same place.
+     *
+     * `adjustResize` stays in the manifest even though it is inert. Dropping it
+     * leaves the mode unspecified, and the platform may then pick `adjustPan` —
+     * which would slide the whole page up, status bar and all.
+     *
+     * The strip left below the WebView is exactly where the keyboard is, so it
+     * is only visible for the frames of the open animation. That is the same
+     * trade `adjustResize` itself made.
      */
-    private fun holdBarsOutOfThePage() {
+    private fun holdSystemUiOutOfThePage() {
         ViewCompat.setOnApplyWindowInsetsListener(container) { _, insets ->
             bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
             )
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+            if (ime != keyboard) {
+                keyboard = ime
+                // Children are MATCH_PARENT, so this is the WebView's height.
+                container.setPadding(0, 0, 0, ime)
+            }
             // A page already loaded needs telling; one loading now reads the
             // same numbers itself, from the document-start script.
             webView?.evaluateJavascript("window.__homerunSafeArea && __homerunSafeArea()", null)
@@ -501,7 +554,7 @@ class MainActivity : ComponentActivity() {
             )
         }
         setContentView(container)
-        holdBarsOutOfThePage()
+        holdSystemUiOutOfThePage()
 
         // Before the page loads, so `deep-link:consume` finds it on mount.
         intent?.dataString?.let {
@@ -725,6 +778,28 @@ class MainActivity : ComponentActivity() {
             if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 view.evaluateJavascript(bootstrapScript, null)
             }
+        }
+
+        /**
+         * Re-reads the safe area, because the document-start read can be stale
+         * by now and one of the four numbers moves at runtime.
+         *
+         * An inset change while a document is loading is pushed with
+         * `evaluateJavascript`, which needs `__homerunSafeArea` to already be
+         * defined — and it is not, for the window between a document starting
+         * and its bootstrap running. Miss the push there and the page keeps the
+         * numbers from before it existed until the *next* inset change, with
+         * nothing to prompt one.
+         *
+         * That was survivable while these were only the system bars, which do
+         * not move after the first pass. It is not survivable now the keyboard
+         * is in them: kill the app with the keyboard up — which is what
+         * reinstalling over a running app does — and the page comes back
+         * believing a keyboard that is now down is still covering its bottom
+         * 24dp. Reading again here costs one JS call per document load.
+         */
+        override fun onPageFinished(view: WebView, url: String) {
+            view.evaluateJavascript("window.__homerunSafeArea && __homerunSafeArea()", null)
         }
 
         /**

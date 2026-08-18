@@ -68,6 +68,15 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Homerun">
 
+        <!--
+          windowSoftInputMode: adjustResize does NOT resize this window. The app
+          targets SDK 35, so it is edge-to-edge, and the platform only insets a
+          window's content while that window fits system windows. It is declared
+          anyway because leaving the mode unspecified lets the platform choose
+          adjustPan, which slides the whole page up instead. What actually makes
+          room for the keyboard is MainActivity.holdSystemUiOutOfThePage, which
+          shortens the WebView by the IME inset.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

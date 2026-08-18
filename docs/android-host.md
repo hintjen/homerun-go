@@ -206,7 +206,7 @@ than the theme. Both are set **per bar** — a sheet can dim the top of the
 screen while leaving its own surface at the bottom, and one flag for both puts
 a black clock on a dimmed page.
 
-### The safe area — `holdBarsOutOfThePage`, `ChromeInterface.safeArea`
+### The safe area — `holdSystemUiOutOfThePage`, `ChromeInterface.safeArea`
 
 From Android 15 an app targeting SDK 35 is edge-to-edge and cannot opt out.
 The window is the whole display, so a WebView filling it draws under the clock
@@ -221,7 +221,7 @@ WebView fills them in from a display **cutout** and never from the bars, so on
 Android the UI was asking a question the platform would not answer, and every
 answer came back zero.
 
-So the host answers it. `holdBarsOutOfThePage` records the insets;
+So the host answers it. `holdSystemUiOutOfThePage` records the insets;
 `ChromeInterface.safeArea()` hands them back as CSS pixels, and the
 document-start script writes them onto `<html>` as an inline style, which
 outranks the `:root` rule. Nothing forks — the same classes that space the UI
@@ -244,10 +244,46 @@ called on it instead. `CONSUMED` stops the inset dispatch at the container so
 the WebView never sees a cutout of its own — `env(safe-area-inset-*)` stays
 zero and the injected variables are the only source of the numbers.
 
-The IME is deliberately not part of the safe area: `adjustResize` in the
-manifest already shrinks the window when the keyboard opens. Adding
-`Type.ime()` would subtract the keyboard's height a second time and leave a gap
-the size of the keyboard above it.
+#### The keyboard, and `adjustResize` not doing anything
+
+`android:windowSoftInputMode="adjustResize"` does **not** resize this window.
+The platform only insets a window's content while that window fits system
+windows, and an edge-to-edge one by definition does not — so the same Android 15
+change that created the safe-area problem above also quietly disabled the
+keyboard handling. This document and the code both used to assert the opposite,
+and excluded `Type.ime()` from the inset pass to avoid double-counting a resize
+that was never happening. Nothing counted it at all. The keyboard opened over
+whatever was on screen, and `innerHeight` did not move: a sheet with a text
+field in it — claiming a guest account, naming a server — put the field the
+player was typing into behind the keys.
+
+So the host resizes the WebView itself: the IME inset becomes bottom padding on
+the container, whose children are `MATCH_PARENT`. That is deliberately a real
+resize rather than another reported variable, because a real resize is what the
+shared UI already asks for — its viewport tag carries
+`interactive-widget=resizes-content`, whose whole purpose is to shrink the
+layout viewport for the keyboard rather than pan it, and which can do nothing
+while the window it sits in never changes size. Honour it and `100dvh`,
+`bottom-0`, `--visual-vh` and `.pb-keyboard` all come right together, for every
+sheet in the bundle. Verified on a Pixel 9 Pro XL: `innerHeight` 997 → 639 with
+the keyboard up, and back.
+
+Two consequences worth knowing:
+
+- **`--safe-bottom` goes to zero while the keyboard is up**, because the
+  navigation bar it exists to avoid is behind the keys and the WebView now stops
+  above them. Left in, every sheet would float 24dp above the keyboard.
+- **`adjustResize` stays in the manifest** even though it is inert. Removing it
+  leaves the mode unspecified, and the platform may then choose `adjustPan`,
+  which slides the whole page up — status bar included.
+
+`onPageFinished` re-reads the safe area for a related reason: an inset change
+that lands while a document is loading is pushed with `evaluateJavascript` and
+needs `__homerunSafeArea` to already exist. It does not, between a document
+starting and its bootstrap running. That was harmless while these numbers never
+moved after the first pass; with the keyboard in them, a missed push left the
+page believing a keyboard that was already down still covered its bottom 24dp —
+which is what reinstalling over a running app with the keyboard open produces.
 
 ### The Android 12+ splash, and why it draws no icon
 
@@ -553,6 +589,19 @@ reads it, so check `getComputedStyle(document.documentElement)
 document-start script did not run (see the `DOCUMENT_START_SCRIPT` triage
 above), and a real value there means the screen in question is missing its
 `pt-safe`/`pb-safe`, which is a fix in the UI repo.
+
+**A sheet with a text field in it is behind the keyboard.** Ask the page, not
+the code: `innerHeight` should drop by the keyboard's height and
+`--safe-bottom` should go to `0.00px` while it is up. If neither moved, the IME
+inset never arrived — confirm the keyboard really is showing with
+`adb shell "dumpsys input_method | grep mInputShown"`, since a WebView that
+never got focus shows nothing to resize for. If `innerHeight` moved but the
+sheet did not, that is the UI's bound and belongs in the UI repo.
+
+**Content sits 24dp above the keyboard, or clear of a pill that is not there.**
+A safe-area push was missed while a document was loading, so the page is holding
+numbers from before it existed. `__homerunSafeArea()` from `chrome://inspect`
+re-reads them; if that fixes it, `onPageFinished` is not firing.
 
 **Desktop window controls flash at the top right during launch.** Not a host
 bug and not fixable here: `useCapabilities()` in the UI initialises its state
