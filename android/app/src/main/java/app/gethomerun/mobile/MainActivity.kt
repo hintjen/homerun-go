@@ -9,9 +9,11 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
+import android.net.Uri
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.RenderProcessGoneDetail
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -19,6 +21,7 @@ import android.webkit.WebView
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.ColorUtils
@@ -70,6 +73,36 @@ class MainActivity : ComponentActivity() {
      */
     @Volatile
     private var keyboard: Int = 0
+
+    /**
+     * The file the page's `<input type="file">` is waiting on.
+     *
+     * Held across the activity result because a `WebChromeClient` callback
+     * cannot be handed to `startActivityForResult` directly. **It must be
+     * answered exactly once, on every path** — a `filePathCallback` that is
+     * dropped leaves the input permanently dead: the WebView believes a chooser
+     * is still open and refuses to raise another for the life of the page, so
+     * the second tap does nothing and there is nothing in the log.
+     */
+    private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
+
+    /** Answers [pendingFileChooser] and clears it, whatever the outcome was. */
+    private fun settleFileChooser(result: ActivityResult?) {
+        val callback = pendingFileChooser ?: return
+        pendingFileChooser = null
+        // `parseResult` returns null for a cancelled chooser, which is the
+        // value the WebView needs to unstick the input — not an empty array,
+        // and not nothing at all.
+        val uris = result?.let {
+            WebChromeClient.FileChooserParams.parseResult(it.resultCode, it.data)
+        }
+        callback.onReceiveValue(uris)
+    }
+
+    private val chooseFile =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            settleFileChooser(result)
+        }
 
     private val requestNotifications =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -886,6 +919,53 @@ class MainActivity : ComponentActivity() {
     }
 
     private inner class ConsoleClient : WebChromeClient() {
+        /**
+         * Raise the system picker for the page's `<input type="file">`.
+         *
+         * Without this override a WebView silently does nothing when an input
+         * is clicked — the default implementation returns false and drops the
+         * callback. There is no error, no console line and no permission
+         * prompt; the tap simply has no effect, which is exactly what picking a
+         * server icon did on Android.
+         *
+         * `createIntent()` builds the chooser from the input's own `accept` and
+         * `multiple` attributes, so the page keeps deciding what it will take
+         * and this stays out of it. It needs no storage permission: the picker
+         * runs in its own process and hands back a content URI already granted
+         * to us, which is the modern contract and the reason not to hand-roll
+         * an `ACTION_GET_CONTENT` here.
+         */
+        override fun onShowFileChooser(
+            webView: WebView?,
+            filePathCallback: ValueCallback<Array<Uri>>?,
+            fileChooserParams: FileChooserParams?,
+        ): Boolean {
+            if (filePathCallback == null) return false
+
+            // A chooser already in flight is answered before it is replaced.
+            // Two inputs cannot both be waiting, and leaking the first would
+            // wedge it for good.
+            settleFileChooser(null)
+            pendingFileChooser = filePathCallback
+
+            val intent = fileChooserParams?.createIntent()
+            if (intent == null) {
+                settleFileChooser(null)
+                return false
+            }
+
+            return try {
+                chooseFile.launch(intent)
+                true
+            } catch (err: Exception) {
+                // No app on the device can satisfy the intent. Answering the
+                // callback is what lets the input be tapped again.
+                Log.w(TAG, "no picker for the file input: ${err.message}")
+                settleFileChooser(null)
+                false
+            }
+        }
+
         override fun onConsoleMessage(message: ConsoleMessage): Boolean {
             // Without this the shared UI's errors are invisible: they go to a
             // console nothing is attached to, and the app just shows a blank
