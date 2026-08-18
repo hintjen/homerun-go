@@ -56,3 +56,19 @@ Thumbs.db
 
 # Python bytecode from scripts/ (stage-jre.py is importable for its ELF checks).
 __pycache__/
+
+# Push credentials. Two of these are private keys and none of them belong in
+# git: the Firebase service-account JSON signs sends *as the backend*, and the
+# APNs .p8 can push to every app in the team and cannot be re-downloaded from
+# Apple. Same rule as the upload keystore above.
+#
+# google-services.json / GoogleService-Info.plist are not secret by Google's
+# own guidance, but they are per-environment build inputs — staging in a
+# production build is a real user's phone getting test data — so they are
+# staged like every other build input rather than committed.
+*.p8
+*firebase-adminsdk*.json
+google-services.json
+*-google-services.json
+GoogleService-Info.plist
+*-GoogleService-Info.plist

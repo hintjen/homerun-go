@@ -326,6 +326,61 @@ Both fixed, and both worth knowing because they explain the shape above:
 Either one alone made `--api` useless on every device, which is why the flag
 looked broken rather than the page.
 
+## Push credentials
+
+Push is Firebase Cloud Messaging on both platforms. Every file it needs is a
+**per-environment build input, and none of them are committed** — the same
+shape as the section above, and for the same reason: staging and production
+are two separate Firebase projects, and a staging build wired to the
+production project is a real user's phone buzzing with test data.
+
+The projects are `homerun-go-staging` and `homerun-go-prod`. Each registers
+the same two apps, `app.gethomerun.mobile` and `app.gethomerun.ios`.
+
+| File | Where it goes | Secret? |
+|---|---|---|
+| `google-services.json` | `android/app/`, per build type | No — but per environment |
+| `GoogleService-Info.plist` | `ios/HomerunHost/`, per configuration | No — but per environment |
+| `AuthKey_<KeyID>.p8` | uploaded to Firebase; **never into this repo** | Yes |
+| `*-firebase-adminsdk-*.json` | the API's secret store; **never into this repo** | Yes |
+
+`.gitignore` covers all four patterns. The two marked secret are private keys:
+the service-account JSON signs sends *as the backend*, so holding one is
+holding the ability to push to every user of that project, and Apple will not
+re-issue a `.p8` — it downloads once and never again.
+
+The service-account JSON is a **backend** credential and does not belong in
+this repo at all. It reaches the API as `FCM_SERVICE_ACCOUNT_JSON`.
+
+### The `.p8` is not per Firebase project
+
+The axis that trips people is the APNs key's environment, which is **Apple's
+build environment** — a debug build on a device is sandbox; TestFlight and the
+App Store are production — and it has nothing to do with which backend or
+which Firebase project a build talks to.
+
+So one sandbox key and one production key, and **both go into both projects**:
+
+```
+homerun-go-staging   development slot: sandbox key
+                     production  slot: production key
+homerun-go-prod      development slot: sandbox key
+                     production  slot: production key
+```
+
+Firebase Console → Project settings → Cloud Messaging → Apple app
+configuration → APNs authentication key, which has a slot for each. Each
+upload wants the `.p8`, its Key ID (the part after `AuthKey_` in the
+filename), and the team id `35DS8JGY4Y`.
+
+A key uploaded into the wrong slot fails at send time as `BadDeviceToken`,
+which reads like a bad *token* rather than a bad key — budget an afternoon if
+this is got wrong. The environment is chosen when the key is created in
+Apple's portal and **cannot be changed afterwards**.
+
+Nothing here is wired into either host yet. See
+[`../plans/push-notifications.md`](../plans/push-notifications.md).
+
 ## Building a release
 
 `build:android` is the debug loop's staging step. It covers the UI bundle,

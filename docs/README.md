@@ -28,6 +28,9 @@ each platform's assets, and the Rust FFI compiled for its targets.
 - **Which backend a build talks to**: the two places that hold an API URL, the
   switch on each platform (`--api` / `HOMERUN_API_URL`), and why neither moves a
   device that has already run without clearing its data
+- **Push credentials**: which of the four Firebase and APNs files goes where,
+  which two are private keys, and why an APNs key is scoped to Apple's build
+  environment rather than to a Firebase project
 - Typical loops, and a triage list for the usual toolchain failures
 
 **Read this for**: Setting up a machine, wiring CI, or decoding a toolchain
