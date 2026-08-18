@@ -99,6 +99,14 @@ class PushMessagingService : FirebaseMessagingService() {
      * crashed" must not be droppable.
      */
     override fun onMessageReceived(message: RemoteMessage) {
+        // Receipt is otherwise invisible: a foreground message that goes
+        // wrong leaves no trace anywhere else, and "delivered but nothing
+        // happened" is indistinguishable from "never delivered" without it.
+        Log.i(
+            "HomerunPush",
+            "message received: notification=${message.notification != null} " +
+                "data=${message.data.keys}",
+        )
         val title = message.notification?.title
         val body = message.notification?.body ?: return
         BridgeRouter.postNotification(
