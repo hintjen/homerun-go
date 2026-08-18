@@ -193,6 +193,13 @@ instead, which is the faithful path for testing the updater itself. For merely
 iterating on a local UI build it is the wrong tool — a hand-staged bundle gets
 serial `0` and any real release outranks it.
 
+**A *pending* bundle is the same trap one launch later.** The updater
+downloads into `files/ui/pending` silently while you test, and the *next*
+cold start activates it — so the launch you do to test a cold-start flow is
+exactly the launch that swaps your build out. If the app shows an "Update
+Available" banner, a pending bundle already exists; delete `files/ui/pending`
+along with `current` before any test that restarts the app.
+
 Confirm what actually shipped in the APK rather than trusting the staging log,
 too — the assets are just a zip entry:
 
@@ -546,6 +553,14 @@ HomerunBundle:*` says which is being served; delete `current` to fall back.
 **A deep link raises an "Open with" chooser with two identical entries.** Both
 the release and debug builds are installed and both claim the scheme.
 `pm disable-user --user 0 <releaseAppId>`.
+
+**An FCM push never arrives after `am force-stop`.** Force-stop puts the app
+in Android's *stopped state*, and the platform refuses to deliver FCM to
+stopped apps — the send returns 200 and nothing ever reaches the device, which
+reads exactly like a broken token. A dead-but-deliverable app is one that was
+launched and then killed gently: `am start`, HOME, then `am kill <appId>`
+(or swipe it from Recents). Force-stop is for freezing the UI, not for
+simulating "the app is not running".
 
 **A browser-based flow stalls on a fresh emulator.** Chrome's first-run
 onboarding ("Welcome to Chrome", then a notifications dialog) sits in front of
