@@ -1093,4 +1093,147 @@ enum Core {
     static func digestMatches(expected: String, actual: String) throws -> Bool {
         try call("bundle.digestMatches", ["expected": expected, "actual": actual]) as? Bool ?? false
     }
+
+    // MARK: - Minecraft accounts
+
+    // The Microsoft sign-in chain. Every request body and every response shape
+    // is the core's, because the chain is five calls deep and full of details
+    // that fail silently when wrong: the `d=` prefix on the RPS ticket, the
+    // relying party that has to be Minecraft's and not Xbox's, the identity
+    // token's exact spelling. ``MinecraftAuth`` performs the calls and decides
+    // nothing about them, and Android reaches the identical methods through
+    // its own `Core` — which is the whole reason none of this is written twice.
+
+    /// One HTTP call, as the core described it.
+    struct HTTPRequest {
+        let method: String
+        let url: String
+        /// Ordered pairs rather than a dictionary: the core emits them in the
+        /// order the endpoint expects and nothing is gained by reordering.
+        let headers: [(String, String)]
+        let body: String?
+    }
+
+    /// A pending device-code sign-in, with the page to send the user to.
+    struct DeviceCode {
+        let userCode: String
+        let deviceCode: String
+        /// `microsoft.com/link` with the code already filled in.
+        let approvalURL: String
+        let intervalSecs: Double
+        let expiresInSecs: Double
+    }
+
+    private static func httpRequest(_ value: Any?) throws -> HTTPRequest {
+        guard
+            let object = value as? [String: Any],
+            let method = object["method"] as? String,
+            let url = object["url"] as? String
+        else {
+            throw CoreError(message: "The core described a request this host cannot read.")
+        }
+        let headers = (object["headers"] as? [[Any]] ?? []).compactMap { pair -> (String, String)? in
+            guard pair.count == 2, let name = pair[0] as? String, let value = pair[1] as? String
+            else { return nil }
+            return (name, value)
+        }
+        return HTTPRequest(method: method, url: url, headers: headers, body: object["body"] as? String)
+    }
+
+    static func accountDeviceCodeRequest() throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.deviceCodeRequest", [:]))
+    }
+
+    static func accountDeviceCode(from body: Any) throws -> DeviceCode {
+        let value = try object("minecraft.account.deviceCodeFrom", ["body": body])
+        guard
+            let userCode = value["userCode"] as? String,
+            let deviceCode = value["deviceCode"] as? String,
+            let approvalURL = value["approvalUrl"] as? String
+        else {
+            throw CoreError(message: "Microsoft did not return a sign-in code.")
+        }
+        return DeviceCode(
+            userCode: userCode,
+            deviceCode: deviceCode,
+            approvalURL: approvalURL,
+            intervalSecs: (value["intervalSecs"] as? NSNumber)?.doubleValue ?? 5,
+            expiresInSecs: (value["expiresInSecs"] as? NSNumber)?.doubleValue ?? 900)
+    }
+
+    static func accountPollRequest(deviceCode: String) throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.pollRequest", ["deviceCode": deviceCode]))
+    }
+
+    /// What a poll response meant: pending, slowDown, declined, expired, approved.
+    static func accountPollOutcome(_ body: Any) throws -> [String: Any] {
+        try object("minecraft.account.pollOutcome", ["body": body])
+    }
+
+    static func accountMsaTokens(from body: Any) throws -> [String: Any] {
+        try object("minecraft.account.msaTokensFrom", ["body": body])
+    }
+
+    static func accountRefreshRequest(refreshToken: String) throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.refreshRequest", ["refreshToken": refreshToken]))
+    }
+
+    static func accountXblRequest(msaAccessToken: String) throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.xblRequest", ["msaAccessToken": msaAccessToken]))
+    }
+
+    static func accountXstsRequest(xblToken: String) throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.xstsRequest", ["xblToken": xblToken]))
+    }
+
+    static func accountXboxToken(from body: Any) throws -> [String: Any] {
+        try object("minecraft.account.xboxTokenFrom", ["body": body])
+    }
+
+    /// An XSTS refusal, in words naming what the player has to go and do.
+    static func accountXstsRefusal(_ body: Any) throws -> String {
+        try string("minecraft.account.xstsRefusal", ["body": body])
+    }
+
+    static func accountMinecraftLoginRequest(xsts: [String: Any]) throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.minecraftLoginRequest", ["xsts": xsts]))
+    }
+
+    static func accountMinecraftToken(from body: Any) throws -> String {
+        try string("minecraft.account.minecraftTokenFrom", ["body": body])
+    }
+
+    static func accountProfileRequest(minecraftToken: String) throws -> HTTPRequest {
+        try httpRequest(call("minecraft.account.profileRequest", ["minecraftToken": minecraftToken]))
+    }
+
+    /// The stored session: identity plus the tokens that keep it alive.
+    static func accountSession(
+        profile: Any,
+        minecraftToken: String,
+        msa: Any,
+        nowMs: Double
+    ) throws -> [String: Any] {
+        try object(
+            "minecraft.account.sessionFrom",
+            [
+                "profile": profile,
+                "minecraftToken": minecraftToken,
+                "msa": msa,
+                "nowMs": nowMs,
+            ])
+    }
+
+    /// The only shape of a session allowed to cross into the WebView.
+    ///
+    /// The bridge type has token fields because the desktop's client launcher
+    /// needs them to start a game. No phone surface reads one, so they go over
+    /// as `"0"` and the real tokens stay in the Keychain.
+    static func accountRedacted(_ session: [String: Any]) throws -> [String: Any] {
+        try object("minecraft.account.redacted", ["session": session])
+    }
+
+    static func accountNeedsRefresh(expiresAt: Double, nowMs: Double) throws -> Bool {
+        try bool("minecraft.account.needsRefresh", ["expiresAt": expiresAt, "nowMs": nowMs])
+    }
 }

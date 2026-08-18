@@ -26,6 +26,23 @@ enum TokenStore {
         set { write("deviceToken", newValue) }
     }
 
+    /// The signed-in Minecraft account, as the JSON blob ``MinecraftAuth``
+    /// stores.
+    ///
+    /// A whole session rather than one token because the chain that produced it
+    /// cannot be rerun from a Minecraft token alone: refreshing means going back
+    /// to the Microsoft refresh token and walking Xbox Live, XSTS and Minecraft
+    /// again. The Keychain rather than `UserDefaults` for the reason at the top
+    /// of this file, and with more force — this one holds a refresh token that
+    /// is good until the user revokes it.
+    ///
+    /// Never crosses into the WebView. `Core.accountRedacted` is what the page
+    /// sees.
+    static var minecraftSession: String? {
+        get { read("minecraftSession") }
+        set { write("minecraftSession", newValue) }
+    }
+
     // MARK: - Keychain
 
     private static let service = "app.gethomerun.ios.tokens"

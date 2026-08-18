@@ -90,3 +90,59 @@ extension BridgeRouter {
         return nil
     }
 }
+
+/// The Minecraft account: who the player is, so their minigame stats can be
+/// looked up.
+///
+/// Three invokes and two events, all `minecraftAccount`-tier and all already in
+/// `bridge/v1` — Android has answered them since revision 8 and this is iOS
+/// catching up, not a protocol change.
+///
+/// The two events are not optional and are the detail most likely to be missed:
+/// several `useMinecraftAccount` consumers mount at once — the profile banner
+/// and the leaderboard's "You" row are both on `/games` — and each keeps its own
+/// state from them. A login that only answered its caller would leave the other
+/// consumers signed out until reload.
+extension BridgeRouter {
+
+    /// Refreshes silently when the token has aged out. Null covers "not signed
+    /// in" and "the session could not be recovered" alike, which is what the UI
+    /// does with both anyway.
+    func minecraftAuthGetProfile(_ params: Any?) async throws -> Any? {
+        guard let session = await MinecraftAuth.shared.profile() else { return NSNull() }
+        return (try? Core.accountRedacted(session)) ?? NSNull()
+    }
+
+    func minecraftAuthLogin(_ params: Any?) async throws -> Any? {
+        do {
+            let session = try await MinecraftAuth.shared.signIn()
+            let credentials = try Core.accountRedacted(session)
+            events?.emit("minecraft:auth:ready", [credentials])
+            return ["success": true, "credentials": credentials]
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // Written for a player: `MinecraftAuth.AuthError` messages already
+            // are, and `Core.CoreError` carries the core's own wording. Anything
+            // else would be a Foundation description, so it does not go through.
+            HostLog.bridge.warning(
+                "Minecraft sign-in failed: \(error.localizedDescription, privacy: .public)")
+            let message: String
+            switch error {
+            case let authError as MinecraftAuth.AuthError:
+                message = authError.message
+            case let coreError as Core.CoreError:
+                message = coreError.message
+            default:
+                message = "Could not sign in to Microsoft."
+            }
+            return ["success": false, "error": message]
+        }
+    }
+
+    func minecraftAuthLogout(_ params: Any?) async throws -> Any? {
+        await MinecraftAuth.shared.signOut()
+        events?.emit("minecraft:auth:signed-out", [])
+        return ["success": true]
+    }
+}

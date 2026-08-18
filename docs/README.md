@@ -340,7 +340,7 @@ that spins for ever.
 
 ---
 
-### ⛏️ [The Minecraft account on Android](./minecraft-account.md)
+### ⛏️ [The Minecraft account on mobile](./minecraft-account.md)
 
 Which Minecraft player a phone belongs to. Stats are keyed on a Minecraft uuid
 and every read of them takes one as input, so without this the Minigames Hub
@@ -353,6 +353,9 @@ could only ever show a signed-in user zero of their own numbers.
   credential and has nothing to sign out of
 - Why device code rather than a redirect, and what the public Xbox client id
   buys us
+- What differs between the two hosts, which is only storage, transport and how
+  the approval page is opened — and why iOS uses `ASWebAuthenticationSession`
+  for `auth:web-session` but not for this
 - The two failure modes that are not failures: pending polls arriving as HTTP
   400, and Android cutting a backgrounded app's DNS mid-sign-in
 - Why the sign-in completes when the user comes back, not when they approve

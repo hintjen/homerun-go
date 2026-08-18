@@ -1,7 +1,11 @@
-# The Minecraft account on Android
+# The Minecraft account on mobile
 
 Which Minecraft player this phone belongs to, and the two independent ways it
 finds out.
+
+Both hosts implement this. Android arrived first (host revision 8) and iOS
+followed (revision 10); they run the same flow against the same core, so
+everything below is true of both unless it names a platform.
 
 Minigame stats are keyed on a Minecraft **uuid**. Every read of them takes one
 as input — the player profile, the leaderboard's "You" row — and the only way to
@@ -41,10 +45,28 @@ round trip.
 and were re-tiered onto the `minecraftAccount` capability, so this was a host
 learning to answer what the contract already described. Host revision 8.
 
-`MinecraftAuth.kt` performs the calls; every request body, response shape and
-error message is `homerun_core::minecraft::account`, because the chain is five
-calls deep with a documented trap at nearly every step and iOS has to make the
-same calls.
+`MinecraftAuth.kt` and `MinecraftAuth.swift` perform the calls; every request
+body, response shape and error message is `homerun_core::minecraft::account`,
+because the chain is five calls deep with a documented trap at nearly every
+step and both hosts have to make the same calls. What differs between them is
+only what only they can do:
+
+| | Android | iOS |
+|---|---|---|
+| Session storage | `SecretStore` — SharedPreferences under a Keystore AES-GCM envelope | Keychain, via `TokenStore.minecraftSession` |
+| Transport | `HttpURLConnection` on `Dispatchers.IO` | `URLSession`, inside an `actor` |
+| Opening the approval page | `ACTION_VIEW` intent | `UIApplication.open`, hopped to the main actor |
+
+### Why iOS does not use ASWebAuthenticationSession
+
+It uses one for `auth:web-session` and not for this, which reads as an
+inconsistency until you notice they are different flows. That channel runs a
+*redirect* and has to capture a callback URL, which is what
+`ASWebAuthenticationSession` exists for. Device code has no callback at all:
+the browser is only where the user approves, and the answer arrives on a poll
+over a separate connection. An auth session would put a "Sign In" consent
+prompt in front of the user for nothing, and then sit there with nothing to
+close it.
 
 ### Why device code and not a redirect
 
@@ -187,8 +209,11 @@ anything here, the form wins.
 | | |
 |---|---|
 | `rust/homerun-core/src/minecraft/account.rs` | The whole chain as pure functions, plus the XSTS refusal messages |
-| `android/.../MinecraftAuth.kt` | Performs the calls, polls, stores the session |
-| `android/.../BridgeRouter.kt` | The three invokes and two events |
+| `android/.../MinecraftAuth.kt` | Android: performs the calls, polls, stores the session |
+| `android/.../BridgeRouter.kt` | Android: the three invokes and two events |
+| `ios/HomerunHost/MinecraftAuth.swift` | iOS: the same, as an actor over `URLSession` |
+| `ios/HomerunHost/BridgeRouter+Session.swift` | iOS: the three invokes and two events |
+| `ios/HomerunHost/FFI/Core.swift` | iOS: the `minecraft.account.*` core wrappers |
 | `homerun-app-ui/hooks/useMinecraftAccount.ts` | `credentials`, `linkedAccount`, `account`, `canSignIn` |
 | `homerun-app-ui/docs/minecraft-account-mobile.md` | The cross-repo brief this was built from |
 | `api/docs/minigame-stats.md` | `MicrosoftAccount`, and what linking inherits |
