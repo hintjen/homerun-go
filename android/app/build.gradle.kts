@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.google.services)
 }
 
 /** A `-P` override, or the default. Keeps build config out of source. */
@@ -232,7 +233,44 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.commons.compress)
     implementation(libs.tukaani.xz)
+    implementation(libs.firebase.messaging)
 }
+
+/**
+ * Stage the google-services.json that matches the backend this build talks to.
+ *
+ * The pairing that matters is app Firebase project <-> backend FCM credential,
+ * NOT debug-vs-release: a debug build against the production API registers its
+ * token with the production backend, and if that token was minted in the
+ * staging Firebase project every send dies as SENDER_ID_MISMATCH. So the file
+ * follows `-PapiUrl` exactly the way the API URL itself does. The two source
+ * files sit gitignored in the repo root (see docs/building.md, "Push
+ * credentials"); missing means push silently cannot work, so fail the build
+ * with the fix spelled out instead.
+ */
+val stageGoogleServices by tasks.registering {
+    val apiUrl = prop("apiUrl", "https://api.gethomerun.app")
+    val flavor = if (apiUrl.contains("gethomerun.app")) "prod" else "staging"
+    val source = rootProject.layout.projectDirectory.file("../$flavor-android-google-services.json")
+    val target = layout.projectDirectory.file("google-services.json")
+    inputs.file(source).optional(true)
+    outputs.file(target)
+    doFirst {
+        if (!source.asFile.exists()) {
+            throw GradleException(
+                "No $flavor-android-google-services.json in the repo root.\n" +
+                    "Download it from the Firebase console ($flavor project) — " +
+                    "see docs/building.md, \"Push credentials\".",
+            )
+        }
+        source.asFile.copyTo(target.asFile, overwrite = true)
+    }
+}
+
+// The google-services plugin reads app/google-services.json during resource
+// processing; make sure the staged copy is in place first.
+tasks.matching { it.name.startsWith("process") && it.name.endsWith("GoogleServices") }
+    .configureEach { dependsOn(stageGoogleServices) }
 
 /**
  * The UI bundle is not committed — it is staged by `npm run ui:android` from

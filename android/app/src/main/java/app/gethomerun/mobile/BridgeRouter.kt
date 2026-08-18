@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -523,6 +524,39 @@ class BridgeRouter(
      * because there is only one browser and only one user.
      */
     private val pendingAuthSession = AtomicReference<CompletableDeferred<String>?>(null)
+
+    /**
+     * Set by [MainActivity], which owns the only ActivityResultLauncher that
+     * can show the POST_NOTIFICATIONS sheet. Suspends until the sheet is
+     * answered and returns the resulting status — no timeout, per the
+     * protocol's rule. Null while no activity is attached, in which case
+     * `push:request-permission` degrades to reporting the current state.
+     */
+    @Volatile
+    var requestPushPermission: (suspend () -> String)? = null
+
+    /**
+     * The OS notification-permission state, in the contract's vocabulary.
+     *
+     * Below API 33 there is no runtime permission: notifications are on
+     * unless the user turned them off in settings, so the answer is only
+     * ever granted or denied. From 33, "off with no recorded ask" is
+     * `notDetermined` — the one state where a prompt is worth showing.
+     * [KEY_PUSH_ASKED] is written by MainActivity for *either* prompt (its
+     * own first-hosting ask covers the same permission), because the OS
+     * offers no reliable "was this ever asked" and a wrong `notDetermined`
+     * makes the UI offer a prompt the OS will silently swallow.
+     */
+    fun pushPermissionStatus(): String {
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (manager.areNotificationsEnabled()) return "granted"
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !prefs.getBoolean(KEY_PUSH_ASKED, false)
+        ) {
+            return "notDetermined"
+        }
+        return "denied"
+    }
 
     /** True when [url] belonged to a waiting sign-in and was handed to it. */
     private fun completeAuthSession(url: String): Boolean {
@@ -1111,6 +1145,32 @@ class BridgeRouter(
             null
         },
 
+        /**
+         * Remote push (`remotePush` capability). The host's half is the OS
+         * permission and the FCM token; the UI registers the token with the
+         * API over the user's JWT and deletes it on logout — no identity
+         * ever passes through here.
+         */
+        "push:permission" to { _ ->
+            buildJsonObject { put("status", pushPermissionStatus()) }
+        },
+        "push:request-permission" to { _ ->
+            // Unlike the local channel above, this one prompts — because the
+            // UI asked it to, at a moment the user understands. The sheet is
+            // MainActivity's; without one attached, report where we stand.
+            val status = requestPushPermission?.invoke() ?: pushPermissionStatus()
+            buildJsonObject { put("status", status) }
+        },
+        "push:get-token" to { _ ->
+            // Null is a state, not an error: an emulator without Play
+            // services stays null forever, and `push:token-changed` is what
+            // announces one arriving later.
+            buildJsonObject {
+                val token = PushMessaging.currentToken()
+                if (token != null) put("token", token) else put("token", JsonNull)
+            }
+        },
+
         // ─── files ───────────────────────────────────────────────────────
 
         /**
@@ -1668,38 +1728,7 @@ class BridgeRouter(
      * whatever the player was doing costs more than the notification is worth.
      * Denied means silence, which is what the contract allows.
      */
-    private fun notify(title: String, body: String) {
-        runCatching {
-            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            if (!manager.areNotificationsEnabled()) return
-
-            manager.createNotificationChannel(
-                NotificationChannel(
-                    NOTIFICATION_CHANNEL,
-                    // A channel name is a category *within* the app, so naming
-                    // it after the app read as "Homerun / Homerun" in system
-                    // settings — and gave the user nothing to distinguish it
-                    // from the hosting channel when deciding what to mute.
-                    context.getString(R.string.alerts_channel_name),
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                )
-            )
-
-            val notification = Notification.Builder(context, NOTIFICATION_CHANNEL)
-                .setContentTitle(title)
-                .setContentText(body)
-                // The dedicated monochrome icon, for the reason spelled out in
-                // res/drawable/ic_notification.xml: a small icon is drawn from
-                // its alpha channel, so the launcher icon renders as a solid
-                // shape with no mark in it.
-                .setSmallIcon(R.drawable.ic_notification)
-                .setColor(context.getColor(R.color.brand_cornflower))
-                .setAutoCancel(true)
-                .build()
-
-            manager.notify(body.hashCode(), notification)
-        }.onFailure { Log.w(TAG, "could not post a notification: ${it.message}") }
-    }
+    private fun notify(title: String, body: String) = postNotification(context, title, body)
 
     private fun systemMemory(): JsonElement {
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
@@ -1727,6 +1756,66 @@ class BridgeRouter(
 
         const val NOTIFICATION_CHANNEL = "homerun"
 
+        /** Whether the POST_NOTIFICATIONS sheet has ever been shown. */
+        const val KEY_PUSH_ASKED = "push-permission-asked"
+
+        /**
+         * Create the alerts channel. Idempotent, and called from
+         * [HomerunApplication] as well as before every post: a notification
+         * naming a channel that does not exist is silently dropped, and a
+         * *background* push is drawn by the system tray before any code here
+         * has run — the channel must already exist by then.
+         */
+        fun ensureNotificationChannel(context: Context) {
+            val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    NOTIFICATION_CHANNEL,
+                    // A channel name is a category *within* the app, so naming
+                    // it after the app read as "Homerun / Homerun" in system
+                    // settings — and gave the user nothing to distinguish it
+                    // from the hosting channel when deciding what to mute.
+                    context.getString(R.string.alerts_channel_name),
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                )
+            )
+        }
+
+        /**
+         * Post a local notification, or do nothing if we may not.
+         *
+         * From API 33 this needs POST_NOTIFICATIONS at runtime, and it is
+         * deliberately not requested here: a permission prompt interrupting
+         * whatever the player was doing costs more than the notification is
+         * worth. Denied means silence, which is what the contract allows.
+         *
+         * Companion rather than instance because the FCM service posts
+         * through it too, for a foreground push — one code path, one icon,
+         * one channel, whoever the author is.
+         */
+        fun postNotification(context: Context, title: String, body: String) {
+            runCatching {
+                val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (!manager.areNotificationsEnabled()) return
+
+                ensureNotificationChannel(context)
+
+                val notification = Notification.Builder(context, NOTIFICATION_CHANNEL)
+                    .setContentTitle(title)
+                    .setContentText(body)
+                    // The dedicated monochrome icon, for the reason spelled out in
+                    // res/drawable/ic_notification.xml: a small icon is drawn from
+                    // its alpha channel, so the launcher icon renders as a solid
+                    // shape with no mark in it.
+                    .setSmallIcon(R.drawable.ic_notification)
+                    .setColor(context.getColor(R.color.brand_cornflower))
+                    .setAutoCancel(true)
+                    .build()
+
+                manager.notify(body.hashCode(), notification)
+            }.onFailure { Log.w(TAG, "could not post a notification: ${it.message}") }
+        }
+
         /** The name JavaScript sees; PROTOCOL.md §3.3 fixes it. */
         const val JS_INTERFACE = "HomerunHost"
 
@@ -1746,7 +1835,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 8
+        const val HOST_REVISION = 9
 
         /**
          * Auth callbacks come home on this prefix rather than one of the

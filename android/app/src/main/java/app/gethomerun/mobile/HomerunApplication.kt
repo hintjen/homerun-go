@@ -16,6 +16,12 @@ class HomerunApplication : Application() {
         // and the WebView being torn down and rebuilt.
         ServerHost.init(this)
 
+        // The alerts channel, before anything can post on it — including the
+        // system tray drawing a background push, which happens with no other
+        // code from this app running. A notification naming a channel that
+        // does not exist is silently dropped.
+        BridgeRouter.ensureNotificationChannel(this)
+
         // Reads the same preferences the bridge writes at login, and must be
         // ready before anything that acts as the user.
         Session.init(this)

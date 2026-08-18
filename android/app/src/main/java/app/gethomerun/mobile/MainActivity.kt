@@ -82,7 +82,14 @@ class MainActivity : ComponentActivity() {
             // posted into a void. It has to enter the foreground again to
             // become visible — see ServerHost.refreshHosting.
             if (granted) ServerHost.refreshHosting()
+            // The bridge's `push:request-permission` may be suspended on this
+            // very sheet; answer it in the contract's vocabulary.
+            pendingPushPermission.getAndSet(null)?.complete(if (granted) "granted" else "denied")
         }
+
+    /** A `push:request-permission` waiting for the sheet above to be answered. */
+    private val pendingPushPermission =
+        java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.CompletableDeferred<String>?>(null)
 
     /**
      * Asks for POST_NOTIFICATIONS the first time this process hosts anything.
@@ -547,6 +554,43 @@ class MainActivity : ComponentActivity() {
 
         router = BridgeRouter(applicationContext, lifecycleScope)
 
+        // Remote push: the router needs this activity for the permission
+        // sheet, and the FCM service needs the router for token rotations.
+        // Both references die with the activity (onDestroy), like every
+        // other router tie.
+        PushMessaging.router = router
+        router.requestPushPermission = requestPushPermission@{
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                // No runtime permission to ask for; the state is the answer.
+                return@requestPushPermission router.pushPermissionStatus()
+            }
+            if (router.pushPermissionStatus() != "notDetermined") {
+                // iOS cannot re-prompt after a denial and neither can
+                // Android 13+ (the sheet is silently swallowed) — resolving
+                // immediately with the truth beats hanging on a sheet that
+                // will never appear.
+                return@requestPushPermission router.pushPermissionStatus()
+            }
+            val deferred = kotlinx.coroutines.CompletableDeferred<String>()
+            pendingPushPermission.set(deferred)
+            // Either prompt marks "asked": it is the same OS permission.
+            getSharedPreferences("homerun-host", MODE_PRIVATE)
+                .edit().putBoolean(BridgeRouter.KEY_PUSH_ASKED, true).apply()
+            runCatching { requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) }
+                .onFailure {
+                    pendingPushPermission.set(null)
+                    deferred.complete(router.pushPermissionStatus())
+                }
+            deferred.await()
+        }
+
+        // A tap on a remote notification cold-starts the activity with the
+        // message's data payload in the launcher intent. Queued through the
+        // router (`push:opened` rides the ready handshake), because the page
+        // does not exist yet — the same shape as the cold-start deep link
+        // below.
+        intent?.let { deliverPushTap(it) }
+
         container = FrameLayout(this).apply {
             layoutParams = ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -695,6 +739,7 @@ class MainActivity : ComponentActivity() {
         // Keep getIntent() current, or a later re-read returns the stale one.
         setIntent(intent)
         intent.dataString?.let { router.deliverDeepLink(it) }
+        deliverPushTap(intent)
     }
 
     /**
@@ -714,6 +759,25 @@ class MainActivity : ComponentActivity() {
         BundleUpdater.check(this, lifecycleScope)
     }
 
+    /**
+     * Emit `push:opened` if this intent is a notification tap.
+     *
+     * FCM stamps `google.message_id` on the launcher intent it fires for a
+     * tray tap and copies the message's `data` keys in as extras — that stamp
+     * is the discriminator, because everything else about the intent looks
+     * like an ordinary launch. `href` is the same string the desktop bell
+     * would have opened; the shared UI routes it, not the host.
+     */
+    private fun deliverPushTap(intent: Intent) {
+        if (intent.getStringExtra("google.message_id") == null) return
+        val payload = buildJsonObject {
+            intent.getStringExtra("href")?.let { put("href", it) }
+            intent.getStringExtra("id")?.let { put("id", it) }
+        }
+        Log.i(TAG, "notification tap: $payload")
+        router.emit("push:opened", listOf(payload))
+    }
+
     private fun askForNotifications() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
         if (asked) return
@@ -721,6 +785,10 @@ class MainActivity : ComponentActivity() {
         val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         if (granted) return
+        // The bridge's permission vocabulary needs to know a sheet was shown,
+        // whichever feature showed it — it is the same OS permission.
+        getSharedPreferences("homerun-host", MODE_PRIVATE)
+            .edit().putBoolean(BridgeRouter.KEY_PUSH_ASKED, true).apply()
         runCatching { requestNotifications.launch(Manifest.permission.POST_NOTIFICATIONS) }
             .onFailure { Log.w(TAG, "could not ask about notifications: ${it.message}") }
     }
@@ -733,6 +801,7 @@ class MainActivity : ComponentActivity() {
         // router per recreation, each still reporting server state to the API.
         // Guarded because `onCreate` can throw before the assignment, and an
         // UninitializedPropertyAccessException here would bury whatever did it.
+        PushMessaging.router = null
         if (::router.isInitialized) router.dispose()
         webView?.let {
             container.removeView(it)

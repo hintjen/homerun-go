@@ -378,7 +378,24 @@ which reads like a bad *token* rather than a bad key — budget an afternoon if
 this is got wrong. The environment is chosen when the key is created in
 Apple's portal and **cannot be changed afterwards**.
 
-Nothing here is wired into either host yet. See
+### How the Android build consumes them
+
+`stageGoogleServices` (app/build.gradle.kts) copies the right JSON into
+`app/google-services.json` **by backend, not by build type** — it follows
+`-PapiUrl` exactly as the API URL does, because the pairing that matters is
+app Firebase project ↔ backend FCM credential: a debug build against the
+production API with a staging `google-services.json` mints tokens the prod
+backend can never send to (`SENDER_ID_MISMATCH`).
+
+**Each Firebase project must register BOTH Android package names** —
+`app.gethomerun.mobile` *and* `app.gethomerun.mobile.debug` (the debug build
+type appends `.debug`). The google-services plugin fails the debug build with
+`No matching client found` when the second one is missing; re-download the
+JSON after adding it, and the one file then covers both build types.
+
+The host side is [`PushMessaging.kt`] plus the three `push:*` handlers in the
+router (bridge host revision 9); the token→API registration lives in the
+shared UI (`lib/push.ts` in `homerun-app-ui`). See
 [`../plans/push-notifications.md`](../plans/push-notifications.md).
 
 ## Building a release

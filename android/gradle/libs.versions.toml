@@ -9,6 +9,8 @@ coroutines = "1.9.0"
 serialization = "1.7.3"
 commonsCompress = "1.27.1"
 xz = "1.10"
+firebaseMessaging = "24.1.0"
+googleServices = "4.4.2"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -21,8 +23,15 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 # .tar.xz. commons-compress does tar; it delegates xz to tukaani.
 commons-compress = { group = "org.apache.commons", name = "commons-compress", version.ref = "commonsCompress" }
 tukaani-xz = { group = "org.tukaani", name = "xz", version.ref = "xz" }
+# Remote push. The one Play-services dependency in the app; the BoM is not
+# used because this is the only Firebase artifact and a BoM would suggest
+# otherwise.
+firebase-messaging = { group = "com.google.firebase", name = "firebase-messaging", version.ref = "firebaseMessaging" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+# Reads google-services.json into BuildConfig-adjacent resources. The file
+# itself is staged per backend by stageGoogleServices in app/build.gradle.kts.
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

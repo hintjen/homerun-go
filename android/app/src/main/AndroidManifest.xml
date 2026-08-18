@@ -147,6 +147,33 @@
                 android:value="Runs a Minecraft server on this device so the player's friends can join it, for as long as the player chooses to keep it online, and finishes uploading the world to their backup repository after they stop it. No other foreground service type fits: the work is not media playback, not a phone call, not location, and not a connected or companion device. It is not dataSync either — nothing is being synchronised on the user's behalf; the device is answering a game protocol for other players in real time, and the six-hour daily limit on dataSync would cap how long a player may host." />
         </service>
 
+        <!-- Remote push. FCM instantiates this for token rotations and for
+             messages delivered while the app is foregrounded; a BACKGROUND
+             message with a notification block never reaches it — the system
+             tray draws that itself, which is why the channel and icon are
+             also declared as meta-data below: the tray needs them before any
+             code in this process has run. -->
+        <service
+            android:name=".PushMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- The same channel the local push-notification bridge channel posts
+             on ("homerun", created at process start in HomerunApplication),
+             so the user has one mute switch for Homerun alerts — and the
+             monochrome icon, because the tray draws a small icon from its
+             alpha channel and the launcher icon would render as a blank
+             square. -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="homerun" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@drawable/ic_notification" />
+
     </application>
 
 </manifest>

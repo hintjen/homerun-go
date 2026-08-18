@@ -163,11 +163,13 @@ data class HostCapabilities(
             // here would produce a Share row that reaches a channel nothing
             // answers, which is worse than a Copy row that works.
             nativeShare = false,
-            // False until this host answers the push:* channels — the flip is
-            // what makes conformance require them, so it lands in the same
-            // change as the handlers (M3 of plans/push-notifications.md in
-            // this repo). Same staging as minecraftAccount before revision 8.
-            remotePush = false,
+            // Flipped true at revision 9, in the same change as the handlers.
+            // The host's half is the OS permission and the FCM token
+            // ([PushMessaging] and the three push:* handlers); registering
+            // the token with the API is the shared UI's job, over the user's
+            // own JWT — the same split as social sign-in, and the reason no
+            // identity appears anywhere in the push path here.
+            remotePush = true,
         )
     }
 }

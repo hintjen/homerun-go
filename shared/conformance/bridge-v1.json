@@ -1259,7 +1259,7 @@
         "deviceWebsocket": true,
         "haptics": true,
         "nativeShare": false,
-        "remotePush": false
+        "remotePush": true
       },
       "required": [
         "auth:web-session",
@@ -1324,6 +1324,11 @@
         "open-storage-settings",
         "posthog-capture-event",
         "push-notification",
+        "push:get-token",
+        "push:opened",
+        "push:permission",
+        "push:request-permission",
+        "push:token-changed",
         "quit-and-install",
         "server-files-exist",
         "set-api-url",
