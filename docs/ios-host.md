@@ -213,6 +213,7 @@ page for as long as the load takes.
 | `ios/HomerunHost/HomerunHost.entitlements` | Empty until there is a team; associated domains land at M2 |
 | `ios/HomerunHost/AppDelegate.swift` | `@main`, window, owns the bridge |
 | `ios/HomerunHost/MainViewController.swift` | Full-screen WebView layout, status bar style |
+| `ios/HomerunHost/ScreenAwake.swift` | Named-reason holder for `isIdleTimerDisabled`: the screen stays lit while hosting or uploading a backup |
 | `ios/HomerunHost/Brand.swift` | The launch colour, read from the asset catalog |
 | `ios/HomerunHost/Assets.xcassets` | `LaunchBackground` — the one colour `UILaunchScreen` names |
 | `ios/HomerunHost/AppSchemeHandler.swift` | Serves `web/` over `homerun-app://` |
