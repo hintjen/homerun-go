@@ -412,18 +412,18 @@ relaunching. The network: a manifest signed over the real published archive
 staged, activated and confirmed with the real UI rendering — plus all three
 tampered-manifest refusals, with the same messages Android gives.
 
-Two caveats. The **real stage API has never served iOS a manifest**: it
-answers `204` for `platform=ios` because nothing has been published there,
-which the client reports correctly as `the server has no bundle for this
-host`. And the fetch was proven against a local stub with a throwaway signing
-key, because the production private half is CI-only — so what is unexercised
-is the server, not the client. `plans/ios-ota.md` carries the rig and the
-traps.
+One caveat left, and it is a smaller one than it was. Until 2026-08-19 the
+**real stage API had never served iOS a manifest** — it answered `204` for
+`platform=ios` because nothing had ever been published there, which the client
+reports correctly as `the server has no bundle for this host`. The publisher
+grew an iOS leg that day and `2026-08-19.1` is published to stage at 100%, run
+`32295191237`, signed with the production key rather than a throwaway.
 
-Closing the first of those is now a dispatch rather than a code change: the
-publisher grew an iOS leg on 2026-08-19. Run it with `platforms=ios`,
-`target=stage` and the stage device pointed at `api.fractalnetworks.co`, and
-step 4 of `plans/ios-ota.md` has something real to answer it.
+So the server half is no longer hypothetical. What remains unobserved is the
+last hop: an iOS device pointed at stage actually fetching it. That needs a
+device with a valid stage token — the bundle endpoint is authenticated, so it
+cannot be checked from a shell — and it is step 4 of `plans/ios-ota.md`, which
+carries the rig and the traps.
 
 One bug worth remembering, because the same shape can recur in any port of
 this: `BundleStore.activate()` existed and was correct but had **no caller at
