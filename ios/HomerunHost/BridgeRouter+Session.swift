@@ -30,6 +30,10 @@ extension BridgeRouter {
         }
 
         TokenStore.accessToken = token
+        // Which account this is, so `DeviceRegistrar` can tell a change of
+        // token from a change of *account* — a device row belongs to one
+        // account, and re-using another's is what the backend refuses.
+        HostStore.currentAccount = credentials["matrix_id"] as? String
         if let apiURL = credentials["apiUrl"] as? String, !apiURL.isEmpty {
             HostStore.apiURL = apiURL
         }
@@ -47,7 +51,10 @@ extension BridgeRouter {
         HostStore.clientNonce = nil
         // The device registration deliberately survives: it belongs to the
         // phone, not the session, and re-registering on the next login would
-        // orphan the servers already attached to it.
+        // orphan the servers already attached to it. Signing back in as a
+        // *different* account is the one case where it must not survive, and
+        // `DeviceRegistrar` handles that by comparing the account it was
+        // registered to — here there is nothing yet to compare against.
         TokenStore.accessToken = nil
         return nil
     }

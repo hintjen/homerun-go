@@ -17,6 +17,8 @@ enum HostStore {
         static let installed = "homerun.firstRunComplete"
         static let registeredDeviceId = "homerun.registeredDeviceId"
         static let deviceGroupId = "homerun.deviceGroupId"
+        static let registeredDeviceAccount = "homerun.registeredDeviceAccount"
+        static let currentAccount = "homerun.currentAccount"
         static let pendingBackupReports = "homerun.pendingBackupReports"
     }
 
@@ -68,6 +70,28 @@ enum HostStore {
     static var deviceGroupId: String? {
         get { defaults.string(forKey: Key.deviceGroupId) }
         set { defaults.set(newValue, forKey: Key.deviceGroupId) }
+    }
+
+    /// The account `registeredDeviceId` was registered to, as a matrix id.
+    ///
+    /// A device row belongs to exactly one account, so a registration made as
+    /// one account is not usable as another: the backend refuses it as
+    /// somebody else's hardware. See `DeviceRegistrar.deviceId()`.
+    static var registeredDeviceAccount: String? {
+        get { defaults.string(forKey: Key.registeredDeviceAccount) }
+        set { defaults.set(newValue, forKey: Key.registeredDeviceAccount) }
+    }
+
+    /// The account signed in right now, as the matrix id the UI handed over
+    /// with the credentials.
+    ///
+    /// The matrix id rather than the address: claiming a guest account rotates
+    /// the address while staying the same account on the same device, so
+    /// keying on email would re-register for no reason every time somebody
+    /// signed up.
+    static var currentAccount: String? {
+        get { defaults.string(forKey: Key.currentAccount) }
+        set { defaults.set(newValue, forKey: Key.currentAccount) }
     }
 
     /// The backend this app talks to.

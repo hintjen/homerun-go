@@ -25,7 +25,36 @@ final class DeviceRegistrar {
     /// blocks server creation with a message of its own, which is a better
     /// outcome than handing it an id that will be rejected later.
     func deviceId() async -> String? {
-        if let known = HostStore.registeredDeviceId { return known }
+        if let known = HostStore.registeredDeviceId {
+            // A device row belongs to exactly one account, so returning any
+            // existing registration regardless of who is signed in is not a
+            // shortcut — it is how a phone that started as a guest stays
+            // registered to the guest it has already left. Every later request
+            // naming that device is then refused as somebody else's hardware:
+            // the push token upsert with "Not one of your devices", and the
+            // guest-server migration with "That device does not belong to this
+            // account".
+            let account = HostStore.currentAccount
+            let registeredTo = HostStore.registeredDeviceAccount
+
+            if account == nil { return known }
+
+            if registeredTo == nil {
+                // Registered before this marker existed. Adopt the current
+                // account rather than re-registering: on upgrade that would
+                // mint a second device row for every install at once. A wrong
+                // guess corrects itself at the next real change of account.
+                HostStore.registeredDeviceAccount = account
+                return known
+            }
+
+            if registeredTo == account { return known }
+
+            HostLog.device.info("signed in as a different account; re-registering this device")
+            HostStore.registeredDeviceId = nil
+            HostStore.deviceGroupId = nil
+            TokenStore.deviceToken = nil
+        }
 
         // The UI asks from more than one screen, and two registrations would
         // create two devices.
@@ -59,6 +88,7 @@ final class DeviceRegistrar {
                 existingDeviceId: HostStore.registeredDeviceId)
 
             HostStore.registeredDeviceId = device.id
+            HostStore.registeredDeviceAccount = HostStore.currentAccount
             HostStore.deviceGroupId = device.groupId
             TokenStore.deviceToken = device.token
 
