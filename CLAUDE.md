@@ -176,8 +176,11 @@ tell a linked engine from a child process. See `docs/ffi.md`.
 
 Both hosts exist and both pass conformance. Android runs a real JVM server
 end to end — jar cache, settings, tunnel, graceful stop, on-stop backup,
-Insights — and is the platform to test on, since it is the one that can be
-driven from this machine.
+Insights — and is the platform to test a *server* on.
+
+On a Mac, iOS is drivable from a terminal too: build, install, launch and read
+the log without opening Xcode, which is how the device websocket was verified.
+The `on-device-build` skill has that loop and the traps in it.
 
 Known gaps, so you do not rediscover them:
 

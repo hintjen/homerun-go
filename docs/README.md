@@ -478,21 +478,23 @@ between iOS and Android, and the fork patches it needs.
 
 ### 🔌 [The device websocket on mobile](../plans/device-websocket.md)
 
-Not a subsystem doc yet — how the desktop serves `wss://<device-fqdn>` for the
-dashboard's console and RCON, and what it would take on a phone.
+Not a subsystem doc yet — the plan, and the record of building it. **Both
+phones serve one now**: Android through D5, iOS as far as a simulator can
+prove, with the host halves in `docs/android-host.md` and `docs/ios-host.md`.
 
 **Contains**:
 - The four layers desktop brings up, and the order it tears them down
 - The frame protocol, and why authentication and authorisation are separate
   questions answered by different parties
 - The two liveness defences a tunnelled socket cannot do without
-- What mobile already has (more than expected) and what is missing (less)
 - What terminating TLS on a phone actually commits us to
 - Why renewal, not issuance, is the risk — and why it gets its own milestone
-- Why "a plugin in homerun-core" is right, and the two-dependency constraint
-  that decides which half goes there
+- Why "a plugin in `homerun-core`" is right, and the dependency constraint that
+  decides which half goes there
+- What each milestone actually proved, on which device — and, for iOS, what a
+  simulator could not settle
 
-**Read this for**: Building it.
+**Read this for**: Working on it, or finishing the iOS half.
 
 ---
 
