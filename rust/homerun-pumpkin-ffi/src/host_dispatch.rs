@@ -20,13 +20,14 @@
 //! Nothing stateful belongs here. If a call needs to be remembered between
 //! invocations it belongs in the supervisor, or as state the host holds.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 use homerun_core::minecraft::slp;
+use homerun_core::region;
 
 use crate::core_dispatch;
 
@@ -47,6 +48,10 @@ pub fn call(method: &str, args: &str) -> String {
     let handled = match method {
         "net.gatewayPing" => Some(
             std::panic::catch_unwind(|| gateway_ping(args))
+                .unwrap_or_else(|_| Err(format!("the native host panicked handling \"{method}\""))),
+        ),
+        "net.regionLatency" => Some(
+            std::panic::catch_unwind(|| region_latency(args))
                 .unwrap_or_else(|_| Err(format!("the native host panicked handling \"{method}\""))),
         ),
         "server.statsPoll" => Some(
@@ -157,6 +162,107 @@ fn gateway_ping(args: &str) -> Result<Value, String> {
     Ok(measure(host, port, deadline)
         .map(Value::from)
         .unwrap_or(Value::Null))
+}
+
+/// Round-trip time to a *region's gateway*, in milliseconds, before any server
+/// exists there.
+///
+/// # Why this is not `net.gatewayPing`
+///
+/// That one speaks Server List Ping, which needs something on the other end
+/// willing to answer as a Minecraft server. A region probe runs while the
+/// player is still choosing where to put a server, so there is nothing to
+/// answer: the only thing available to measure is the TCP handshake itself.
+///
+/// # Why it is here rather than in each host
+///
+/// It used to be in each host, written twice, and it was wrong in both — see
+/// [`homerun_core::region`] for what each of them got wrong. This module's
+/// header already made the argument in the general case: writing the socket
+/// once per platform shares the interesting half and duplicates the half that
+/// can hang.
+///
+/// Null for every failure, never an error, because the UI ranks regions by
+/// this number and one bad host must not cost the whole list.
+fn region_latency(args: &str) -> Result<Value, String> {
+    let args: Value = serde_json::from_str(args).map_err(|e| format!("bad arguments: {e}"))?;
+    let domain = args
+        .get("domain")
+        .and_then(Value::as_str)
+        .ok_or("\"net.regionLatency\" needs a domain")?;
+
+    let deadline = args
+        .get("timeoutMs")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .unwrap_or(DEADLINE);
+
+    let Some(target) = region::probe_target(domain) else {
+        return Ok(Value::Null);
+    };
+
+    Ok(connect_latency(&target.host, target.port, deadline)
+        .map(Value::from)
+        .unwrap_or(Value::Null))
+}
+
+/// Time one TCP handshake.
+///
+/// **A refusal is a measurement, not a failure.** The SYN reached the gateway
+/// and a reset came back, which is the round trip being timed. Only a drop —
+/// seen as a timeout — or a name that will not resolve is unreachable. Note
+/// that on the public internet a closed port is normally dropped rather than
+/// refused, so this tolerance is a safety net and not a licence to probe a
+/// port nothing serves; see [`region::DEFAULT_PROBE_PORT`].
+///
+/// Resolution happens **before the clock starts**. The desktop folds it into
+/// its figure, but a cold lookup is tens of milliseconds that vary per
+/// hostname, and these numbers exist only to be ranked against each other. It
+/// still counts against the deadline, because a name that takes five seconds
+/// to resolve is not a region worth offering.
+fn connect_latency(host: &str, port: u16, deadline: Duration) -> Option<f64> {
+    let started = Instant::now();
+    // `checked_sub` rather than a subtraction, for the reason `measure` gives:
+    // a socket call given a zero timeout blocks forever.
+    let remaining = || {
+        deadline
+            .checked_sub(started.elapsed())
+            .filter(|d| !d.is_zero())
+    };
+
+    let address = (host, port).to_socket_addrs().ok()?.next()?;
+
+    let connect_started = Instant::now();
+    let elapsed = || connect_started.elapsed().as_secs_f64() * 1_000.0;
+
+    match TcpStream::connect_timeout(&address, remaining()?) {
+        Ok(_) => Some(elapsed()),
+        Err(error) if is_measurable(error.kind()) => Some(elapsed()),
+        Err(_) => None,
+    }
+}
+
+/// Whether a *failed* connect still says how far away the peer is.
+///
+/// A refusal or a reset is an answer: the SYN arrived and a reply came back,
+/// which is the round trip being timed. A timeout is not an answer — nothing
+/// came back at all, and the elapsed time is our own deadline rather than any
+/// property of the network.
+///
+/// # This branch does nothing on Windows
+///
+/// `TcpStream::connect_timeout` there reports even a refused loopback
+/// connection as [`ErrorKind::TimedOut`], with `raw_os_error` unset because it
+/// is Rust's own deadline firing rather than the OS answering. So on a dev
+/// machine a refused port reads as unreachable. On Linux and Darwin — the two
+/// platforms that actually ship — the refusal surfaces properly and this
+/// branch is live, which is why it is worth keeping and worth testing
+/// directly rather than through a socket.
+fn is_measurable(kind: ErrorKind) -> bool {
+    matches!(
+        kind,
+        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset
+    )
 }
 
 fn measure(host: &str, port: u16, deadline: Duration) -> Option<f64> {
@@ -304,5 +410,102 @@ mod tests {
         let reply = call("net.gatewayPing", r#"{"port":25565}"#);
         assert!(reply.contains("\"ok\":false"), "{reply}");
         assert!(reply.contains("needs a host"), "{reply}");
+    }
+
+    // --- region latency ---------------------------------------------------
+
+    /// The regression that started all of this, end to end: a plain address
+    /// goes in the front door and a number comes out. A host that treated the
+    /// argument as a URL never got as far as the socket.
+    ///
+    /// No `accept` thread: the kernel completes the handshake from the listen
+    /// backlog, so an unaccepted connection is still a connected one. An
+    /// earlier version of this test did spawn one, bound it to `127.0.0.1`,
+    /// and dialled `localhost` — which resolves to `::1` first on Windows, so
+    /// nothing ever arrived and `join` hung for ever.
+    #[test]
+    fn a_listening_address_is_measured() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+
+        let reply = call(
+            "net.regionLatency",
+            &format!(r#"{{"domain":"127.0.0.1:{port}","timeoutMs":2000}}"#),
+        );
+        assert!(reply.contains("\"ok\":true"), "{reply}");
+        assert!(
+            !reply.contains("\"value\":null"),
+            "a listening port was not measured: {reply}"
+        );
+
+        drop(listener);
+    }
+
+    /// A refusal is an answer. Nothing is bound to this port, and on loopback
+    /// a closed port resets rather than dropping — so it must come back as a
+    /// measurement, not as unreachable.
+    /// The rule the measurement turns on, tested where a socket cannot test
+    /// it — see [`is_measurable`] for why Windows never reaches the refusal
+    /// branch through a real connect.
+    #[test]
+    fn a_refusal_is_an_answer_and_a_timeout_is_not() {
+        assert!(is_measurable(ErrorKind::ConnectionRefused));
+        assert!(is_measurable(ErrorKind::ConnectionReset));
+
+        assert!(!is_measurable(ErrorKind::TimedOut));
+        assert!(!is_measurable(ErrorKind::ConnectionAborted));
+        assert!(!is_measurable(ErrorKind::NotFound));
+    }
+
+    /// The same rule through a real socket, on the platforms whose
+    /// `connect_timeout` can express it. Nothing is bound to this port, so the
+    /// connect is refused and must still come back as a number.
+    #[test]
+    #[cfg(not(windows))]
+    fn a_refused_port_is_still_a_measurement() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().unwrap().port()
+        };
+
+        let measured = connect_latency("127.0.0.1", port, Duration::from_millis(2_000));
+        assert!(
+            measured.is_some(),
+            "a reset from a closed loopback port was treated as unreachable"
+        );
+    }
+
+    /// TEST-NET-1 is unroutable by definition, so this exercises the timeout
+    /// without depending on the network.
+    #[test]
+    fn an_unroutable_region_is_null() {
+        let reply = call(
+            "net.regionLatency",
+            r#"{"domain":"192.0.2.1","timeoutMs":250}"#,
+        );
+        assert!(reply.contains("\"ok\":true"), "{reply}");
+        assert!(reply.contains("\"value\":null"), "{reply}");
+    }
+
+    /// An unparseable target is null too — never an error, or one bad entry
+    /// would cost the UI the whole region list.
+    #[test]
+    fn an_unusable_domain_is_null_rather_than_an_error() {
+        for args in [
+            r#"{"domain":""}"#,
+            r#"{"domain":"https://"}"#,
+            r#"{"domain":"x:0"}"#,
+        ] {
+            let reply = call("net.regionLatency", args);
+            assert!(reply.contains("\"ok\":true"), "{args} -> {reply}");
+            assert!(reply.contains("\"value\":null"), "{args} -> {reply}");
+        }
+    }
+
+    #[test]
+    fn a_region_call_missing_its_domain_says_so() {
+        let reply = call("net.regionLatency", "{}");
+        assert!(reply.contains("\"ok\":false"), "{reply}");
+        assert!(reply.contains("needs a domain"), "{reply}");
     }
 }

@@ -313,24 +313,42 @@ extension BridgeRouter {
         return Double(total) / 1_073_741_824.0
     }
 
-    /// Round-trip time in milliseconds to a region endpoint, used to rank
-    /// regions in the UI. A failure returns a large number rather than
-    /// throwing, so one unreachable region cannot break the whole picker.
+    // MARK: - Region latency
+
+    /// The contract's "unreachable", as a latency rather than an error.
+    ///
+    /// A number, not a throw, because the UI ranks regions by this and one bad
+    /// host must not cost the whole list. It stays on this side because it is
+    /// a *bridge* value rather than a measurement: the core answers nil for
+    /// "could not measure", and what the UI receives instead is this
+    /// protocol's business.
+    ///
+    /// Note the UI's own "nothing answered" test is `=== Infinity`, which this
+    /// never trips — `JSON.stringify(Infinity)` is `null`, so no host can send
+    /// it. See `docs/region-latency.md`.
+    private static let unreachableMs = 9999
+
+    /// Round-trip time to a region's gateway, in milliseconds.
+    ///
+    /// The whole measurement — splitting the address, resolving it, timing the
+    /// handshake — is `net.regionLatency` in the native host. None of it is
+    /// here, and that is the point: it *was* here, and in Kotlin, and both
+    /// copies were wrong. Each treated the argument as a URL when it is a bare
+    /// hostname, so every region came back ``unreachableMs`` and the picker
+    /// ranked a list of ties. `homerun-core::region` has the post-mortem.
     func measureRegionLatency(_ params: Any?) async throws -> Any? {
-        guard let raw = params as? String, let url = URL(string: raw) else { return 9999 }
+        guard
+            let domain = (params as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            !domain.isEmpty
+        else { return Self.unreachableMs }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "HEAD"
-        request.timeoutInterval = 5
-        request.cachePolicy = .reloadIgnoringLocalCacheData
+        // The core call blocks for up to five seconds. Off the actor, or the
+        // whole bridge stalls behind one slow region.
+        let measured = await Task.detached { Core.regionLatency(domain: domain) }.value
 
-        let started = Date()
-        do {
-            _ = try await URLSession.shared.data(for: request)
-        } catch {
-            return 9999
-        }
-        return Int(Date().timeIntervalSince(started) * 1000)
+        guard let ms = measured, ms.isFinite, ms >= 0 else { return Self.unreachableMs }
+        return Int(ms.rounded())
     }
 
     // MARK: - Notifications

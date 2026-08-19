@@ -54,6 +54,7 @@ pub mod lifecycle;
 pub mod link;
 pub mod metrics;
 pub mod properties;
+pub mod region;
 pub mod reporting;
 pub mod state;
 pub mod tunnel;

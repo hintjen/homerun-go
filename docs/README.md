@@ -298,6 +298,31 @@ sent.
 
 ---
 
+### 📍 [Region latency](./region-latency.md)
+
+One channel, three hosts, and the reason a player can be put on the wrong
+continent without a single error being logged.
+
+**Contains**:
+- What `domain` actually is — a bare SRV target, and why nothing in the
+  contract says so
+- The bug both mobile hosts shipped: a hostname parsed as a URL, every region
+  reporting 9999, and no packet ever sent
+- Why the parsing and the socket both left the hosts, and what is left behind
+- Why the probe is a bare TCP connect rather than Server List Ping, and why a
+  *refused* port is a valid measurement
+- Why port 80 is a three-host decision, and why DNS is resolved off the clock
+- Why the refusal rule is dead code on Windows, and how it is tested anyway
+- The `9999` sentinel, why it stays in the hosts, and the UI's `=== Infinity`
+  check that can never fire
+- An unverified assumption about what these hostnames resolve to, and how to
+  settle it
+
+**Read this for**: A region picker that ranks everything equally, or before
+changing how any host measures a region.
+
+---
+
 ### 📦 [Over-the-air UI bundles](./ota-bundles.md)
 
 Replacing the shared web bundle without a store release: which one is served,

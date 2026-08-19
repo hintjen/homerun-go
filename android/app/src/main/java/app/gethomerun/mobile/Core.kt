@@ -1711,6 +1711,21 @@ object Core {
     }
 
     /**
+     * Round-trip time to a region's gateway, in milliseconds, or null when it
+     * could not be reached.
+     *
+     * The argument is the API's `domain` for a region — a bare hostname, not a
+     * URL. Splitting it and opening the socket both belong to the native side:
+     * doing either here is what produced the bug where every region reported
+     * unreachable without a packet being sent. See `docs/region-latency.md`.
+     *
+     * > **Blocking**, up to a five-second deadline. Call it off the main thread.
+     */
+    fun regionLatency(domain: String): Double? =
+        (call("net.regionLatency", buildJsonObject { put("domain", domain) })
+            as? JsonPrimitive)?.contentOrNull?.toDoubleOrNull()
+
+    /**
      * An `op`, `deop`, `ban` or `pardon` typed into the console, if that is
      * what this was. Null for everything else, which is almost every command.
      */

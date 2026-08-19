@@ -263,6 +263,12 @@ timeout — with an idle timeout, a peer dribbling one byte a second keeps the
 measurement alive indefinitely, which on a phone is a wake lock held by a
 stranger.
 
+It has a neighbour now. `net.regionLatency` measures a *region's* gateway
+before any server exists there, so it cannot speak SLP — there is nothing to
+answer — and times a bare TCP handshake instead. It moved here from the two
+hosts for the reason above, having been written twice and been wrong both
+times: see [`region-latency.md`](./region-latency.md).
+
 ## Console forgery, which was real
 
 Two lines of defence in the core, both added because the desktop's equivalents

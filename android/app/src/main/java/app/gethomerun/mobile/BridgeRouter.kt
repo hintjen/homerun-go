@@ -24,9 +24,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import java.io.File
-import java.net.HttpURLConnection
 import java.net.URI
-import java.net.URL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -45,6 +43,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.roundToInt
 
 /** A channel implementation. `params` is the raw payload; the return value is the result. */
 private typealias ChannelHandler = suspend (JsonElement?) -> JsonElement?
@@ -1712,29 +1711,23 @@ class BridgeRouter(
     }
 
     /**
-     * Round-trip time to a region endpoint, in milliseconds.
+     * Round-trip time to a region's gateway, in milliseconds.
      *
-     * A HEAD with a short timeout, and [UNREACHABLE_MS] for anything that
-     * fails. The UI sorts regions by this figure, so an exception would cost
-     * the whole list rather than one entry.
+     * The whole measurement — splitting the address, resolving it, timing the
+     * handshake — is `net.regionLatency` in the native host. None of it is
+     * here, and that is the point: it *was* here, and in Swift, and both
+     * copies were wrong. Each treated the argument as a URL when it is a bare
+     * hostname, so every region came back [UNREACHABLE_MS] and the picker
+     * ranked a list of ties. `homerun-core::region` has the post-mortem.
+     *
+     * [UNREACHABLE_MS] stays on this side because it is a *bridge* value, not
+     * a measurement: the core answers null for "could not measure", and the
+     * number the UI has to receive instead is this protocol's business.
      */
-    private suspend fun measureLatency(url: String?): Int = withContext(Dispatchers.IO) {
-        val target = url?.let { runCatching { URL(it) }.getOrNull() } ?: return@withContext UNREACHABLE_MS
-        runCatching {
-            val started = System.nanoTime()
-            val connection = (target.openConnection() as HttpURLConnection).apply {
-                requestMethod = "HEAD"
-                connectTimeout = LATENCY_TIMEOUT_MS
-                readTimeout = LATENCY_TIMEOUT_MS
-                useCaches = false
-            }
-            try {
-                connection.responseCode
-            } finally {
-                connection.disconnect()
-            }
-            ((System.nanoTime() - started) / 1_000_000).toInt()
-        }.getOrDefault(UNREACHABLE_MS)
+    private suspend fun measureLatency(domain: String?): Int = withContext(Dispatchers.IO) {
+        val target = domain?.trim()?.takeIf { it.isNotEmpty() } ?: return@withContext UNREACHABLE_MS
+        val measured = runCatching { Core.regionLatency(target) }.getOrNull()
+        measured?.takeIf { it.isFinite() && it >= 0 }?.roundToInt() ?: UNREACHABLE_MS
     }
 
     /**
@@ -1766,10 +1759,16 @@ class BridgeRouter(
          */
         const val LOW_STORAGE_BYTES = 1_073_741_824L
 
-        /** The contract's "unreachable", as a latency rather than an error. */
+        /**
+         * The contract's "unreachable", as a latency rather than an error.
+         *
+         * A number, not a throw, because the UI sorts regions by this and one
+         * bad host must not cost the whole list. Note the UI's own
+         * "nothing answered" test is `=== Infinity`, which this never trips —
+         * `JSON.stringify(Infinity)` is `null`, so no host can send it.
+         */
         const val UNREACHABLE_MS = 9999
 
-        const val LATENCY_TIMEOUT_MS = 5_000
 
         const val NOTIFICATION_CHANNEL = "homerun"
 

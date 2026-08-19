@@ -982,6 +982,21 @@ enum Core {
         return number(value)?.doubleValue
     }
 
+    /// Round-trip time to a region's gateway, in milliseconds, or nil when it
+    /// could not be reached.
+    ///
+    /// > **Blocking**, up to a five-second deadline. Call it off the main actor.
+    ///
+    /// `domain` is the API's address for a region — a bare hostname, not a
+    /// URL. Splitting it and opening the socket both belong to the native
+    /// side: doing either here is what produced the bug where every region
+    /// reported unreachable. See `docs/region-latency.md`.
+    static func regionLatency(domain: String) -> Double? {
+        guard let value = try? call("net.regionLatency", ["domain": domain])
+        else { return nil }
+        return number(value)?.doubleValue
+    }
+
     /// The gateway address a player connects to, out of a server body.
     static func publicAddress(serverBody: [String: Any]) -> String? {
         guard let value = try? call("link.publicAddress", ["body": serverBody]) else { return nil }
