@@ -13,6 +13,10 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * This device, as the backend knows it.
@@ -127,7 +131,33 @@ object DeviceRegistry {
      * than fatal, and so does this.
      */
     suspend fun ensure(apiUrl: String, userToken: String): Registration? {
-        current()?.let { return it }
+        current()?.let { existing ->
+            // A device row belongs to exactly one account. Returning any
+            // existing registration regardless of who is signed in is what
+            // left this phone registered to a guest it had already left:
+            // every later request naming the device was then refused as
+            // somebody else's hardware — the push token upsert with "Not one
+            // of your devices", and the migration that exists to rescue that
+            // guest's servers with the same.
+            val account = currentAccount()
+            val registeredTo = prefs.getString(KEY_ACCOUNT, null)
+
+            if (account == null) return existing
+
+            if (registeredTo == null) {
+                // Registered before this marker existed. Adopt the current
+                // account rather than re-registering: on upgrade that would
+                // mint a second device row for every install at once. If the
+                // guess is wrong it corrects itself at the next real change.
+                prefs.edit().putString(KEY_ACCOUNT, account).apply()
+                return existing
+            }
+
+            if (registeredTo == account) return existing
+
+            Log.i(TAG, "signed in as a different account; re-registering this device")
+            clear()
+        }
         if (userToken.isBlank()) {
             Log.i(TAG, "not registering: no user token yet")
             return null
@@ -155,6 +185,7 @@ object DeviceRegistry {
         prefs.edit()
             .putString(KEY_ID, result.deviceId)
             .putString(KEY_GROUP, result.groupId)
+            .putString(KEY_ACCOUNT, currentAccount())
             .apply()
         SecretStore.write(prefs, KEY_TOKEN, result.deviceToken)
         Log.i(TAG, "registered as ${result.deviceId}")
@@ -281,7 +312,9 @@ object DeviceRegistry {
     fun clear() {
         heartbeat?.cancel()
         heartbeat = null
-        prefs.edit().remove(KEY_ID).remove(KEY_TOKEN).remove(KEY_GROUP).apply()
+        prefs.edit()
+            .remove(KEY_ID).remove(KEY_TOKEN).remove(KEY_GROUP).remove(KEY_ACCOUNT)
+            .apply()
     }
 
     private const val TAG = "HomerunDevice"
@@ -298,6 +331,27 @@ object DeviceRegistry {
     private const val KEY_TOKEN = "native-device-token"
     private const val KEY_GROUP = "native-device-group"
     private const val KEY_API_URL = "api-url"
+
+    /** Which account this device is registered to. See [ensure]. */
+    private const val KEY_ACCOUNT = "native-device-account"
+
+    /**
+     * The signed-in account, as the matrix id the UI handed over with the
+     * credentials.
+     *
+     * The matrix id rather than the address: claiming a guest account rotates
+     * the address while staying the same account and keeping the same device,
+     * so keying on email would re-register for no reason every time somebody
+     * signed up.
+     */
+    private fun currentAccount(): String? = runCatching {
+        val stored = SecretStore.read(prefs, KEY_CREDENTIALS) ?: return@runCatching null
+        (Json.parseToJsonElement(stored) as? JsonObject)
+            ?.get("matrix_id")?.jsonPrimitive?.contentOrNull
+    }.getOrNull()
+
+    /** Written by BridgeRouter; the same key, in the same preferences file. */
+    private const val KEY_CREDENTIALS = "credentials"
 
     private const val HEARTBEAT_INTERVAL_MS = 30_000L
 }
