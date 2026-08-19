@@ -340,10 +340,26 @@ Two things it does that matter here:
 
 `.github/workflows/publish-ui-bundle.yml`, manual dispatch only and gated on
 the `ui-bundle-publish` environment. It stages the UI with the same
-`build-ui.js` the APK uses, zips that tree, asks the API what serial to sign,
-signs, uploads, and registers the release.
+`build-ui.js` the APK and the IPA use, zips that tree, asks the API what serial
+to sign, signs, uploads, and registers the release — for one platform or for
+both, chosen with the `platforms` input.
 
-Three things about it worth not undoing:
+**One archive, two publishes.** `build-ui.js` stages a byte-identical tree into
+both hosts' asset directories — same source, same source-map filter, only the
+destination differs — so the zip is built once and the same bytes go up under a
+key per platform. What cannot be shared is the manifest: `platform`, `url` and
+`serial` are all signed fields, all three differ, and the core refuses a
+manifest built for the other platform outright (`declines_the_other_platforms_bundle`
+in `bundle.rs`). The workflow checks the two staged trees still match and fails
+if they ever diverge, because nothing downstream would notice iOS being handed
+Android's tree.
+
+`min-host` is one value for the whole run. `BRIDGE_HOST_REVISION` is a single
+shared ledger rather than a per-platform counter, but the hosts do not sit at
+the same revision — iOS 11, Android 10 today — so a `min-host` above the lower
+of the two quietly excludes that platform instead of failing at publish time.
+
+Four things about it worth not undoing:
 
 - **It pins to `package-lock.json`** (`HOMERUN_UI_NO_UPDATE=1`) rather than
   re-resolving the UI branch. This publishes an interface to every phone and
@@ -370,6 +386,11 @@ CloudFront, but stage and prod are separate databases with independent serials �
 so both count from 1 and would otherwise want the same key on the same day. The
 prefix is what stops one target overwriting bytes the other's signed manifest
 already names.
+
+Platforms collide the same way and for the same reason, so each takes a segment
+of its own beneath that: `ui/ios/`, `ui/stage/ios/`. Android keeps the bare path
+because its archives are already published under it and a signed manifest names
+the URL — a published key cannot move.
 
 It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
 `sign-manifest.js keygen`), the AWS upload credential as repository secrets
@@ -398,6 +419,11 @@ host`. And the fetch was proven against a local stub with a throwaway signing
 key, because the production private half is CI-only — so what is unexercised
 is the server, not the client. `plans/ios-ota.md` carries the rig and the
 traps.
+
+Closing the first of those is now a dispatch rather than a code change: the
+publisher grew an iOS leg on 2026-08-19. Run it with `platforms=ios`,
+`target=stage` and the stage device pointed at `api.fractalnetworks.co`, and
+step 4 of `plans/ios-ota.md` has something real to answer it.
 
 One bug worth remembering, because the same shape can recur in any port of
 this: `BundleStore.activate()` existed and was correct but had **no caller at
