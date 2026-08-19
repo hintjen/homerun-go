@@ -842,6 +842,38 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             serde_json::to_value(hosting::refuse(host, &server)).map_err(|e| e.to_string())
         }
 
+        // Which of this host's engines runs this server — the routing answer,
+        // and the other half of `refuse` above. A host with two backends asks
+        // this instead of deciding in Kotlin, because "a Pumpkin server goes
+        // to Pumpkin, a Java server prefers a real JVM, and a device with no
+        // JVM serves Java with Pumpkin anyway" is three rules that both
+        // platforms would otherwise write separately.
+        //
+        // Answers `{"engine":"jvm"|"pumpkin"|"bedrock"}` or the same refusal
+        // shape `minecraft.hosting.refuse` returns, so a caller needs one
+        // round trip rather than two.
+        "minecraft.hosting.serves" => {
+            let host: hosting::Host = match args.get("host") {
+                Some(v) if !v.is_null() => {
+                    serde_json::from_value(v.clone()).map_err(|e| format!("bad host: {e}"))?
+                }
+                _ => hosting::Host::default(),
+            };
+            let server: hosting::Server = serde_json::from_value(field("server")?.clone())
+                .map_err(|e| format!("bad server: {e}"))?;
+            Ok(match hosting::serves(host, &server) {
+                Ok(engine) => json!({ "engine": engine.as_str(), "refusal": Value::Null }),
+                Err(refusal) => json!({
+                    "engine": Value::Null,
+                    "refusal": serde_json::to_value(refusal).map_err(|e| e.to_string())?,
+                }),
+            })
+        }
+
+        // Whether a launch has a jar and a `Main-Class` to resolve, from the
+        // one thing that knows: the game type. Feeds `needsJvm` above.
+        "minecraft.hosting.needsJvm" => Ok(Value::Bool(hosting::needs_jvm(&text("gameType")?))),
+
         // One wording per refusal, so two apps turning down the same thing say
         // the same sentence. An unknown kind is an error rather than a shrug:
         // a host asking for wording that does not exist would otherwise show
@@ -1141,6 +1173,12 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     Some("linked") => launch::Engine::Linked,
                     _ => launch::Engine::Spawned,
                 },
+                // Absent means "infer it from the engine", which is what
+                // every host did before a Pumpkin server could be spawned.
+                // Only a host that knows the game type can answer this, and
+                // only Android needs to: a spawned Pumpkin looks exactly like
+                // a JVM server to `engine` and has no jar to fetch.
+                needs_jvm: args.get("needsJvm").and_then(|v| v.as_bool()),
             };
             let steps: Vec<Value> = launch::plan(inputs)
                 .into_iter()
@@ -2150,6 +2188,94 @@ mod tests {
     }
 
     /// The loop a host implements, on the wire: ask, read, record, read back.
+    /// The routing answer both Android backends now depend on. A device with
+    /// two engines asks once and gets the engine *and* the refusal.
+    #[test]
+    fn the_core_routes_a_server_to_an_engine() {
+        let android = json!({ "jvm": true, "pumpkin": true, "bedrock": false });
+
+        let paper = ok(
+            "minecraft.hosting.serves",
+            json!({ "host": android, "server": { "gameType": "native", "env": { "TYPE": "PAPER" } } }),
+        );
+        assert_eq!(paper["engine"], "jvm");
+        assert!(paper["refusal"].is_null());
+
+        let pumpkin = ok(
+            "minecraft.hosting.serves",
+            json!({ "host": android, "server": { "gameType": "native-pumpkin", "env": {} } }),
+        );
+        assert_eq!(pumpkin["engine"], "pumpkin");
+
+        // A Pumpkin server is never quietly substituted with the JVM, even
+        // though this device has one and a JVM is the better engine.
+        let modded = ok(
+            "minecraft.hosting.serves",
+            json!({
+                "host": android,
+                "server": { "gameType": "native-pumpkin", "env": { "TYPE": "FABRIC" } },
+            }),
+        );
+        assert!(modded["engine"].is_null());
+        assert_eq!(modded["refusal"]["code"], "mods-unsupported");
+    }
+
+    /// iOS sends the field this struct used to have and must keep the answers
+    /// it has always had, without being rebuilt.
+    #[test]
+    fn a_host_naming_only_its_engine_is_still_understood() {
+        let served = ok(
+            "minecraft.hosting.serves",
+            json!({
+                "host": { "engine": "linked", "bedrock": false },
+                "server": { "gameType": "native", "env": {} },
+            }),
+        );
+        assert_eq!(served["engine"], "pumpkin");
+
+        let refused = ok(
+            "minecraft.hosting.refuse",
+            json!({
+                "host": { "engine": "linked", "bedrock": false },
+                "server": { "gameType": "native", "env": { "TYPE": "FORGE" } },
+            }),
+        );
+        assert_eq!(refused["code"], "mods-unsupported");
+    }
+
+    /// What feeds `needsJvm` into a launch plan. Getting this wrong sends a
+    /// Pumpkin server to download a Mojang jar it cannot run.
+    #[test]
+    fn only_a_java_server_is_planned_around_a_jar() {
+        for (game_type, expected) in [
+            ("native", true),
+            ("native-crossplay", true),
+            ("native-pumpkin", false),
+            ("native-bedrock", false),
+        ] {
+            assert_eq!(
+                ok("minecraft.hosting.needsJvm", json!({ "gameType": game_type })),
+                json!(expected),
+                "{game_type}",
+            );
+        }
+
+        // And the plan actually drops the two steps when told.
+        let steps = ok(
+            "launch.plan",
+            json!({ "backups": false, "settings": true, "tunnel": false, "needsJvm": false }),
+        );
+        let names: Vec<&str> = steps
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["step"].as_str().unwrap())
+            .collect();
+        assert!(!names.contains(&"ensureJar"), "{names:?}");
+        assert!(!names.contains(&"resolveMainClass"), "{names:?}");
+        assert!(names.contains(&"ensureRuntime"), "{names:?}");
+    }
+
     #[test]
     fn a_host_can_sample_a_run_without_deciding_anything() {
         // A fresh history wants a sample immediately.

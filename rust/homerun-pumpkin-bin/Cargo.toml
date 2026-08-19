@@ -1,0 +1,51 @@
+[package]
+name = "homerun-pumpkin-bin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Pumpkin as a child process, so a server crash cannot take the app with it"
+
+# An ordinary executable. It ships as `libpumpkin.so` in jniLibs, which is the
+# only way Android will let us exec it — same rule and same rename as
+# `homerun-java-launcher`. See docs/android-server-backend.md.
+[[bin]]
+name = "homerun-pumpkin"
+path = "src/main.rs"
+
+[dependencies]
+# The same fork at the same rev as `homerun-pumpkin-ffi`. These two must not
+# drift: the FFI crate's `pumpkin_settings` writes the config this binary
+# reads, and a settings key that moved between revs would be written to a file
+# the running server does not read. There is a test for this — see
+# `scripts/check-pumpkin-rev.js`.
+pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a" }
+pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a" }
+pumpkin-data = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a" }
+
+# The settings machinery, reused rather than reimplemented. `engine_settings`
+# resolves what a player asked for into what an engine will accept — clamps,
+# UUIDs, advisories — and `pumpkin_settings` assigns it onto Pumpkin's own
+# config types. Rendering a `pumpkin.toml` by hand instead would mean spelling
+# every key and every enum's serde representation a second time, and getting
+# one wrong is silent: `GameMode` serialises as "Survival", so a lower-cased
+# guess would be dropped on load and the server would start on defaults.
+homerun-pumpkin-ffi = { path = "../homerun-pumpkin-ffi", features = ["pumpkin-engine"] }
+homerun-core = { path = "../homerun-core" }
+
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tracing = "0.1"
+
+# Cargo only honours a profile at a workspace root and there is no workspace
+# here, so every crate states its own.
+#
+# **`thin`, not `true`.** Full LTO over this dependency tree — Pumpkin plus
+# wasmtime and cranelift — takes about twenty minutes and peaks near 7 GB in
+# one rustc process, and it re-runs on any source change, so a one-line edit
+# costs a coffee break. Thin LTO gets most of the size back for a fraction of
+# that. The neighbouring `homerun-java-launcher` uses `lto = true` and is
+# right to: it is a few hundred kilobytes.
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

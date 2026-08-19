@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Process-level owner of the running server.
@@ -48,8 +49,51 @@ object ServerHost {
     private lateinit var appContext: Context
     private val listeners = mutableSetOf<Listener>()
 
-    lateinit var backend: ServerBackend
-        private set
+    /**
+     * Every engine this build actually has. Both are constructed at [init] and
+     * both keep their callbacks wired, because which one a launch uses is not
+     * known until the server's game type has been read back from the API.
+     *
+     * `java` is null when no JRE is staged; `pumpkin` when no `libpumpkin.so`
+     * shipped for this ABI. A build missing both cannot host anything, and
+     * says so at the point a launch is attempted rather than at startup —
+     * everything else in the app still works.
+     */
+    private var java: ServerBackend? = null
+    private var pumpkin: ServerBackend? = null
+
+    /**
+     * The backend a running or launching server is on.
+     *
+     * Set by [select] when a launch is admitted and cleared only once the run
+     * *and its on-stop backup* are finished — not at `stopped`. A backup emits
+     * console notes after the server is gone, and routing those through the
+     * other engine would attribute them to a server that never ran.
+     */
+    @Volatile
+    private var active: ServerBackend? = null
+
+    /**
+     * Whoever answers when nothing is running: introspection getters, and the
+     * device heartbeat's list of running ids.
+     *
+     * Every getter on both backends is guarded by "is this the server I am
+     * running", so a stopped server gets the same honest answer from either.
+     */
+    val backend: ServerBackend
+        get() = active ?: storage
+
+    /**
+     * Creates, deletes and reads server directories.
+     *
+     * Both backends build the identical `filesDir/servers/<id>` path, so this
+     * is a real choice only in that [JavaServerBackend.delete] also sweeps the
+     * shared jar cache — a superset, and harmless for a server that never had
+     * a jar.
+     */
+    private val storage: ServerBackend
+        get() = active ?: java ?: pumpkin
+            ?: throw ServerBackendException.Engine("This build cannot host a server.")
 
     /**
      * Who owns a server right now — the bookkeeping the bridge and the backend
@@ -80,34 +124,107 @@ object ServerHost {
         fun onBackupFinished(serverId: String) {}
     }
 
+    private var started = false
+
     @Synchronized
     fun init(context: Context) {
-        if (::backend.isInitialized) return
+        if (started) return
+        started = true
         appContext = context.applicationContext
-        // Java is the Android product: a real server jar on a real JVM, with
-        // the mods, plugins and parity that implies. Pumpkin is the fallback
-        // for builds that ship no JRE — and the only option on iOS, which
-        // cannot spawn a process at all.
-        val java = JavaRuntime.isAvailable(appContext)
-        Log.i(TAG, if (java) "using the bundled JVM" else "no JVM bundled — falling back to Pumpkin")
-        backend = (if (java) JavaServerBackend(appContext, scope) else PumpkinBackend(appContext, scope)).apply {
-            onLog = { id, line -> forEach { it.onLog(id, line) } }
-            onPlayersChanged = { id -> forEach { it.onPlayersChanged(id) } }
-            onNetworkError = { id, kind -> forEach { it.onNetworkError(id, kind) } }
-            onStateChanged = { id, state, backingUp ->
-                // Before the fan-out, not after. The service is what stops
-                // Android reclaiming this process, and the transition to
-                // `starting` is followed immediately by minutes of downloading
-                // and unpacking — work that must not be interruptible while
-                // listeners are still being called.
-                track(id, state, backingUp)
-                forEach { it.onStateChanged(id, state, backingUp) }
-            }
-            onBackupFinished = { id ->
-                track(id, null, false)
-                forEach { it.onBackupFinished(id) }
+
+        // Both, when both are available. Which one a server runs on is decided
+        // per launch by its game type — see [select] — because this device can
+        // host a modded Java server and a Pumpkin one on the same afternoon,
+        // and "which engine is this app" has no answer for it.
+        if (JavaRuntime.isAvailable(appContext)) java = JavaServerBackend(appContext, scope)
+        if (PumpkinBackend.isAvailable(appContext)) pumpkin = PumpkinBackend(appContext, scope)
+        Log.i(TAG, "engines: jvm=${java != null} pumpkin=${pumpkin != null}")
+
+        listOfNotNull(java, pumpkin).forEach { it.wire() }
+    }
+
+    /**
+     * What this device can run, for the core to route with.
+     *
+     * Both facts are things only the host can know: whether a JRE was staged
+     * into the APK, and whether a Pumpkin binary shipped for this ABI.
+     */
+    fun engines(): Core.HostEngines =
+        Core.HostEngines(jvm = java != null, pumpkin = pumpkin != null, bedrock = false)
+
+    /**
+     * Choose the engine for a launch, and hold it for the run.
+     *
+     * The core decides; this only owns the two instances. A refusal is thrown
+     * as a message written for a player, because that is what it is.
+     */
+    @Synchronized
+    fun select(gameType: String, env: JsonObject): ServerBackend {
+        val verdict = Core.serves(engines(), gameType, env)
+        verdict.refusal?.let { throw ServerBackendException.Engine(it) }
+        val chosen = when (verdict.engine) {
+            "pumpkin" -> pumpkin
+            "jvm" -> java
+            // `bedrock` is refused above on this device, so anything else is
+            // the core naming an engine this host has not been taught about.
+            else -> null
+        } ?: throw ServerBackendException.Engine("This device can't host this kind of server.")
+        active = chosen
+        return chosen
+    }
+
+    /**
+     * Point one backend's callback slots at the listener fan-out.
+     *
+     * Both engines get this, identically, at [init] — not the selected one at
+     * launch. A backend whose slots were wired only when it was chosen would
+     * drop the exit of the run it was just finishing.
+     */
+    private fun ServerBackend.wire() {
+        // Captured rather than relying on `this` inside the lambdas below,
+        // where the enclosing object is also a receiver.
+        val engine = this
+
+        onLog = { id, line -> forEach { it.onLog(id, line) } }
+        onPlayersChanged = { id -> forEach { it.onPlayersChanged(id) } }
+        onNetworkError = { id, kind -> forEach { it.onNetworkError(id, kind) } }
+        onStateChanged = { id, state, backingUp ->
+            // Before the fan-out, not after. The service is what stops
+            // Android reclaiming this process, and the transition to
+            // `starting` is followed immediately by minutes of downloading
+            // and unpacking — work that must not be interruptible while
+            // listeners are still being called.
+            track(id, state, backingUp)
+            forEach { it.onStateChanged(id, state, backingUp) }
+            // A run that ends with nothing still backing up is done with its
+            // engine. `onBackupFinished` covers the other case, and only one
+            // backend fires it — so releasing solely there would pin a
+            // Pumpkin run's engine until the next launch replaced it.
+            if (state == ServerState.STOPPED || state == ServerState.CRASHED) {
+                if (!backingUp) release(engine)
             }
         }
+        onBackupFinished = { id ->
+            track(id, null, false)
+            forEach { it.onBackupFinished(id) }
+            // The run is over and so is its backup, so this device is finally
+            // idle and the next launch is free to pick a different engine.
+            // Released here rather than at `stopped` because a backup goes on
+            // writing console notes after the server is gone.
+            release(engine)
+        }
+    }
+
+    /**
+     * Let go of a backend once it has nothing left in flight.
+     *
+     * Guarded on identity: a launch that has already selected the *other*
+     * engine must not have its choice cleared by the previous run's backup
+     * finishing late.
+     */
+    @Synchronized
+    private fun release(backend: ServerBackend) {
+        if (active === backend) active = null
     }
 
     @Synchronized

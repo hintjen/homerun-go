@@ -15,39 +15,81 @@ phone as much as an emulator; where they differ, the phone is called out.
 Do not assume paths. Establish these once per session:
 
 ```bash
-which adb || ls "$ANDROID_HOME/platform-tools/adb"   # often already on PATH
-adb devices                                          # nothing attached? see below
+npm run doctor                     # says what this machine has, per target
+adb devices                        # nothing attached? see below
 ```
 
-If `adb` is missing, `ANDROID_HOME` / `ANDROID_SDK_ROOT` point at the SDK;
-`adb` lives in `platform-tools/`, `emulator` in `emulator/`.
+**Run `npm run doctor` first and believe it over anything written here.** This
+skill has been written from more than one machine, and the toolchain paths are
+the part that does not travel. `ANDROID_HOME` / `ANDROID_SDK_ROOT` point at the
+SDK; `adb` lives in `platform-tools/`, `emulator` in `emulator/`.
 
-**Neither variable is set on this Mac, and there is no `java` on PATH.** Both
-came from Homebrew rather than Android Studio, which is why nothing is
-exported. Gradle needs both spelled out or it fails twice in a row, on two
+Two setups have been used so far and they agree on almost nothing:
+
+| | macOS (Homebrew) | Windows |
+|---|---|---|
+| `ANDROID_HOME` | unset — `/opt/homebrew/share/android-commandlinetools` | set — `%LOCALAPPDATA%\Android\Sdk` |
+| `JAVA_HOME` | unset — `/opt/homebrew/opt/openjdk@21` | set |
+| AVD `homerun_api35` | arm64-v8a | **x86_64** |
+| Real phone | wireless debugging | USB |
+| `adb` | `adb` | `adb.exe` |
+
+On the Mac neither variable is exported, and Gradle fails twice in a row on two
 different messages ("Unable to locate a Java Runtime", then "SDK location not
-found"):
+found") until both are spelled out on the command line. On Windows both are
+already set and Gradle needs nothing.
+
+**The AVD's ABI decides which Rust target you must build**, and it differs
+between the two machines. Build the one the AVD actually reports
+(`getprop ro.product.cpu.abi`), not the one you remember. On Apple Silicon the
+arm64 image runs the same slice the phone does, so proving a change there
+covers the shipping ABI; the Windows emulator is **x86_64, so it never
+exercises the arm64 slice at all** and a change proven on it has skipped what
+ships.
+
+`:app:compileDebugKotlin` type-checks a change with nothing attached, which is
+worth doing before you go looking for hardware.
+
+### Scope every `adb` command to one device
+
+More than one thing can be attached, and **one of them may belong to someone
+else** — another agent session, or the user's own phone mid-task. `adb` with no
+`-s` chooses for you and complains only when it cannot decide, so a stray
+`adb install` or `adb shell am force-stop` lands on whichever device it liked.
+That is somebody else's work interrupted, with nothing in your output saying
+so.
+
+Establish the serial once, then use it everywhere:
 
 ```bash
-ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
-JAVA_HOME=/opt/homebrew/opt/openjdk@21 \
-  ./gradlew :app:compileDebugKotlin
+ADB="$ANDROID_HOME/platform-tools/adb"        # adb.exe on Windows
+"$ADB" devices                                 # look at ALL of them first
+EMU=$("$ADB" devices | grep '^emulator-' | head -1 | cut -f1)
+"$ADB" -s "$EMU" shell ...
 ```
 
-`sdkmanager` *is* on PATH, so `readlink -f "$(which sdkmanager)"` finds the SDK
-if that path ever moves. `:app:compileDebugKotlin` type-checks a change with
-nothing attached, which is worth doing before you go looking for hardware.
+A freshly launched emulator shows as `offline` before `device`; poll
+`getprop sys.boot_completed` for `1` rather than sleeping a fixed time. If a
+device you did not start is listed, leave it alone and say so rather than
+assuming it is yours to reset.
 
-The emulator package is installed and there is one AVD, `homerun_api35`, built
-on an **arm64-v8a** system image rather than the x86_64 one `npm run doctor`
-recommends. That hint is written for an Intel host; on Apple Silicon the arm64
-image runs natively *and* executes the same slice the phone does, so a change
-proven there has not quietly skipped the ABI that ships. The x86_64 Rust
-targets are deliberately absent, which is why `doctor` lists them as MISS. The
-AVD has not been booted yet — treat it as untested until it has.
+### Working in a git worktree
 
-The real phone is reached over **wireless debugging, not USB** — see the next
-section.
+A worktree has none of the repo's untracked build inputs, and Gradle fails on
+each in turn rather than on all of them at once. Copy them from the main
+checkout before the first build:
+
+- `*-google-services.json` — **configuration** fails, not the build:
+  "Property '$1' specifies file … which doesn't exist".
+- `android/app/src/main/assets/web` — the UI bundle.
+- `android/app/src/main/assets/jre-*` — without it `JavaRuntime.isAvailable`
+  is false and the host reports one fewer engine than the build actually has,
+  which reads as a routing bug rather than a missing file.
+- `android/app/src/main/jniLibs/<abi>/*.so` — for anything you are not
+  rebuilding yourself.
+
+The real phone is reached over **wireless debugging, not USB** on the Mac — see
+the next section.
 
 Starting an emulator, if the project has no script for it:
 

@@ -17,6 +17,15 @@ const CRATE_NAME = "homerun_pumpkin_ffi";
 const LAUNCHER_CRATE = path.join(ROOT, "rust", "homerun-java-launcher");
 
 /**
+ * Pumpkin as a child process. A separate crate for the same reason as the
+ * launcher — it is an executable — and it ships renamed for the same two
+ * rules. Android links no Pumpkin at all now: the engine is this binary, so
+ * `pumpkin-engine` is absent from the two Android feature lists below and the
+ * `.so` they produce is ~7 MB rather than ~80 MB.
+ */
+const PUMPKIN_CRATE = path.join(ROOT, "rust", "homerun-pumpkin-bin");
+
+/**
  * `kind` decides how it is built:
  *   cargo — plain `cargo build --target <triple>`
  *   ndk   — `cargo ndk -t <abi> build`, which supplies the NDK toolchain
@@ -59,7 +68,7 @@ const TARGETS = {
     triple: "aarch64-linux-android",
     abi: "arm64-v8a",
     artifact: `lib${CRATE_NAME}.so`,
-    features: ["pumpkin-engine", "process-engine", "device-ws"],
+    features: ["process-engine", "device-ws"],
     // jniLibs is the only place Android will exec/load from on API 29+.
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "arm64-v8a"
@@ -71,7 +80,7 @@ const TARGETS = {
     triple: "x86_64-linux-android",
     abi: "x86_64",
     artifact: `lib${CRATE_NAME}.so`,
-    features: ["pumpkin-engine", "process-engine", "device-ws"],
+    features: ["process-engine", "device-ws"],
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
     ),
@@ -103,6 +112,33 @@ const TARGETS = {
       ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
     ),
   },
+  // Pumpkin, staged as `libpumpkin.so`. Same two rules as the launcher above:
+  // Android packages only `lib*.so` from jniLibs, and only files under
+  // nativeLibraryDir may be exec'd on API 29+.
+  "pumpkin-bin": {
+    label: "Pumpkin server, Android arm64 (devices)",
+    kind: "ndk",
+    crate: PUMPKIN_CRATE,
+    triple: "aarch64-linux-android",
+    abi: "arm64-v8a",
+    artifact: "homerun-pumpkin",
+    outName: "libpumpkin.so",
+    outDir: path.join(
+      ROOT, "android", "app", "src", "main", "jniLibs", "arm64-v8a"
+    ),
+  },
+  "pumpkin-bin-x86_64": {
+    label: "Pumpkin server, Android x86_64 (emulator)",
+    kind: "ndk",
+    crate: PUMPKIN_CRATE,
+    triple: "x86_64-linux-android",
+    abi: "x86_64",
+    artifact: "homerun-pumpkin",
+    outName: "libpumpkin.so",
+    outDir: path.join(
+      ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
+    ),
+  },
   host: {
     label: "this machine (tests only)",
     kind: "host",
@@ -114,7 +150,11 @@ const TARGETS = {
 /** Targets a platform needs before its app can be built. */
 const PLATFORM_TARGETS = {
   ios: ["ios", "ios-sim"],
-  android: ["android", "android-x86_64", "java-launcher", "java-launcher-x86_64"],
+  android: [
+    "android", "android-x86_64",
+    "java-launcher", "java-launcher-x86_64",
+    "pumpkin-bin", "pumpkin-bin-x86_64",
+  ],
 };
 
 /** Where each host expects the UI bundle staged. */
@@ -123,4 +163,4 @@ const UI_DESTINATIONS = {
   android: path.join(ROOT, "android", "app", "src", "main", "assets", "web"),
 };
 
-module.exports = { ROOT, CRATE, CRATE_NAME, LAUNCHER_CRATE, TARGETS, PLATFORM_TARGETS, UI_DESTINATIONS };
+module.exports = { ROOT, CRATE, CRATE_NAME, LAUNCHER_CRATE, PUMPKIN_CRATE, TARGETS, PLATFORM_TARGETS, UI_DESTINATIONS };

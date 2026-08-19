@@ -1046,14 +1046,48 @@ holds at all of them, including the one somebody adds next.
 
 ## Current engine
 
-`StubEngine`, because the Pumpkin fork is not pinned yet. It is not a no-op:
-it reports startup, emits console lines, honours stop requests, and can be
-told to fail, so every path above is exercised for real. Swapping in Pumpkin
-changes `engine.rs` and nothing in this document.
+Two, and neither is linked into the app. Both are child processes under the
+same supervisor, which is what makes them interchangeable to everything above:
+`JavaServerBackend` execs the staged JRE, `PumpkinBackend` execs
+`libpumpkin.so`, and `ProcessEngine` cannot tell them apart.
 
-Verified on the emulator end to end: start → `running` + port + console
-lines → metrics and perf samples → stop → `stopped`, with the active-id list
-correct on both sides of it.
+`pumpkin-engine` is **off** for both Android targets (`scripts/targets.js`).
+It was on, and the engine ran inside the app — which cost four things worth
+naming, because each one reads as a different bug:
+
+- An engine fault took the **whole app** down. `catch_unwind` holds that line
+  for a Rust panic and for nothing else, so an abort inside a dependency was
+  the app vanishing with no report.
+- Memory could only be reported as this process, so the server's gauge
+  included the WebView and everything the UI had loaded.
+- The engine selects its world by `set_current_dir`, making that choice global
+  to the app rather than to a run.
+- stdout and stderr needed a permanent, process-wide `dup2`, after which the
+  host's own printing appeared in the game console.
+
+All four are gone, and the `.so` dropped from ~80 MB to ~7 MB — though the
+payload as a whole is a wash, because `libpumpkin.so` is the same Pumpkin
+tree. The case for this was never size. iOS still links the engine, because
+that platform cannot spawn a process at all.
+
+### What Pumpkin needs that a JVM does not
+
+- **A readiness line of its own.** Pumpkin never prints `Done (…)! For help`;
+  it prints `Server is now running.`. `homerun-core::minecraft::console::is_ready`
+  matches both. Without the second, a Pumpkin child never leaves `starting`
+  and the launch fails on a timeout with a healthy server behind it.
+- **All three stop signals registered at once.** Upstream's `main` awaits
+  `SIGINT` before it constructs the `SIGTERM` stream, so `SIGTERM` — rung two
+  of the stop ladder — hit the default disposition and killed the server
+  without saving. `rust/homerun-pumpkin-bin` registers them concurrently, and
+  that is most of why the wrapper crate exists.
+- **Settings as a file, not a config.** The host writes the raw inputs to
+  `homerun-settings.json` in the server directory and the binary resolves them
+  with the same `engine_settings`/`pumpkin_settings` code the linked build
+  uses. Rendering a `pumpkin.toml` in Kotlin would mean spelling every key and
+  every enum a second time, and a wrong one is silent — `GameMode` serialises
+  as `"Survival"`, so a lower-cased guess is dropped on load and the server
+  starts on its own defaults.
 
 ## Triage
 

@@ -82,8 +82,11 @@ the spec so mobile CI needs no checkout of it.
 `android/.../ServerBackend.kt`. Implement the `native-server-*` channels
 against this, never against a specific engine.
 
-- iOS: `PumpkinBackend` only. The platform cannot spawn processes.
-- Android: `PumpkinBackend` (JNI) **and** `JavaServerBackend` (real JVM).
+- iOS: `PumpkinBackend` only, with the engine linked in. The platform cannot
+  spawn processes.
+- Android: `PumpkinBackend` **and** `JavaServerBackend`, both child processes
+  through the same supervisor. Which one a launch uses is the core's answer to
+  the server's game type, not a property of the device.
 
 The `native-server-*` naming is desktop-legacy — it meant "not WSL". Treat it
 as "the server this device hosts". Do not rename in v1; three repos depend on
@@ -139,7 +142,7 @@ bugs that are miserable to diagnose.
 ## Building
 
 Both Rust crates build and test **host-native on any OS**, including Windows —
-550 core tests and 134 FFI tests in seconds, no device and no Pumpkin. Do that
+564 core tests and 134 FFI tests in seconds, no device and no Pumpkin. Do that
 before reaching for a simulator or a phone.
 
 ```bash
@@ -166,8 +169,9 @@ cargo install cargo-ndk
 ```
 
 Every heavy dependency sits behind a feature that is **off by default** —
-`pumpkin-engine`, `backup-engine` (iOS only), `process-engine` (Android and
-desktop, never iOS). That is what keeps the suite device-free and seconds
+`pumpkin-engine` (iOS only now; Android spawns the server instead of linking
+it), `backup-engine` (iOS only), `process-engine` (Android and desktop, never
+iOS). That is what keeps the suite device-free and seconds
 long; the platform builds turn on what they need, see `scripts/targets.js`.
 Everything is written against the `Engine` trait, so the supervisor cannot
 tell a linked engine from a child process. See `docs/ffi.md`.
@@ -184,9 +188,12 @@ The `on-device-build` skill has that loop and the traps in it.
 
 Known gaps, so you do not rediscover them:
 
-- **Android's Pumpkin path is compiled but never runs.** `ServerHost` picks
-  `JavaServerBackend` whenever a JRE is present, which is always. That code
-  has an `Engine` impl and a metrics path nothing exercises here.
+- **Android runs Pumpkin as a child process, not linked.** `pumpkin-engine` is
+  off for both Android targets; the server ships as `libpumpkin.so` from
+  `rust/homerun-pumpkin-bin` and is supervised by the same `ProcessEngine` the
+  JVM backend uses. `ServerHost` holds both backends and routes per launch on
+  the game type, which the core decides (`minecraft.hosting.serves`). iOS still
+  links the engine, because it cannot spawn one.
 - **The arm64 slice has never run on hardware.** Incremental builds usually
   refresh only the ABI you are emulating; assume the other one is stale.
 - **iOS Swift changes have often been written without a compiler.**

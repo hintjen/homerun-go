@@ -471,10 +471,19 @@ Without it a linked engine has *no* message to classify.
 Implemented and tested: state machine, console buffer, pre-flight, crash
 capture, the whole C surface, one-server enforcement.
 
-Implemented, **not yet exercised against a running world**: `PumpkinEngine`
-and the stdout/stderr redirection. Both compile against the pinned fork; what
-has not happened is a server actually booting a world and a player joining it.
+`PumpkinEngine` and the stdout/stderr redirection — the **linked** path, which
+is now iOS's only — still have not been exercised against a running world.
 Treat the run sequence above as the design until that has been done.
+
+The **spawned** path has. Pumpkin boots a world on Android as a child process
+under `ProcessEngine`: it prints `Server is now running.`, applies the
+settings the host leaves in `homerun-settings.json`, and saves all three
+dimensions on `SIGTERM`. Two things had to be fixed for that and neither was
+visible from a green suite — `console::is_ready` did not recognise Pumpkin's
+readiness line, so a launch sat in `starting` until it timed out behind a
+healthy server; and upstream's `main` registers its signal handlers in
+sequence, so `SIGTERM` — rung two of the stop ladder — killed the server
+without saving. `rust/homerun-pumpkin-bin` exists mostly for the second.
 
 The 134 tests all run against `StubEngine`.
 
