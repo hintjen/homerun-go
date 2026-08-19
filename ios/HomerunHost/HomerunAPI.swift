@@ -399,6 +399,64 @@ enum HomerunAPI {
         return nil
     }
 
+    /// Wait for the gateway to hand this **device** a tunnel.
+    ///
+    /// Not the same call as `awaitTunnel`, and not the same link: a server's
+    /// arrives nested under `config.links[]` on the server record, while this
+    /// one is provisioned by `POST /api/device/<id>/link_up/` and polled by
+    /// task id. The core keeps the two parsers apart for the same reason.
+    ///
+    /// Same cadence as the server link and as Android: 20 attempts, 3 s apart,
+    /// waiting *before* each poll. Null means the device serves no websocket
+    /// this session — which costs the dashboard's console and RCON for this
+    /// device and nothing else, since health rides the instances heartbeat.
+    static func awaitDeviceLink(
+        apiURL: String,
+        deviceId: String,
+        token: String,
+        attempts: Int = 20,
+        interval: TimeInterval = 3
+    ) async -> Core.DeviceLink? {
+        guard !token.isEmpty else {
+            HostLog.device.info("no token — this device will serve no websocket")
+            return nil
+        }
+
+        let path = "/api/device/\(deviceId)/link_up/"
+        guard
+            let started = try? await post(apiURL: apiURL, path: path, body: [:], token: token),
+            let task = started["task"] as? String, !task.isEmpty
+        else {
+            HostLog.device.error("link_up did not start")
+            return nil
+        }
+        HostLog.device.info("link_up triggered, task \(task, privacy: .public)")
+
+        for attempt in 1...attempts {
+            try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+
+            // The API answers 404 while the task is still running, so a failed
+            // GET here is "not yet" rather than an error worth reporting.
+            guard
+                let body = try? await get(
+                    apiURL: apiURL, path: "\(path)?result=\(task)", token: token),
+                // One `let`, not two: `try?` on a call that already answers
+                // an optional flattens to a single level, so binding it twice
+                // does not compile. Both failures mean the same thing here —
+                // the task has not finished — and both are a retry.
+                let link = try? Core.deviceLinkFromBody(body)
+            else { continue }
+
+            HostLog.device.info(
+                "device link ready after \(attempt, privacy: .public) attempt(s), fqdn=\(link.fqdn ?? "(unnamed)", privacy: .public)"
+            )
+            return link
+        }
+
+        HostLog.device.error("no device link after \(attempts, privacy: .public) attempts")
+        return nil
+    }
+
     /// A link plus the one field that changes how staleness is judged.
     private struct PolledLink {
         let link: WireProxy.Link

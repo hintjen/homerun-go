@@ -439,6 +439,13 @@ extension BridgeController: WKScriptMessageHandler {
                     }).catch(function () {});
                   }
                   return res;
+                }, function (err) {
+                  // A request that never completes is the failure this hook
+                  // used to be blind to: no status, no body, and a UI that
+                  // spins for ever with nothing logged anywhere. Report and
+                  // rethrow — swallowing it would change what the page does.
+                  report(method, url, 0, 'fetch failed: ' + (err && err.message));
+                  throw err;
                 });
               };
 
@@ -455,6 +462,13 @@ extension BridgeController: WKScriptMessageHandler {
                   if (self.status >= 400) {
                     report(self.__m, self.__u, self.status, self.responseText);
                   }
+                });
+                // Same blindness as fetch had: an XHR that errors, times out or
+                // is aborted never reaches 'load', so nothing was reported.
+                ['error', 'timeout', 'abort'].forEach(function (kind) {
+                  self.addEventListener(kind, function () {
+                    report(self.__m, self.__u, 0, 'xhr ' + kind);
+                  });
                 });
                 return send_.apply(this, arguments);
               };

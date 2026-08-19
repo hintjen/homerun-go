@@ -39,12 +39,24 @@ extension BridgeRouter {
         // for the device id as soon as the dashboard mounts. Starting now
         // means it is usually already done by then; `DeviceRegistrar` handles
         // the case where it is not.
-        Task { _ = await deviceRegistrar.deviceId() }
+        //
+        // The device websocket waits on that id rather than fetching one of
+        // its own — two registrars would create two devices — so it is asked
+        // for afterwards. Not awaited: provisioning polls for up to a minute
+        // and nothing in the UI depends on it.
+        Task {
+            _ = await deviceRegistrar.deviceId()
+            DeviceWebsocket.shared.ensure()
+        }
         return nil
     }
 
     func logout(_ params: Any?) async throws -> Any? {
         HostStore.clientNonce = nil
+        // Before the token goes: the link was provisioned with it, and a
+        // socket left up after a sign-out would keep answering an API
+        // membership check made on behalf of somebody who has left.
+        DeviceWebsocket.shared.stop()
         // The device registration deliberately survives: it belongs to the
         // phone, not the session, and re-registering on the next login would
         // orphan the servers already attached to it.

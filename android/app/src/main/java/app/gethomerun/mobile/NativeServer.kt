@@ -25,7 +25,7 @@ object NativeServer {
      *
      * So `scripts/check-abi.js` compares the two at build time, and `npm test`
      * runs it. Forgetting is now loud and free.     */
-    private const val EXPECTED_ABI = 7
+    private const val EXPECTED_ABI = 8
 
     /**
      * The engine overflows a default thread stack and takes the process down

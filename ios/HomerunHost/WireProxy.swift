@@ -99,20 +99,35 @@ final class WireProxy {
     /// took a path — so the key did briefly reach the filesystem, and this
     /// comment was wrong.
     func start(link: Link, minecraftPort: Int) throws {
+        try startRendered(
+            Self.render(link: link, minecraftPort: minecraftPort),
+            // Endpoint and address only — never the key material.
+            describedAs:
+                "server: peer=\(link.endpoint) address=\(link.address ?? "10.0.0.2/24") allowed=\(link.allowedIps ?? "10.0.0.1/32") target=127.0.0.1:\(minecraftPort)"
+        )
+    }
+
+    /// Bring up a tunnel whose config was rendered elsewhere.
+    ///
+    /// The device websocket's link forwards two ports at two listeners and
+    /// carries no Minecraft port at all, so it renders through
+    /// `Core.deviceWsTunnelConfig` rather than [`render`] — but everything
+    /// after that is the same tunnel with the same watchdog, and a second copy
+    /// of this method is how the two would drift.
+    ///
+    /// `describedAs` is what gets logged. It must name no key material: this
+    /// goes to the unified log, which a support flow can read back.
+    func startRendered(_ config: String, describedAs description: String) throws {
         stop()
 
         var error: NSError?
-        let config = try Self.render(link: link, minecraftPort: minecraftPort)
         guard let started = WireproxyiosStart(config, &error) else {
             throw ServerBackendError.engine(
                 "The connection to the Homerun gateway could not be opened"
                     + (error.map { ": \($0.localizedDescription)" } ?? "."))
         }
 
-        // Endpoint and address only — never the key material.
-        HostLog.tunnel.info(
-            "up: peer=\(link.endpoint, privacy: .public) address=\(link.address ?? "10.0.0.2/24", privacy: .public) allowed=\(link.allowedIps ?? "10.0.0.1/32", privacy: .public) target=127.0.0.1:\(minecraftPort, privacy: .public)"
-        )
+        HostLog.tunnel.info("up: \(description, privacy: .public)")
 
         tunnel = started
         openedAt = Date()

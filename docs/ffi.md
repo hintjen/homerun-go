@@ -27,18 +27,26 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `lib.rs` | The `extern "C"` surface. Marshalling, panic containment. |
 | `server.rs` | Composes everything into the one server this device hosts. Owns the global. |
 | `engine.rs` | The `Engine` trait — the only part that needs Pumpkin. |
+| `pumpkin_engine.rs`, `pumpkin_settings.rs` | The linked Pumpkin engine and the assignment of a launch's settings onto its types. Behind `pumpkin-engine`. |
+| `process_engine.rs` | The `Engine` that supervises a **child process**. Behind `process-engine`; never iOS, which cannot spawn one. |
 | `state.rs` | The state machine and its legal transitions. |
 | `log_buffer.rs` | Bounded console buffer with monotonic cursors. |
 | `preflight.rs` | Port availability, checked before the engine can exit the process. |
 | `crash.rs` | Panic hook, crash reports, last-panic capture. |
 | `core_dispatch.rs` | `homerun-core`'s shared decisions, with no platform in it. |
 | `core_bridge.rs` | The JNI adapter around `core_dispatch` (Android only). |
+| `jni_bridge.rs` | The JNI adapter around the C surface itself (Android only). Calls the same C functions rather than reaching past them. |
+| `host_dispatch.rs` | The shared decisions that need one effect — a socket, a file — on the same wire as the pure ones. |
+| `device_ws/` | The websocket the dashboard connects to: listener, TLS, ACME, JWKS. Behind `device-ws`, on for both phone targets. See `plans/device-websocket.md`. |
+| `app_logs.rs` | This app's own logs, for `get-app-logs`: logcat on Android, a host-registered provider everywhere else. Always compiled. |
+| `host_log.rs` | Where this crate's diagnostics go when the platform captures neither stdout nor stderr. Android wires logcat itself; iOS registers a sink. Always compiled. |
 | `backup_job.rs` | Progress, cancellation and the one-at-a-time guard for a backup. Built everywhere. |
 | `backup_engine.rs` | The linked backup engine. iOS only, behind `backup-engine`. |
 | `engine_settings.rs` | What the player's settings mean to an engine — clamps, UUIDs, what cannot be honoured. No Pumpkin, so it is in the fast suite. |
 
 Everything except `Engine::run` and `backup_engine` is platform-independent
-and unit-tested on any machine — 91 tests, no device and no Pumpkin required.
+and unit-tested on any machine — 134 tests under `npm run test:rust`, no device
+and no Pumpkin required, plus the `device-ws` module's own when that is on.
 
 `core_dispatch` is deliberately built on every target, not just the two mobile
 ones, which is what lets its dispatch tests run under plain `cargo test`.
@@ -65,11 +73,32 @@ char *homerun_server_stats(void);
 char *homerun_server_players(void);
 char *homerun_server_logs_since(uint64_t cursor);
 char *homerun_server_command(const char *command);
+char *homerun_server_metrics(void);
 
 /* The host's own console lines, and the launch boundary. */
 char *homerun_server_note(const char *line);
 char *homerun_server_console_begin(void);
+
+/* The dashboard's console and RCON, served from this device. Behind
+   `device-ws`; a build without it answers that it cannot serve one. */
+char *homerun_device_ws_start(const char *config);
+char *homerun_device_ws_stop(void);
+
+/* Two callbacks a host may register, both added at ABI 8 and both there
+   because of iOS: one for where this crate's own diagnostics go, one for
+   where this app's own logs come from. NULL unregisters either. Android
+   needs neither — logcat answers both. */
+char *homerun_set_log_sink(homerun_log_sink_fn sink);
+char *homerun_set_app_logs_provider(homerun_app_logs_fn provider);
 ```
+
+**A host that registers no log sink gets no diagnostics at all from this
+crate**, and on iOS that is every diagnostic the device websocket produces.
+`println!` is not the fallback: after a launch stdout is the pipe feeding the
+player-visible console, so a line written there is shown to a player as if the
+server had said it. Android is the other shape of the same trap — it captures
+neither stream, so the line goes nowhere. Everything logs through the `log`
+facade for that reason.
 
 Fallible calls answer `{"ok":true,…}` or `{"ok":false,"error":"…"}`.
 
@@ -136,6 +165,13 @@ What a setting *means* is decided in Rust (`engine_settings.rs`, on top of
 `null` when not running. Do not render a roster for a server nobody can join.
 
 `homerun_server_logs_since` → `{"lines":[str],"cursor":n,"dropped":bool}`
+
+`homerun_server_metrics` → `{"ok":true,"samples":{…}}` — one run's graph, oldest
+sample first, each `{"t":ms,"memUsedMb":n?,"cpuPercent":n?,"playerCount":n?}`.
+The supervisor samples for as long as a server runs, so a host polls to *read*
+what is already there, never to cause a reading. `cpuPercent` can exceed 100:
+a server uses more than one core, and clamping would hide the moment worth
+seeing.
 
 ## Host integration rules
 
@@ -440,7 +476,7 @@ and the stdout/stderr redirection. Both compile against the pinned fork; what
 has not happened is a server actually booting a world and a player joining it.
 Treat the run sequence above as the design until that has been done.
 
-The 91 tests all run against `StubEngine`.
+The 134 tests all run against `StubEngine`.
 
 The backup engine **has** been run, on an iOS simulator: `ios/coretest/`
 compiled for `arm64-apple-ios-sim` and spawned with `simctl` does a real

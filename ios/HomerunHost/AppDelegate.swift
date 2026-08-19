@@ -73,6 +73,15 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // and state changes. The backend outlives every page and so does this.
         Reporting.attach(backend: backend)
 
+        // Both halves of the crate's logging, registered before anything can
+        // fail. The sink is where its own diagnostics land — without it every
+        // device-websocket failure on iOS is silent, since printing would
+        // write into the pipe that feeds the player-visible console. The
+        // provider is the other direction: what `get-app-logs` answers a
+        // support request with. See `DeviceWebsocket.swift`.
+        registerNativeLogSink()
+        registerAppLogsProvider()
+
         // Before anything can load a page. A bundle downloaded on an earlier
         // launch goes live here and in `quit-and-install`, nowhere else — never
         // under a live WebView, which would cancel whatever bridge call is in
@@ -92,6 +101,32 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         self.window = window
 
         return true
+    }
+
+    /// The device websocket lives exactly as long as the foreground does.
+    ///
+    /// iOS suspends the process, and a suspended process serves nothing, so the
+    /// link follows the app rather than being left to rot across a suspension —
+    /// which would have the gateway holding a peer slot for a device that
+    /// cannot answer. `plans/ios-background-execution.md` is why that limit is
+    /// the platform's and not a backlog item.
+    ///
+    /// Idempotent: `ensure` returns immediately when a link is already up, so
+    /// firing on every activation costs nothing.
+    ///
+    /// > Verifying this needs **Simulator.app open**. A device booted headless
+    /// > with `simctl boot` never activates an app, so neither this method nor
+    /// > `didBecomeActiveNotification` fires and the link silently never comes
+    /// > up — which reads exactly like a hook that was never wired.
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        DeviceWebsocket.shared.ensure()
+    }
+
+    /// Not `willResignActive`, which also fires for a notification banner, the
+    /// app switcher and a phone call — none of which suspend anything. Tearing
+    /// the link down for those would renegotiate it several times a minute.
+    func applicationDidEnterBackground(_ application: UIApplication) {
+        DeviceWebsocket.shared.stop()
     }
 
     /// Auth returns through `homerun://` while the app is already running.

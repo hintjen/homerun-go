@@ -26,8 +26,11 @@ const LAUNCHER_CRATE = path.join(ROOT, "rust", "homerun-java-launcher");
  * because the two platforms no longer want the same one. `backup-engine`
  * links a restic-compatible library and costs ~5.6 MB; iOS needs it because
  * it cannot spawn a process, and Android must not have it because it ships
- * the restic binary instead. `--stub` overrides all of this with nothing,
- * which is how you check the FFI surface for a target in seconds.
+ * the restic binary instead. `device-ws` is on for both phones and off for
+ * the host build, which is what keeps `npm test` free of a TLS stack — note
+ * that it pulls in `aws-lc-sys`, so an iOS build needs `cmake` on the machine
+ * doing it. `--stub` overrides all of this with nothing, which is how you
+ * check the FFI surface for a target in seconds.
  */
 const TARGETS = {
   ios: {
@@ -35,7 +38,7 @@ const TARGETS = {
     kind: "cargo",
     triple: "aarch64-apple-ios",
     deploymentTarget: "16.0",
-    features: ["pumpkin-engine", "backup-engine"],
+    features: ["pumpkin-engine", "backup-engine", "device-ws"],
     artifact: `lib${CRATE_NAME}.a`,
     outDir: path.join(ROOT, "ios", "HomerunHost", "lib"),
     requiresMacOS: true,
@@ -45,7 +48,7 @@ const TARGETS = {
     kind: "cargo",
     triple: "aarch64-apple-ios-sim",
     deploymentTarget: "16.0",
-    features: ["pumpkin-engine", "backup-engine"],
+    features: ["pumpkin-engine", "backup-engine", "device-ws"],
     artifact: `lib${CRATE_NAME}.a`,
     outDir: path.join(ROOT, "ios", "HomerunHost", "lib", "sim"),
     requiresMacOS: true,

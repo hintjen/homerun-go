@@ -42,7 +42,6 @@ use homerun_core::device_ws::protocol::{
 use homerun_core::minecraft;
 use homerun_core::reporting;
 
-pub mod app_logs;
 pub mod tls;
 
 /// Everything the socket needs that only the host can know.
@@ -676,7 +675,7 @@ impl Connection {
                 // [`app_logs`]. Read on the caller's task rather than
                 // spawned: it is one `logcat -d` that returns in milliseconds,
                 // and a support request is not a hot path.
-                let (main_log, renderer_log) = app_logs::collect();
+                let (main_log, renderer_log) = crate::app_logs::collect();
                 self.send(outgoing::app_logs(&main_log, &renderer_log));
                 true
             }

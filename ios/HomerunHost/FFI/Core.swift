@@ -245,6 +245,56 @@ enum Core {
         try call("link.fromServerBody", ["body": body]) as? [String: Any]
     }
 
+    // MARK: - The device's own link
+
+    /// The tunnel on a `link_up` result body, or nil while the task runs.
+    ///
+    /// Null is not a failure. The API answers with no `native_config` for the
+    /// first several seconds, and a caller that treats that as one abandons a
+    /// link that was about to be provisioned.
+    ///
+    /// A **device** link, not a server one: it arrives flat rather than nested
+    /// under `config.links[]`, which is why this is not `linkFromServerBody`.
+    static func deviceLinkFromBody(_ body: [String: Any]) throws -> DeviceLink? {
+        guard let object = try call("deviceWs.fromLinkUpBody", ["body": body]) as? [String: Any],
+            let link = object["link"] as? [String: Any]
+        else { return nil }
+
+        return DeviceLink(
+            link: link,
+            fqdn: (object["fqdn"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+            // The core answers `gateway_v2`; this host cares about the
+            // consequence rather than the provenance. Getting it backwards is
+            // not a warning — the header lands where a ClientHello is expected
+            // and every handshake fails.
+            expectsProxyProtocol: (object["gateway_v2"] as? Bool) != true)
+    }
+
+    /// What `POST /api/device/<id>/link_up/` provisioned.
+    struct DeviceLink {
+        /// Opaque here: handed straight back to `deviceWs.tunnelConfig`, so
+        /// this host never learns the shape of a key it does not need to read.
+        let link: [String: Any]
+        /// The ACME identifier, the TLS SNI, and what the dashboard dials.
+        /// Absent means the API has not named this device, which is a link
+        /// that carries traffic but cannot be reached by name.
+        let fqdn: String?
+        let expectsProxyProtocol: Bool
+    }
+
+    /// The wireproxy config for the device websocket's own tunnel.
+    ///
+    /// A nil `httpTarget` omits the ACME forward, which is the shape a device
+    /// with no certificate takes — forwarding a port at a listener that was
+    /// never started is worse than not forwarding it.
+    static func deviceWsTunnelConfig(
+        link: [String: Any], httpsTarget: Int, httpTarget: Int?
+    ) throws -> String {
+        var args: [String: Any] = ["link": link, "httpsTarget": httpsTarget]
+        if let httpTarget { args["httpTarget"] = httpTarget }
+        return try string("deviceWs.tunnelConfig", args)
+    }
+
     /// False when these are the dead credentials from the previous session.
     static func linkIsUsable(polled: [String: Any], before: [String: Any]?) throws -> Bool {
         var args: [String: Any] = ["polled": polled]

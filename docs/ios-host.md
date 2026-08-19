@@ -141,6 +141,9 @@ For iOS the profile declares `serverBackends: ["pumpkin"]`,
 `moddedServers: false` (Pumpkin runs no Bukkit plugin or Fabric mod) and
 `backgroundExecution: false` (iOS cannot host in the background).
 
+`deviceWebsocket: true` is now true of this host as well — see
+[The device websocket](#the-device-websocket--devicewebsocketswift) below.
+
 ## App shell — `AppDelegate.swift`, `MainViewController.swift`
 
 UIKit, window-based, **no scenes and no SwiftUI**. The app is one WebView for
@@ -204,6 +207,93 @@ blue. An ordinary navigation keeps it: WebKit leaves the old page up until the
 new one paints, so clearing it there would flash a white clock over a light
 page for as long as the load takes.
 
+## The device websocket — `DeviceWebsocket.swift`
+
+The dashboard's console, RCON and remote log-fetch do not go through the API.
+They connect to `wss://<device-fqdn>`, a socket the device serves itself, and
+this is the iOS half of it. `plans/device-websocket.md` is the design;
+Android's `DeviceWebsocket.kt` is the sibling, and the two are deliberately the
+same shape.
+
+The split is the repo's usual one. This class owns the **link** — the device's
+own `link_up`, a wireproxy tunnel of its own, and the lifecycle — while the
+socket, the TLS listener and the ACME client are the supervisor's, behind
+`homerun_device_ws_start`. That is not tidiness: the supervisor already holds
+the console buffer the dashboard reads and the command path RCON writes to, so
+a streaming console crosses the FFI zero times.
+
+**Two ports, and they are not interchangeable.** `homerun_device_ws_start`
+answers both. The plaintext one is what `get-device-ws-port` returns and what
+the app's own UI dials over loopback — the shared UI uses `ws://localhost:<port>`
+for the device it is running on and `wss://<fqdn>` only for other people's — and
+the TLS one is what the tunnel forwards the gateway's `:443` to. Forwarding the
+plaintext port at the gateway fails every handshake, because what arrives is a
+ClientHello. Reaching the loopback port still requires a Keycloak token and an
+API membership check, so another app on the phone gains nothing by finding it.
+
+A third port, for the ACME HTTP-01 challenge, is chosen *here* rather than by
+the OS. The supervisor binds it during the order and the tunnel has to already
+be forwarding at it by then, so the number has to exist before either runs.
+
+### It lives exactly as long as the foreground does
+
+This is the one real difference from Android, and it is the platform's rather
+than this code's: iOS suspends the process, and a suspended process serves
+nothing. There is no foreground service to hold it —
+[`plans/ios-background-execution.md`](../plans/ios-background-execution.md)
+sweeps every persistent-process option and finds none that can hold a socket.
+
+So `applicationDidBecomeActive` brings the link up and
+`applicationDidEnterBackground` takes it down. Not `willResignActive`, which
+also fires for a notification banner and the app switcher — neither suspends
+anything, and tearing down for those would renegotiate the link several times a
+minute. The teardown is synchronous on the main thread, which costs up to the
+supervisor's one-second drain: a detached task is not guaranteed to run at all
+before the system suspends the process, and a socket left half-up across a
+suspension is the thing being avoided.
+
+The certificate store lives in **Application Support**, not `Documents/`, and is
+excluded from backup. It holds a private key: iCloud is the wrong place for one
+and the Files app — which reaches everything under `Documents/` — is a worse
+one.
+
+### The two callbacks the crate needs
+
+Both are registered in `didFinishLaunchingWithOptions`, before anything can
+fail, and both are ABI 8 additions that exist because of iOS specifically.
+
+`homerun_set_log_sink` gives the crate's own diagnostics somewhere to land.
+Android wires the `log` facade to logcat; iOS cannot, because `os_log`'s entry
+points are C macros rather than functions — and printing is not an alternative,
+since after a launch stdout *is* the pipe feeding the player-visible console.
+Without it, a certificate that is ordered, issued, stored and never served looks
+exactly like one that was never ordered. That is a debugging round the Android
+port already paid for once.
+
+`homerun_set_app_logs_provider` is the other direction: what `get-app-logs`
+answers a support request with. Android reads its own logcat; iOS reads
+`OSLogStore(scope: .currentProcessIdentifier)`, which can see this process and
+no other — the same line logd draws for `logcat --pid`, and the reason neither
+platform needs a permission for it.
+
+### What has actually been run
+
+The app builds and launches on an iPhone 17 simulator under Xcode 26.4.1 and
+reports `FFI ABI version 8`. `ios/wsprobe/` — a simulator harness that needs no
+account — binds both loopback ports out of the real staticlib, upgrades a
+connection, and gets the unauthenticated peer refused with close `4001`.
+
+What has not run is everything needing a session or the gateway: the device
+link, the certificate, and RCON against a live world. The plan tracks that list.
+
+**The renderer half of `get-app-logs` is empty on iOS.** Android gets it free:
+`MainActivity`'s `WebChromeClient` forwards the WebView console into logcat
+under `HomerunWeb`, and the crate splits on that tag. WKWebView exposes no
+console callback at all, so the only way to the same place would be injecting a
+script that captures `console.*` and posts it over the bridge — changing the
+page's console for every user to serve a support flow. The field arrives empty
+rather than wrong.
+
 ## File map
 
 | File | Role |
@@ -218,6 +308,8 @@ page for as long as the load takes.
 | `ios/HomerunHost/Assets.xcassets` | `LaunchBackground` — the one colour `UILaunchScreen` names |
 | `ios/HomerunHost/AppSchemeHandler.swift` | Serves `web/` over `homerun-app://` |
 | `ios/HomerunHost/Capabilities.swift` | Reads `profiles.ios.capabilities`, builds the document-start script |
+| `ios/HomerunHost/DeviceWebsocket.swift` | The device's own link and the socket behind it, plus the two log callbacks the crate registers |
+| `ios/wsprobe/main.swift` | Simulator harness: does the device websocket bind, upgrade and refuse an unauthenticated peer? No account needed |
 | `ios/HomerunHost/FFI/HomerunFFI.h` | Hand-written C header for the Rust library |
 
 ## Triage

@@ -211,10 +211,14 @@ extension BridgeRouter {
         await deviceRegistrar.deviceId()
     }
 
-    /// The device WebSocket is parity work that has not landed on iOS yet.
-    /// Null is a valid result and means "no port"; the UI copes.
+    /// The plaintext port the app's own UI dials for *this* device.
+    ///
+    /// Null until the link is up, and again once the app leaves the foreground
+    /// — the socket lives exactly as long as the foreground does. Null is a
+    /// valid answer meaning "no port", and the UI copes; it is asked again on
+    /// the next page load. See `DeviceWebsocket`.
     func getDeviceWSPort(_ params: Any?) async throws -> Any? {
-        nil
+        DeviceWebsocket.shared.port
     }
 
     // MARK: - Journeys

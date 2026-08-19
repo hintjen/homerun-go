@@ -13,6 +13,8 @@
 #define HOMERUN_FFI_H
 
 #include <stdint.h>
+#include <stddef.h>
+#include <sys/types.h>
 
 /* Bumped whenever the shape of this surface changes. The host checks it at
  * launch: a mismatch means the staged .a is not the one this source expects. */
@@ -115,23 +117,63 @@ char *homerun_server_command(const char *command);
  * slow launch ever gets. Appends only. */
 char *homerun_server_note(const char *line);
 
+/* What this run has cost, oldest sample first:
+ * {"ok":true,"samples":{…}}. Cheap — a lock and a clone — and safe from the
+ * main thread while homerun_server_start blocks another one. The supervisor
+ * samples for as long as a server runs, so this reads what is already there
+ * rather than causing a reading. */
+char *homerun_server_metrics(void);
+
 /* A launch is beginning: clear whatever the last one left. Call once, at the
  * moment the host decides to launch — before the world and the settings, all
  * of which write through homerun_server_note. Forgetting is safe:
  * homerun_server_start still clears a console holding a finished run. */
 char *homerun_server_console_begin(void);
 
+/* Where this crate's own diagnostics go.
+ *
+ * Android needs no sink: nativeInitLogging wires the `log` facade to logcat.
+ * iOS has no equivalent, because os_log's entry points are C macros rather
+ * than functions — so the host takes each line and writes it itself.
+ *
+ * Without one, every diagnostic a device websocket produces is lost: printing
+ * is not an alternative, since after a launch stdout is the pipe feeding the
+ * player-visible console. Levels are 1 error, 2 warn, 3 info, 4 debug, 5
+ * trace. Called from whatever thread produced the line, tokio workers
+ * included; the message is valid for the duration of the call only. NULL
+ * unregisters, and lines are then dropped rather than queued. */
+typedef void (*homerun_log_sink_fn)(uint8_t level, const char *message);
+char *homerun_set_log_sink(homerun_log_sink_fn sink);
+
+/* Where this app's own logs come from, for the support flow behind
+ * `get-app-logs`.
+ *
+ * Android needs no provider: logcat holds this process's entries and reading
+ * them needs no permission. iOS does, because its logs live in the unified
+ * logging system, which only OSLogStore can read and only Swift can call.
+ *
+ * The function is called from a worker thread when somebody asks for the logs,
+ * never on a schedule. It must write UTF-8, at most `capacity` bytes, into a
+ * buffer that belongs to the crate for the duration of the call, and return how
+ * many bytes it wrote — or a negative number if it could not read them. It
+ * must not throw: an exception crossing back into Rust is undefined behaviour,
+ * exactly as a Rust panic crossing out is.
+ *
+ * Passing NULL unregisters. Registering twice replaces. */
+typedef ssize_t (*homerun_app_logs_fn)(char *buffer, size_t capacity);
+char *homerun_set_app_logs_provider(homerun_app_logs_fn provider);
+
 /* Serve the dashboard's console and RCON on a loopback port that the device's
  * own tunnel forwards to. Config is { port, apiUrl, jwksUrl, deviceId }; a
  * port of 0 asks the OS to choose, and the reply carries the port actually
  * bound.
  *
- * iOS builds without the `device-ws` feature, so these answer that this build
- * cannot serve one. That is honest rather than a gap to close: the app can
- * only hold a socket open while it is in the foreground, so a device websocket
- * here would be a promise the platform withdraws — see
- * plans/ios-background-execution.md. Declared so the symbol resolves and the
- * ABI matches; wired if that changes. */
+ * Both iOS targets build with the `device-ws` feature. The socket lives as
+ * long as the foreground does — iOS suspends the process behind it — so
+ * `DeviceWebsocket` starts it when the app becomes active and stops it when the
+ * app resigns, rather than leaving listeners to rot across a suspension. See
+ * plans/ios-background-execution.md for why that limit is the platform's and
+ * not a backlog item. */
 char *homerun_device_ws_start(const char *config);
 char *homerun_device_ws_stop(void);
 
