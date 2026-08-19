@@ -58,11 +58,14 @@
 		<key>UIColorName</key>
 		<string>LaunchBackground</string>
 	</dict>
+	<!-- Portrait only. Every screen in the bundle is a single column against a
+	     bottom tab bar and none of them has a landscape design, so rotating
+	     gave a stretched phone layout rather than a wider one. Upside-down is
+	     left out as well, which is the iPhone convention. TARGETED_DEVICE_FAMILY
+	     is "1", so there is no ~ipad variant to keep in step with this. -->
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
-		<string>UIInterfaceOrientationLandscapeLeft</string>
-		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 
 	<!-- Shown when the app first reports the LAN address friends connect to. -->

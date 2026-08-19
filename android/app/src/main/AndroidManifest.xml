@@ -77,10 +77,25 @@
           room for the keyboard is MainActivity.holdSystemUiOutOfThePage, which
           shortens the WebView by the IME inset.
         -->
+        <!--
+          screenOrientation: portrait only. Every screen in the bundle is a
+          single column against a bottom tab bar and none of them has a
+          landscape design, so rotating gave a stretched phone layout rather
+          than a wider one. `portrait` rather than `userPortrait` or
+          `sensorPortrait` because the intent is a lock, not a preference the
+          device can talk us out of.
+
+          `orientation|screenSize|screenLayout` stay in configChanges. They are
+          not made redundant by the lock: a foldable unfolding, multi-window
+          resizing and a desktop-mode display all deliver those without any
+          rotation, and handling them in place is what stops the WebView being
+          torn down and the page reloaded mid-session.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Homerun"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale">
