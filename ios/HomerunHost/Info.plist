@@ -73,7 +73,14 @@
 	<string>Homerun shows your phone's Wi-Fi address so friends on the same network can join your Minecraft server.</string>
 
 	<!-- Lets the dev loop point at http://localhost:3000 and permits plain-HTTP
-	     LAN reachability checks. Public traffic still requires TLS. -->
+	     LAN reachability checks. Public traffic still requires TLS.
+
+	     It is also what lets the UI reach this device's own console: the device
+	     websocket binds a plaintext listener on 127.0.0.1 and the page dials
+	     ws://localhost:<port> for the phone it is running on, reserving
+	     wss://<fqdn> for other people's. Nothing between those two ends is on a
+	     network to encrypt against. Android says the same thing in
+	     res/xml/network_security_config.xml. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

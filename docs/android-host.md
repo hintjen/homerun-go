@@ -399,8 +399,9 @@ failure — it is a `NoSuchFieldError` on a real API-30 phone.
 
 An invoke with no reply leaves a promise pending forever and the UI hangs with
 no clue why. Unimplemented channels therefore reply with an **error**, never
-with silence. The 26 channels not yet in the dispatch table are visibly broken
-in the UI instead of invisibly stuck.
+with silence. The dispatch table now answers all 57 channels the profile
+requires, but the rule is what keeps a channel added to the contract tomorrow
+visibly broken in the UI instead of invisibly stuck.
 
 There is deliberately **no call timeout**. `native-server-start` and modpack
 imports legitimately run for minutes. Pending work is cleared when the page

@@ -62,6 +62,18 @@ object DeviceWebsocket {
     var fqdn: String? = null
         private set
 
+    /**
+     * The device row the current link is for.
+     *
+     * A different account signing in *replaces* that row: [DeviceRegistry]
+     * re-registers rather than reuse a device belonging to somebody else. A
+     * link still serving the old row is then a link nothing will ever dial,
+     * because the dashboard asks the API for this account's device and gets an
+     * fqdn no phone is answering. Compared on every [ensure] so the switch is
+     * caught there, rather than waiting for a backgrounding to clear it.
+     */
+    private var linkedDeviceId: String? = null
+
     /** Read off the link, and passed to the socket that terminates TLS. */
     private var expectsProxyProtocol: Boolean = true
 
@@ -81,6 +93,17 @@ object DeviceWebsocket {
      */
     @Synchronized
     fun ensure(apiUrl: String, userToken: String) {
+        // Before the guard below, not after: a link for the wrong device row
+        // still leaves the tunnel running, which makes every later `ensure` a
+        // no-op — so the stale link would outlive the account that owns it and
+        // nothing else would ever notice.
+        val current = DeviceRegistry.currentDeviceId()
+        val linked = linkedDeviceId
+        if (linked != null && current != null && linked != current) {
+            Log.i(TAG, "this phone is registered as a different device now — relinking")
+            stop()
+        }
+
         if (job?.isActive == true || tunnel?.isRunning == true) return
         val scope = this.scope ?: return
         if (userToken.isBlank()) return
@@ -143,6 +166,7 @@ object DeviceWebsocket {
             // device it is running on. `wss://<fqdn>` is for other people's.
             port = bound.plaintext
             fqdn = link.fqdn
+            linkedDeviceId = deviceId
         }
         Log.i(
             TAG,
@@ -165,6 +189,7 @@ object DeviceWebsocket {
         stopSocket()
         port = null
         fqdn = null
+        linkedDeviceId = null
     }
 
     /**

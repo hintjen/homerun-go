@@ -27,7 +27,15 @@
 //!
 //! See `docs/ffi.md` for the full contract and host integration notes.
 
+/// This device's own logs, for the support flow behind `get-app-logs`. Always
+/// compiled: a host registers its source at launch, long before it knows
+/// whether a socket will ever come up.
+pub mod app_logs;
 pub mod crash;
+/// Where this crate's own diagnostics go on a platform that captures neither
+/// stdout nor stderr. Android wires the `log` facade to logcat itself; iOS
+/// registers a sink here. Always compiled, for the same reason `app_logs` is.
+pub mod host_log;
 /// Serving `wss://<device-fqdn>` so the dashboard can reach this device's
 /// console and RCON directly. What the frames *mean* is decided in
 /// `homerun_core::device_ws::protocol`, which is pure and always compiled;
@@ -152,10 +160,17 @@ use serde_json::json;
 /// `device-ws` feature answers that it cannot serve one rather than failing to
 /// link.
 ///
+/// 8 added `homerun_set_app_logs_provider` and `homerun_set_log_sink`, the two
+/// halves of iOS serving a device websocket: one lets the crate read this
+/// app's own logs for the support flow, the other gives the crate's own
+/// diagnostics somewhere to land on a platform that captures neither stdout
+/// nor stderr. Additive: a host that calls neither gets exactly what 7 gave
+/// it, and on Android nothing changes either way — logcat answers both.
+///
 /// Hosts *report* this at startup; Android also compares it
 /// (`NativeServer.EXPECTED_ABI`), which is the check that catches a `.a` or
 /// `.so` that links but decodes garbage.
-pub const FFI_ABI_VERSION: u32 = 7;
+pub const FFI_ABI_VERSION: u32 = 8;
 
 /// How long [`homerun_server_stop`] waits for a graceful shutdown. A world
 /// save can take a while on a phone; killing early risks losing it.
@@ -537,20 +552,86 @@ pub unsafe extern "C" fn homerun_server_command(command: *const c_char) -> *mut 
 }
 
 // ---------------------------------------------------------------------------
+/// Where this crate's own diagnostics go.
+///
+/// Android needs no sink: `nativeInitLogging` wires the `log` facade to logcat.
+/// iOS has no equivalent — the unified logging system is reached through
+/// `os_log`, whose entry points are C macros rather than functions — so the
+/// host registers one and every line this crate logs is handed to it.
+///
+/// Without this, every diagnostic a device websocket produces on iOS goes
+/// nowhere: `println!` is not an option either, because after a launch stdout
+/// *is* the pipe feeding the player-visible console. A certificate that is
+/// ordered, issued, stored and never served looks identical to one that was
+/// never ordered — that is a debugging round the Android port already paid for.
+///
+/// Called from whatever thread produced the line, including tokio workers. The
+/// message is valid for the duration of the call and not afterwards. Passing
+/// null unregisters, and lines are dropped rather than queued.
+#[no_mangle]
+pub extern "C" fn homerun_set_log_sink(sink: Option<host_log::Sink>) -> *mut c_char {
+    guarded(move || {
+        host_log::set(sink);
+        json!({ "ok": true }).to_string()
+    })
+}
+
+/// Where this app's own logs come from, on a platform this crate cannot read
+/// them from itself.
+///
+/// Android needs no provider — logcat holds this process's entries and reading
+/// them needs no permission. iOS does: its logs live in the unified logging
+/// system, which only `OSLogStore` can read and only Swift can call. So the
+/// host registers a function, and `get-app-logs` calls it at the moment
+/// somebody asks rather than keeping a second copy of every line.
+///
+/// Passing null unregisters, which is what a host does when it is tearing down.
+/// Registering twice replaces; there is one provider, not a list, because two
+/// sources for one log is how a support flow ends up reading half of it.
+///
+/// The function is called from a worker thread, with a buffer that belongs to
+/// this crate for the duration of the call and to nobody afterwards. It must
+/// write UTF-8, at most `capacity` bytes, and answer how many — or a negative
+/// number if it cannot. **It must not unwind**; a Swift or Kotlin exception
+/// crossing back into Rust is undefined behaviour, exactly as a Rust panic
+/// crossing out is.
+#[no_mangle]
+pub extern "C" fn homerun_set_app_logs_provider(
+    provider: Option<app_logs::provider::Provider>,
+) -> *mut c_char {
+    guarded(move || {
+        app_logs::provider::set(provider);
+        json!({ "ok": true }).to_string()
+    })
+}
+
 // The device websocket
 // ---------------------------------------------------------------------------
 
 /// Serve `wss://<device-fqdn>` on a loopback port the tunnel forwards to.
 ///
-/// `config` is `{ port, apiUrl, jwksUrl, deviceId }`. A `port` of 0 asks the OS
-/// to choose, and the answer comes back as `{ ok: true, port }` — a host that
-/// ignores it will forward the gateway at a port nothing is listening on.
+/// `config` is `{ port, apiUrl, jwksUrl, deviceId, fqdn?, storageDir?,
+/// challengePort?, expectProxyProtocol?, acmeStaging? }`. A `port` of 0 asks
+/// the OS to choose, and the answer carries **both** ports —
+/// `{ ok: true, port, tlsPort }`. A host needs each for a different thing: its
+/// own UI dials `port` over loopback, and the tunnel forwards the gateway's
+/// `:443` to `tlsPort`. Forward the wrong one and every handshake fails, since
+/// what arrives at a plaintext socket is a ClientHello.
+///
+/// Without `fqdn`, `storageDir` and `challengePort` there is no certificate to
+/// obtain: the socket still serves, reachable through the tunnel and not by a
+/// browser. `expectProxyProtocol` follows the gateway generation and defaults
+/// to the legacy plane.
 ///
 /// Builds without the `device-ws` feature answer that they cannot serve one,
-/// rather than pretending to. iOS is such a build today: it can only hold a
-/// socket open while the app is in the foreground, so advertising a device
-/// websocket there would promise something the platform withdraws — see
-/// `plans/ios-background-execution.md`.
+/// rather than pretending to. Both phone targets have it; a host build does
+/// not, which is what keeps the fast suite free of a TLS stack.
+///
+/// On iOS the socket lives exactly as long as the foreground does — the
+/// platform suspends the process behind it, so the host brings this up when it
+/// becomes active and stops it when it resigns, rather than letting the
+/// listeners rot across a suspension. See `plans/ios-background-execution.md`
+/// for why that limit is not a backlog item.
 ///
 /// # Safety
 /// `config` must be a valid NUL-terminated UTF-8 string.
@@ -803,6 +884,24 @@ mod tests {
     #[test]
     fn freeing_null_is_a_no_op() {
         unsafe { homerun_free_string(ptr::null_mut()) };
+    }
+
+    /// Registering and unregistering a log provider are both ordinary calls.
+    ///
+    /// Null is how a host unregisters, and it arrives here as `None` rather
+    /// than as a pointer to dereference — the shape that makes a torn-down
+    /// host safe rather than lucky.
+    #[test]
+    fn a_log_provider_can_be_registered_and_taken_away() {
+        unsafe extern "C" fn supply(_buffer: *mut c_char, _capacity: usize) -> isize {
+            0
+        }
+
+        let reply = take(homerun_set_app_logs_provider(Some(supply)));
+        assert_eq!(reply["ok"], true, "{reply}");
+
+        let reply = take(homerun_set_app_logs_provider(None));
+        assert_eq!(reply["ok"], true, "{reply}");
     }
 
     /// The surface iOS links against, exercised the way Swift will use it:

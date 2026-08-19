@@ -88,10 +88,28 @@ check("homerun_abi_version matches what this source expects") {
     // `npm run test:abi` reads this line, so forgetting the bump now fails a
     // check that runs without a Swift toolchain. It went unnoticed from 3 to 7
     // before that was true.
-    let expected: UInt32 = 7
+    let expected: UInt32 = 8
     let v = homerun_abi_version()
     try expect(v == expected, "expected \(expected), got \(v) — is the staged .a stale?")
     return "v\(v)"
+}
+
+check("the ABI 8 callbacks are in the staged library") {
+    // Registering nothing, twice. The point is not the behaviour — it is that
+    // these symbols resolve at all: a stale `.a` fails here rather than at the
+    // moment somebody asks a device for its logs.
+    //
+    // The raw C, not `HomerunFFI.swift`. Pulling that in would pull in the
+    // backend's types behind it, and this harness stays a leaf on purpose.
+    func registered(_ reply: UnsafeMutablePointer<CChar>?) -> Bool {
+        guard let reply else { return false }
+        defer { homerun_free_string(reply) }
+        return String(cString: reply).contains("\"ok\":true")
+    }
+
+    try expect(registered(homerun_set_log_sink(nil)), "the log sink was refused")
+    try expect(registered(homerun_set_app_logs_provider(nil)), "the log provider was refused")
+    return "both registered"
 }
 
 check("the backup engine reports whether it is linked") {
@@ -1592,6 +1610,75 @@ check("a server with no gateway port yet has no address to ping") {
         throw Wrong(what: "invented \(wrong) before the gateway assigned a port")
     }
     return "nil"
+}
+
+print("\nthe device's own link")
+
+check("a link_up result becomes a device link") {
+    // The strings and the shape the API actually answers with. Every one of
+    // them is resolved at run time, so a rename in the core is invisible until
+    // something asks — and the thing that asks is a phone, an hour later.
+    let body: [String: Any] = [
+        "fqdn": "verdant-gulch.minecraft.fractalnetworks.co",
+        "gateway_version": 2,
+        "native_config": [
+            "client_privkey": "aPrivateKey=",
+            "gateway_pubkey": "aPublicKey=",
+            "link_address": "gateway.example:51820",
+            "address": "10.9.0.7/32",
+            "allowed_ips": "10.9.0.1/32",
+        ],
+    ]
+    guard let link = try Core.deviceLinkFromBody(body) else {
+        throw Wrong(what: "no link out of a complete body")
+    }
+    guard link.fqdn == "verdant-gulch.minecraft.fractalnetworks.co" else {
+        throw Wrong(what: "fqdn was \(link.fqdn ?? "nil")")
+    }
+    // v2 writes no PROXY header. Getting this backwards is not a warning: the
+    // header lands where a ClientHello is expected and every handshake fails.
+    guard !link.expectsProxyProtocol else { throw Wrong(what: "expected no PROXY header on v2") }
+    return "fqdn + v2"
+}
+
+check("a link_up task still running is not a failure") {
+    // The API answers without `native_config` for the first several seconds.
+    // A caller that read that as an error would abandon a link that was about
+    // to be provisioned.
+    if let wrong = try Core.deviceLinkFromBody(["fqdn": "a.b.c"]) {
+        throw Wrong(what: "invented a link from \(wrong.fqdn ?? "nothing")")
+    }
+    return "nil"
+}
+
+check("the device tunnel forwards both of the gateway's ports") {
+    let link: [String: Any] = [
+        "client_privkey": "aPrivateKey=",
+        "gateway_pubkey": "aPublicKey=",
+        "link_address": "gateway.example:51820",
+    ]
+    let config = try Core.deviceWsTunnelConfig(link: link, httpsTarget: 51234, httpTarget: 51235)
+    // The listen ports are the *gateway's* — it DNATs public :443 and :80 onto
+    // them whatever this device bound locally. "Correcting" one to match the
+    // local port produces a config that loads, connects, and is unreachable.
+    try expect(config.contains("8443"), "no :443 forward")
+    try expect(config.contains("8080"), "no :80 forward")
+    try expect(config.contains("51234"), "the TLS listener is not the target")
+    return "8443 → 51234, 8080 → 51235"
+}
+
+check("a device with no certificate forwards only :443") {
+    let link: [String: Any] = [
+        "client_privkey": "aPrivateKey=",
+        "gateway_pubkey": "aPublicKey=",
+        "link_address": "gateway.example:51820",
+    ]
+    // No hostname to prove means no order can run, and a forward at a listener
+    // that never starts looks like the device answered.
+    let config = try Core.deviceWsTunnelConfig(link: link, httpsTarget: 51234, httpTarget: nil)
+    try expect(config.contains("8443"), "no :443 forward")
+    try expect(!config.contains("8080"), "forwarded :80 with nothing behind it")
+    return "8443 only"
 }
 
 print("\n\(checks - failures)/\(checks) passed")

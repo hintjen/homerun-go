@@ -66,7 +66,46 @@ staging, not before** — `project.yml` references the staged payload, so a
 generate that runs first produces a project missing files.
 
 `ios/coretest` is a device-free harness over the same FFI; run it before
-reaching for a simulator.
+reaching for a simulator. `ios/wsprobe` is the same idea one layer out — it
+runs the device websocket's real listener in a simulator and needs no account.
+
+### Driving a simulator from a terminal
+
+The whole loop without opening Xcode, which is what a headless session needs:
+
+```bash
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+npm run ui:ios && npm run rust:ios-sim
+node scripts/build-wireproxy.js ios
+cd ios && xcodegen generate
+xcodebuild -project HomerunHost.xcodeproj -scheme HomerunHost \
+  -destination 'platform=iOS Simulator,name=iPhone 17' \
+  -configuration Debug -derivedDataPath /tmp/dd \
+  CODE_SIGNING_ALLOWED=NO build > /tmp/xcodebuild.log 2>&1
+xcrun simctl install booted /tmp/dd/Build/Products/Debug-iphonesimulator/Homerun.app
+xcrun simctl launch booted app.gethomerun.ios
+xcrun simctl spawn booted log show --last 2m --info --debug --style compact \
+  --predicate 'process == "Homerun"'
+```
+
+Five things about that, each of which cost a round when it was worked out:
+
+- **`DEVELOPER_DIR` beats `xcode-select`.** A machine whose active developer
+  directory is CommandLineTools has no iOS SDK at all, and switching it needs
+  `sudo`. The environment variable overrides it per process, no password.
+- **`CODE_SIGNING_ALLOWED=NO`** for the simulator. Without a team, a signed
+  build fails on something that has nothing to do with the change.
+- **`--info --debug` on `log show`.** `HostLog` writes at info level, which the
+  unified log does not persist by default: without those flags the app looks
+  silent and every `HostLog.*.info` in the codebase appears not to run.
+- **Open Simulator.app before testing anything lifecycle-shaped.** A device
+  booted headless with `simctl boot` never *activates* an app, so
+  `applicationDidBecomeActive` — and `didBecomeActiveNotification` with it —
+  never fires. Work that hangs off the foreground silently does nothing, which
+  reads exactly like a hook that was never wired. `open -a Simulator` first.
+- **Never pipe `xcodebuild` into `head`.** The SIGPIPE kills the build partway
+  and the wrapper still exits 0, so a truncated log reads as a clean run.
+  Redirect to a file and grep that.
 
 ## Pointing it at a backend
 

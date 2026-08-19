@@ -26,7 +26,7 @@ also the only control a player has while the app is not open.
 `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_SPECIAL_USE` and `WAKE_LOCK` are
 install-time permissions: declared in the manifest, granted by being declared,
 no dialog. What reviews whether the use is legitimate is Google Play, not the
-OS — see [Play policy](#play-policy-is-the-open-risk).
+OS — see [Play policy](#play-policy-the-open-item-and-how-to-close-it).
 
 `POST_NOTIFICATIONS` (API 33+) *does* prompt, and gates only the notification's
 **visibility**. Denied, the service still runs at foreground importance and the
@@ -292,5 +292,5 @@ within five seconds of `startForegroundService`. It is the first statement in
 or return early.
 
 **Play rejects the build over the service type.** See
-[Play policy](#play-policy-is-the-open-risk). Expect this to need a Console
+[Play policy](#play-policy-the-open-item-and-how-to-close-it). Expect this to need a Console
 justification before it needs a code change.

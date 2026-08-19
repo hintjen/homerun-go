@@ -5,7 +5,7 @@ description: Add, change, or remove a `homerun_*` C ABI export in homerun-pumpki
 
 # Changing the C ABI
 
-One export is **seven touchpoints across three languages**, and most ways of
+One export is **eight touchpoints across three languages**, and most ways of
 getting it wrong fail silently or point somewhere else entirely. This is the
 order to do them in and what skipping each looks like.
 
@@ -88,8 +88,59 @@ means iOS fails to compile or link, which at least is loud.
 **7. The Swift wrapper** — `ios/HomerunHost/FFI/HomerunFFI.swift`, in the
 existing shape: `decode(homerun_…())`, or `x.withCString { decode(…($0)) }`
 for arguments. iOS links statically and only *reports* the ABI at startup
-(`AppDelegate`), so there is no `EXPECTED_ABI` to update — and no runtime
-check to catch a mismatch either.
+(`AppDelegate`), so there is no runtime check to catch a mismatch there.
+
+**8. The iOS harness's expectation** — `ios/coretest/main.swift`, the
+`let expected: UInt32 = N` line. It is not shipping code, but
+`scripts/check-abi.js` reads it, so **`npm test` fails until it is bumped** —
+and it fails on a message that reads "is the staged .a stale?", which sends you
+looking at the build rather than at this line. It sat at 3 while the crate
+reached 7, which is why the check exists.
+
+## When the export is for one platform only
+
+Touchpoints 3 and 4 — the JNI wrapper and the Kotlin `external fun` — are for
+things Kotlin calls. An export only iOS uses needs neither, and adding them
+anyway means two symbols nothing invokes. Say so in the doc comment, so the
+next reader does not go looking for the missing half.
+
+**Touchpoint 5 is not skippable on that reasoning.** `EXPECTED_ABI` is a
+comparison against the crate, not against what Android calls, so an iOS-only
+export that bumps the version still disables Android's entire server backend
+until the constant follows. That is the worst failure mode here and it looks
+like a UI bug.
+
+## Registering a callback rather than adding a call
+
+Some things have to go the other way: the crate needs something only the host
+can do (read the unified log, write to `os_log`). That is still an ABI change,
+and the shape is a registration export.
+
+```rust
+pub type Sink = unsafe extern "C" fn(level: u8, message: *const c_char);
+
+#[no_mangle]
+pub extern "C" fn homerun_set_log_sink(sink: Option<Sink>) -> *mut c_char {
+    guarded(move || { host_log::set(sink); json!({ "ok": true }).to_string() })
+}
+```
+
+- **`Option<extern "C" fn …>` is FFI-safe and null-checks itself.** A host
+  passing NULL arrives as `None`, which is how unregistering works — no
+  pointer to dereference and no separate "clear" export.
+- **The header needs a `typedef`**, and the Swift side takes it as
+  `@convention(c)`. That means the Swift function **captures nothing**: a
+  global `func` or a `let` closure with an empty capture list, never a method
+  on an instance.
+- **Copy the pointer out of its lock before calling it.** Holding the mutex
+  across a call into the host deadlocks the moment that host logs anything
+  itself, and it presents as a hang in whatever produced the line.
+- **Neither side may unwind.** A Swift or Kotlin exception crossing into Rust
+  is undefined behaviour exactly as a Rust panic crossing out is; `guarded`
+  only covers the second.
+- **Register it at launch, not at first use.** A callback that answers
+  diagnostics is worth nothing if it is registered after the failure it would
+  have explained.
 
 ## Then rebuild — properly
 
@@ -99,7 +150,10 @@ npm test                  # core + FFI + the ABI check
 ```
 
 `scripts/check-abi.js` compares the crate's `FFI_ABI_VERSION` against each
-host's expectation. It only knows about Android today; iOS is not checked.
+host's expectation — Android's `NativeServer.EXPECTED_ABI` and the iOS
+harness's `let expected` in `ios/coretest/main.swift`. The shipping iOS app
+still has no expectation of its own: it links statically and only reports the
+version at startup.
 
 **Gradle alone is not enough.** The npm script restages the `.so` into
 `jniLibs` first. Skip it and a fresh APK runs against yesterday's library — a

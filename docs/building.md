@@ -124,6 +124,15 @@ node scripts/build-rust.js ios --stub     # without it
 target without waiting for the engine to build. The first build with the
 engine pulls the pinned Pumpkin fork from GitHub and takes a few minutes.
 
+### The device websocket feature needs `cmake`
+
+Both phone targets build with `device-ws`, which pulls in `aws-lc-rs` for the
+crypto provider rustls and the ACME client share. `aws-lc-sys` compiles C, and
+its build script needs **cmake on the machine doing the build** — `brew install
+cmake` on a Mac. Without it the failure is a build-script error naming
+`aws-lc-sys` rather than anything in this repo, which reads like a broken
+dependency instead of a missing tool.
+
 ## The tunnel — `scripts/build-wireproxy.js`
 
 ```bash
@@ -497,6 +506,27 @@ Build Android locally and leave iOS to a Mac or CI.
 
 **`Rust target … is not installed`** — the message includes the exact
 `rustup target add` line.
+
+**`failed to authenticate when downloading repository`, naming no repository
+you recognise** — the Pumpkin and rustic forks are private, and cargo's
+built-in git client cannot use the credentials `gh` or ssh already hold. The
+system git can:
+
+```toml
+# ~/.cargo/config.toml
+[net]
+git-fetch-with-cli = true
+```
+
+`node scripts/doctor.js` checks for this. It bites every fresh machine and
+nothing about the message says which repository it means.
+
+**`Undefined symbols … ___chkstk_darwin` linking for iOS** — the deployment
+target is unset, so rustc linked against iOS 10 while the SDK compiled
+`aws-lc-sys`'s C for the current one. `scripts/build-rust.js` sets
+`IPHONEOS_DEPLOYMENT_TARGET` from `targets.js`, so this only appears when
+calling `cargo build --target aarch64-apple-ios` by hand. Use the script, or
+export it yourself.
 
 **`cargo-ndk is not installed`** — `cargo install cargo-ndk`. If it is
 installed and the build still fails on a missing linker, `ANDROID_NDK_HOME`

@@ -79,12 +79,13 @@ enum HomerunFFI {
 
     /// Serve the dashboard's console and RCON on a loopback port.
     ///
-    /// Answers "this build cannot serve a device websocket" on iOS today, and
-    /// that is the honest answer rather than a gap to close: the socket would
-    /// only be alive while the app is in front of the player, so advertising
-    /// one would promise something the platform takes away — see
-    /// `plans/ios-background-execution.md`. Wired so the shape is already right
-    /// if that calculus changes.
+    /// The reply carries **two** ports and the host needs both: `port` is the
+    /// plaintext one its own UI dials over loopback, and `tlsPort` is what the
+    /// tunnel forwards the gateway's `:443` to. Forwarding the first would send
+    /// a ClientHello at a plaintext socket, which fails as a protocol error
+    /// naming neither end.
+    ///
+    /// The socket lives as long as the foreground does. See `DeviceWebsocket`.
     @discardableResult
     static func startDeviceWebsocket(_ config: String) -> Reply {
         config.withCString { decode(homerun_device_ws_start($0)) }
@@ -93,6 +94,32 @@ enum HomerunFFI {
     @discardableResult
     static func stopDeviceWebsocket() -> Reply {
         decode(homerun_device_ws_stop())
+    }
+
+    /// Give the crate's own diagnostics somewhere to land.
+    ///
+    /// Nothing this crate logs is visible on iOS without this: `os_log` is
+    /// unreachable from Rust, and printing would write into the pipe that
+    /// feeds the player-visible console once a server is running. Register it
+    /// at launch — a failure that happens before the sink exists is a failure
+    /// nobody can explain afterwards.
+    @discardableResult
+    static func setLogSink(_ sink: homerun_log_sink_fn?) -> Reply {
+        decode(homerun_set_log_sink(sink))
+    }
+
+    /// Hand the crate a way to read this app's own logs.
+    ///
+    /// `provider` is a C function pointer, so it can capture nothing — it must
+    /// be a plain `func` or a closure with an empty capture list. That is the
+    /// constraint, not an oversight: the crate calls it from a worker thread at
+    /// an arbitrary moment, and a captured `self` would be a reference kept
+    /// alive by Rust with no way to say when it was done with it.
+    ///
+    /// Pass `nil` to unregister.
+    @discardableResult
+    static func setAppLogsProvider(_ provider: homerun_app_logs_fn?) -> Reply {
+        decode(homerun_set_app_logs_provider(provider))
     }
 
     static func state() -> ServerState {

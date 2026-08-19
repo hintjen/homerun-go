@@ -46,10 +46,12 @@ just made. Small, specific corrections beat rewrites.
 
 `rust/homerun-core` holds the decisions every Homerun app makes — what a
 console line means, how much heap is safe, what order a launch runs in, what
-an exit meant. It has no sockets, no processes, no async runtime; its only
-dependencies are `serde` and `serde_json`. Hosts supply the effects and the
-things only they can know (how much RAM this device has, which launcher may be
-exec'd).
+an exit meant. It has no sockets, no processes, no async runtime; its
+dependencies are `serde`, `serde_json` and `ed25519-dalek` — the last one
+argued at length in `bundle.rs`, because an OTA manifest's signature is the one
+place a hand-rolled implementation still accepts every honest input while
+quietly accepting forged ones too. Hosts supply the effects and the things only
+they can know (how much RAM this device has, which launcher may be exec'd).
 
 **The rule: if two platforms could answer a question differently, the answer
 belongs in the core.** Two divergences prompted it and both were live before
@@ -96,7 +98,7 @@ node shared/conformance/check-coverage.js android android/app/src/main/java/app/
 ```
 
 `npm run conformance:ios` and `conformance:android` wrap those. Both pass
-today: iOS requires 49 handlers (58 declared), Android 56 of 56. The checker
+today: iOS requires 56 handlers (65 declared), Android 57 of 57. The checker
 reads the router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END`
 markers — keep those markers around the real table, not a duplicate list.
 
@@ -137,11 +139,12 @@ bugs that are miserable to diagnose.
 ## Building
 
 Both Rust crates build and test **host-native on any OS**, including Windows —
-237 core tests and 100 FFI tests in seconds, no device and no Pumpkin. Do that
+550 core tests and 134 FFI tests in seconds, no device and no Pumpkin. Do that
 before reaching for a simulator or a phone.
 
 ```bash
-npm test        # core + FFI (with process-engine) + the ABI check
+npm test        # core + FFI (with process-engine), then the ABI, host-revision
+                # and capability checks
 ```
 
 Cross-compiling: Android targets work from any host with `cargo-ndk`; iOS
@@ -173,8 +176,11 @@ tell a linked engine from a child process. See `docs/ffi.md`.
 
 Both hosts exist and both pass conformance. Android runs a real JVM server
 end to end — jar cache, settings, tunnel, graceful stop, on-stop backup,
-Insights — and is the platform to test on, since it is the one that can be
-driven from this machine.
+Insights — and is the platform to test a *server* on.
+
+On a Mac, iOS is drivable from a terminal too: build, install, launch and read
+the log without opening Xcode, which is how the device websocket was verified.
+The `on-device-build` skill has that loop and the traps in it.
 
 Known gaps, so you do not rediscover them:
 
@@ -184,7 +190,11 @@ Known gaps, so you do not rediscover them:
 - **The arm64 slice has never run on hardware.** Incremental builds usually
   refresh only the ABI you are emulating; assume the other one is stale.
 - **iOS Swift changes have often been written without a compiler.**
-  `plans/ios-handoff.md` tracks which, and what to check first.
+  `plans/ios-handoff.md` tracks which, and what to check first. The device
+  websocket is no longer one of them: it builds, runs on a simulator, and its
+  socket is proven by `ios/wsprobe/`. What it has not seen is an account, the
+  gateway, or a physical device — `plans/device-websocket.md`,
+  *What iOS still has to prove*.
 - **The desktop has no `homerun-core` binding.** Every core module has exactly
   one consumer today, so "shared" is still aspirational in one direction.
 
