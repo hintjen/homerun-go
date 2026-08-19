@@ -56,7 +56,7 @@ extension BridgeRouter {
         // Before the token goes: the link was provisioned with it, and a
         // socket left up after a sign-out would keep answering an API
         // membership check made on behalf of somebody who has left.
-        DeviceWebsocket.shared.stop()
+        DeviceWebsocket.shared.stop(reason: "the account signed out")
         // The device registration deliberately survives: it belongs to the
         // phone, not the session, and re-registering on the next login would
         // orphan the servers already attached to it.

@@ -57,6 +57,16 @@ final class DeviceWebsocket {
     /// The device's public hostname, once the API has named it.
     private(set) var fqdn: String?
 
+    /// The device row the current link — or the one being brought up — is for.
+    ///
+    /// A different account signing in *replaces* that row: `DeviceRegistrar`
+    /// re-registers rather than reuse a device belonging to somebody else. A
+    /// link still serving the old row is then a link nothing will ever dial,
+    /// because the dashboard asks the API for this account's device and gets an
+    /// fqdn no phone is answering. Compared on every `ensure` so the switch is
+    /// caught there, rather than waiting for a backgrounding to clear it.
+    private var linkedDeviceId: String?
+
     private init() {}
 
     // MARK: - Lifecycle
@@ -70,6 +80,16 @@ final class DeviceWebsocket {
     /// instances heartbeat, so a device that serves no websocket still appears
     /// in the browse list.
     func ensure() {
+        // Before the guard below, not after: a link for the wrong device row
+        // still sets `port`, which makes every later `ensure` a no-op — so the
+        // stale link would outlive the account that owns it and nothing else
+        // would ever notice.
+        if let linked = linkedDeviceId, let current = HostStore.registeredDeviceId,
+            !current.isEmpty, linked != current
+        {
+            stop(reason: "this phone is registered as a different device now")
+        }
+
         // `port` rather than `tunnel`: a socket that came up while its tunnel
         // did not is still a socket, and starting a second one answers "the
         // device websocket is already running" after a minute of polling for a
@@ -98,8 +118,17 @@ final class DeviceWebsocket {
         }
         HostLog.device.info("bringing the device link up")
 
+        linkedDeviceId = deviceId
         task = Task { [weak self] in
             await self?.bringUp(apiURL: apiURL, deviceId: deviceId, token: token)
+            // Only when this task is still the current one. `task` is cleared
+            // elsewhere by `stop()` alone, and `stop()` cancels first — so a
+            // cancelled task that finds it nil means `ensure()` has started
+            // another since, and clearing it now would drop the one reference
+            // `stop()` needs in order to cancel that one. It would then bring a
+            // socket up behind a teardown that had already run, which is the
+            // suspended-and-still-listening state this class exists to avoid.
+            guard !Task.isCancelled else { return }
             self?.task = nil
         }
     }
@@ -110,12 +139,17 @@ final class DeviceWebsocket {
     /// can still hand it a connection, and a forward pointing at a port that
     /// has just been released is how a dashboard gets a refusal instead of a
     /// clean close.
-    func stop() {
+    ///
+    /// `reason` is logged, so a teardown is never ambiguous about which of the
+    /// three it was — backgrounded, signed out, or relinking onto a new device
+    /// row. They look identical in the log otherwise, and only one of them is
+    /// expected to be followed by a fresh link.
+    func stop(reason: String = "the app left the foreground") {
         // Only when there was something to take down. `stop` runs on every
         // backgrounding, and a line each time an app with no link goes into the
         // background is a log nobody reads twice.
         if port != nil {
-            HostLog.device.info("the app left the foreground — taking the device link down")
+            HostLog.device.info("\(reason, privacy: .public) — taking the device link down")
         }
 
         task?.cancel()
@@ -137,6 +171,7 @@ final class DeviceWebsocket {
 
         port = nil
         fqdn = nil
+        linkedDeviceId = nil
     }
 
     // MARK: - Bring-up
