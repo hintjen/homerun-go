@@ -39,13 +39,21 @@ tracing = "0.1"
 # Cargo only honours a profile at a workspace root and there is no workspace
 # here, so every crate states its own.
 #
-# **`thin`, not `true`.** Full LTO over this dependency tree — Pumpkin plus
-# wasmtime and cranelift — takes about twenty minutes and peaks near 7 GB in
-# one rustc process, and it re-runs on any source change, so a one-line edit
-# costs a coffee break. Thin LTO gets most of the size back for a fraction of
-# that. The neighbouring `homerun-java-launcher` uses `lto = true` and is
-# right to: it is a few hundred kilobytes.
+# **Full LTO, and it is expensive.** Over this dependency tree — Pumpkin plus
+# wasmtime and cranelift — the link takes roughly twenty minutes and peaks near
+# 7 GB in a single rustc process, and it re-runs on *any* source change in this
+# crate. Budget for that before editing: a one-line fix costs a full relink.
+#
+# It is kept anyway because this is what ships. Measured on x86_64:
+#
+#   lto = true    71.7 MB
+#   lto = "thin"  88.9 MB
+#
+# 17 MB is what keeps the move to a child process size-neutral — the library
+# it replaces was 79.8 MB with the engine linked in, so full LTO lands the pair
+# at ~78 MB and thin lands them at ~96 MB. If you need to iterate, build with
+# `--profile dev` rather than making the shipped artifact bigger for everyone.
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = true
 strip = true
