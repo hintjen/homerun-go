@@ -340,6 +340,27 @@ that spins for ever.
 
 ---
 
+### 🧳 [Validating guest-server migration on iOS](./ios-guest-migration-validation.md)
+
+A guest's servers should follow them onto the account they sign up or sign in
+to. The API and the UI are shared and already proven on Android; this is how
+to prove the one iOS-specific part.
+
+**Contains**:
+- Why a device row belongs to exactly one account, and the two endpoints that
+  refuse it when it does not
+- The run: guest, server, upsell, then either registering or signing in —
+  both migrate
+- What to check on the device (`registeredDeviceAccount` vs `currentAccount`),
+  in the console, and on the backend
+- Why "the servers moved" is *not* evidence the iOS fix works, and what is
+- That the Swift has never been compiled
+
+**Read this for**: Verifying migration on iOS, or a phone that migrates and
+then says "running on another device".
+
+---
+
 ### ⛏️ [The Minecraft account on mobile](./minecraft-account.md)
 
 Which Minecraft player a phone belongs to. Stats are keyed on a Minecraft uuid
