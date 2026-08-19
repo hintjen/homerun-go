@@ -566,7 +566,9 @@ written.*
 Planned, one per milestone (see plans/shared-milestones.md):
 
   ios-lifecycle.md        iOS      M4
-  android-bridge.md       Android  M1, extended at M2
+  ios-push.md             iOS      once M4 of plans/push-notifications.md verifies
+
+(android-bridge.md landed as android-host.md.)
 -->
 
 ## House style

@@ -63,7 +63,10 @@ These are not preferences; they decide the design.
 - `bridge-v1.json` — the generated manifest: every channel, and which
   profile requires it.
 
-151 channels exist. **iOS must implement 64, Android 67** — the rest are
+161 manifest entries cover 160 channels (`open-storage-settings` is listed
+twice, as an invoke and as an event). **iOS must answer 56, Android 57** — of
+the 82 and 83 each profile requires, the balance are events a host emits rather
+than channels it answers. The rest are
 desktop-only (WSL, the Minecraft client launcher, the installer) and gated
 off by capability, so the UI never calls them.
 

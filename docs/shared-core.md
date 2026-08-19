@@ -74,6 +74,12 @@ metrics.rs     what a run is costing, and how much of it to remember
 properties.rs  key=value config merging, comments preserved
 state.rs       handshake supervision, exit classification
 tunnel.rs      WireGuard config from a list of forwards
+backup.rs      what a backup failure meant, and who holds the lease
+bundle.rs      OTA manifests: signature, version ordering, rollback
+device_ws/     the dashboard socket's frames, auth scope and PROXY v1 — no socket
+md5.rs         a hash nothing trusts, to avoid a dependency
+sha1.rs        checksums for downloaded artifacts
+reporting/     crash reports and the stats a run reports home
 minecraft/     jar, jvm, console, settings — one implementation of game.rs
 ```
 
@@ -128,7 +134,7 @@ ignores half the arguments of.
 
 ## The tests are the deliverable
 
-237 tests, and they are checked for teeth rather than counted. Deliberate
+550 tests, and they are checked for teeth rather than counted. Deliberate
 regressions are introduced and each must be caught by its own test:
 
 | Regression | Caught by |

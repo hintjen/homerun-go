@@ -5,7 +5,7 @@ How both mobile hosts reach `homerun-core`.
 **Source**: `rust/homerun-pumpkin-ffi/src/core_dispatch.rs` (the dispatch, with
 no platform in it), `core_bridge.rs` (the JNI adapter) and `lib.rs`'s
 `homerun_core_call` (the C ABI); `android/.../Core.kt` and
-`ios/HomerunHost/Core.swift` on the host side.
+`ios/HomerunHost/FFI/Core.swift` on the host side.
 
 Dispatch is one function and both hosts wrap it:
 
@@ -378,7 +378,7 @@ JVM dedupes, so this means the `.so` is missing for the device's ABI, not that
 they conflict.
 
 **A Swift symbol not found for `homerun_core_call`** — the header is not in the
-bridging header, or the staticlib predates it. `ios/HomerunHost/homerun_ffi.h`
+bridging header, or the staticlib predates it. `ios/HomerunHost/FFI/HomerunFFI.h`
 declares the whole C surface.
 
 **`bad arguments: …`** — the args object was not valid JSON. Almost always a
@@ -406,8 +406,8 @@ char *homerun_core_call(const char *method, const char *args);
 void  homerun_free_string(char *ptr);
 ```
 
-Declared in `ios/HomerunHost/homerun_ffi.h`; add it to the bridging header.
-`ios/HomerunHost/Core.swift` has typed wrappers mirroring `Core.kt` — prefer
+Declared in `ios/HomerunHost/FFI/HomerunFFI.h`; add it to the bridging header.
+`ios/HomerunHost/FFI/Core.swift` has typed wrappers mirroring `Core.kt` — prefer
 those to calling the C function directly, and note that the reply must be freed
 on every path, which `Core.call` does with a `defer`.
 
