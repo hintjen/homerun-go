@@ -102,6 +102,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // survive to report it itself.
         AppErrors.drain()
 
+        // Beside the drain and for the same reason: both answer "what happened
+        // to the process before this one". The difference is who noticed — the
+        // drain sends what the dying process managed to write down, and this
+        // subscribes to what the system recorded when it could not write
+        // anything at all. MetricKit calls back on its own queue, so
+        // subscribing here costs launch nothing.
+        ExitDiagnostics.shared.start()
+
         let bridge = BridgeController(deepLinks: deepLinks, backend: backend)
         self.bridge = bridge
 

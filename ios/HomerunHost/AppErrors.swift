@@ -94,11 +94,12 @@ enum AppErrors {
         message: String,
         stack: String? = nil,
         location: String? = nil,
-        extra: [String: Any]? = nil
+        extra: [String: Any]? = nil,
+        atMs: Int? = nil
     ) {
         let occurrence = occurrenceOf(
             source: source, severity: severity, kind: kind, message: message,
-            stack: stack, location: location, extra: extra)
+            stack: stack, location: location, extra: extra, atMs: atMs)
 
         Task.detached(priority: .utility) {
             guard let request = Core.appErrorReport(context: context(), occurrence: occurrence)
@@ -216,14 +217,19 @@ enum AppErrors {
         message: String,
         stack: String?,
         location: String?,
-        extra: [String: Any]?
+        extra: [String: Any]?,
+        atMs: Int? = nil
     ) -> [String: Any] {
         var occurrence: [String: Any] = [
             "source": source,
             "severity": severity,
             "kind": kind,
             "message": message,
-            "atMs": Int(Date().timeIntervalSince1970 * 1_000),
+            // Now, unless the caller knows better. ``ExitDiagnostics`` does:
+            // MetricKit hands over a crash that happened up to a day ago, and
+            // stamping it with the moment it arrived would file every one of
+            // them under "just now" and make the timeline useless.
+            "atMs": atMs ?? Int(Date().timeIntervalSince1970 * 1_000),
         ]
         if let stack { occurrence["stack"] = stack }
         if let location { occurrence["location"] = location }
@@ -249,6 +255,10 @@ enum AppErrors {
     static let sourceHost = "host"
     static let sourceUI = "ui"
     static let sourceAPI = "api"
+    /// Below the host language: a Rust panic, or a death the system reported
+    /// afterwards because nothing of ours was alive to report it. See
+    /// ``ExitDiagnostics``.
+    static let sourceNative = "native"
     static let severityFatal = "fatal"
     static let severityError = "error"
 }
