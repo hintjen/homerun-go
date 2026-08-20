@@ -38,6 +38,7 @@
     "android:logs": "node scripts/android-app.js logs",
     "test": "npm run test:core && npm run test:rust && npm run test:abi && npm run test:pumpkin-rev && npm run test:host-revision && npm run test:capabilities",
     "test:abi": "node scripts/check-abi.js",
+    "test:swift-syntax": "node scripts/check-swift-syntax.js",
     "test:pumpkin-rev": "node scripts/check-pumpkin-rev.js",
     "test:host-revision": "node scripts/check-host-revision.js",
     "test:capabilities": "node scripts/check-capabilities.js",
