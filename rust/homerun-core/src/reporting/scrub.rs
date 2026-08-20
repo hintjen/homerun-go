@@ -152,7 +152,12 @@ fn chat_name_end(line: &str) -> Option<usize> {
 /// ```text
 /// Steve[/203.0.113.4:52341] logged in with entity id 42 at (…)
 /// ```
-fn redact_addresses(line: &str) -> String {
+///
+/// `pub(crate)` for [`crate::reporting::app_error`], which redacts a wholly
+/// different kind of text — stack traces, HTTP bodies, file paths — but has
+/// the same address problem and must not solve it twice. Two IP scanners in
+/// one crate is how one of them ends up missing bracketed IPv6.
+pub(crate) fn redact_addresses(line: &str) -> String {
     let bytes = line.as_bytes();
     let mut out = String::with_capacity(line.len());
     let mut i = 0;

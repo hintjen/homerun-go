@@ -50,6 +50,7 @@
 //! API's side, like a server nobody ever started.
 
 use super::scrub;
+use super::truncate;
 use super::Request;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -301,23 +302,12 @@ pub fn report<S: AsRef<str>>(server_id: &str, device_id: &str, lines: &[S]) -> R
 
 /// The last [`MAX_REPORTED_BYTES`], cut on a line boundary.
 ///
-/// The scan for the boundary starts from a **char** boundary, not from the
-/// byte offset itself. A Minecraft console carries UTF-8 — `§` colour codes,
-/// player names, a MOTD — and slicing a `String` mid-character is one of the
-/// few things in safe Rust that panics outright.
+/// The console wants its *tail*: the crash is the last thing that happened.
+/// See [`crate::reporting::truncate`] for why that is the opposite of what a
+/// stack trace wants, and for the char-boundary scan this used to carry
+/// itself before app error reporting gave it five more callers.
 fn tail_bytes(text: String) -> String {
-    if text.len() <= MAX_REPORTED_BYTES {
-        return text;
-    }
-    let mut start = text.len() - MAX_REPORTED_BYTES;
-    while start < text.len() && !text.is_char_boundary(start) {
-        start += 1;
-    }
-    let cut = text[start..]
-        .find('\n')
-        .map(|offset| start + offset + 1)
-        .unwrap_or(start);
-    format!("[earlier lines dropped]\n{}", &text[cut..])
+    truncate::tail_lines(text, MAX_REPORTED_BYTES)
 }
 
 fn matches<S: AsRef<str>>(lines: &[S], patterns: &[&str]) -> bool {
