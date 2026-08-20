@@ -1559,6 +1559,70 @@ object Core {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // App errors
+    // -----------------------------------------------------------------------
+    //
+    // Four calls, one funnel. The core owns every decision — whether two
+    // failures are the same bug, whether this one is worth sending again,
+    // what has to be redacted, what the body looks like — so that this host
+    // and the iOS one cannot drift on any of them. See
+    // `homerun-core::reporting::app_error` and `homerun-pumpkin-ffi::errors`.
+
+    /**
+     * Point the core's crash artefacts at a directory this app owns.
+     *
+     * Once per process, at launch. Until this is called a panic in the native
+     * core has nowhere to go, and [appErrorDrain] has nothing to read.
+     */
+    fun appErrorAttach(dataDir: String) {
+        call("error.attach", buildJsonObject { put("dataDir", dataDir) })
+    }
+
+    /**
+     * Record one failure and get back the request to send, if any.
+     *
+     * **Null is the ordinary answer**, not a failure: the core holds a
+     * sighting it has seen recently, and during a render loop it holds
+     * thousands. A caller that logs a warning per null reproduces in logcat
+     * the exact flood the core just prevented on the network.
+     */
+    fun appErrorReport(context: JsonObject, occurrence: JsonObject): Request? =
+        Request.from(
+            (call("error.report", buildJsonObject {
+                put("context", context)
+                put("occurrence", occurrence)
+            }) as? JsonObject)?.get("request")
+        )
+
+    /**
+     * Write one failure to disk for the next launch to send.
+     *
+     * Synchronous by necessity — the caller is an uncaught-exception handler
+     * running on a thread that is about to be killed, and anything
+     * asynchronous would not finish. That is also why this exists at all
+     * rather than the crash path calling [appErrorReport]: the request would
+     * be built correctly and then never sent.
+     */
+    fun appErrorStash(context: JsonObject, occurrence: JsonObject) {
+        call("error.stash", buildJsonObject {
+            put("context", context)
+            put("occurrence", occurrence)
+        })
+    }
+
+    /**
+     * Everything the last launch left behind, as requests to send now.
+     *
+     * The core deletes each file before it reads it, so nothing here can be
+     * seen twice however badly it goes.
+     */
+    fun appErrorDrain(context: JsonObject): List<Request> {
+        val value = call("error.drain", buildJsonObject { put("context", context) })
+        val requests = (value as? JsonObject)?.get("requests") as? JsonArray ?: return emptyList()
+        return requests.mapNotNull { Request.from(it) }
+    }
+
     /** What a crash log says went wrong, when the core recognises it. */
     data class Diagnosis(val cause: String, val message: String, val recovery: String) {
         /** The jar was damaged and the budget allows another go at it. */

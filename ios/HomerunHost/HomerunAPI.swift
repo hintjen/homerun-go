@@ -214,6 +214,36 @@ enum HomerunAPI {
         }
     }
 
+    /// Carry out an app error report, signed if this device has a credential
+    /// and unsigned if it does not.
+    ///
+    /// The one request in this file that may go out with no `Authorization`
+    /// header, and the endpoint is built to accept that. The reason is the
+    /// whole reason the endpoint exists: the errors worth most are the ones
+    /// that happen before there is a token to sign with — a crash on the login
+    /// screen, a failure during device registration, a bundle that throws
+    /// before the page boots. Requiring a credential would lose exactly those
+    /// and keep the ones that were already survivable.
+    ///
+    /// Never throws, like ``perform(apiURL:request:token:)``.
+    static func performAppError(
+        apiURL: String,
+        request: Core.Request,
+        token: String?
+    ) async -> [String: Any]? {
+        do {
+            return try await post(
+                apiURL: apiURL, path: request.path, body: request.body, token: token)
+        } catch {
+            // A plain log, never a report. Reporting a failed report is how a
+            // reporter becomes the outage.
+            HostLog.reporting.error(
+                "an error report did not go through: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
+    }
+
     /// A server as the API holds it *now*.
     ///
     /// The read half of an operator change's read-modify-write. It has to be a
@@ -518,7 +548,7 @@ enum HomerunAPI {
     }
 
     private static func post(
-        apiURL: String, path: String, body: [String: Any], token: String
+        apiURL: String, path: String, body: [String: Any], token: String?
     ) async throws -> [String: Any] {
         guard let url = URL(string: apiURL.trimmedTrailingSlash + path) else {
             throw APIError.malformed
@@ -527,7 +557,11 @@ enum HomerunAPI {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setRequestValue()
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        // Only when there is one. An app error report may be the single
+        // request this app ever makes unsigned — see `performAppError`.
+        if let token, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         // No blanket short timeout: this runs once, on a phone that may be on
         // a slow connection, and failing it strands the user at the first

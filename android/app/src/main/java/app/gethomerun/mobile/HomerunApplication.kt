@@ -9,7 +9,9 @@ class HomerunApplication : Application() {
     override fun onCreate() {
         super.onCreate()
 
-        // First, so it covers the rest of this method as well.
+        // First, so both cover the rest of this method as well. `AppErrors`
+        // goes before the handler because the handler stashes through it.
+        AppErrors.init(this)
         logCrashesBeforeDying()
 
         // Process-scoped, because a running server must survive the activity
@@ -41,6 +43,12 @@ class HomerunApplication : Application() {
         // scope is ServerHost's — cancelled never, because the thing that ends
         // it is the process ending.
         DeviceWebsocket.init(this, ServerHost.scope)
+
+        // Last, because it needs a credential to sign with and a place to
+        // send to. What it sends was written before any of the above ran —
+        // during the previous launch, by a process that did not survive to
+        // report it itself.
+        AppErrors.drain()
 
         // Debug builds are inspectable from the host machine at
         // chrome://inspect — the only practical way to debug the shared UI
@@ -81,6 +89,10 @@ class HomerunApplication : Application() {
      * always installs one (`RuntimeInit`'s `KillApplicationHandler`), so the
      * null branch is theory. `runCatching` for the same reason: a handler that
      * throws is a handler that never reaches the line below it.
+     *
+     * It now also stashes the crash for [AppErrors] to send next launch, which
+     * is the half a tombstone could never provide: the stack, off the device,
+     * grouped with every other sighting of the same bug.
      */
     private fun logCrashesBeforeDying() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
@@ -88,6 +100,13 @@ class HomerunApplication : Application() {
             runCatching {
                 Log.e(TAG, "fatal on ${thread.name}; this device was ${ServerHost.hostingSummary()}", err)
             }
+            // Stashed, not sent. This thread is about to be killed by the
+            // handler below, so a coroutine would never resume and a request
+            // would never complete — the report that matters most would be
+            // the one guaranteed to be lost. It goes to disk here and leaves
+            // on the next launch. Wrapped for the same reason as the log
+            // above: a handler that throws never reaches the line after it.
+            runCatching { AppErrors.stash(err, location = thread.name) }
             previous?.uncaughtException(thread, err)
         }
     }

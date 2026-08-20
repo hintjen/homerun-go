@@ -37,6 +37,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             HostLog.host.info("FFI ABI version \(homerun_abi_version(), privacy: .public)")
         #endif
 
+        // First, so it covers the rest of launch. It points the native core's
+        // crash directory at storage this app owns and takes over the uncaught
+        // exception handler — the window both protect starts here.
+        AppErrors.start()
+
         // Before the WebView exists, because the UI asks `is-installed` on its
         // post-login path and a false answer strands it on the splash screen.
         HostStore.ensureFirstRunSetup()
@@ -91,6 +96,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // taps Install Now, so the whole mechanism looks like it works — the
         // fetch is narrated, the bundle stages — and silently never goes live.
         BundleStore.activate()
+
+        // Late, because it needs a credential and an API URL. What it sends
+        // was written during the *previous* launch, by a process that did not
+        // survive to report it itself.
+        AppErrors.drain()
 
         let bridge = BridgeController(deepLinks: deepLinks, backend: backend)
         self.bridge = bridge

@@ -521,6 +521,38 @@ object HomerunApi {
     }
 
     /**
+     * Carry out an app error report, signed if this device has a credential
+     * and unsigned if it does not.
+     *
+     * The one request in this file that may go out with no `Authorization`
+     * header, and the endpoint is built to accept that. The reason is the
+     * whole reason the endpoint exists: the errors worth most are the ones
+     * that happen before there is a token to sign with — a crash on the login
+     * screen, a failure during device registration, a bundle that throws
+     * before the page boots. Requiring a credential would lose exactly those
+     * and keep the ones that were already survivable.
+     *
+     * An unsigned report is attributed to nothing and is rate-limited far
+     * harder at the far end; a signed one carries the device and its owner.
+     * Both beat silence.
+     *
+     * Never throws, like [perform].
+     */
+    suspend fun performAppError(
+        apiUrl: String,
+        request: Core.Request,
+        token: String?,
+    ): JsonObject? = withContext(Dispatchers.IO) {
+        runCatching { post(apiUrl, request.path, request.body, token) }
+            .onFailure {
+                // A plain log, never a report. Reporting a failed report is
+                // how a reporter becomes the outage.
+                Log.w(TAG, "an error report did not go through: ${it.message}")
+            }
+            .getOrNull()
+    }
+
+    /**
      * This device's public address, as the API records it.
      *
      * Cached for the life of the process. It is one fact about the network the
@@ -569,14 +601,14 @@ object HomerunApi {
         apiUrl: String,
         path: String,
         body: JsonObject,
-        token: String,
+        token: String?,
     ): JsonObject? = send("PATCH", apiUrl, path, body, token)
 
     private fun post(
         apiUrl: String,
         path: String,
         body: JsonObject,
-        token: String,
+        token: String?,
     ): JsonObject? = send("POST", apiUrl, path, body, token)
 
     private fun send(
@@ -584,7 +616,7 @@ object HomerunApi {
         apiUrl: String,
         path: String,
         body: JsonObject,
-        token: String,
+        token: String?,
     ): JsonObject? {
         val connection = (URL("${apiUrl.trimEnd('/')}$path").openConnection() as HttpURLConnection)
             .apply {
@@ -592,7 +624,12 @@ object HomerunApi {
                 doOutput = true
                 connectTimeout = CONNECT_TIMEOUT_MS
                 readTimeout = READ_TIMEOUT_MS
-                setRequestProperty("Authorization", "Bearer $token")
+                // Only when there is one. An app error report may be the
+                // one request this app ever makes unsigned — see
+                // [performAppError].
+                if (!token.isNullOrBlank()) {
+                    setRequestProperty("Authorization", "Bearer $token")
+                }
                 setRequestProperty("Content-Type", "application/json")
                 setRequestProperty("Accept", "application/json")
             }

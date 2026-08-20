@@ -374,6 +374,16 @@ extension BridgeController: WKScriptMessageHandler {
         onThemeChanged?(theme)
     }
 
+    /// An uncaught error from the page, to the device log *and* to the API.
+    ///
+    /// This hook is injected at document start, which is what makes it worth
+    /// keeping now that the shared UI reports its own errors: it is live
+    /// before the bundle boots, so it catches the one failure a React error
+    /// boundary can never see — the bundle that throws on its way up and
+    /// leaves a blank screen with no page left to report from.
+    ///
+    /// Location rather than a stack: `window.onerror` gives a file and a line
+    /// and nothing else here. The core groups on what it is given.
     private func logJSError(_ params: Any?) {
         let details = params as? [String: Any] ?? [:]
         let message = details["message"] as? String ?? "?"
@@ -382,6 +392,13 @@ extension BridgeController: WKScriptMessageHandler {
         HostLog.bridge.error(
             "uncaught JS error: \(message, privacy: .public) (\(source, privacy: .public):\(line, privacy: .public))"
         )
+
+        AppErrors.report(
+            source: AppErrors.sourceUI,
+            severity: AppErrors.severityFatal,
+            kind: "boot",
+            message: message,
+            location: source.isEmpty ? nil : "\(source):\(line)")
     }
 
     /// Uncaught JS errors are otherwise invisible from the native side, and a

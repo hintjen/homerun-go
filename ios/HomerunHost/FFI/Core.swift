@@ -881,6 +881,56 @@ enum Core {
         }
     }
 
+    // MARK: - App errors
+    //
+    // Four calls, one funnel. The core owns every decision — whether two
+    // failures are the same bug, whether this one is worth sending again,
+    // what has to be redacted, what the body looks like — so that this host
+    // and the Android one cannot drift on any of them. See
+    // `homerun-core::reporting::app_error` and `homerun-pumpkin-ffi::errors`.
+
+    /// Point the core's crash artefacts at a directory this app owns.
+    ///
+    /// Once per process, at launch. Until this is called a panic in the native
+    /// core has nowhere to go and ``appErrorDrain(context:)`` finds nothing.
+    static func appErrorAttach(dataDir: String) {
+        _ = try? call("error.attach", ["dataDir": dataDir])
+    }
+
+    /// Record one failure and get back the request to send, if any.
+    ///
+    /// **Nil is the ordinary answer**, not a failure: the core holds a
+    /// sighting it has seen recently, and during a render loop it holds
+    /// thousands. A caller that logs per nil reproduces, in the device log,
+    /// the exact flood the core just prevented on the network.
+    static func appErrorReport(
+        context: [String: Any], occurrence: [String: Any]
+    ) -> Request? {
+        let value = try? call("error.report", ["context": context, "occurrence": occurrence])
+        return Request.from((value as? [String: Any])?["request"])
+    }
+
+    /// Write one failure to disk for the next launch to send.
+    ///
+    /// Synchronous by necessity — the caller is an uncaught-exception handler
+    /// on a process that is about to go, and anything asynchronous would not
+    /// finish. That is also why this exists rather than the crash path calling
+    /// ``appErrorReport(context:occurrence:)``: the request would be built
+    /// correctly and then never sent.
+    static func appErrorStash(context: [String: Any], occurrence: [String: Any]) {
+        _ = try? call("error.stash", ["context": context, "occurrence": occurrence])
+    }
+
+    /// Everything the last launch left behind, as requests to send now.
+    ///
+    /// The core deletes each file before reading it, so nothing here can be
+    /// seen twice however badly it goes.
+    static func appErrorDrain(context: [String: Any]) -> [Request] {
+        let value = try? call("error.drain", ["context": context])
+        let requests = (value as? [String: Any])?["requests"] as? [Any] ?? []
+        return requests.compactMap { Request.from($0) }
+    }
+
     /// What the console said a crash was.
     struct Diagnosis {
         let cause: String
