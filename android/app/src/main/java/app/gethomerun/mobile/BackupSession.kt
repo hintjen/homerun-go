@@ -138,11 +138,14 @@ class BackupSession(
             // Cancellation skips this deliberately: the only thing that cancels
             // a backup is a relaunch, and that starts its own.
             finishConsole(serverId)
+            Log.i(TAG, "$serverId: on-stop backup body finished")
         }
         jobs[serverId] = job
-        job.invokeOnCompletion {
+        job.invokeOnCompletion { cause ->
             jobs.remove(serverId, job)
-            onFinished()?.invoke(serverId)
+            val listener = onFinished()
+            Log.i(TAG, "$serverId: backup job completed (cause=$cause, listener=${listener != null})")
+            listener?.invoke(serverId)
         }
     }
 

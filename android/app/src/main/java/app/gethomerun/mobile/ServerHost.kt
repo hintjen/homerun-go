@@ -449,6 +449,11 @@ object ServerHost {
     fun syncHosting() {
         val snapshot = snapshot()
         val busy = snapshot.busy
+        Log.i(
+            TAG,
+            "hosting: id=$hostingId state=$hostingState backup=$hostingBackup " +
+                "starting=$hostingStarting busy=$busy wanted=$serviceWanted",
+        )
         if (busy == serviceWanted) {
             // Already up: refresh in place rather than re-entering the service.
             // The service listens for its own updates.
