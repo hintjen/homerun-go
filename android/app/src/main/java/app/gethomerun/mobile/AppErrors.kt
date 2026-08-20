@@ -212,6 +212,13 @@ object AppErrors {
     const val SOURCE_HOST = "host"
     const val SOURCE_UI = "ui"
     const val SOURCE_API = "api"
+
+    /**
+     * Below the host language: a Rust panic, or a process death the system
+     * reported to us afterwards because nothing of ours was alive to report
+     * it. See [ExitReasons].
+     */
+    const val SOURCE_NATIVE = "native"
     const val SEVERITY_FATAL = "fatal"
     const val SEVERITY_ERROR = "error"
 

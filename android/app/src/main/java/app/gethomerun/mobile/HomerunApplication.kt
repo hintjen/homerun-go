@@ -57,6 +57,13 @@ class HomerunApplication : Application() {
         // report it itself.
         AppErrors.drain()
 
+        // Beside the drain and for the same reason: both answer "what happened
+        // to the process before this one". The difference is who noticed --
+        // the drain sends what the dying process managed to write down, and
+        // this sends what the system recorded when it could not write anything
+        // at all.
+        ExitReasons.report(this)
+
         // Debug builds are inspectable from the host machine at
         // chrome://inspect — the only practical way to debug the shared UI
         // running inside the app.

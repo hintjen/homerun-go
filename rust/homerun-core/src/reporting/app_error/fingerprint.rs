@@ -399,6 +399,18 @@ fn is_noise(frame: &str) -> bool {
         "libswiftCore",
         "libdyld",
         "CoreFoundation",
+        // Android natives. A tombstone unwinds through the runtime and the C
+        // library on the way to whatever actually faulted, so these decide
+        // nothing — every native crash on the platform passes through them.
+        "libc.so",
+        "libart.so",
+        "libandroid_runtime",
+        "libnativehelper",
+        "libbase.so",
+        "libutils.so",
+        "libbinder",
+        "libc++",
+        "linker64",
         // Rust
         "core::panicking",
         "std::panicking",
@@ -863,6 +875,54 @@ java.lang.IllegalStateException: nope
         assert_eq!(strip_chunk_hash("main.js"), "main.js");
         assert_eq!(strip_chunk_hash("Reporting.kt"), "Reporting.kt");
         assert_eq!(strip_chunk_hash("1e90c2ccc103585c.js"), "chunk.js");
+    }
+
+    #[test]
+    fn a_native_crash_groups_on_our_library_not_the_runtime() {
+        // The shape `ExitReasons` sends: a tombstone's backtrace rewritten as
+        // `at symbol (library)`, which is the format every other language here
+        // already produces. Every native death on Android unwinds through the
+        // C library and the ART runtime, so without these markers each one
+        // would fingerprint as `libc.so:abort` and merge with all the others.
+        let stack = concat!(
+            "signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0\n",
+            "    at abort (libc.so)\n",
+            "    at art::Runtime::Abort (libart.so)\n",
+            "    at homerun_pumpkin_ffi::server::tick (libhomerun_pumpkin_ffi.so)\n",
+        );
+
+        let seen = Occurrence {
+            stack: Some(stack.into()),
+            ..occurrence(Source::Native, "native-crash", "Native crash")
+        };
+        let sig = signature(&seen);
+
+        assert!(sig.contains("libhomerun_pumpkin_ffi"), "{sig}");
+        for runtime in ["libc.so", "libart.so"] {
+            assert!(!sig.contains(runtime), "{runtime} decided the group: {sig}");
+        }
+    }
+
+    #[test]
+    fn two_native_crashes_in_different_places_stay_apart() {
+        // The guard on the markers above: filtering the runtime out must not
+        // filter so much that unrelated faults collapse together.
+        let from = |symbol: &str| Occurrence {
+            stack: Some(format!(
+                concat!(
+                    "    at abort (libc.so)\n",
+                    "    at art::Runtime::Abort (libart.so)\n",
+                    "    at {} (libhomerun_pumpkin_ffi.so)\n",
+                ),
+                symbol
+            )),
+            ..occurrence(Source::Native, "native-crash", "Native crash")
+        };
+
+        assert_ne!(
+            signature(&from("homerun_pumpkin_ffi::server::tick")),
+            signature(&from("homerun_pumpkin_ffi::backup::restore")),
+        );
     }
 
     #[test]
