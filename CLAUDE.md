@@ -194,8 +194,15 @@ Known gaps, so you do not rediscover them:
   JVM backend uses. `ServerHost` holds both backends and routes per launch on
   the game type, which the core decides (`minecraft.hosting.serves`). iOS still
   links the engine, because it cannot spawn one.
-- **The arm64 slice has never run on hardware.** Incremental builds usually
-  refresh only the ABI you are emulating; assume the other one is stale.
+- **arm64 builds and installs; no server has been started on it.** The whole
+  payload — FFI, launcher, `libpumpkin.so` at 65 MB, restic, wireproxy, a JRE —
+  is staged and extracted to `nativeLibraryDir` on a Pixel 9 Pro XL, and the
+  host reports `engines: jvm=true pumpkin=true` there. What has not happened on
+  hardware is a launch: no world, no stop ladder, no metrics. Everything in
+  `plans/android.md` about verifying those was done on the x86_64 emulator.
+
+  Incremental builds still refresh only the ABI you are building; assume the
+  other one is stale.
 - **iOS Swift changes have often been written without a compiler.**
   `plans/ios-handoff.md` tracks which, and what to check first. The device
   websocket is no longer one of them: it builds, runs on a simulator, and its
