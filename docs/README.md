@@ -386,6 +386,29 @@ then says "running on another device".
 
 ---
 
+### 🧯 [Validating error reporting on iOS](./ios-error-reporting-runbook.md)
+
+Every unexpected failure — JavaScript, Kotlin, Swift, Rust — lands in one
+table. The core logic, the endpoint and the Android host are verified on
+hardware; the Swift has never been compiled. This is how to prove it.
+
+**Contains**:
+- What is already proven and what is not, so no time goes on things that work
+- The four native triggers (`HOMERUN_DEBUG_ERROR`) and the two JS ones you
+  throw by hand from Safari's Web Inspector
+- MetricKit: why a crash is not reportable for a day, and the Xcode menu item
+  that gets you a payload now
+- Why a native crash has offsets instead of function names, and why `kind`
+  carries the signal because of it
+- The three things that otherwise cost an hour: an OTA bundle outranking the
+  one you built, the reporter dropping repeats on purpose, and one row being a
+  *group* of failures
+
+**Read this for**: Bringing the iOS half up on a Mac, or a report that did not
+arrive.
+
+---
+
 ### ⛏️ [The Minecraft account on mobile](./minecraft-account.md)
 
 Which Minecraft player a phone belongs to. Stats are keyed on a Minecraft uuid

@@ -110,6 +110,11 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         // subscribing here costs launch nothing.
         ExitDiagnostics.shared.start()
 
+        #if DEBUG
+            // Compiled out of a release entirely. See [DebugTriggers].
+            DebugTriggers.armIfRequested()
+        #endif
+
         let bridge = BridgeController(deepLinks: deepLinks, backend: backend)
         self.bridge = bridge
 
