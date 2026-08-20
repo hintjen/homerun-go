@@ -45,18 +45,83 @@ jobs:
 
   rust:
     name: FFI tests
-    runs-on: ubuntu-latest
+    # simrig-homerun-runner. A hosted runner cannot do this job: `pumpkin` is a
+    # git dependency on the private hintjen/Pumpkin, and Cargo resolves
+    # optional dependencies whether or not their feature is enabled, so even a
+    # default-feature `cargo test` has to clone it. The self-hosted runner also
+    # keeps ~/.cargo warm, which matters for a dependency tree this size.
+    runs-on: [self-hosted, Linux, X64, simrig]
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      # A read-only deploy key on hintjen/Pumpkin: CI can read that one
+      # repository and nothing else. Scoped deliberately -- the runner user's
+      # own SSH key would also work and would hand CI everything that account
+      # can reach.
+      #
+      # The agent is started per job and killed at the end, so no key is left
+      # on disk.
+      #
+      # The rewrite is what makes the key apply at all, since Cargo.toml pins
+      # https URLs. Two details matter:
+      #
+      #   - It goes in GIT_CONFIG_* rather than `git config`. A `--local`
+      #     rewrite has no effect, because Cargo fetches from its own checkout
+      #     under ~/.cargo/git/db and never reads this repo's config; and
+      #     `--global` would rewrite every https GitHub URL for every job on
+      #     this shared runner, including actions/checkout's token clone.
+      #   - It is scoped to hintjen/Pumpkin, not to github.com. The other git
+      #     dependency, hintjen/rustic-fork, is public and resolves over https;
+      #     forcing it onto SSH would authenticate it with a deploy key scoped
+      #     to a different repository.
+      - name: Authenticate to the private Pumpkin fork
+        env:
+          DEPLOY_KEY: ${{ secrets.PUMPKIN_DEPLOY_KEY }}
+        run: |
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::PUMPKIN_DEPLOY_KEY is unset; the pumpkin git dependency cannot be resolved."
+            exit 1
+          fi
+          eval "$(ssh-agent -s)"
+          echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> "$GITHUB_ENV"
+          echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> "$GITHUB_ENV"
+          echo "$DEPLOY_KEY" | ssh-add - 2>&1 | sed 's/^/  /'
+          mkdir -p ~/.ssh
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          sort -u -o ~/.ssh/known_hosts ~/.ssh/known_hosts
+          {
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=url.git@github.com:hintjen/Pumpkin.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/hintjen/Pumpkin"
+          } >> "$GITHUB_ENV"
+
+      # Already installed on this runner. Not using dtolnay/rust-toolchain@stable
+      # here on purpose: it would mutate the shared toolchain that other jobs on
+      # this host depend on. `component add` is idempotent and touches nothing
+      # else.
+      - name: Ensure clippy
+        run: rustup component add clippy
 
       # The crate builds and tests host-native on any OS — no device, no
-      # simulator, no Pumpkin. Most of the FFI is covered here.
+      # simulator, no Pumpkin *linked*. Most of the FFI is covered here.
+      # git-fetch-with-cli makes Cargo shell out to git, which is what picks up
+      # the ssh-agent above; its built-in libgit2 transport does not.
       - name: Test
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          CARGO_BUILD_JOBS: "16"
         run: cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml
 
       - name: Clippy
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          CARGO_BUILD_JOBS: "16"
         run: cargo clippy --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml --all-targets -- -D warnings
+
+      # Last, and `always()`: the agent holds the deploy key in memory, and a
+      # self-hosted runner's processes outlive the job unless something reaps
+      # them.
+      - name: Stop the ssh-agent
+        if: always()
+        run: |
+          if [ -n "${SSH_AGENT_PID:-}" ]; then kill "$SSH_AGENT_PID" 2>/dev/null || true; fi
