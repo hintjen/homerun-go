@@ -335,6 +335,51 @@ Both fixed, and both worth knowing because they explain the shape above:
 Either one alone made `--api` useless on every device, which is why the flag
 looked broken rather than the page.
 
+## Which UI a build runs, and turning updates off
+
+A build does not necessarily run the UI it was built with. `BundleStore` serves
+`files/ui/current` — a bundle fetched over the air — in preference to the
+`assets/web` staged into the binary, deliberately: that is the whole point of
+`docs/ota-bundles.md`. Since 2026-08-20 a bundle that arrives also applies
+**immediately** rather than at the next launch, so a build can move onto a
+different UI mid-session.
+
+That is right for a user and wrong for a session whose purpose is the UI you
+just staged. One flag per platform turns it off:
+
+```bash
+npm run android:run -- --no-ota      # shorthand for -PotaUpdates=off
+xcodebuild … HOMERUN_OTA_UPDATES=0   # iOS, defaulted in ios/project.yml
+```
+
+Off means **ignore over-the-air bundles entirely**, not merely "do not fetch":
+nothing is downloaded, and a bundle already on disk is neither promoted nor
+served. So there is nothing to delete first, and nothing is deleted — a later
+build without the flag carries on exactly where it left off. Both hosts say
+`over-the-air updates are off in this build` once per launch, on
+`HomerunBundle` / `HostLog.bundle`.
+
+**On by default, including for debug.** The update path is only ever exercised
+on a debug build, so defaulting it off in development would mean nobody sees it
+work until a release. And a *release* built with it off would look completely
+healthy while silently never updating again — every shared-UI fix would need
+another store release — so Gradle's `verifyReleaseConfig` refuses one. iOS has
+no equivalent gate; the setting lives in `project.yml` and is not something a
+release build should be passing.
+
+There is no "off" spelled as an empty signing key, though both hosts do treat a
+blank `BUNDLE_PUBLIC_KEY` that way. `prop()` falls back to the compiled-in
+default for a blank `-P` override and the hex `require` rejects an empty one, so
+`-PbundlePublicKey=` never disabled anything — it just looked like it had.
+
+To ask a running device which UI it is on rather than guessing:
+
+```bash
+adb logcat -d -s HomerunBundle:* | tail -3
+#  serving the shipped bundle   <- the one in the APK
+#  serving bundle 2026-08-13.2  <- one from the CDN
+```
+
 ## Push credentials
 
 Push is Firebase Cloud Messaging on both platforms. Every file it needs is a

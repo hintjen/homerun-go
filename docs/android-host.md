@@ -374,6 +374,22 @@ on the WebView, and the `webView` field is read *inside* the hop rather than
 before it, because it belongs to whichever view currently exists and is
 replaced when the render process dies.
 
+#### Knowing when nothing is in flight
+
+The router counts the handlers it has dispatched for the current page and calls
+`onPageIdle` when the last of them unwinds — main thread, like the other two
+hooks. `MainActivity` uses it for one thing: putting a downloaded UI bundle on
+screen the moment doing so cannot cancel anything (`docs/ota-bundles.md` §
+*Applying it: as soon as it arrives*).
+
+The count is deliberately not derived from `pageJobs.children`. A cancelled
+coroutine stays a child until it actually unwinds, so a page teardown would
+read as busy for as long as that took. It is also generation-stamped: a handler
+that finishes after its page died must not decrement the *new* page's count,
+which would read as idle while a call was in flight — and the one thing that
+must never happen here is applying a bundle underneath a live
+`wait-for-update-check`, which the shared UI awaits on the post-login path.
+
 ### Haptics — `Haptics.kt`
 
 The `haptic` send carries what the user just did, not what the motor should do.

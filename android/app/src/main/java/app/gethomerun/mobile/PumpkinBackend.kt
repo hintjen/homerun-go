@@ -174,6 +174,29 @@ class PumpkinBackend(
         currentPort = port
         logCursor = 0
 
+        // Empty the console before this launch writes anything into it.
+        // Without this the supervisor clears it inside `start` instead, which
+        // is *after* the world restore and the tunnel have written their
+        // notes — so on every launch but the first, the slow part of a start
+        // explained itself into a buffer that was about to be wiped.
+        // `JavaServerBackend.reset` has always done this; this backend never
+        // did.
+        runCatching { NativeServer.nativeConsoleBegin() }
+            .onFailure { Log.w(TAG, "the console was not cleared for this launch: ${it.message}") }
+
+        // The core routes a Java server here only when the device has no JVM.
+        // That is ordinary on iOS, which cannot spawn one; on Android it means
+        // the build shipped without a Java runtime, and the player's vanilla
+        // server is quietly running different server software. Said in the
+        // console because that is the surface they are already looking at when
+        // they wonder why their server does not behave like Minecraft does.
+        if (runCatching { Core.needsJvm(config.gameType) }.getOrDefault(false)) {
+            note(
+                serverId,
+                "[Homerun] Hosting this server with Pumpkin: this device has no Java runtime.",
+            )
+        }
+
         // A relaunch supersedes a backup still reading the world it is about
         // to overwrite. The core answers whether this start is that.
         if (ServerHost.lifecycle.supersedesOnStopBackup(serverId)) {

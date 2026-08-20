@@ -27,6 +27,30 @@ enum Capabilities {
     /// old key until it updates through the store.
     static let bundlePublicKey = "8d44ecfa010fe0136b450baee986a352cd027d3555403f0662dce5eb2ff16f4e"
 
+    /// Whether this build has anything to do with over-the-air bundles at all.
+    ///
+    /// `HOMERUN_OTA_UPDATES=0` (see `ios/project.yml`) is for a development
+    /// build whose whole point is the UI just staged into the app's `web/`.
+    /// Off means **ignore them entirely**, not merely "do not fetch":
+    /// `BundleStore` promotes nothing, serves the shipped copy, and reports no
+    /// pending bundle. Nothing on disk is touched, so a build with it back on
+    /// carries on where it left off. Android's `-PotaUpdates=off`.
+    ///
+    /// **Defaults to on, and every ambiguous reading resolves to on.** A
+    /// missing key means a project generated before this existed; an
+    /// unsubstituted `$(…)` means the setting reached Info.plist undefined.
+    /// Both are accidents, and an app that silently stopped updating is far
+    /// harder to notice than one that never started — the same argument as the
+    /// empty signing key above, in the other direction.
+    static let otaUpdates: Bool = {
+        guard
+            let raw = Bundle.main.object(forInfoDictionaryKey: "HomerunOTAUpdates") as? String,
+            !raw.isEmpty,
+            !raw.hasPrefix("$(")
+        else { return true }
+        return !["0", "no", "off", "false"].contains(raw.lowercased())
+    }()
+
     /// Injected at document start — the UI resolves capabilities synchronously
     /// as its first act and cannot await the host.
     ///

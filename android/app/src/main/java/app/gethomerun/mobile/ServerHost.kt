@@ -169,6 +169,28 @@ object ServerHost {
             // the core naming an engine this host has not been taught about.
             else -> null
         } ?: throw ServerBackendException.Engine("This device can't host this kind of server.")
+
+        // Loud, because the interesting case is otherwise silent. The core
+        // serves a plain Java server with Pumpkin when the device has no JVM
+        // — right on iOS, where every server ever created is `native`, and on
+        // Android it means this build staged no Java runtime. The player's
+        // vanilla server then runs different server software and nothing says
+        // so. Worth spelling out because it is a build accident and not a
+        // configuration one: `npm run build:android` does not stage a runtime
+        // (only `build:android:release` does), and the Gradle warning that
+        // produces is one line in a very long log.
+        if (verdict.engine == "pumpkin" &&
+            runCatching { Core.needsJvm(gameType) }.getOrDefault(false)
+        ) {
+            Log.w(
+                TAG,
+                "no Java runtime in this build - serving $gameType with Pumpkin instead; " +
+                    "stage one with `npm run jre:android`",
+            )
+        } else {
+            Log.i(TAG, "$gameType runs on ${verdict.engine}")
+        }
+
         active = chosen
         return chosen
     }

@@ -24,6 +24,11 @@ final class BridgeController: NSObject, BridgeEventSink {
 
     private let router: BridgeRouter
 
+    /// The engine, for one question this class asks it: is this device
+    /// hosting? A staged bundle waits until it is not — see
+    /// ``applyStagedBundle(_:)``.
+    private let backend: PumpkinBackend
+
     /// The scheme the page has resolved, or nil until it says. Nil means the
     /// splash is still up, so the status bar is being read against brand blue
     /// rather than against either theme.
@@ -53,6 +58,7 @@ final class BridgeController: NSObject, BridgeEventSink {
 
     init(deepLinks: DeepLinkManager, backend: PumpkinBackend) {
         router = BridgeRouter(deepLinks: deepLinks, backend: backend)
+        self.backend = backend
 
         let config = WKWebViewConfiguration()
         // Both must be set before the WebView exists. The configuration retains
@@ -104,7 +110,16 @@ final class BridgeController: NSObject, BridgeEventSink {
         // told *after* the page is, because the page is what the player is
         // looking at.
         backend.onStateChanged = { [weak self] serverId, state, _ in
-            defer { Reporting.onStateChanged(serverId: serverId, state: state) }
+            defer {
+                Reporting.onStateChanged(serverId: serverId, state: state)
+                // A run ending is the moment this device stops being busy,
+                // which is what can hold a staged bundle back. Last, so the
+                // page that may be about to be replaced still gets its final
+                // state and the report still goes out.
+                if state == .stopped || state == .crashed {
+                    self?.applyStagedBundle("the server reached \(state.rawValue)")
+                }
+            }
             guard let wire = ["running", "stopped", "crashed"].first(where: { $0 == state.rawValue })
             else { return }
             self?.emit("native-server-state-changed", [["serverId": serverId, "state": wire]])
@@ -167,15 +182,14 @@ final class BridgeController: NSObject, BridgeEventSink {
             self.webView.reload()
         }
 
-        // Offer an update as soon as it is staged rather than waiting for the
-        // user to relaunch of their own accord.
+        // Apply an update as soon as it is staged rather than offering it.
+        // There is no prompt on this host: `update-available` is what the
+        // shared UI's update card subscribes to, and never emitting it is what
+        // keeps the card off the screen.
         BundleUpdater.onBundleStaged = { [weak self] bundle in
             Task { @MainActor in
-                self?.emit("update-available", [[
-                    "status": "available",
-                    "version": bundle,
-                    "bundle": bundle,
-                ]])
+                HostLog.bundle.info("bundle \(bundle, privacy: .public) is staged")
+                self?.applyStagedBundle("it was just staged")
             }
         }
 
@@ -183,6 +197,67 @@ final class BridgeController: NSObject, BridgeEventSink {
         // of network and disk for something that takes effect later, so there
         // is nothing to gain by making the user wait on it.
         BundleUpdater.check()
+    }
+
+    // MARK: - Over-the-air updates
+
+    /// Put a downloaded bundle on screen, if this is a safe moment to.
+    ///
+    /// There is no update prompt on this host. A bundle that has been fetched,
+    /// verified and unpacked goes live as soon as the app can take it, which
+    /// is usually within a second of it arriving — the page reloads and comes
+    /// back on the new UI. The alternative was a card asking permission for
+    /// something that costs a second and that nobody can evaluate, and
+    /// "later" meant the next launch anyway.
+    ///
+    /// **Two things make now the wrong moment**, and both defer rather than
+    /// cancel:
+    ///
+    ///  - **A bridge call is in flight.** A reload clears `pending`, so the
+    ///    call's promise never resolves. `wait-for-update-check` is itself one
+    ///    of them — it is awaited on the mandatory post-login path, so
+    ///    applying underneath it would hang login at a spinner, which is the
+    ///    exact failure this protocol is most careful about.
+    ///  - **This device is hosting.** A running server survives the swap — it
+    ///    lives in the backend, not the page — but the console scrollback does
+    ///    not, and interrupting someone mid-session to reload the UI is a poor
+    ///    trade for a fix that can wait for the stop.
+    ///
+    /// The on-stop backup deliberately does *not* hold it back, where Android's
+    /// `busy` does: it runs in a detached task on the backend, owns no page
+    /// state, and a reload cannot touch it.
+    ///
+    /// Every path back to idle calls this again — the last reply of a page,
+    /// the handshake of a fresh one, a server reaching a final state — and if
+    /// none of them ever does, `BundleStore.activate()` in `AppDelegate` still
+    /// takes it at the next launch. That path is untouched and remains the
+    /// floor.
+    func applyStagedBundle(_ trigger: String) {
+        guard let staged = BundleStore.pending() else { return }
+
+        guard case .live = delivery else {
+            HostLog.bundle.info(
+                "holding \(staged, privacy: .public) back (\(trigger, privacy: .public)): no page is listening yet")
+            return
+        }
+        guard pending.isEmpty else {
+            HostLog.bundle.info(
+                "holding \(staged, privacy: .public) back (\(trigger, privacy: .public)): the page is mid-call")
+            return
+        }
+        guard backend.lifecycle.activeIds().isEmpty else {
+            HostLog.bundle.info(
+                "holding \(staged, privacy: .public) back (\(trigger, privacy: .public)): this device is hosting")
+            return
+        }
+
+        HostLog.bundle.info(
+            "applying \(staged, privacy: .public) now (\(trigger, privacy: .public))")
+        BundleStore.activate()
+        // Forget the resolved root before reloading, or the page comes back on
+        // the bundle it was already showing and nothing appears to happen.
+        AppSchemeHandler.invalidateRoot()
+        webView.reload()
     }
 
     // MARK: - Host -> UI
@@ -254,6 +329,9 @@ extension BridgeController: WKScriptMessageHandler {
             // protocol says that.
             BundleStore.confirm()
             flushQueue()
+            // A bundle held back while the last page was busy takes the first
+            // chance it gets. A no-op unless one is waiting.
+            applyStagedBundle("the page announced itself")
             return
         }
 
@@ -317,6 +395,11 @@ extension BridgeController: WKScriptMessageHandler {
                 })
             }
             if let id { self?.pending.removeValue(forKey: id) }
+            // The other half of applying immediately: a bundle that arrived
+            // while this call was in flight goes live now that it is not.
+            if self?.pending.isEmpty == true {
+                self?.applyStagedBundle("the page went idle")
+            }
         }
 
         // A send has no id and nothing to correlate; only invokes are tracked.

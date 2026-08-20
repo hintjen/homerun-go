@@ -38,11 +38,59 @@ Most changes are provable without hardware, and a device round trip is minutes.
 
 ### Android
 
+The fast loop, for a change to the FFI or the UI bundle, on a device that is
+already carrying everything else:
+
 ```bash
 npm run ui:android          # stage the shared UI bundle into assets/web
 npm run rust:android        # rebuild the FFI into jniLibs (gradle will not)
 node scripts/android-app.js install
 ```
+
+**That is not a whole app.** None of it stages the Java runtime, restic, the
+Pumpkin binary or wireproxy — and neither does `npm run build:android`. Only
+`build:android:release` names the full set. In a fresh checkout or a new
+worktree, where all of it starts empty, those three lines produce an APK that
+builds, installs, launches and is missing half of what it hosts with:
+
+```bash
+npm run ui:android
+npm run rust:android          # libhomerun_pumpkin_ffi.so
+npm run rust:java-launcher    # libjavabin.so   - the exec'able launcher
+npm run rust:pumpkin-bin      # libpumpkin.so
+npm run wireproxy:android     # libwireproxy.so - no tunnel without it
+npm run restic:android        # librestic.so    - no backups without it
+npm run jre:android           # assets/jre-25   - no Java server without it
+node scripts/android-app.js install
+```
+
+#### A missing payload is silent at runtime
+
+`verifyNativePayload` gates a **release** only. A debug build ships whatever
+happens to be staged, and each gap surfaces somewhere other than where you are
+looking:
+
+| Missing | What you actually see |
+|---|---|
+| `assets/jre-*` | **every Java server runs on Pumpkin.** `JavaRuntime.isAvailable` is false, so the host declares `jvm=false`, and `homerun-core::minecraft::hosting::serves` serves a plain Java server with Pumpkin whenever a device has no JVM. That arm is correct on iOS and here it is a silent substitution: a vanilla server the player created runs different server software |
+| `librestic.so` | backups quietly no-op |
+| `libwireproxy.so` | the launch fails at the tunnel, reported as a network error |
+| `libpumpkin.so` | a Pumpkin server refuses with "This build cannot host this kind of server." |
+
+So read the host's own inventory after **every** install, before concluding
+anything from behaviour:
+
+```bash
+adb logcat -d | grep -E "engines:|Pumpkin instead"
+# I/HomerunHost: engines: jvm=true pumpkin=true
+```
+
+`ServerHost.select` also warns on the substitution itself
+(`serving <gameType> with Pumpkin instead`), and `PumpkinBackend` says so in
+the server console. Gradle does warn about a missing runtime too
+(`verifyJavaRuntime`) — but it is a `logger.warn` in a two-hundred-line build
+log, and it was missed on a real phone, which is how a vanilla server came to
+be hosted by Pumpkin with nothing in the app admitting it.
 
 `scripts/android-app.js` exists for the things Gradle cannot do for itself: pick
 a JDK inside AGP's supported range, refuse to build without a staged bundle, and
@@ -187,14 +235,31 @@ If the point of the build is to run *your* UI, do not race the updater —
 turn it off for that build:
 
 ```bash
-node scripts/android-app.js install -PbundlePublicKey=
+npm run android:run -- --no-ota          # or: -PotaUpdates=off
+xcodebuild … HOMERUN_OTA_UPDATES=0       # iOS, same meaning
 ```
 
-An empty key disables updates entirely (`BundleUpdater` will not fetch what it
-cannot verify), so the APK's own `assets/web` is what serves. Delete
-`files/ui` as well, or an already-activated bundle still outranks it. Both are
-per-build and per-device: a later install without the flag restores normal
-updating, and nothing about the branch changes.
+Off means **ignore them entirely**, not merely "do not fetch": nothing is
+downloaded, and a bundle already sitting in `files/ui` is neither promoted nor
+served, so you do not have to delete anything. `HomerunBundle` says
+`over-the-air updates are off in this build` once per launch, and nothing on
+disk is touched — a later build without the flag picks up exactly where it left
+off. A **release** built this way is refused by `verifyReleaseConfig`, because
+it would look healthy and silently never update again.
+
+> **This section used to say `-PbundlePublicKey=`, and that does nothing.**
+> An empty key genuinely does disable the updater, but `prop()` in
+> `build.gradle.kts` treats a blank `-P` override as absent and falls back to
+> the compiled-in key — and the hex `require` would reject an empty one
+> anyway. The build succeeded, the flag was ignored, and updates kept
+> arriving. The switch above exists as of 2026-08-20; before it there was no
+> working one.
+
+The other half of "am I running my own UI" changed at the same time: a bundle
+that arrives now **applies itself immediately** rather than waiting for a
+relaunch or a prompt, so a long session on a build with updates on can move
+underneath you mid-run. `docs/ota-bundles.md` § *Applying it: as soon as it
+arrives*.
 
 **Gradle can decide there is nothing to do.** Compare the installed APK against
 the built one rather than trusting `BUILD SUCCESSFUL`:

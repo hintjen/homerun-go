@@ -158,6 +158,25 @@ class BridgeRouter(
     @Volatile
     var onAppearance: ((String) -> Unit)? = null
 
+    /**
+     * The page is live and nothing is mid-call on it — see [pageIdle].
+     *
+     * A staged over-the-air bundle is applied by rebuilding the WebView, and
+     * that cancels every in-flight handler ([onPageGone]). Most of them the
+     * fresh page would simply ask again, but not all: `native-server-start`
+     * drives a launch for minutes, and `wait-for-update-check` is awaited on
+     * the mandatory post-login path, where a cancelled invoke is a login that
+     * never finishes. So the update waits for this instead of interrupting
+     * one.
+     *
+     * **Invoked on the main thread**, like [onApplyUpdate], and for the same
+     * reason — what it does on the other side is rebuild a view hierarchy.
+     * Fires on every transition into idle, so a listener must be cheap and
+     * must tolerate having nothing to do.
+     */
+    @Volatile
+    var onPageIdle: (() -> Unit)? = null
+
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
@@ -324,6 +343,33 @@ class BridgeRouter(
      */
     private var pageJobs = Job()
 
+    /**
+     * Handlers dispatched for the current page that have not finished.
+     *
+     * Main-thread state like [ready] and [queued]: [dispatch] runs there and
+     * every completion hops back. Not derived from [pageJobs]' children,
+     * because a cancelled job stays a child until it actually unwinds and a
+     * page teardown would read as busy for as long as that took.
+     */
+    private var inFlight = 0
+
+    /**
+     * Bumped by [onPageGone]. A handler that unwinds after its page died must
+     * not decrement the *new* page's count, which would read as idle while a
+     * call was in flight.
+     */
+    private var pageGeneration = 0
+
+    /**
+     * Main thread. A page is listening and nothing is mid-call on it.
+     *
+     * "Nothing in flight" counts sends as well as invokes. A send has no reply
+     * to lose, but it is still work the page asked for, and the ones here that
+     * take any time at all — `native-server-command`, `quit-and-install` —
+     * are all worth finishing.
+     */
+    fun pageIdle(): Boolean = ready && inFlight == 0
+
     // ---------------------------------------------------------------------
     // UI -> host
     // ---------------------------------------------------------------------
@@ -402,6 +448,8 @@ class BridgeRouter(
         //
         // Handlers that genuinely need the main thread hop back for the few
         // lines that do; see the class doc for which and why.
+        inFlight++
+        val generation = pageGeneration
         scope.launch(pageJobs + Dispatchers.IO) {
             try {
                 val result = handler(envelope.params)
@@ -420,8 +468,19 @@ class BridgeRouter(
                         )
                     )
                 }
+            } finally {
+                // Runs on cancellation too, which is why the generation is
+                // checked rather than the count merely floored at zero.
+                main.post { handlerFinished(generation) }
             }
         }
+    }
+
+    /** One handler has unwound. Main thread. */
+    private fun handlerFinished(generation: Int) {
+        if (generation != pageGeneration) return
+        inFlight--
+        if (pageIdle()) onPageIdle?.invoke()
     }
 
     // ---------------------------------------------------------------------
@@ -449,6 +508,10 @@ class BridgeRouter(
         BundleStore.confirm(context)
         while (queued.isNotEmpty()) evaluate(queued.removeFirst())
         resyncServerState()
+        // A page that has just announced itself with nothing outstanding is
+        // idle, and this is the only transition into idle that no handler
+        // completion reports.
+        if (pageIdle()) onPageIdle?.invoke()
     }
 
     /**
@@ -641,6 +704,11 @@ class BridgeRouter(
             queued.clear()
             pageJobs.cancel()
             pageJobs = Job()
+            // The count goes with them. Handlers already unwinding will post
+            // their completion after this, which is what [pageGeneration]
+            // exists to discard.
+            pageGeneration++
+            inFlight = 0
         }
     }
 
