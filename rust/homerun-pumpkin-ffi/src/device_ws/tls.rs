@@ -92,6 +92,14 @@ impl instant_acme::HttpClient for AcmeHttp {
 /// fortnight — see the renewal note in `plans/device-websocket.md`.
 const RENEW_AFTER: Duration = Duration::from_secs(60 * 24 * 60 * 60);
 
+/// How long a whole order may take before it is called a failure.
+///
+/// Generous: an HTTP-01 validation involves Let's Encrypt reaching this device
+/// from the internet, and a phone on a slow link is not a broken phone. It is
+/// here to bound *silence*, not to be a tight timeout -- five minutes is far
+/// longer than a healthy order and far shorter than for ever.
+const ORDER_DEADLINE: Duration = Duration::from_secs(5 * 60);
+
 /// Where the account and the certificate live.
 ///
 /// One directory, app-private. It holds a private key, so on Android it must
@@ -218,7 +226,27 @@ pub async fn ensure_certificate(
         None => log::info("no certificate stored — ordering one"),
     }
 
-    match order_certificate(store, fqdn, challenge_port, staging).await {
+    // Bounded, because the failure this file was written to fix produced no
+    // error at all. `instant-acme`'s poll uses a retry policy that can wait a
+    // very long time, and a validation that never completes leaves the whole
+    // order hanging -- which is exactly how the platform-verifier bug in the
+    // header presented: "ordering one", and then nothing, for ever. Silence is
+    // the one failure nothing downstream can see, so it is turned into an
+    // error here rather than left to be nothing.
+    let ordered = match tokio::time::timeout(
+        ORDER_DEADLINE,
+        order_certificate(store, fqdn, challenge_port, staging),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "the order did not finish within {}s",
+            ORDER_DEADLINE.as_secs()
+        )),
+    };
+
+    match ordered {
         Ok(fresh) => {
             if let Err(err) = store.save(&fresh) {
                 // Worth saying loudly. The certificate works for this run, and

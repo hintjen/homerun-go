@@ -698,6 +698,15 @@ pub unsafe extern "C" fn homerun_device_ws_start(config: *const c_char) -> *mut 
                     .get("acmeStaging")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                // Optional, and silently absent when a host has not wired it
+                // up: without it a certificate failure is logged and not
+                // reported, which is where this started. Every field of
+                // `Context` has a default, so a host sending a partial one
+                // still gets a usable report rather than a parse failure.
+                error_context: parsed
+                    .get("errorContext")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()),
             };
             if config.api_url.is_empty() || config.jwks_url.is_empty() {
                 return err("the device websocket needs an apiUrl and a jwksUrl");

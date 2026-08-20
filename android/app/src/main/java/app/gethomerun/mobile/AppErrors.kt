@@ -165,7 +165,14 @@ object AppErrors {
      * the report that arrives during exactly that window is the one worth
      * most. A partial context beats no report.
      */
-    private fun context(): JsonObject = buildJsonObject {
+    /**
+     * Not private: [DeviceWebsocket] hands this to the native core at startup,
+     * so a certificate failure inside the socket can be reported as an app
+     * error instead of vanishing into logcat. The core holds it for the life
+     * of the socket, which is why it must be cheap to produce and forgiving of
+     * everything being absent.
+     */
+    fun context(): JsonObject = buildJsonObject {
         put("deviceId", runCatching { DeviceRegistry.current()?.deviceId }.getOrNull().orEmpty())
         put("session", session)
         put("platform", "android")

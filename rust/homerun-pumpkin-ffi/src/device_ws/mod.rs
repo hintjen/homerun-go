@@ -41,6 +41,7 @@ use homerun_core::device_ws::protocol::{
 };
 use homerun_core::minecraft;
 use homerun_core::reporting;
+use homerun_core::reporting::app_error;
 
 pub mod tls;
 
@@ -74,6 +75,62 @@ pub struct Config {
     /// by browsers, which is the point: staging has generous rate limits and
     /// production allows five certificates per hostname per week.
     pub acme_staging: bool,
+    /// Who this install is, so a certificate failure can be reported as an app
+    /// error rather than only logged. Absent on a host that has not wired it
+    /// up, and then nothing is reported -- see [`note_cert_failure`].
+    pub error_context: Option<app_error::Context>,
+}
+
+/// Report a certificate failure, which is otherwise completely invisible.
+///
+/// Every path in this file used to end at `log::warn`, which on a phone means
+/// logcat, which means gone. And a device with no certificate does not crash
+/// and shows the user nothing -- `wss://` simply never works, so nobody files
+/// a bug either. This is the one class of failure with no other witness.
+///
+/// **Stashed rather than sent.** Nothing here holds a device token: the socket
+/// authenticates the *dashboard* against Keycloak, and `perform_as` signs with
+/// the caller's token, which belongs to whoever is connected and not to us.
+/// The host's drain has a device credential on the next launch and runs the
+/// ledger over these on the way out, so the deduplication still happens -- one
+/// launch later, which for a certificate is soon enough.
+fn note_cert_failure(
+    context: Option<&app_error::Context>,
+    kind: &str,
+    severity: app_error::Severity,
+    message: String,
+) {
+    let Some(context) = context else {
+        // A host that never passed one. Reporting under a fabricated context
+        // would put rows in the table attributed to nothing.
+        return;
+    };
+
+    let at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let occurrence = app_error::Occurrence {
+        source: app_error::Source::Native,
+        severity,
+        kind: kind.to_string(),
+        message,
+        stack: None,
+        // Not a URL and not a route: the subsystem, which is what identifies
+        // this the way a file and a symbol identify a crash.
+        location: Some("device-ws/tls".to_string()),
+        http: None,
+        extra: serde_json::Map::new(),
+        at_ms,
+    };
+
+    match crate::errors::stash(context, &occurrence) {
+        Ok(_) => log::info(&format!("recorded {kind} for the next launch to report")),
+        // Nowhere left to escalate to, and this must never be the reason the
+        // socket fails to come up.
+        Err(err) => log::warn(&format!("could not record {kind}: {err}")),
+    }
 }
 
 /// The `azp` claim every Homerun token carries.
@@ -172,6 +229,9 @@ pub fn start(config: Config) -> Result<Bound, String> {
         .zip(config.challenge_port)
         .map(|((fqdn, dir), port)| (fqdn, dir, port));
     let staging = config.acme_staging;
+    // Cloned out before `config` is moved into `Shared` below, because the TLS
+    // task outlives this scope and cannot borrow it.
+    let error_context = config.error_context.clone();
     let state = Arc::new(Shared::new(config));
 
     // The plaintext loop: the app's own UI, and nothing else.
@@ -219,11 +279,25 @@ pub fn start(config: Config) -> Result<Bound, String> {
                         }
                         Err(err) => {
                             log::warn(&format!("the certificate could not be loaded: {err}"));
+                            note_cert_failure(
+                                error_context.as_ref(),
+                                "cert-unusable",
+                                app_error::Severity::Fatal,
+                                format!("the certificate could not be loaded: {err}"),
+                            );
                             None
                         }
                     },
                     Err(err) => {
                         log::warn(&format!("no certificate: {err}"));
+                        note_cert_failure(
+                            error_context.as_ref(),
+                            "cert-order-failed",
+                            // Fatal: `wss://` is the surface, and without a
+                            // certificate it does not work at all.
+                            app_error::Severity::Fatal,
+                            format!("no certificate: {err}"),
+                        );
                         None
                     }
                 }
@@ -1017,6 +1091,80 @@ mod log {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch crash directory, and the lock that stops two tests sharing one.
+    fn scratch(name: &str) -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = crate::crash::test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "homerun-cert-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = crate::crash::set_app_crash_dir(&root);
+        (dir, guard)
+    }
+
+    fn stashed(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("stash-"))
+            .map(|e| std::fs::read_to_string(e.path()).unwrap())
+            .collect()
+    }
+
+    fn a_context() -> app_error::Context {
+        app_error::Context {
+            device_id: "device-1".into(),
+            session: "session-1".into(),
+            platform: "android".into(),
+            app_version: "0.4.2".into(),
+            api_url: "https://api.gethomerun.app".into(),
+            ..app_error::Context::default()
+        }
+    }
+
+    #[test]
+    fn a_certificate_failure_is_recorded_for_the_next_launch() {
+        // The failure with no other witness: no crash, nothing on screen, and
+        // `wss://` simply never works. Before this it reached logcat and
+        // stopped there.
+        let (dir, _guard) = scratch("recorded");
+
+        note_cert_failure(
+            Some(&a_context()),
+            "cert-order-failed",
+            app_error::Severity::Fatal,
+            "no certificate: the order did not finish within 300s".to_string(),
+        );
+
+        let files = stashed(&dir);
+        assert_eq!(files.len(), 1, "expected exactly one stashed report");
+        assert!(files[0].contains("cert-order-failed"), "{}", files[0]);
+        assert!(files[0].contains("device-ws/tls"), "{}", files[0]);
+        // The context must be the host's, not invented here.
+        assert!(files[0].contains("device-1"), "{}", files[0]);
+    }
+
+    #[test]
+    fn a_host_that_passed_no_context_records_nothing() {
+        // The guard on the test above. Reporting under a fabricated context
+        // would put rows in the table attributed to a device that is not real,
+        // which is worse than the silence it replaced.
+        let (dir, _guard) = scratch("no-context");
+
+        note_cert_failure(
+            None,
+            "cert-order-failed",
+            app_error::Severity::Fatal,
+            "no certificate: boom".to_string(),
+        );
+
+        assert!(stashed(&dir).is_empty(), "reported without a context");
+    }
 
     /// The dashboard parses these, so the shape is not ours to drift.
     #[test]

@@ -229,6 +229,12 @@ object DeviceWebsocket {
             // hostname per week, and a developer reinstalling all afternoon
             // would spend that before lunch.
             put("acmeStaging", BuildConfig.DEBUG)
+            // Who this install is, so the core can report a certificate
+            // failure rather than only logging one. A device that cannot get a
+            // certificate serves no `wss://` at all, and it does that silently
+            // -- no crash, nothing on screen, and therefore no bug report. It
+            // was the one failure with no witness.
+            put("errorContext", AppErrors.context())
         }
         val reply = runCatching { NativeServer.nativeDeviceWsStart(config.toString()) }
             .onFailure { Log.w(TAG, "the socket did not start: ${it.message}", it) }
