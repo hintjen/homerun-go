@@ -1,6 +1,10 @@
 package app.gethomerun.mobile
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import android.webkit.WebView
@@ -43,6 +47,9 @@ class HomerunApplication : Application() {
         // scope is ServerHost's — cancelled never, because the thing that ends
         // it is the process ending.
         DeviceWebsocket.init(this, ServerHost.scope)
+
+        // Debug builds only. See [installDebugErrorTriggers].
+        installDebugErrorTriggers()
 
         // Last, because it needs a credential to sign with and a place to
         // send to. What it sends was written before any of the above ran —
@@ -111,7 +118,60 @@ class HomerunApplication : Application() {
         }
     }
 
+    /**
+     * Two ways to make this app fail on purpose, for verifying that failures
+     * are actually reported. **Debug builds only.**
+     *
+     * Error reporting is the one feature whose own failure is invisible: a
+     * reporter that quietly sends nothing looks exactly like an app with no
+     * bugs. So there has to be a way to produce a known failure on a real
+     * device and watch for the row at the other end.
+     *
+     *     adb shell am broadcast -a app.gethomerun.mobile.DEBUG_ERROR
+     *     adb shell am broadcast -a app.gethomerun.mobile.DEBUG_ERROR --es mode report
+     *
+     * The default `crash` mode throws on the main thread, which is a genuine
+     * uncaught exception: it goes through [logCrashesBeforeDying], is stashed
+     * to disk, and leaves on the *next* launch. That delay is the point — it
+     * is the path a real crash takes, and the one no unit test can cover.
+     *
+     * `report` mode sends immediately without killing anything, which
+     * exercises the live path instead.
+     */
+    private fun installDebugErrorTriggers() {
+        if (!BuildConfig.DEBUG) return
+
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.getStringExtra("mode")) {
+                    "report" -> {
+                        Log.i(TAG, "debug: reporting a non-fatal error")
+                        AppErrors.report(
+                            IllegalStateException("deliberate non-fatal, for verification"),
+                            location = "debug-trigger",
+                        )
+                    }
+                    // Thrown on the main looper, so it reaches the default
+                    // uncaught handler exactly as a real crash would.
+                    else -> throw IllegalStateException(
+                        "deliberate crash, for verifying error reporting"
+                    )
+                }
+            }
+        }
+
+        val filter = IntentFilter(DEBUG_ERROR_ACTION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+        Log.i(TAG, "debug: error triggers listening on $DEBUG_ERROR_ACTION")
+    }
+
     private companion object {
         const val TAG = "HomerunHost"
+        const val DEBUG_ERROR_ACTION = "app.gethomerun.mobile.DEBUG_ERROR"
     }
 }
