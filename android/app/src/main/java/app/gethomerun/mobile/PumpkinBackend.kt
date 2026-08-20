@@ -253,10 +253,13 @@ class PumpkinBackend(
                 tunnel.shutdown()
 
                 val due = backups.claim(serverId, verdict.state)
+                // `force`: the core ruled on this exit a few lines ago, and
+                // `superseded` is how it says a newer launch owns this server.
                 transition(
                     serverId,
                     if (verdict.state == "crashed") ServerState.CRASHED else ServerState.STOPPED,
                     backupInProgress = due != null,
+                    force = !verdict.superseded,
                 )
                 currentServerId = null
                 currentPort = null
@@ -570,6 +573,22 @@ class PumpkinBackend(
         serverId: String,
         state: ServerState,
         backupInProgress: Boolean = false,
+        /**
+         * Announce without asking the core's permission, for an exit it has
+         * just adjudicated itself.
+         *
+         * `exited` prunes a server's entry once the device has nothing left in
+         * flight, and `mayAnnounce` refuses `stopped` for a server it holds no
+         * entry for — so asking again turns "was this exit announced" into a
+         * race between the exit callback and the stop call returning. The
+         * in-app Stop wins that race; the notification's Stop loses it, and the
+         * server sticks at `stopping` for ever with the foreground service
+         * pinned behind it.
+         *
+         * Nothing is lost by not asking: `exited` already answers the question
+         * `mayAnnounce` exists for, with `superseded`.
+         */
+        force: Boolean = false,
     ) {
         // The same guard the JVM backend has, and for the same reason: a
         // launch still catching up must not announce `running` for a server
@@ -578,7 +597,7 @@ class PumpkinBackend(
         // The core answers *may this be said*; the check below answers *have
         // we already said it*, which is about the event stream rather than the
         // server, and is this file's own business.
-        if (!ServerHost.lifecycle.mayAnnounce(serverId, state.wire)) return
+        if (!force && !ServerHost.lifecycle.mayAnnounce(serverId, state.wire)) return
         if (lastAnnounced == state) return
         lastAnnounced = state
         onStateChanged?.invoke(serverId, state, backupInProgress)

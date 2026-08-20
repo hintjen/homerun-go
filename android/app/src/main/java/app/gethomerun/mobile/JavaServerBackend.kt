@@ -922,10 +922,13 @@ class JavaServerBackend(
             // either way, because only that closes it again.
             val backup = backups.claim(serverId, outcome)
 
+            // `force`: the core ruled on this exit a few lines ago, and
+            // `superseded` is how it says a newer launch owns this server.
             transition(
                 serverId,
                 if (outcome == "crashed") ServerState.CRASHED else ServerState.STOPPED,
                 backupInProgress = backup != null,
+                force = !verdict.superseded,
             )
             engineThread = null
             currentServerId = null
@@ -1180,6 +1183,22 @@ class JavaServerBackend(
         serverId: String,
         state: ServerState,
         backupInProgress: Boolean = false,
+        /**
+         * Announce without asking the core's permission, for an exit it has
+         * just adjudicated itself.
+         *
+         * `exited` prunes a server's entry once the device has nothing left in
+         * flight, and `mayAnnounce` refuses `stopped` for a server it holds no
+         * entry for — so asking again turns "was this exit announced" into a
+         * race between the exit callback and the stop call returning. The
+         * in-app Stop wins that race; the notification's Stop loses it, and the
+         * server sticks at `stopping` for ever with the foreground service
+         * pinned behind it.
+         *
+         * Nothing is lost by not asking: `exited` already answers the question
+         * `mayAnnounce` exists for, with `superseded`.
+         */
+        force: Boolean = false,
     ) {
         // Two different questions, and it is worth being clear which is which.
         //
@@ -1193,7 +1212,7 @@ class JavaServerBackend(
         //
         // This file answers *have we already said it* — which is about the
         // event stream, not about the server, and is the host's own business.
-        if (!lifecycle.mayAnnounce(serverId, state.wire)) return
+        if (!force && !lifecycle.mayAnnounce(serverId, state.wire)) return
         if (lastAnnounced == state) return
         lastAnnounced = state
         onStateChanged?.invoke(serverId, state, backupInProgress)
