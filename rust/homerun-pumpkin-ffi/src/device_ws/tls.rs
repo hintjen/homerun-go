@@ -35,6 +35,7 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 use super::log;
+use homerun_core::reporting::app_error;
 
 /// instant-acme's HTTP, carried by the client this crate already has.
 ///
@@ -210,11 +211,23 @@ fn now() -> u64 {
 /// certificate already on disk returns that one, expired or not. A device that
 /// refused to serve because renewal failed would be unreachable for the days it
 /// still had left on the old certificate, which is the wrong way round.
+/// A way to report a degraded outcome without this file knowing who we are.
+///
+/// Same shape as `pumpkin_settings::load_config`'s `warn`, and for the same
+/// reason: the decision about *where* a report goes belongs to the caller, and
+/// threading an `app_error::Context` down here would put host identity in a
+/// file whose entire job is certificates.
+/// `Sync` because this is held across an await inside a task tokio spawns:
+/// a future is only `Send` when everything it holds is, and a bare
+/// `&dyn Fn` is not.
+pub type Note<'a> = &'a (dyn Fn(&str, app_error::Severity, String) + Sync);
+
 pub async fn ensure_certificate(
     store: &CertStore,
     fqdn: &str,
     challenge_port: u16,
     staging: bool,
+    note: Note<'_>,
 ) -> Result<Certificate, String> {
     let existing = store.load();
     match &existing {
@@ -253,6 +266,16 @@ pub async fn ensure_certificate(
                 // every later launch will order another one — Let's Encrypt
                 // rate-limits that at five per week per hostname.
                 log::warn(&format!("the new certificate was not stored: {err}"));
+                // Which is why this reports. The symptom arrives days later
+                // and nowhere near the cause: a device that quietly re-orders
+                // on every launch works fine until the sixth one in a week,
+                // and then stops getting certificates for reasons nothing on
+                // the device explains.
+                note(
+                    "cert-not-stored",
+                    app_error::Severity::Error,
+                    format!("the new certificate was not stored: {err}"),
+                );
             }
             Ok(fresh)
         }
@@ -261,6 +284,14 @@ pub async fn ensure_certificate(
                 log::warn(&format!(
                     "renewal failed ({err}); serving the certificate already held"
                 ));
+                // Serving, so not fatal — but the held certificate is already
+                // past [`RENEW_AFTER`] and will expire. This is the window in
+                // which it is still fixable, and it closes silently.
+                note(
+                    "cert-renewal-failed",
+                    app_error::Severity::Error,
+                    format!("renewal failed ({err}); serving the certificate already held"),
+                );
                 Ok(certificate)
             }
             None => Err(err),

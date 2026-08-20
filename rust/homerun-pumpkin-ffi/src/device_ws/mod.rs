@@ -232,6 +232,19 @@ pub fn start(config: Config) -> Result<Bound, String> {
     // Cloned out before `config` is moved into `Shared` below, because the TLS
     // task outlives this scope and cannot borrow it.
     let error_context = config.error_context.clone();
+    // The zip above collapses three reasons into one `None`, and they are not
+    // the same thing: no hostname is an unnamed device behaving correctly,
+    // while a hostname with nowhere to store a certificate is a host that
+    // wired this up wrong.
+    let named = config.fqdn.is_some();
+    let missing: Vec<&str> = [
+        (config.storage_dir.is_none(), "storageDir"),
+        (config.challenge_port.is_none(), "challengePort"),
+    ]
+    .iter()
+    .filter(|(absent, _)| *absent)
+    .map(|(_, name)| *name)
+    .collect();
     let state = Arc::new(Shared::new(config));
 
     // The plaintext loop: the app's own UI, and nothing else.
@@ -264,14 +277,34 @@ pub fn start(config: Config) -> Result<Bound, String> {
         // arrives the TLS listener has nothing to hand a connection, and says
         // so rather than answering plaintext on a port the gateway will send a
         // ClientHello to.
+        let note = |kind: &str, severity: app_error::Severity, message: String| {
+            note_cert_failure(error_context.as_ref(), kind, severity, message);
+        };
+
         let acceptor = match tls_inputs {
             None => {
                 log::warn("no hostname or storage — serving plaintext, which no browser will use");
+                // An unnamed device has no hostname to certify and is working
+                // as intended, so that stays a log line — reporting it would
+                // file one row per unnamed device for ever. A device that *has*
+                // a name and still cannot proceed is the host's mistake, and
+                // the symptom is a `wss://` that never works with nothing to
+                // explain it.
+                if named && !missing.is_empty() {
+                    note(
+                        "cert-misconfigured",
+                        app_error::Severity::Fatal,
+                        format!(
+                            "a named device was started without {} — serving plaintext",
+                            missing.join(" and ")
+                        ),
+                    );
+                }
                 None
             }
             Some((fqdn, dir, challenge_port)) => {
                 let store = tls::CertStore::new(dir);
-                match tls::ensure_certificate(&store, &fqdn, challenge_port, staging).await {
+                match tls::ensure_certificate(&store, &fqdn, challenge_port, staging, &note).await {
                     Ok(certificate) => match tls::acceptor(&certificate) {
                         Ok(acceptor) => {
                             log::info(&format!("serving TLS for {fqdn}"));
@@ -279,8 +312,7 @@ pub fn start(config: Config) -> Result<Bound, String> {
                         }
                         Err(err) => {
                             log::warn(&format!("the certificate could not be loaded: {err}"));
-                            note_cert_failure(
-                                error_context.as_ref(),
+                            note(
                                 "cert-unusable",
                                 app_error::Severity::Fatal,
                                 format!("the certificate could not be loaded: {err}"),
@@ -290,8 +322,7 @@ pub fn start(config: Config) -> Result<Bound, String> {
                     },
                     Err(err) => {
                         log::warn(&format!("no certificate: {err}"));
-                        note_cert_failure(
-                            error_context.as_ref(),
+                        note(
                             "cert-order-failed",
                             // Fatal: `wss://` is the surface, and without a
                             // certificate it does not work at all.
@@ -1164,6 +1195,55 @@ mod tests {
         );
 
         assert!(stashed(&dir).is_empty(), "reported without a context");
+    }
+
+    #[test]
+    fn a_named_device_missing_its_storage_is_reported() {
+        // The host's mistake, not the device's: a device with a hostname and
+        // nowhere to keep a certificate serves plaintext for ever, and the
+        // only symptom is a `wss://` that never works.
+        let (dir, _guard) = scratch("misconfigured");
+
+        note_cert_failure(
+            Some(&a_context()),
+            "cert-misconfigured",
+            app_error::Severity::Fatal,
+            "a named device was started without storageDir — serving plaintext".to_string(),
+        );
+
+        let files = stashed(&dir);
+        assert_eq!(files.len(), 1);
+        assert!(files[0].contains("cert-misconfigured"), "{}", files[0]);
+    }
+
+    #[test]
+    fn the_three_degraded_outcomes_are_three_groups() {
+        // Each of these is a different problem with a different fix, and the
+        // fingerprint keys on `kind` — so they must not collapse into one row
+        // that reads as "something about certificates".
+        let (dir, _guard) = scratch("distinct");
+        let context = a_context();
+
+        for (kind, severity) in [
+            ("cert-order-failed", app_error::Severity::Fatal),
+            ("cert-not-stored", app_error::Severity::Error),
+            ("cert-renewal-failed", app_error::Severity::Error),
+        ] {
+            note_cert_failure(Some(&context), kind, severity, format!("{kind} happened"));
+        }
+
+        let files = stashed(&dir);
+        assert_eq!(files.len(), 3, "one stash per distinct failure");
+        for kind in [
+            "cert-order-failed",
+            "cert-not-stored",
+            "cert-renewal-failed",
+        ] {
+            assert!(
+                files.iter().any(|f| f.contains(kind)),
+                "{kind} was not recorded"
+            );
+        }
     }
 
     /// The dashboard parses these, so the shape is not ours to drift.
