@@ -419,7 +419,10 @@ mod tests {
     #[test]
     fn a_pumpkin_server_is_never_served_by_the_jvm() {
         for host in [ANDROID, IOS] {
-            assert_eq!(serves(host, &vanilla("native-pumpkin")), Ok(Served::Pumpkin));
+            assert_eq!(
+                serves(host, &vanilla("native-pumpkin")),
+                Ok(Served::Pumpkin)
+            );
         }
     }
 
@@ -446,7 +449,11 @@ mod tests {
     /// device happens to deploy it.
     #[test]
     fn a_pumpkin_server_still_refuses_mods_on_a_host_with_a_jvm() {
-        let r = refuse(ANDROID, &server("native-pumpkin", json!({ "TYPE": "FABRIC" }))).unwrap();
+        let r = refuse(
+            ANDROID,
+            &server("native-pumpkin", json!({ "TYPE": "FABRIC" })),
+        )
+        .unwrap();
         assert_eq!(r.code, "mods-unsupported");
 
         let r = refuse(ANDROID, &vanilla("native-crossplay")).map(|r| r.code);

@@ -172,6 +172,21 @@ fn is_id(segment: &str) -> bool {
 /// symbol, keep whichever it got. A frame it cannot parse is kept whole
 /// rather than dropped — an ugly group is still a group.
 fn frames(stack: &str) -> Vec<String> {
+    // The JVM wraps: an exception thrown in a broadcast receiver arrives as a
+    // `RuntimeException` whose own frames are all framework, with the real
+    // fault under `Caused by:`. Android's uncaught handler does exactly this,
+    // so on a phone it is the common shape rather than a corner.
+    //
+    // The *last* `Caused by:` is the root cause, which is the JVM convention
+    // and the frame a person would look at first. Found on a real device: the
+    // first version fingerprinted `RuntimeInit$MethodAndArgsCaller`, which is
+    // the same for every crash on Android and would have merged unrelated
+    // bugs into one group.
+    let stack = match stack.rfind("Caused by:") {
+        Some(at) => &stack[at..],
+        None => stack,
+    };
+
     // The raw line is kept beside the normalised frame because noise is a
     // property of the *path*, and normalising throws the path away: once
     // `.../node_modules/react-dom/index.js` is `index.js`, nothing is left to
@@ -341,6 +356,15 @@ fn is_noise(frame: &str) -> bool {
         "android.os.",
         "android.app.",
         "dalvik.system",
+        // The scaffolding every Android process dies through. Identical for
+        // every crash, so keeping any of it merges unrelated bugs.
+        "com.android.internal",
+        "RuntimeInit",
+        "LoadedApk",
+        "ZygoteInit",
+        "ActivityThread",
+        "Handler.dispatchMessage",
+        "Looper.loop",
         // Apple
         "Foundation:",
         "UIKit:",
@@ -606,6 +630,137 @@ java.lang.IllegalStateException: nope
         let sig = signature(&seen);
         assert!(sig.contains("Reporting.kt"), "{sig}");
         assert!(!sig.contains("374"), "line numbers must not group: {sig}");
+    }
+
+    #[test]
+    fn an_android_uncaught_exception_groups_on_the_app_frame_not_the_framework() {
+        // The real thing, off a Pixel. Every Android crash unwinds through the
+        // same RuntimeInit/LoadedApk scaffolding, so fingerprinting on that
+        // merges every unrelated bug into one useless group.
+        let stack = concat!(
+            "java.lang.RuntimeException: Error receiving broadcast Intent\n",
+            "\tat android.app.LoadedApk$ReceiverDispatcher$Args.lambda$getRunnable$0(LoadedApk.java:2058)\n",
+            "\tat android.os.Handler.handleCallback(Handler.java:958)\n",
+            "\tat android.os.Handler.dispatchMessage(Handler.java:99)\n",
+            "\tat android.os.Looper.loop(Looper.java:257)\n",
+            "\tat android.app.ActivityThread.main(ActivityThread.java:8496)\n",
+            "\tat com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)\n",
+            "\tat com.android.internal.os.ZygoteInit.main(ZygoteInit.java:1045)\n",
+            "Caused by: java.lang.IllegalStateException: deliberate crash\n",
+            "\tat app.gethomerun.mobile.HomerunApplication$receiver.onReceive(HomerunApplication.kt:118)\n",
+        );
+
+        let seen = Occurrence {
+            stack: Some(stack.into()),
+            ..occurrence(
+                Source::Host,
+                "java.lang.RuntimeException",
+                "Error receiving broadcast",
+            )
+        };
+        let sig = signature(&seen);
+
+        assert!(sig.contains("HomerunApplication"), "{sig}");
+        for framework in ["RuntimeInit", "ZygoteInit", "LoadedApk", "Looper"] {
+            assert!(
+                !sig.contains(framework),
+                "{framework} decided the group: {sig}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_crashes_through_the_same_scaffolding_stay_apart() {
+        // The failure the test above prevents: without root-cause selection
+        // both of these fingerprint as RuntimeInit and become one group.
+        fn wrapped(cause: &str, frame: &str) -> String {
+            format!(
+                concat!(
+                    "java.lang.RuntimeException: wrapped\n",
+                    "\tat com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:548)\n",
+                    "Caused by: {}\n\tat {}\n",
+                ),
+                cause, frame
+            )
+        }
+
+        let one = Occurrence {
+            stack: Some(wrapped(
+                "java.lang.IllegalStateException: a",
+                "app.x.Alpha.go(Alpha.kt:1)",
+            )),
+            ..occurrence(Source::Host, "java.lang.RuntimeException", "wrapped")
+        };
+        let two = Occurrence {
+            stack: Some(wrapped(
+                "java.lang.IllegalStateException: b",
+                "app.x.Beta.go(Beta.kt:1)",
+            )),
+            ..occurrence(Source::Host, "java.lang.RuntimeException", "wrapped")
+        };
+
+        assert_ne!(signature(&one), signature(&two));
+    }
+
+    #[test]
+    fn the_root_cause_decides_the_group_not_the_wrapper() {
+        // Every frame here is the app's own, so the noise filter cannot tell
+        // these apart — this is the case that pins the `Caused by:` selection
+        // itself rather than the framework markers beside it.
+        fn wrapped(wrapper_frame: &str, cause: &str, cause_frame: &str) -> String {
+            format!(
+                concat!(
+                    "app.x.SaveFailed: could not save the world\n",
+                    "\tat {}\n",
+                    "Caused by: {}\n",
+                    "\tat {}\n",
+                ),
+                wrapper_frame, cause, cause_frame
+            )
+        }
+
+        let seen = |stack: String| Occurrence {
+            stack: Some(stack),
+            ..occurrence(Source::Host, "app.x.SaveFailed", "could not save the world")
+        };
+
+        // Same root cause, reached two different ways: one bug, one group.
+        let via_save = seen(wrapped(
+            "app.x.Saver.save(Saver.kt:10)",
+            "java.io.IOException: disk full",
+            "app.x.Disk.write(Disk.kt:5)",
+        ));
+        let via_backup = seen(wrapped(
+            "app.x.Backup.run(Backup.kt:44)",
+            "java.io.IOException: disk full",
+            "app.x.Disk.write(Disk.kt:5)",
+        ));
+        assert_eq!(
+            signature(&via_save),
+            signature(&via_backup),
+            "one root cause reached two ways must be one group"
+        );
+
+        // And the wrapper must not appear at all, or it is still deciding.
+        let sig = signature(&via_save);
+        assert!(sig.contains("Disk.kt"), "{sig}");
+        assert!(
+            !sig.contains("Saver.kt"),
+            "the wrapper decided the group: {sig}"
+        );
+
+        // Two different root causes under the same wrapper stay apart.
+        let disk_full = seen(wrapped(
+            "app.x.Saver.save(Saver.kt:10)",
+            "java.io.IOException: disk full",
+            "app.x.Disk.write(Disk.kt:5)",
+        ));
+        let denied = seen(wrapped(
+            "app.x.Saver.save(Saver.kt:10)",
+            "java.lang.SecurityException: denied",
+            "app.x.Perms.check(Perms.kt:9)",
+        ));
+        assert_ne!(signature(&disk_full), signature(&denied));
     }
 
     #[test]
