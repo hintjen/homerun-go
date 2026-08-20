@@ -142,7 +142,7 @@ bugs that are miserable to diagnose.
 ## Building
 
 Both Rust crates build and test **host-native on any OS**, including Windows —
-564 core tests and 134 FFI tests in seconds, no device and no Pumpkin. Do that
+573 core tests and 142 FFI tests in seconds, no device and no Pumpkin. Do that
 before reaching for a simulator or a phone.
 
 ```bash

@@ -45,7 +45,7 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `engine_settings.rs` | What the player's settings mean to an engine — clamps, UUIDs, what cannot be honoured. No Pumpkin, so it is in the fast suite. |
 
 Everything except `Engine::run` and `backup_engine` is platform-independent
-and unit-tested on any machine — 134 tests under `npm run test:rust`, no device
+and unit-tested on any machine — 142 tests under `npm run test:rust`, no device
 and no Pumpkin required, plus the `device-ws` module's own when that is on.
 
 `core_dispatch` is deliberately built on every target, not just the two mobile
@@ -485,7 +485,7 @@ healthy server; and upstream's `main` registers its signal handlers in
 sequence, so `SIGTERM` — rung two of the stop ladder — killed the server
 without saving. `rust/homerun-pumpkin-bin` exists mostly for the second.
 
-The 134 tests all run against `StubEngine`.
+The 142 tests all run against `StubEngine`.
 
 The backup engine **has** been run, on an iOS simulator: `ios/coretest/`
 compiled for `arm64-apple-ios-sim` and spawned with `simctl` does a real

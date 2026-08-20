@@ -31,7 +31,7 @@ detailed and applies to a real phone too. Do not re-derive it here.
 | Wrapper to prefer | `node scripts/android-app.js run` | `npm run build:ios` then `cd ios && xcodegen generate` |
 
 Rust and the core tests are host-native on every OS. **Run those first** —
-`npm test` is 550+ core tests and 120+ FFI tests in seconds, no device involved.
+`npm test` is 570+ core tests and 140+ FFI tests in seconds, no device involved.
 Most changes are provable without hardware, and a device round trip is minutes.
 
 ## The loop
@@ -50,6 +50,27 @@ restage the native libraries. Going around it is how you end up debugging a new
 APK against an old library. It also passes `-Pabi` for the attached device, which
 is what arms the check that a Java runtime staged for the *other* architecture
 cannot ship.
+
+### Building from a git worktree
+
+Everything staged into the app — `jniLibs/`, `assets/web`, `assets/jre-*` — is
+gitignored, so it is **per-worktree and starts empty**. A worktree that builds
+and installs from the main checkout's habits will fail at `verifyNativePayload`,
+or quietly ship one ABI's libraries to a phone of the other kind. Stage the full
+set for the ABI you are installing to; `build:android:release` names it.
+
+Two of the staging scripts resolve their *source* relative to the repo root,
+which in a worktree is the worktree — so they look for a sibling clone that is
+next to the real checkout instead:
+
+```bash
+HOMERUN_WIREPROXY_SRC=/path/to/wireproxy-fork npm run wireproxy:android
+```
+
+The failure is legible ("clone it next to this repo"), but it arrives after the
+other artefacts are already built and reads like a missing dependency rather
+than a path problem. `restic` and the JRE download rather than build, so they
+are unaffected.
 
 `install` builds and installs; `run` also launches and tails logcat — that tail
 never returns, so prefer `install` when scripting and launch with `am start`.
