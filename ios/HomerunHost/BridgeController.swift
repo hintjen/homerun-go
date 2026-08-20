@@ -405,17 +405,20 @@ extension BridgeController: WKScriptMessageHandler {
     /// bundle that fails to boot looks identical to a bridge that is broken.
     private static func errorHookScript() -> WKUserScript {
         let source = """
+            function preBootError(message, source, line) {
+              if (window.__homerunPageErrors) return;
+              try {
+                window.webkit.messageHandlers.homerun.postMessage({
+                  v: 1, method: '__host:jsError',
+                  params: { message: String(message), source: String(source), line: line }
+                });
+              } catch (e) {}
+            }
             window.addEventListener('error', function (e) {
-              window.webkit.messageHandlers.homerun.postMessage({
-                v: 1, method: '__host:jsError',
-                params: { message: String(e.message), source: String(e.filename), line: e.lineno }
-              });
+              preBootError(e.message, e.filename, e.lineno);
             });
             window.addEventListener('unhandledrejection', function (e) {
-              window.webkit.messageHandlers.homerun.postMessage({
-                v: 1, method: '__host:jsError',
-                params: { message: 'Unhandled rejection: ' + String(e.reason), source: '', line: 0 }
-              });
+              preBootError('Unhandled rejection: ' + String(e.reason), '', 0);
             });
             """
         return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)

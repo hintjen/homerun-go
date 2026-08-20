@@ -340,11 +340,45 @@ class BridgeRouter(
         main.post { dispatch(envelope) }
     }
 
+    /**
+     * An uncaught page error, from the document-start hook in
+     * [MainActivity]'s bootstrap script.
+     *
+     * Protocol-level, handled here rather than in [handlers]: `__host:` names
+     * bypass the channel table by design and are deliberately absent from
+     * `channels.ts`, so this needs no contract entry and no host revision.
+     *
+     * A location rather than a stack, because `window.onerror` gives a file
+     * and a line and nothing else for a script it did not load same-origin.
+     * The core groups on whatever it is given.
+     */
+    private fun logJsError(params: JsonElement?) {
+        val details = params as? JsonObject
+        val message = details?.get("message")?.jsonPrimitive?.contentOrNull ?: "?"
+        val source = details?.get("source")?.jsonPrimitive?.contentOrNull.orEmpty()
+        val line = details?.get("line")?.jsonPrimitive?.intOrNull ?: 0
+
+        Log.e(TAG, "uncaught JS error: $message ($source:$line)")
+
+        AppErrors.reportFromPage(buildJsonObject {
+            put("source", AppErrors.SOURCE_UI)
+            put("severity", AppErrors.SEVERITY_FATAL)
+            put("kind", "boot")
+            put("message", message)
+            if (source.isNotEmpty()) put("location", "$source:$line")
+        })
+    }
+
     private fun dispatch(envelope: Envelope) {
         val method = envelope.method ?: return
 
         if (method == READY_METHOD) {
             onReady()
+            return
+        }
+
+        if (method == JS_ERROR_METHOD) {
+            logJsError(envelope.params)
             return
         }
 
@@ -1895,6 +1929,13 @@ class BridgeRouter(
 
         /** Protocol-level, deliberately absent from the channel inventory. */
         private const val READY_METHOD = "__bridge:ready"
+
+        /**
+         * Protocol-level like [READY_METHOD], and absent from `channels.ts`
+         * for the same reason: it is spoken by a script the host injects, not
+         * by the shared UI, so it is not part of the generated contract.
+         */
+        private const val JS_ERROR_METHOD = "__host:jsError"
 
         /**
          * Shown to whoever tried to move this host to another backend, so it

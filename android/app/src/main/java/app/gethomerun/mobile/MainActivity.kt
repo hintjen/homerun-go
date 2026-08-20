@@ -3,6 +3,9 @@ package app.gethomerun.mobile
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -54,6 +57,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var router: BridgeRouter
     private var webView: WebView? = null
+
+    /** Debug builds only; see [installDebugJsErrorTriggers]. */
+    private var debugJsErrorReceiver: BroadcastReceiver? = null
 
     /**
      * The space the system bars occupy; zero until the first inset pass.
@@ -219,6 +225,38 @@ class MainActivity : ComponentActivity() {
           window.__homerunHostRevision = ${BridgeRouter.HOST_REVISION};
           var host = window.__homerunHost || (window.__homerunHost = {});
           host.postMessage = function (json) { ${BridgeRouter.JS_INTERFACE}.postMessage(json); };
+
+          // Uncaught page errors, for the window before the bundle can report
+          // its own. A bundle that throws on its way up leaves a blank screen
+          // with no page left to report from, and that is the one failure a
+          // React error boundary can never see — the boundary is inside the
+          // tree that never mounted.
+          //
+          // It stands down the moment the page's own reporter is live. The
+          // shared UI installs listeners with a real stack and a real error
+          // name as soon as _app.tsx evaluates; without the check below every
+          // UI error after boot would arrive twice, and the second copy is
+          // strictly the worse one — window.onerror gives a file and a line
+          // and nothing else.
+          //
+          // Kept identical to BridgeController.errorHookScript() on iOS. The
+          // two hosts inject the same behaviour and neither has anywhere
+          // shared to put JavaScript.
+          function preBootError(message, source, line) {
+            if (window.__homerunPageErrors) return;
+            try {
+              host.postMessage(JSON.stringify({
+                v: 1, method: '__host:jsError',
+                params: { message: String(message), source: String(source), line: line }
+              }));
+            } catch (e) {}
+          }
+          window.addEventListener('error', function (e) {
+            preBootError(e.message, e.filename, e.lineno);
+          });
+          window.addEventListener('unhandledrejection', function (e) {
+            preBootError('Unhandled rejection: ' + String(e.reason), '', 0);
+          });
 
           var root = document.documentElement;
 
@@ -691,7 +729,64 @@ class MainActivity : ComponentActivity() {
 
         ServerHost.addListener(hostingListener)
 
+        // Debug builds only. See [installDebugJsErrorTriggers].
+        installDebugJsErrorTriggers()
+
         onBackPressedDispatcher.addCallback(this, backToPreviousPage)
+    }
+
+    /**
+     * Make the page fail on purpose, to prove the document-start hook works
+     * and then to prove it gets out of the way. **Debug builds only.**
+     *
+     *     adb shell am broadcast -a app.gethomerun.mobile.DEBUG_JS_ERROR
+     *     adb shell am broadcast -a app.gethomerun.mobile.DEBUG_JS_ERROR --es mode handoff
+     *
+     * The default `preboot` mode clears the flag the bundle sets when its own
+     * reporter comes up, putting the page back in the state it is in while it
+     * is still loading, and then throws. That must produce a row with
+     * `kind: "boot"` — the failure a React error boundary can never see,
+     * because the tree it would live in never mounted.
+     *
+     * `handoff` mode throws with the flag left alone. That must produce
+     * exactly one row, from the bundle's own listener, with a real error name
+     * and a real stack — and no `boot` row beside it. Both halves need
+     * checking: a hook that never fires and a hook that fires twice are
+     * different bugs with the same cause, and only the second one is visible
+     * in a query that is not looking for it.
+     *
+     * `setTimeout` rather than a bare throw, because an exception raised
+     * directly inside `evaluateJavascript` is caught by the evaluation itself
+     * and never reaches `window.onerror`. A task scheduled onto the event loop
+     * fails the way a real uncaught error does.
+     */
+    private fun installDebugJsErrorTriggers() {
+        if (!BuildConfig.DEBUG) return
+
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val handoff = intent?.getStringExtra("mode") == "handoff"
+                val clear = if (handoff) "" else "window.__homerunPageErrors = false;"
+                val what = if (handoff) "handoff" else "pre-boot"
+                Log.i(TAG, "debug: forcing a $what JS error")
+                webView?.evaluateJavascript(
+                    "$clear setTimeout(function () {" +
+                        " throw new Error('deliberate $what JS error, for verification');" +
+                        " }, 0);",
+                    null,
+                )
+            }
+        }
+
+        val filter = IntentFilter(DEBUG_JS_ERROR_ACTION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, filter)
+        }
+        debugJsErrorReceiver = receiver
+        Log.i(TAG, "debug: JS error triggers listening on $DEBUG_JS_ERROR_ACTION")
     }
 
     /** Builds a fresh WebView, wires it to the router, and loads the bundle. */
@@ -828,6 +923,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         ServerHost.removeListener(hostingListener)
+        // Registered against this activity, so it has to go with it — a
+        // receiver outliving its activity is a leaked one, and this one holds
+        // a WebView through `webView`.
+        debugJsErrorReceiver?.let { runCatching { unregisterReceiver(it) } }
+        debugJsErrorReceiver = null
         // The router is built in `onCreate` and subscribes to `ServerHost`,
         // which outlives every activity — so it has to be let go here for the
         // same reason the listener above does. Missing this left one abandoned
@@ -986,6 +1086,13 @@ class MainActivity : ComponentActivity() {
 
         /** The global the injected backdrop watcher reports through. */
         const val CHROME_INTERFACE = "HomerunChrome"
+
+        /**
+         * Separate from `DEBUG_ERROR` in [HomerunApplication] on purpose: two
+         * receivers on one action both fire, and that one throws for any mode
+         * it does not know.
+         */
+        const val DEBUG_JS_ERROR_ACTION = "app.gethomerun.mobile.DEBUG_JS_ERROR"
 
         /** One channel of an `rgb()`/`rgba()`, which is all CSS ever hands back. */
         val CSS_CHANNEL = Regex("""\d+""")
