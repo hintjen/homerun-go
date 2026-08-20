@@ -44,6 +44,17 @@ data class HostCapabilities(
      * fewer thing for a player to weigh.
      */
     val socialProviders: List<String>,
+    /**
+     * This host can create and run a **Pumpkin** server.
+     *
+     * Deliberately not read off `serverBackends`, which has listed `"pumpkin"`
+     * here since M0 while nothing could route a server to it. A UI gating on
+     * that would offer Pumpkin to older hosts, and those would create a server
+     * the API accepts and then serve as plain vanilla Java — the wrong server,
+     * quietly. This field is absent on every host that predates the subprocess,
+     * and the UI reads absent as false.
+     */
+    val pumpkinServers: Boolean,
 ) {
     companion object {
         /**
@@ -177,6 +188,11 @@ data class HostCapabilities(
             // identity appears anywhere in the push path here.
             remotePush = true,
             socialProviders = listOf("google"),
+            // True as a statement about the platform, like the rest of these:
+            // Android ships `libpumpkin.so` and picks the backend from the
+            // game type. A build that somehow lacks the binary still refuses
+            // at launch — `PumpkinBackend.isAvailable` — rather than here.
+            pumpkinServers = true,
         )
     }
 }

@@ -134,7 +134,7 @@ ignores half the arguments of.
 
 ## The tests are the deliverable
 
-550 tests, and they are checked for teeth rather than counted. Deliberate
+573 tests, and they are checked for teeth rather than counted. Deliberate
 regressions are introduced and each must be caught by its own test:
 
 | Regression | Caught by |

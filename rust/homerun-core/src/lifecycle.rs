@@ -269,6 +269,15 @@ impl Lifecycle {
     /// `running` for a server already on its way down. The UI would flip the
     /// card to running and the API would mark the service healthy, moments
     /// before it exits.
+    ///
+    /// **Do not ask this about an exit [`Self::exited`] has just returned.**
+    /// That call prunes the entry once the device has nothing left in flight,
+    /// and with no entry this refuses `stopped` — so whether the exit is
+    /// announced comes down to a race between the host's exit callback and its
+    /// stop call returning. Android lost that race only when the stop came
+    /// from the notification rather than the app, and the server sat at
+    /// `stopping` for ever with the foreground service pinned behind it.
+    /// [`Exit::superseded`] is how an exit says it must not be announced.
     pub fn may_announce(&self, id: &str, state: State) -> bool {
         let Some(entry) = self.entries.get(id) else {
             return state != State::Stopped;

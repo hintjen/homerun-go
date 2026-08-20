@@ -76,6 +76,11 @@ pub struct Inputs {
     /// does not say otherwise is.
     #[serde(default)]
     pub engine: Engine,
+    /// This server runs on a JVM, so it has a jar to fetch and a `Main-Class`
+    /// to read. `None` means the host did not say, and the answer is inferred
+    /// from [`Inputs::engine`] — see [`plan`].
+    #[serde(default)]
+    pub needs_jvm: Option<bool>,
 }
 
 /// One thing a host does, in order.
@@ -148,22 +153,35 @@ pub fn plan(inputs: Inputs) -> Vec<Step> {
         steps.push(Step::BeginResolveTunnel);
     }
 
+    // Whether there is a jar at all. The host answers from the game type,
+    // which is the only thing that actually knows: Pumpkin *is* the server and
+    // Bedrock is its own binary, so neither has a jar or a `Main-Class`.
+    //
+    // When the host does not say, this falls back to the engine — which is
+    // what every host did before, and is exactly the inference that breaks
+    // once Pumpkin is spawned rather than linked. A spawned Pumpkin is
+    // `Engine::Spawned` and still has nothing to download; without the
+    // explicit answer it would be sent to fetch a Mojang jar it cannot use.
+    // The fallback stays because iOS still says nothing and must keep the
+    // plan it has always had.
+    let needs_jvm = inputs.needs_jvm.unwrap_or(inputs.engine == Engine::Spawned);
+
     // `EnsureRuntime` and `AcceptEula` are in every plan, and that is not an
     // oversight. Neither is about the jar: one unpacks a bundled payload, the
     // other writes `eula=true` into the server directory, which Android does
-    // as a plain file write. A linked host that happened to run a
-    // Mojang-derived engine would still need both, so gating them on `engine`
-    // would be encoding "linked implies not Mojang" — true of Pumpkin today,
-    // and not something the word "linked" says.
+    // as a plain file write. A host running a Mojang-derived engine would
+    // still need both however it deploys it, so gating them here would be
+    // encoding "no jar implies not Mojang", which is not something either
+    // input says.
     //
     // The two below are jar-shaped by definition, so they are the ones that
     // come out.
     steps.push(Step::EnsureRuntime);
-    if inputs.engine == Engine::Spawned {
+    if needs_jvm {
         steps.push(Step::EnsureJar);
     }
     steps.push(Step::AcceptEula);
-    if inputs.engine == Engine::Spawned {
+    if needs_jvm {
         steps.push(Step::ResolveMainClass);
     }
 
@@ -203,6 +221,7 @@ mod tests {
             settings: true,
             tunnel: true,
             engine: Engine::Spawned,
+            needs_jvm: None,
         }
     }
 
@@ -267,6 +286,60 @@ mod tests {
         assert!(wait < index(&steps, Step::Spawn));
     }
 
+    /// The regression that arrives with a spawned Pumpkin.
+    ///
+    /// It is `Engine::Spawned` like every JVM server, and it has no jar and no
+    /// `Main-Class` — so inferring the jar steps from the engine sends it to
+    /// download a Mojang server it cannot run. `EnsureRuntime` and `AcceptEula`
+    /// stay, because neither is about the jar.
+    #[test]
+    fn a_spawned_server_with_no_jar_fetches_nothing() {
+        let steps = plan(Inputs {
+            needs_jvm: Some(false),
+            ..full()
+        });
+        assert!(!steps.contains(&Step::EnsureJar));
+        assert!(!steps.contains(&Step::ResolveMainClass));
+        assert!(steps.contains(&Step::EnsureRuntime));
+        assert!(steps.contains(&Step::AcceptEula));
+        assert!(steps.contains(&Step::WriteSettings));
+    }
+
+    /// A host that says nothing keeps the plan it has always had. iOS says
+    /// nothing, and every server on it would start fetching a jar if this
+    /// fallback were dropped.
+    #[test]
+    fn an_unanswered_launch_keeps_the_plan_the_engine_implied() {
+        let linked = plan(Inputs {
+            engine: Engine::Linked,
+            needs_jvm: None,
+            ..full()
+        });
+        assert!(!linked.contains(&Step::EnsureJar));
+        assert!(!linked.contains(&Step::ResolveMainClass));
+
+        let spawned = plan(Inputs {
+            engine: Engine::Spawned,
+            needs_jvm: None,
+            ..full()
+        });
+        assert!(spawned.contains(&Step::EnsureJar));
+        assert!(spawned.contains(&Step::ResolveMainClass));
+    }
+
+    /// And an explicit answer overrules the inference in both directions, so a
+    /// linked engine that *did* have a jar would still be planned correctly.
+    #[test]
+    fn an_explicit_answer_wins_over_the_engine() {
+        let steps = plan(Inputs {
+            engine: Engine::Linked,
+            needs_jvm: Some(true),
+            ..full()
+        });
+        assert!(steps.contains(&Step::EnsureJar));
+        assert!(steps.contains(&Step::ResolveMainClass));
+    }
+
     /// A host without backups, settings or a tunnel still has a valid launch —
     /// it just does less. This is the desktop's loopback-only case.
     #[test]
@@ -276,6 +349,7 @@ mod tests {
             settings: false,
             tunnel: false,
             engine: Engine::Spawned,
+            needs_jvm: None,
         });
         assert!(!steps.contains(&Step::RestoreWorld));
         assert!(!steps.contains(&Step::WriteSettings));
@@ -307,6 +381,7 @@ mod tests {
                             settings,
                             tunnel,
                             engine,
+                            needs_jvm: None,
                         });
                         assert_eq!(
                             steps.iter().filter(|s| **s == Step::Spawn).count(),

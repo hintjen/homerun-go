@@ -72,10 +72,28 @@ fn ansi_len(bytes: &[u8], at: usize) -> Option<usize> {
     (bytes.get(end) == Some(&b'm')).then_some(end + 1 - at)
 }
 
-/// `Done (12.345s)! For help, type "help"` — the server is accepting
-/// connections. Matched loosely enough to survive the timing text changing.
+/// The server is accepting connections. Two spellings, because the engines
+/// word it differently:
+///
+/// ```text
+/// Done (12.345s)! For help, type "help"          // vanilla, Paper, the loaders
+/// Server is now running. Connect using port: ... // Pumpkin
+/// ```
+///
+/// Both are matched loosely: the first because the timing text moves, the
+/// second because everything after the port is colour codes and edition names.
+///
+/// **Pumpkin's line is load-bearing, and it was missing.** A child process
+/// reaches `on_ready` only through here, so a Pumpkin server announced
+/// nothing, never left `starting`, and failed its launch on a timeout — with
+/// a healthy server accepting players the whole time. The linked engine
+/// announces readiness itself and never consults this, so nothing about the
+/// gap was visible until Pumpkin was run as a process.
 pub fn is_ready(line: &str) -> bool {
     let clean = strip_ansi(line);
+    if clean.contains("Server is now running") {
+        return true;
+    }
     let Some(rest) = clean.split_once("Done (").map(|(_, r)| r) else {
         return false;
     };
@@ -322,6 +340,33 @@ mod tests {
         assert!(is_ready(
             "[20:49:56 INFO]: Done (21.759s)! For help, type \"help\""
         ));
+    }
+
+    #[test]
+    fn pumpkin_announces_readiness_in_its_own_words() {
+        // Pumpkin never prints "Done (...)". A child process reaches
+        // `on_ready` only through `is_ready`, so without this the state
+        // machine sat in `starting` until the launch timed out, while a
+        // perfectly healthy server accepted players behind it.
+        //
+        // The real line, with the colour codes Pumpkin wraps the edition
+        // and the address in.
+        assert!(is_ready(
+            "[INFO] Server is now running. Connect using port: \u{1b}[33;22mJava Edition:\u{1b}[m \u{1b}[34;22m0.0.0.0:25565\u{1b}[m"
+        ));
+        // Both editions enabled, so the tail carries a separator.
+        assert!(is_ready(
+            "[INFO] Server is now running. Connect using port: Java Edition: 0.0.0.0:25565 | Bedrock Edition: 0.0.0.0:19132"
+        ));
+    }
+
+    #[test]
+    fn a_bound_server_is_not_an_accepting_one() {
+        // `PumpkinServer::new` binds and `start()` accepts; this is printed
+        // between them, so announcing on it would report a server that
+        // cannot be joined yet.
+        assert!(!is_ready("[INFO] Started server; took 1234ms"));
+        assert!(!is_ready("[INFO] Loaded 1 plugin"));
     }
 
     #[test]
