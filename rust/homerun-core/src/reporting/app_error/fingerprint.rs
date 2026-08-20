@@ -88,7 +88,9 @@ pub(crate) fn signature(seen: &Occurrence) -> String {
             // but it is what a `window.onerror` from a cross-origin script
             // gives us, and a weak group beats no group.
             _ => match seen.location.as_deref() {
-                Some(at) if !at.is_empty() => format!("{at}: {}", generalise(&seen.message)),
+                Some(at) if !at.is_empty() => {
+                    format!("{}: {}", normalise_location(at), generalise(&seen.message))
+                }
                 _ => generalise(&seen.message),
             },
         },
@@ -286,6 +288,25 @@ fn basename(location: &str) -> String {
     out.to_string()
 }
 
+/// A location, reduced to the part of it that survives a rebuild.
+///
+/// Two shapes arrive here and only one may be touched. A route pattern —
+/// `/server/[id]`, what the error boundary reports — is already stable and is
+/// kept whole; taking a basename of it would leave the literal `[id]`. A
+/// script URL is the opposite: `window.onerror` names the chunk the error came
+/// from, and the bundler renames every chunk on every build, so keeping it
+/// gives one bug a new fingerprint every publish.
+///
+/// The scheme is what tells them apart, and it is reliable here: the hosts
+/// serve the bundle over a real origin, and a route pattern never has one.
+fn normalise_location(at: &str) -> String {
+    if at.contains("://") {
+        strip_chunk_hash(&basename(at))
+    } else {
+        at.to_string()
+    }
+}
+
 /// Drop the content hash a bundler writes into a filename.
 ///
 /// `index-9f2a.js` and `index-4b71.js` are the same module from two builds.
@@ -300,6 +321,13 @@ fn strip_chunk_hash(file: &str) -> String {
     let Some((stem, extension)) = file.rsplit_once('.') else {
         return file.to_string();
     };
+    // A chunk whose entire name is its hash. Next.js's static export writes
+    // these — `1e90c2ccc103585c.js` — so there is no separator to find and no
+    // stem worth keeping. Longer minimum than the suffix case below, because
+    // here the whole name is being thrown away on the strength of the guess.
+    if stem.len() >= 8 && is_content_hash(stem) {
+        return format!("chunk.{extension}");
+    }
     for separator in ['-', '.'] {
         if let Some((head, tail)) = stem.rsplit_once(separator) {
             if !head.is_empty() && is_content_hash(tail) {
@@ -761,6 +789,80 @@ java.lang.IllegalStateException: nope
             "app.x.Perms.check(Perms.kt:9)",
         ));
         assert_ne!(signature(&disk_full), signature(&denied));
+    }
+
+    #[test]
+    fn a_chunk_named_only_by_its_hash_still_groups_across_builds() {
+        // Both of these are real, off a Pixel: the same deliberate error
+        // reported from two builds of the same bundle. They arrived with two
+        // fingerprints, which is the exact failure the fingerprint exists to
+        // prevent — "is this still happening after the fix" is unanswerable if
+        // every publish starts a new group.
+        //
+        // Next.js's static export names a chunk after its content and nothing
+        // else, so there is no stem to keep and no separator to split on.
+        let from = |chunk: &str| Occurrence {
+            location: Some(format!(
+                "https://appassets.androidplatform.net/_next/static/chunks/{chunk}:3"
+            )),
+            ..occurrence(Source::Ui, "boot", "Uncaught Error: deliberate error")
+        };
+
+        assert_eq!(
+            signature(&from("2e4e479cf01ae177.js")),
+            signature(&from("1e90c2ccc103585c.js")),
+            "a rebuilt chunk must not start a new group"
+        );
+    }
+
+    #[test]
+    fn a_route_pattern_is_not_reduced_to_a_basename() {
+        // The guard on the fix above. `location` carries two different kinds
+        // of thing, and the error boundary's kind must survive untouched —
+        // taking a basename of a route would leave the literal "[id]", which
+        // groups every server page in the app together.
+        let seen = Occurrence {
+            location: Some("/server/[id]".into()),
+            ..occurrence(Source::Ui, "TypeError", "cannot read properties of null")
+        };
+        let sig = signature(&seen);
+
+        assert!(sig.contains("/server/[id]"), "{sig}");
+        assert!(
+            !sig.starts_with("[id]"),
+            "the route was treated as a path: {sig}"
+        );
+    }
+
+    #[test]
+    fn collapsing_the_chunk_name_does_not_merge_two_different_bugs() {
+        // Every chunk now normalises to the same "chunk.js", so the message is
+        // carrying the whole discrimination on this path. Worth pinning: if it
+        // ever stops being part of the signature, every JS error in the app
+        // silently becomes one group.
+        let from = |message: &str| Occurrence {
+            location: Some(
+                "https://appassets.androidplatform.net/_next/static/chunks/1e90c2ccc103585c.js:3"
+                    .into(),
+            ),
+            ..occurrence(Source::Ui, "boot", message)
+        };
+
+        assert_ne!(
+            signature(&from("Cannot read properties of null (reading 'players')")),
+            signature(&from("Unhandled rejection: NetworkError")),
+        );
+    }
+
+    #[test]
+    fn an_ordinary_filename_that_looks_hexish_is_left_alone() {
+        // `is_content_hash` accepts any hex run with a digit in it, so the
+        // length floor is the only thing standing between a real module and
+        // being renamed to "chunk". Check the floor holds.
+        assert_eq!(strip_chunk_hash("abc123.js"), "abc123.js");
+        assert_eq!(strip_chunk_hash("main.js"), "main.js");
+        assert_eq!(strip_chunk_hash("Reporting.kt"), "Reporting.kt");
+        assert_eq!(strip_chunk_hash("1e90c2ccc103585c.js"), "chunk.js");
     }
 
     #[test]

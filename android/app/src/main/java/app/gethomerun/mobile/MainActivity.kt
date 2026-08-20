@@ -748,7 +748,7 @@ class MainActivity : ComponentActivity() {
      * `kind: "boot"` — the failure a React error boundary can never see,
      * because the tree it would live in never mounted.
      *
-     * `handoff` mode throws with the flag left alone. That must produce
+     * `handoff` mode sets the flag and throws. That must produce
      * exactly one row, from the bundle's own listener, with a real error name
      * and a real stack — and no `boot` row beside it. Both halves need
      * checking: a hook that never fires and a hook that fires twice are
@@ -766,7 +766,12 @@ class MainActivity : ComponentActivity() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val handoff = intent?.getStringExtra("mode") == "handoff"
-                val clear = if (handoff) "" else "window.__homerunPageErrors = false;"
+                // Each mode states the flag rather than assuming it. `handoff`
+                // used to merely refrain from clearing it, which meant a
+                // `preboot` run left it false and the next `handoff` silently
+                // became a second `preboot` — the one outcome that makes the
+                // test look like it passed while proving nothing.
+                val clear = "window.__homerunPageErrors = $handoff;"
                 val what = if (handoff) "handoff" else "pre-boot"
                 Log.i(TAG, "debug: forcing a $what JS error")
                 webView?.evaluateJavascript(
