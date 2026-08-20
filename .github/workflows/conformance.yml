@@ -51,6 +51,18 @@ jobs:
     # default-feature `cargo test` has to clone it. The self-hosted runner also
     # keeps ~/.cargo warm, which matters for a dependency tree this size.
     runs-on: [self-hosted, Linux, X64, simrig]
+    env:
+      # Cargo shells out to git, which is what picks up the ssh-agent below;
+      # its built-in libgit2 transport does not.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      # Matches the CPUQuota on this runner's systemd unit, so a build cannot
+      # starve the production restic stack sharing the host.
+      CARGO_BUILD_JOBS: "16"
+      # The workspace persists between runs on a self-hosted runner, and
+      # incremental state is per code revision -- so it accumulates without
+      # bound and buys nothing across differing commits. It reached 38 GB on a
+      # dev machine doing exactly this.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -106,17 +118,46 @@ jobs:
       # simulator, no Pumpkin *linked*. Most of the FFI is covered here.
       # git-fetch-with-cli makes Cargo shell out to git, which is what picks up
       # the ssh-agent above; its built-in libgit2 transport does not.
+      # Default features first: it is what ships by default, and it is seconds.
       - name: Test
-        env:
-          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-          CARGO_BUILD_JOBS: "16"
         run: cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml
 
       - name: Clippy
-        env:
-          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-          CARGO_BUILD_JOBS: "16"
         run: cargo clippy --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml --all-targets -- -D warnings
+
+      # Everything above compiles none of the code that touches Pumpkin,
+      # rustic or the device websocket: those all sit behind default-off
+      # features. Bumping the Pumpkin pin to 09f1d4df broke three call sites
+      # and every check above stayed green, so this is the gate that matters.
+      #
+      # --all-features rather than a job per feature: all four compose on
+      # Linux, so one pass covers pumpkin-engine, device-ws, backup-engine and
+      # process-engine. --all-targets because `cargo check` does not build test
+      # targets, and one of those three breakages was in a test.
+      # --skip a_child_process_is_supervised_by_the_same_host: that test fails
+      # here for a reason predating this job, and predating the Pumpkin pin
+      # bump -- confirmed by running it at the prior commit and without
+      # pumpkin-engine. Its memory assertion is cfg'd to linux/android, so on
+      # the macOS machines these tests are normally run it is compiled out;
+      # this runner is the first place it has ever executed. It fails because
+      # the sampler takes its first reading immediately, before the child's pid
+      # is available, then sleeps a full interval -- so a short run records one
+      # empty sample and nothing else. Skipped rather than dropping the whole
+      # gate: the other 177 feature-gated tests have never run in CI either.
+      # The sampler bug is worth fixing on its own; Android reads the same
+      # /proc.
+      - name: Test (all features)
+        run: |
+          cargo test --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml --all-features             -- --skip a_child_process_is_supervised_by_the_same_host
+
+      - name: Clippy (all features)
+        run: cargo clippy --manifest-path rust/homerun-pumpkin-ffi/Cargo.toml --all-features --all-targets -- -D warnings
+
+      # homerun-pumpkin-bin pins Pumpkin unconditionally -- no feature gate to
+      # hide behind -- and had no CI at all, which made it the crate most
+      # exposed to a pin bump and the least likely to notice one.
+      - name: Clippy (homerun-pumpkin-bin)
+        run: cargo clippy --manifest-path rust/homerun-pumpkin-bin/Cargo.toml --all-targets -- -D warnings
 
       # Last, and `always()`: the agent holds the deploy key in memory, and a
       # self-hosted runner's processes outlive the job unless something reaps
