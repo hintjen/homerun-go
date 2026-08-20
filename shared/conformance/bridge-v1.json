@@ -941,6 +941,7 @@
           "wsl",
           "javaNative"
         ],
+        "pumpkinServers": false,
         "installation": true,
         "moveInstallation": true,
         "clientLauncher": true,
@@ -1137,6 +1138,7 @@
         "serverBackends": [
           "pumpkin"
         ],
+        "pumpkinServers": false,
         "installation": false,
         "moveInstallation": false,
         "clientLauncher": false,
@@ -1253,6 +1255,7 @@
           "javaNative",
           "pumpkin"
         ],
+        "pumpkinServers": true,
         "installation": false,
         "moveInstallation": false,
         "clientLauncher": false,
