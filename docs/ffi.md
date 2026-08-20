@@ -249,10 +249,20 @@ pump is the one that turns a console line into an event; `note` only writes.
 ## Crash handling
 
 `crash.rs` installs a panic hook that writes `crash-reports/panic-<ts>.txt`
-into the server's data directory, with a backtrace, and keeps the message so
-a failed start can explain itself.
+with a backtrace, and keeps the message so a failed start can explain itself.
 
-Two things worth knowing:
+**The hook is installed from `core_dispatch::call`**, at the top of every
+call, not from `server.rs`. It is idempotent behind an `AtomicBool` so the
+cost is one relaxed atomic load, and it means a device that never hosts a
+server still has a panic hook — which was not true before, and is most of the
+app.
+
+**There are two crash directories, and the split matters.** `set_crash_dir`
+takes the server's data directory, which restic backs up as part of the world:
+panics were riding into players' world backups. `set_app_crash_dir`
+(`error.attach`) points at host storage instead, and the hook prefers it.
+
+Two more things worth knowing:
 
 - **Every `extern "C"` function wraps its body in `catch_unwind`.** A panic
   crossing the FFI boundary is undefined behaviour, not a crash you can
@@ -261,6 +271,29 @@ Two things worth knowing:
   that, a panic from anywhere earlier in the process leaks into the *next*
   crash's message and blames the wrong thing. That was a real bug, caught by
   a test, and `a_crash_is_not_blamed_on_an_older_unrelated_panic` pins it.
+
+### Reporting a crash off the device — `errors.rs`
+
+Four arms carry app errors, beside `reporting.crash.report`:
+
+| Arm | Does |
+|---|---|
+| `error.attach` | Points the app-level crash directory. Once, at launch. |
+| `error.report` | Locks the process-global ledger, decides, returns a `Request` or a hold. |
+| `error.stash` | Writes one file. No network — the caller is already dying. |
+| `error.drain` | Reads last launch's files, **deletes each before parsing**, caps at 5. |
+
+The delete-before-parse is a loop cut, not tidiness: a report that panics the
+core while being parsed would be re-read on the next launch, and again.
+
+The ledger is a `static OnceLock<Mutex<Ledger>>` here rather than round-tripped
+through the host like `lifecycle` and `metrics`. Four threads produce into it —
+the JVM crash handler, the WebView bridge thread, the panic hook, the host's
+reporting coroutine — and a per-caller copy would turn "20 sends per session"
+into "20 per caller".
+
+**None of this exports a symbol, so `FFI_ABI_VERSION` did not move.** See
+[`app-errors.md`](./app-errors.md).
 
 ## One server at a time
 

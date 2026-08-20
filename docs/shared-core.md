@@ -79,7 +79,8 @@ bundle.rs      OTA manifests: signature, version ordering, rollback
 device_ws/     the dashboard socket's frames, auth scope and PROXY v1 — no socket
 md5.rs         a hash nothing trusts, to avoid a dependency
 sha1.rs        checksums for downloaded artifacts
-reporting/     crash reports and the stats a run reports home
+reporting/     crash reports, the stats a run reports home, and every
+               unexpected failure the app itself hits
 minecraft/     jar, jvm, console, settings — one implementation of game.rs
 ```
 

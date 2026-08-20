@@ -386,7 +386,35 @@ then says "running on another device".
 
 ---
 
-### 🧯 [Validating error reporting on iOS](./ios-error-reporting-runbook.md)
+### 🧯 [App error reporting](./app-errors.md)
+
+Every unexpected failure — JavaScript, Kotlin, Swift, Rust, and an API
+response the client could not use — in one table, deduplicated and
+rate-limited before it leaves the phone. Not the same thing as
+[`android-reporting.md`](./android-reporting.md), which is about the server a
+device hosts.
+
+**Contains**:
+- Why the reporter is a *decision* module in the core and a transport in the
+  hosts, and why `reqwest` being Android-only settles it
+- The five intakes, and why native deaths stash to disk instead of sending
+- Grouping: what goes into a fingerprint, what is deliberately left out, and
+  the three things a real phone proved were breaking it
+- The rate limiter's actual numbers, the volume they prevent, and the four
+  feedback loops that had to be cut
+- Why the ledger lives in the FFI crate rather than round-tripping through the
+  host
+- The four `error.*` dispatch arms, and why `FFI_ABI_VERSION` did not move
+- `ApplicationExitInfo` and MetricKit — the deaths no code of ours could
+  report, and why no signal handler was written
+- How to make either host fail on purpose, and the two traps that cost real
+  time
+
+**Read this for**: Anything about how a failure becomes a row.
+
+---
+
+### 🧪 [Validating error reporting on iOS](./ios-error-reporting-runbook.md)
 
 Every unexpected failure — JavaScript, Kotlin, Swift, Rust — lands in one
 table. The core logic, the endpoint and the Android host are verified on
