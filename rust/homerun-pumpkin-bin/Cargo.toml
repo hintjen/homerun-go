@@ -18,9 +18,9 @@ path = "src/main.rs"
 # reads, and a settings key that moved between revs would be written to a file
 # the running server does not read. There is a test for this — see
 # `scripts/check-pumpkin-rev.js`.
-pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a" }
-pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a" }
-pumpkin-data = { git = "https://github.com/hintjen/Pumpkin", rev = "6a775376e6e5e057c98b7c49dc6a2c2d09212d8a" }
+pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "09f1d4dfbe524292b3996f1242157b23b90177e4" }
+pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "09f1d4dfbe524292b3996f1242157b23b90177e4" }
+pumpkin-data = { git = "https://github.com/hintjen/Pumpkin", rev = "09f1d4dfbe524292b3996f1242157b23b90177e4" }
 
 # The settings machinery, reused rather than reimplemented. `engine_settings`
 # resolves what a player asked for into what an engine will accept — clamps,

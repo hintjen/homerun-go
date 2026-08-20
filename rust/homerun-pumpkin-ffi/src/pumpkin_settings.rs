@@ -108,10 +108,9 @@ pub fn apply(settings: &EngineSettings, config: &mut PumpkinConfig) {
     // The two listeners are one server. Leaving Bedrock on its own defaults
     // would give a Bedrock client a different player cap and a different MOTD
     // from the Java client next to it on the same Wi-Fi.
-    for (online, encryption, max_players, view, simulation, motd) in [
+    for (online, max_players, view, simulation, motd) in [
         (
             &mut config.advanced.networking.java.online_mode,
-            &mut config.advanced.networking.java.encryption,
             &mut config.advanced.networking.java.max_players,
             &mut config.advanced.networking.java.view_distance,
             &mut config.advanced.networking.java.simulation_distance,
@@ -119,7 +118,6 @@ pub fn apply(settings: &EngineSettings, config: &mut PumpkinConfig) {
         ),
         (
             &mut config.advanced.networking.bedrock.online_mode,
-            &mut config.advanced.networking.bedrock.encryption,
             &mut config.advanced.networking.bedrock.max_players,
             &mut config.advanced.networking.bedrock.view_distance,
             &mut config.advanced.networking.bedrock.simulation_distance,
@@ -127,15 +125,22 @@ pub fn apply(settings: &EngineSettings, config: &mut PumpkinConfig) {
         ),
     ] {
         *online = settings.online_mode;
-        // Pumpkin asserts this pairing, and we bypass the check that would
-        // have caught it.
-        if settings.online_mode {
-            *encryption = true;
-        }
         *max_players = settings.max_players;
         *view = distance(settings.view_distance);
         *simulation = distance(settings.simulation_distance);
         motd.clone_from(&settings.motd);
+    }
+
+    // Java only. `bedrock.encryption` went away upstream in ffcf09ec ("remove
+    // bedrock raknet"); Bedrock's analogue is `authentication.enabled`, which
+    // is Xbox Live auth and a separate user-facing choice, so nothing here
+    // sets it. The assertion this works around is Java-only too:
+    // "When online mode is enabled, encryption must be enabled".
+    //
+    // Pumpkin asserts that pairing, and we bypass the check that would have
+    // caught it.
+    if settings.online_mode {
+        config.advanced.networking.java.encryption = true;
     }
 
     // Also asserted, and reachable the moment a player turns off online mode
@@ -365,8 +370,9 @@ mod tests {
             for encryption in [true, false] {
                 for reports in [true, false] {
                     let mut config = PumpkinConfig::default();
+                    // Java only: Bedrock lost its `encryption` flag upstream,
+                    // and `validate()` only ever asserted on Java's.
                     config.advanced.networking.java.encryption = encryption;
-                    config.advanced.networking.bedrock.encryption = encryption;
                     config.basic.allow_chat_reports = reports;
 
                     apply(

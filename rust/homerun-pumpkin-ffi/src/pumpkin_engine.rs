@@ -206,7 +206,9 @@ impl Engine for PumpkinEngine {
         // block_on is safe here. The reply is written to the console rather
         // than returned; the UI reads it from the log.
         active.runtime.block_on(async move {
-            let dispatcher = server.command_dispatcher.read().await;
+            // `ArcSwap` upstream, not an `RwLock`, since Pumpkin made the
+            // dispatcher hot-swappable for plugin reloads.
+            let dispatcher = server.command_dispatcher.load();
             // Two dispatchers exist with a `handle_command`; the one behind
             // this field takes a resolved `CommandSource`. Mirrors how the
             // engine dispatches its own console input.
