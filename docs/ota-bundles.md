@@ -6,8 +6,9 @@ is the design and the policy argument; this file is what exists, how it behaves
 on a device, and how to break it on purpose.
 
 **Built so far: all of it, on Android.** The client checks for a bundle, verifies
-its signature, downloads it, activates it on the next launch, judges it and rolls
-it back if it fails; the API serves signed manifests; a workflow publishes them.
+its signature, downloads it, puts it on screen as soon as the app can take it,
+judges it and rolls it back if it fails; the API serves signed manifests; a
+workflow publishes them.
 
 What is left is switching it on — the API branch deployed, the AWS credential
 proven, and a store release carrying the public key — plus iOS, which is blocked
@@ -248,7 +249,109 @@ that is judged once, before the page loads.
 
 Activation happens only where a page is being created anyway, never under a live
 one. Swapping the bundle under a running page cancels whatever bridge call is in
-flight, and `native-server-start` runs for minutes.
+flight, and `native-server-start` runs for minutes. The next section is how a
+bundle gets a page created for it without waiting for a launch.
+
+## Applying it: as soon as it arrives
+
+**There is no update prompt on either host, and there never was one that a user
+could see the point of.** A bundle that has been fetched, verified and unpacked
+goes live immediately: the host promotes it and rebuilds the WebView, the user
+sees a splash, and the app comes back on the new UI about a second later. The
+shared UI's update card subscribes to `update-available`, so **never emitting
+that event is what keeps the card off the screen** — the channel is still
+declared, still gated on `autoUpdate`, and simply never fires on mobile.
+
+`MainActivity.applyStagedBundle` and `BridgeController.applyStagedBundle` are
+the same function twice. Both are called with a short reason for the log, both
+answer "not now" far more often than they act, and both are no-ops when nothing
+is staged.
+
+**Two things make now the wrong moment, and both defer rather than cancel:**
+
+- **A bridge call is in flight.** Rebuilding the WebView cancels every handler
+  the page owns, and `wait-for-update-check` is *itself* one of them — the
+  shared UI awaits it on the mandatory post-login path, so applying underneath
+  it would hang login at a spinner with no error. That is the failure mode this
+  repo is most careful about, and it would have been introduced by the feature
+  meant to keep the UI current.
+- **This device is hosting.** A running server survives the swap — that is what
+  `ServerHost` is for on Android, and on iOS the engine lives in the backend
+  rather than the page — but the console scrollback does not, and interrupting
+  someone mid-session to reload the UI is a poor trade for a fix that can wait
+  for the stop.
+
+The two hosts draw the second line in the same place through different
+questions: Android asks `ServerHost.hosting().busy`, iOS asks
+`backend.lifecycle.activeIds()`. The difference that follows is the on-stop
+backup: Android's `busy` stays true through it and iOS's does not. That is
+deliberate rather than drift — Android's backup is bound up with the foreground
+service and the notification, iOS's runs in a detached task that owns no page
+state and cannot be disturbed by a reload.
+
+**Every path back to idle asks again**, which is what makes "immediately" true
+rather than "usually":
+
+| Trigger | Android | iOS |
+|---|---|---|
+| The bundle was just staged | `BundleUpdater.onBundleStaged` | the same |
+| The last in-flight call finished | `BridgeRouter.onPageIdle` | the dispatch task, when `pending` empties |
+| A fresh page finished its handshake | `onPageIdle` from `onReady` | after `flushQueue()` |
+| A run ended, or its backup did | `ServerHost.Listener` | `backend.onStateChanged` |
+| The app came back to the foreground | `onResume` | `applicationDidBecomeActive` |
+
+And if none of them ever fires, `BundleStore.activate()` at the next launch
+still takes it. That path is untouched and remains the floor: **every deferral
+is a delay, never a loss.**
+
+`quit-and-install` still works and still applies without quitting. Nothing on
+mobile sends it any more, but it costs one handler, it is required by the
+`autoUpdate` capability both mobile profiles declare, and it is the manual
+override if a screen is ever built for one.
+
+The log is the way to watch this. Every decision is narrated at info level on
+`HomerunBundle` / `HostLog.bundle`, and reads either
+
+```
+applying 2026-08-14.1 now (it was just staged)
+```
+
+or the reason it did not:
+
+```
+holding 2026-08-14.1 back (it was just staged): hosting srv_123 (RUNNING)
+holding 2026-08-14.1 back (the page went idle): the page is mid-call
+```
+
+### Turning it off for a development build
+
+A build whose point is the UI you just staged should not be racing the updater,
+and since it now applies immediately the race is one it will usually win. One
+flag per platform:
+
+```bash
+npm run android:run -- --no-ota      # shorthand for -PotaUpdates=off
+xcodebuild … HOMERUN_OTA_UPDATES=0   # defaulted in ios/project.yml
+```
+
+Off means **ignore them entirely** rather than "do not fetch". `BundleStore`
+promotes nothing, serves the shipped copy, and reports no pending bundle — that
+last one matters more than it looks: the applier acts on `pending()`, and a
+build that reported a bundle it would then refuse to activate would rebuild its
+WebView on every idle moment, for ever. Nothing on disk is touched, so the same
+device with the flag back on carries on where it left off.
+
+On by default, debug included — the update path is only ever exercised on a
+debug build. A release built this way would look completely healthy and silently
+never update again, so `verifyReleaseConfig` refuses one; iOS has no equivalent
+gate, which is a reason not to put the setting in a release invocation.
+
+**Note what is *not* the switch.** Both hosts treat a blank signing key as
+"off", and that branch is still there and still correct — but Gradle's `prop()`
+falls back to the compiled-in default for a blank `-P` override, and the hex
+`require` would reject an empty one, so `-PbundlePublicKey=` never disabled
+anything. It was documented in the `on-device-build` skill for months as the way
+to do this.
 
 ## Testing it on a device
 
@@ -273,8 +376,9 @@ emulator when it was built:
 | Bundle | Expected |
 |---|---|
 | `index.html` that sends `__bridge:ready` | activated, served on probation, then `confirmed`; probation file gone |
+| The same, pushed while the app is in the foreground | live without relaunching. `adb push` writes `pending` behind the host's back, so nothing announces it — but every trigger in *Applying it* re-asks, and the next bridge call to complete is one. Bring the app back to the foreground if you are impatient |
 | `index.html` that throws before `ready` | two probation launches, then `rolling back`, and the previous bundle serves |
-| `"minHost": 99` | `refusing it`, pending discarded, current untouched |
+| `"minHost": 99` | `refusing it`, pending discarded at the next launch, current untouched. Expect the refusal line more than once: every idle moment re-reads `pending` looking for something to apply, and this is what it finds |
 | `current` with `index.html` deleted, no `previous` | `the live bundle is unusable`, then the shipped bundle, and the real UI loads |
 
 The second one is the only test that matters. Everything else here is plumbing.
@@ -312,7 +416,8 @@ emulator against the real CDN when it was built:
 
 | Manifest | Expected |
 |---|---|
-| Correctly signed, newer serial | fetched, staged, live on the next launch |
+| Correctly signed, newer serial | fetched, staged, and live within a second — the page reloads on its own, with no prompt and no relaunch |
+| The same, with a server running | fetched and staged, `holding … back`, then live the moment the server stops |
 | A signed field edited in transit | `refusing the manifest: the manifest's signature does not match`, nothing fetched |
 | Validly signed, digest of other bytes | downloaded, then `does not match its signed digest; discarding it` |
 | Validly signed, serial ≤ installed | `no update: the offered bundle is serial N, older than the installed N` |
@@ -398,10 +503,14 @@ It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
 
 ## Still to build
 
-The update modal and the iOS half were the two items here, and both are now
-written. `update-available`, `quit-and-install` and `wait-for-update-check` are
-answered by both hosts; on mobile "restart" is a WebView rebuild, about a
-second, with the running server surviving it.
+The update prompt and the iOS half were the two items here. The iOS half is
+written; the prompt was built, shipped and then **removed** — see *Applying it:
+as soon as it arrives*. An update that costs a second and that nobody can
+evaluate is not a decision worth interrupting someone for, and "later" meant
+the next launch either way. `quit-and-install` and `wait-for-update-check` are
+still answered by both hosts and `update-available` is still declared; nothing
+on mobile emits it. On mobile "restart" is a WebView rebuild, about a second,
+with the running server surviving it.
 
 **iOS, as of 2026-08-13**, compiles and is proven on the simulator, both
 halves. The store: the shipped floor, a hand-placed bundle, activation of a

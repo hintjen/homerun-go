@@ -139,8 +139,19 @@ class MainActivity : ComponentActivity() {
      */
     private val hostingListener = object : ServerHost.Listener {
         override fun onStateChanged(serverId: String, state: ServerState, backupInProgress: Boolean) {
-            if (state != ServerState.STARTING) return
-            runOnUiThread { askForNotifications() }
+            if (state == ServerState.STARTING) {
+                runOnUiThread { askForNotifications() }
+                return
+            }
+            // A run ending is one of the two moments this device stops being
+            // busy, which is what holds a staged bundle back — see
+            // [applyStagedBundle]. A no-op unless one is waiting.
+            runOnUiThread { applyStagedBundle("the server reached $state") }
+        }
+
+        /** The other moment: the world has finished going up. */
+        override fun onBackupFinished(serverId: String) {
+            runOnUiThread { applyStagedBundle("the backup finished") }
         }
     }
 
@@ -646,20 +657,13 @@ class MainActivity : ComponentActivity() {
         // launch, so there is nothing to gain by making the user wait on it.
         BundleUpdater.check(this, lifecycleScope)
 
-        // Offer it as soon as it is ready, rather than waiting for the user to
-        // relaunch of their own accord. `update-available` is what the shared
-        // UI's update prompt subscribes to.
+        // Apply it as soon as it is on disk, rather than asking. There is no
+        // update prompt on this host: `update-available` is what the shared
+        // UI's card subscribes to, and never emitting it is what keeps the
+        // card off the screen.
         BundleUpdater.onBundleStaged = { bundle ->
-            router.emit(
-                "update-available",
-                listOf(
-                    buildJsonObject {
-                        put("status", "available")
-                        put("version", bundle)
-                        put("bundle", bundle)
-                    }
-                ),
-            )
+            Log.i(TAG, "bundle $bundle is staged")
+            runOnUiThread { applyStagedBundle("it was just staged") }
         }
 
         // `quit-and-install`, which on this platform installs without quitting.
@@ -689,9 +693,62 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // The other half of applying immediately: a bundle that arrived while
+        // the page was mid-call goes live the moment that call is done, rather
+        // than waiting for the next launch.
+        router.onPageIdle = { applyStagedBundle("the page went idle") }
+
         ServerHost.addListener(hostingListener)
 
         onBackPressedDispatcher.addCallback(this, backToPreviousPage)
+    }
+
+    /**
+     * Put a downloaded bundle on screen, if this is a safe moment to.
+     *
+     * There is no update prompt on this host. A bundle that has been fetched,
+     * verified and unpacked goes live as soon as the app can take it, which is
+     * usually within a second of it arriving — the user sees a splash and the
+     * app comes back on the new UI. The alternative was a card asking
+     * permission for something that costs a second and that nobody can
+     * evaluate, and "later" meant the next launch anyway.
+     *
+     * **Two things make now the wrong moment**, and both defer rather than
+     * cancel:
+     *
+     *  - **A bridge call is in flight.** Rebuilding the WebView cancels every
+     *    handler the page owns ([BridgeRouter.onPageGone]). `wait-for-update-check`
+     *    is itself one of them — it is awaited on the mandatory post-login
+     *    path, so applying underneath it would hang login at a spinner, which
+     *    is the exact failure this repo is most careful about.
+     *  - **This device is hosting.** A running server survives the swap —
+     *    that is what `ServerHost` is for — but the console scrollback does
+     *    not, and interrupting someone mid-session to reload the UI is a poor
+     *    trade for a fix that can wait for the stop. `busy` also covers the
+     *    on-stop backup, which runs for minutes after the server has gone.
+     *
+     * Every path back to idle calls this again: the router when the last
+     * handler unwinds, the hosting listener when a run and its backup end,
+     * [onResume] when the user comes back. And if none of them ever does,
+     * `BundleStore.activate` at the next launch still picks it up — that path
+     * is untouched and remains the floor.
+     */
+    private fun applyStagedBundle(trigger: String) {
+        if (isFinishing || isDestroyed) return
+        val staged = runCatching { BundleStore.pending(this) }.getOrNull() ?: return
+
+        if (!router.pageIdle()) {
+            Log.i(TAG, "holding $staged back ($trigger): the page is mid-call")
+            return
+        }
+        if (ServerHost.hosting().busy) {
+            Log.i(TAG, "holding $staged back ($trigger): ${ServerHost.hostingSummary()}")
+            return
+        }
+
+        Log.i(TAG, "applying $staged now ($trigger)")
+        BundleStore.activate(this)
+        installWebView()
     }
 
     /** Builds a fresh WebView, wires it to the router, and loads the bundle. */
@@ -790,6 +847,10 @@ class MainActivity : ComponentActivity() {
         // would otherwise check once and stay on that bundle for weeks; the
         // throttle inside means most resumes cost nothing.
         BundleUpdater.check(this, lifecycleScope)
+        // A bundle staged earlier and held back — the device was hosting, or
+        // the page was mid-call — takes the first chance it gets. The check
+        // above will not re-announce one it has already staged.
+        applyStagedBundle("the app came back to the foreground")
     }
 
     /**

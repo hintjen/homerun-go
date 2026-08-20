@@ -130,6 +130,22 @@ object BundleStore {
     fun active(): String = loaded?.id ?: SHIPPED
 
     /**
+     * Whether this build has anything to do with over-the-air bundles at all.
+     *
+     * `-PotaUpdates=off` (see `android/app/build.gradle.kts`) is for a
+     * development build whose whole point is the UI that was just staged into
+     * `assets/web/`. It means **ignore them entirely**, not merely "do not
+     * fetch": [activate] promotes nothing, [resolve] serves the shipped copy,
+     * and [pending] answers null so nothing downstream offers or applies one.
+     *
+     * Nothing on disk is touched — not the bundles, not the probation record —
+     * so the same device with the flag back on carries on exactly where it left
+     * off. A release cannot be built this way; Gradle's `verifyReleaseConfig`
+     * refuses.
+     */
+    private val enabled: Boolean get() = BuildConfig.OTA_UPDATES
+
+    /**
      * What the update check tells `homerun_core::bundle` about this device.
      *
      * Built from what [resolve] settled on rather than re-read from disk, so it
@@ -164,6 +180,7 @@ object BundleStore {
      */
     @Synchronized
     fun activate(context: Context) {
+        if (!enabled) return
         val ui = uiDir(context)
         val pending = File(ui, PENDING)
         if (!pending.exists()) return
@@ -259,13 +276,22 @@ object BundleStore {
             unpacked.deleteRecursively()
             return false
         }
-        Log.i(TAG, "bundle $id is staged; it goes live on the next launch")
+        Log.i(TAG, "bundle $id is staged")
         return true
     }
 
-    /** The id already waiting to go live, if any. Keeps the updater from refetching it. */
+    /**
+     * The id already waiting to go live, if any. Keeps the updater from
+     * refetching it, and is what `MainActivity.applyStagedBundle` acts on.
+     *
+     * Null when [enabled] is false, which is load-bearing rather than tidy: the
+     * applier reads this, and a build that reported a pending bundle it would
+     * then refuse to activate would rebuild its WebView on every idle moment,
+     * for ever.
+     */
     @Synchronized
-    fun pending(context: Context): String? = readManifest(File(uiDir(context), PENDING))?.id
+    fun pending(context: Context): String? =
+        if (!enabled) null else readManifest(File(uiDir(context), PENDING))?.id
 
     // -----------------------------------------------------------------------
     // Resolution
@@ -280,6 +306,13 @@ object BundleStore {
      */
     @Synchronized
     fun resolve(context: Context): Loaded {
+        if (!enabled) {
+            // Deliberately not [floor], which clears the probation record: this
+            // build is ignoring what is on disk, not passing judgement on it.
+            Log.i(TAG, "over-the-air updates are off in this build; serving the shipped bundle")
+            onProbation = false
+            return Loaded(SHIPPED, null).also { loaded = it }
+        }
         val ui = uiDir(context)
 
         // Each demotion changes what `current` is, so the question has to be

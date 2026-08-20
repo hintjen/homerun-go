@@ -28,6 +28,9 @@ each platform's assets, and the Rust FFI compiled for its targets.
 - **Which backend a build talks to**: the two places that hold an API URL, the
   switch on each platform (`--api` / `HOMERUN_API_URL`), and why neither moves a
   device that has already run without clearing its data
+- **Which UI a build runs**: why an over-the-air bundle outranks the one in the
+  binary, the flag that turns that off for a development build
+  (`--no-ota` / `HOMERUN_OTA_UPDATES=0`), and why a release cannot use it
 - **Push credentials**: which of the four Firebase and APNs files goes where,
   which two are private keys, and why an APNs key is scoped to Apple's build
   environment rather than to a Firebase project
@@ -335,10 +338,13 @@ and what happens when a new one turns out to be fatal.
 - What activate and resolve do, in order, and why both run before a WebView
 - Why the probation counter is on disk, written before the page can crash
 - Why there is no per-request fallback to the shipped copy
+- **Why there is no update prompt**: a bundle applies as soon as it arrives,
+  the two things that defer it, and the five triggers that re-ask
 - Testing the whole thing with `adb push`, and no CDN needed
 
-**Read this for**: Shipping a UI fix without a store release, or an app that
-came back on an older UI than the one it downloaded.
+**Read this for**: Shipping a UI fix without a store release, an app that came
+back on an older UI than the one it downloaded, or a bundle that downloaded and
+did not go live.
 
 ---
 

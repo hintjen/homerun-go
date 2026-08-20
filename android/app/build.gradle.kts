@@ -24,6 +24,34 @@ fun prop(name: String, fallback: String): String =
 val requestedAbi: String? = (project.findProperty("abi") as String?)?.takeIf { it.isNotBlank() }
 
 /**
+ * Whether this build has anything to do with over-the-air UI bundles.
+ *
+ * On by default, including for debug builds — the update path is only ever
+ * exercised on a debug build, so defaulting it off in development would mean
+ * nobody sees it work until a release. Turn it off for a build whose whole
+ * point is the UI you just staged into `assets/web/`:
+ *
+ *   ./gradlew installDebug -PotaUpdates=off
+ *   npm run android:run -- --no-ota
+ *
+ * Off means *ignore them entirely*, not merely "do not fetch": nothing is
+ * downloaded, and a bundle already sitting in `files/ui/` is neither promoted
+ * nor served. Nothing on disk is deleted either, so a build with the flag back
+ * on picks up exactly where it left off.
+ *
+ * A **release** built this way would look completely healthy while silently
+ * never updating again, which is the same failure an empty signing key would
+ * cause — so `verifyReleaseConfig` refuses one.
+ */
+val otaUpdates: Boolean = when (prop("otaUpdates", "on").lowercase()) {
+    "on", "true", "yes", "1" -> true
+    "off", "false", "no", "0" -> false
+    else -> throw GradleException(
+        "otaUpdates must be on or off, got: ${project.findProperty("otaUpdates")}",
+    )
+}
+
+/**
  * Per ABI: the `OS_ARCH` a Java runtime reports in its `release` file, and the
  * command that stages one. Both belong to `scripts/stage-jre.py`, the only
  * thing that ever writes into `assets/jre-*`; it takes the same two ABI names.
@@ -106,6 +134,13 @@ android {
             "bundlePublicKey must be 64 lowercase hex characters, got: $bundlePublicKey"
         }
         buildConfigField("String", "BUNDLE_PUBLIC_KEY", "\"$bundlePublicKey\"")
+
+        // Note this is *not* spelled as an empty key. `BundleUpdater` treats a
+        // blank key as "off" and always has, but `prop` falls back to the
+        // default for a blank override, so there was no way to reach that state
+        // from a command line — and the regex above rejects it besides. This is
+        // the switch; the key stays a key.
+        buildConfigField("boolean", "OTA_UPDATES", otaUpdates.toString())
 
         // The staged Java runtime is architecture-specific and ~165 MB, so a
         // build ships exactly one ABI — the same choice Anvil-MC makes. Pass
@@ -398,14 +433,26 @@ val verifyReleaseRuntimes by tasks.registering {
 /**
  * The checks that only make sense for a release build.
  *
- * Both are about artifacts that look finished and are not: one that packages
- * every ABI and so carries a JRE for the wrong CPU alongside the right one, and
- * one that Play will not accept because nothing signed it.
+ * All three are about artifacts that look finished and are not: one that
+ * packages every ABI and so carries a JRE for the wrong CPU alongside the right
+ * one, one that Play will not accept because nothing signed it, and one that
+ * can never be fixed without another store release.
  */
 val verifyReleaseConfig by tasks.registering {
     val abi = requestedAbi
     val signed = android.buildTypes.getByName("release").signingConfig != null
+    val ota = otaUpdates
     doFirst {
+        if (!ota) {
+            throw GradleException(
+                "This release was built with -PotaUpdates=off, so it would never " +
+                    "take a UI bundle over the air.\n" +
+                    "Nothing about it would look wrong: it installs, runs, and " +
+                    "silently stays on the UI compiled into it for ever — every " +
+                    "shared-UI fix would need another store release.\n" +
+                    "The flag is for development builds. Drop it.",
+            )
+        }
         if (abi == null) {
             throw GradleException(
                 "A release build must name its ABI:  -Pabi=arm64-v8a\n" +

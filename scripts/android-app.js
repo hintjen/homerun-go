@@ -20,6 +20,10 @@
  *                  property anybody passes and `--api` is what people try.
  *   --fresh        wipe the app's data after installing, so it launches as a
  *                  genuine first run. **Usually wanted with `--api`.**
+ *   --no-ota       ignore over-the-air UI bundles: this build serves the UI it
+ *                  was built with and nothing else. Shorthand for
+ *                  `-PotaUpdates=off`. For iterating on the shared UI, where an
+ *                  update landing mid-session would replace what you staged.
  *   -P<name>=<v>   any other gradle property, forwarded untouched.
  *
  * ## Why `--api` alone is usually not enough
@@ -89,12 +93,16 @@ function parseFlags(argv) {
       if (!flags.apiUrl) die("--api needs a URL, e.g. --api https://api.fractalnetworks.co");
     } else if (arg.startsWith("--api=")) {
       flags.apiUrl = arg.slice("--api=".length);
+    } else if (arg === "--no-ota") {
+      // Not a boolean on `flags`: it is one gradle property and nothing here
+      // needs to know about it afterwards.
+      flags.props.push("-PotaUpdates=off");
     } else if (arg.startsWith("-P")) {
       flags.props.push(arg);
     } else {
       die(
         `Unknown option "${arg}".\n` +
-          "Expected --api <url>, --fresh, or a -P<name>=<value> gradle property."
+          "Expected --api <url>, --fresh, --no-ota, or a -P<name>=<value> gradle property."
       );
     }
   }

@@ -51,6 +51,10 @@ import kotlinx.coroutines.withContext
  * has been asked to load. `plans/ota-updates.md`: "Checks run at launch and on
  * resume, throttled, and never block startup. An update that has not finished
  * downloading is simply not applied yet."
+ *
+ * What happens *after* it finishes downloading is the activity's call, not
+ * this one's: [onBundleStaged] fires and `MainActivity.applyStagedBundle`
+ * decides whether the app can take it now. See `docs/ota-bundles.md`.
  */
 object BundleUpdater {
 
@@ -97,10 +101,14 @@ object BundleUpdater {
     /**
      * Called on the IO thread when a bundle becomes `pending`.
      *
-     * This is what turns a silent background download into an offer the user
-     * can accept — `MainActivity` wires it to the bridge's `update-available`.
-     * A callback rather than a direct emit because this object has no page and
-     * must keep working when there is no WebView at all.
+     * This is what turns a silent background download into a UI the user is
+     * looking at: `MainActivity` wires it to `applyStagedBundle`, which puts
+     * the bundle on screen there and then unless the device is mid-call or
+     * hosting. Nothing is offered and nothing is asked.
+     *
+     * A callback rather than a direct apply because this object has no page,
+     * no activity and no WebView, and must keep working when none of them
+     * exist.
      */
     @Volatile
     var onBundleStaged: ((String) -> Unit)? = null
@@ -144,6 +152,13 @@ object BundleUpdater {
         }
 
     private fun checkNow(context: Context, force: Boolean) {
+        if (!BuildConfig.OTA_UPDATES) {
+            // A development build that wants to keep the UI it was built with.
+            // Info rather than debug: this is a deliberate build flag, and the
+            // one question it will be asked is "why is my phone not updating".
+            Log.i(TAG, "over-the-air updates are off in this build (-PotaUpdates=off)")
+            return
+        }
         if (BuildConfig.BUNDLE_PUBLIC_KEY.isBlank()) {
             // No key compiled in means no way to tell a real manifest from any
             // other. The only safe behaviour is to do nothing at all — never to
@@ -186,7 +201,10 @@ object BundleUpdater {
                 return
             }
             if (BundleStore.pending(context) == offer.bundle) {
-                Log.i(TAG, "bundle ${offer.bundle} is already staged; it goes live on the next launch")
+                // Announced once, when it was staged. If it is still here, the
+                // activity is holding it back for a reason of its own and will
+                // take it at the next idle moment or the next launch.
+                Log.i(TAG, "bundle ${offer.bundle} is already staged and waiting to go live")
                 return
             }
 

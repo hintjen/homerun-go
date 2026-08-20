@@ -53,9 +53,13 @@ enum BundleUpdater {
 
     /// Called when a bundle becomes `pending`.
     ///
-    /// This is what turns a silent background download into an offer the user
-    /// can accept — the bridge controller wires it to `update-available`. A
-    /// callback rather than a direct emit because this type has no page and
+    /// This is what turns a silent background download into a UI the user is
+    /// looking at: the bridge controller wires it to `applyStagedBundle`,
+    /// which puts the bundle on screen there and then unless the page is
+    /// mid-call or this device is hosting. Nothing is offered and nothing is
+    /// asked.
+    ///
+    /// A callback rather than a direct apply because this type has no page and
     /// must keep working when there is no WebView at all.
     static var onBundleStaged: ((String) -> Void)?
 
@@ -80,6 +84,15 @@ enum BundleUpdater {
     /// fetched by an earlier background check is still offered.
     @discardableResult
     static func checkNow(force: Bool = true) async -> String? {
+        guard Capabilities.otaUpdates else {
+            // A development build that wants to keep the UI it was built with.
+            // Info rather than debug: this is a deliberate build setting, and
+            // the one question it will be asked is "why is my phone not
+            // updating".
+            HostLog.bundle.info(
+                "over-the-air updates are off in this build (HOMERUN_OTA_UPDATES=0)")
+            return nil
+        }
         guard !Capabilities.bundlePublicKey.isEmpty else {
             // No key compiled in means no way to tell a real manifest from any
             // other. The only safe behaviour is to do nothing at all — never

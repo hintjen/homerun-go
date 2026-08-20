@@ -120,6 +120,17 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// > up — which reads exactly like a hook that was never wired.
     func applicationDidBecomeActive(_ application: UIApplication) {
         DeviceWebsocket.shared.ensure()
+
+        // The other half of "launch and resume", which `BundleUpdater` has
+        // always claimed and until now did not have: the check ran once, from
+        // `BridgeController.load()`, so a phone that is never quit stayed on
+        // the bundle it launched with for as long as the process lived. The
+        // six-hour throttle inside means most activations cost nothing.
+        BundleUpdater.check()
+
+        // And take anything already staged that an earlier moment held back —
+        // the device was hosting, or the page was mid-call.
+        bridge?.applyStagedBundle("the app came back to the foreground")
     }
 
     /// Not `willResignActive`, which also fires for a notification banner, the

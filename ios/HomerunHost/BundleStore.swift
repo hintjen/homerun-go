@@ -85,6 +85,13 @@ enum BundleStore {
         queue.sync { loaded?.id ?? shipped }
     }
 
+    /// Whether this build takes bundles over the air —
+    /// ``Capabilities/otaUpdates``, which is where the reasoning lives.
+    ///
+    /// Read through here so the four places below say what they mean rather
+    /// than each reaching for a build setting.
+    private static var enabled: Bool { Capabilities.otaUpdates }
+
     /// What the update check tells `homerun_core::bundle` about this device.
     ///
     /// Built from what ``resolve()`` settled on rather than re-read from disk,
@@ -113,6 +120,7 @@ enum BundleStore {
     /// under a running page cancels whatever bridge call is in flight, and
     /// `native-server-start` runs for minutes.
     static func activate() {
+        guard enabled else { return }
         queue.sync {
             let ui = uiDirectory()
             let pending = ui.appendingPathComponent(pendingName)
@@ -221,8 +229,13 @@ enum BundleStore {
     }
 
     /// The id already waiting to go live, if any. Keeps the updater from refetching it.
+    /// Nil when ``enabled`` is false, which is load-bearing rather than tidy:
+    /// `BridgeController.applyStagedBundle` acts on this, and a build that
+    /// reported a pending bundle it would then refuse to activate would reload
+    /// its page on every idle moment, for ever.
     static func pending() -> String? {
-        queue.sync { readManifest(uiDirectory().appendingPathComponent(pendingName))?.id }
+        guard enabled else { return nil }
+        return queue.sync { readManifest(uiDirectory().appendingPathComponent(pendingName))?.id }
     }
 
     // MARK: - Resolution
@@ -234,7 +247,19 @@ enum BundleStore {
     /// would only mean the page loads later.
     @discardableResult
     static func resolve() -> Loaded {
-        queue.sync {
+        guard enabled else {
+            // Deliberately not `floor`, which clears the probation record:
+            // this build is ignoring what is on disk, not judging it.
+            HostLog.bundle.info(
+                "over-the-air updates are off in this build; serving the shipped bundle")
+            return queue.sync {
+                onProbation = false
+                let it = Loaded(id: shipped, root: nil, serial: 0)
+                loaded = it
+                return it
+            }
+        }
+        return queue.sync {
             let ui = uiDirectory()
 
             // Each demotion changes what `current` is, so the question has to

@@ -33,6 +33,16 @@
 	<key>HomerunAPIURL</key>
 	<string>$(HOMERUN_API_URL)</string>
 
+	<!-- Over-the-air UI bundles, on unless a build says otherwise:
+
+	       xcodebuild … HOMERUN_OTA_UPDATES=0
+
+	     Read by `Capabilities.otaUpdates`, which treats a *missing* key as on:
+	     absent means an older generated project, and a build that silently
+	     stopped updating is far harder to notice than one that never started. -->
+	<key>HomerunOTAUpdates</key>
+	<string>$(HOMERUN_OTA_UPDATES)</string>
+
 	<!-- Auth returns through homerun:// (email OTP / magic link). Universal
 	     Links are added alongside this at M2, once a signing team exists. -->
 	<key>CFBundleURLTypes</key>

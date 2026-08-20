@@ -40,6 +40,23 @@ settings:
     # already run means clearing its data — the same rule as `--fresh` on
     # Android. See `docs/building.md`.
     HOMERUN_API_URL: https://api.gethomerun.app
+    # Whether this build has anything to do with over-the-air UI bundles.
+    # Reaches the app through `HomerunOTAUpdates` in Info.plist, read by
+    # `Capabilities.otaUpdates`. Android's `-PotaUpdates=off` equivalent:
+    #
+    #   xcodebuild … HOMERUN_OTA_UPDATES=0
+    #
+    # `0` means *ignore them entirely*, not merely "do not fetch": nothing is
+    # downloaded, and a bundle already in Application Support is neither
+    # promoted nor served. Nothing on disk is deleted, so a build with it back
+    # on carries on where it left off.
+    #
+    # On by default, including for Debug — the update path is only ever
+    # exercised on a debug build, so defaulting it off in development would
+    # mean nobody sees it work until a release. **Never ship a release with
+    # this off**: it would look completely healthy and silently never update
+    # again, and unlike Android there is no Gradle task here to refuse one.
+    HOMERUN_OTA_UPDATES: "1"
 
 # The only third-party Swift dependency in the app.
 #

@@ -187,14 +187,31 @@ If the point of the build is to run *your* UI, do not race the updater —
 turn it off for that build:
 
 ```bash
-node scripts/android-app.js install -PbundlePublicKey=
+npm run android:run -- --no-ota          # or: -PotaUpdates=off
+xcodebuild … HOMERUN_OTA_UPDATES=0       # iOS, same meaning
 ```
 
-An empty key disables updates entirely (`BundleUpdater` will not fetch what it
-cannot verify), so the APK's own `assets/web` is what serves. Delete
-`files/ui` as well, or an already-activated bundle still outranks it. Both are
-per-build and per-device: a later install without the flag restores normal
-updating, and nothing about the branch changes.
+Off means **ignore them entirely**, not merely "do not fetch": nothing is
+downloaded, and a bundle already sitting in `files/ui` is neither promoted nor
+served, so you do not have to delete anything. `HomerunBundle` says
+`over-the-air updates are off in this build` once per launch, and nothing on
+disk is touched — a later build without the flag picks up exactly where it left
+off. A **release** built this way is refused by `verifyReleaseConfig`, because
+it would look healthy and silently never update again.
+
+> **This section used to say `-PbundlePublicKey=`, and that does nothing.**
+> An empty key genuinely does disable the updater, but `prop()` in
+> `build.gradle.kts` treats a blank `-P` override as absent and falls back to
+> the compiled-in key — and the hex `require` would reject an empty one
+> anyway. The build succeeded, the flag was ignored, and updates kept
+> arriving. The switch above exists as of 2026-08-20; before it there was no
+> working one.
+
+The other half of "am I running my own UI" changed at the same time: a bundle
+that arrives now **applies itself immediately** rather than waiting for a
+relaunch or a prompt, so a long session on a build with updates on can move
+underneath you mid-run. `docs/ota-bundles.md` § *Applying it: as soon as it
+arrives*.
 
 **Gradle can decide there is nothing to do.** Compare the installed APK against
 the built one rather than trusting `BUILD SUCCESSFUL`:
