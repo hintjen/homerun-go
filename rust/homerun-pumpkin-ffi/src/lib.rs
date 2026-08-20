@@ -43,6 +43,7 @@ pub mod host_log;
 #[cfg(feature = "device-ws")]
 pub mod device_ws;
 pub mod engine;
+pub mod errors;
 pub mod log_buffer;
 pub mod preflight;
 /// Supervising a server that runs as a child process. Not iOS, which cannot.

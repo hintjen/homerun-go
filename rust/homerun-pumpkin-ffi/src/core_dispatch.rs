@@ -38,7 +38,7 @@ use homerun_core::game::Game as _;
 use homerun_core::minecraft::{
     self, account, argfile, hosting, jar, jvm, loader, modjar, modpack, mods, ops, settings,
 };
-use homerun_core::reporting::{crash, minigame, stats};
+use homerun_core::reporting::{app_error, crash, minigame, stats};
 use homerun_core::{
     backup, bundle, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
 };
@@ -48,6 +48,13 @@ use homerun_core::{
 /// Never panics and never fails: every outcome, including a panic, is a JSON
 /// string the caller can hand straight back to its host language.
 pub fn call(method: &str, args: &str) -> String {
+    // Every path into this crate passes through here, on both platforms, so
+    // this is where the panic hook becomes live — on the first core call at
+    // boot rather than at server start, which is far too late and never
+    // happens at all on a device that only browses. `install_hook` is
+    // idempotent behind an atomic, so the cost is one relaxed load per call.
+    crate::crash::install_hook();
+
     let result = std::panic::catch_unwind(|| dispatch(method, args)).unwrap_or_else(|_| {
         // Reaching here means a bug in this crate, not bad input. Say so
         // plainly rather than dressing it up as a user-facing failure.
@@ -77,6 +84,22 @@ fn pairs(value: &Value, method: &str) -> Result<Vec<(String, String)>, String> {
             _ => Err(format!("\"{method}\": each entry must be [key, value]")),
         })
         .collect()
+}
+
+/// Read the caller's [`app_error::Context`].
+///
+/// A malformed context is refused rather than defaulted. A report filed
+/// against an empty device id and no version is a row nobody can act on, and
+/// it would look exactly like a successful report.
+fn context_arg(value: &Value, method: &str) -> Result<app_error::Context, String> {
+    serde_json::from_value(value.clone())
+        .map_err(|e| format!("\"{method}\" got a context it could not read: {e}"))
+}
+
+/// Read the caller's [`app_error::Occurrence`].
+fn occurrence_arg(value: &Value, method: &str) -> Result<app_error::Occurrence, String> {
+    serde_json::from_value(value.clone())
+        .map_err(|e| format!("\"{method}\" got an occurrence it could not read: {e}"))
 }
 
 /// Fold `extra`'s keys into `into`. Both are always objects here — the callers
@@ -1255,6 +1278,33 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         ))
         .map_err(|e| e.to_string()),
 
+        // -- app error reporting --------------------------------------------
+        //
+        // Four arms and one funnel. Every intake on every platform — a React
+        // error boundary, a rejected promise, an API failure, a Kotlin or
+        // Swift uncaught exception, a panic in this crate — arrives at
+        // `error.report`, or is stashed for the next launch to drain. One
+        // ledger sees all of them, which is the only way the caps mean
+        // anything; see `crate::errors`.
+        "error.attach" => Ok(crate::errors::attach(&text("dataDir")?)),
+
+        "error.report" => {
+            let context = context_arg(field("context")?, method)?;
+            let seen = occurrence_arg(field("occurrence")?, method)?;
+            Ok(crate::errors::report(&context, &seen))
+        }
+
+        "error.stash" => {
+            let context = context_arg(field("context")?, method)?;
+            let seen = occurrence_arg(field("occurrence")?, method)?;
+            crate::errors::stash(&context, &seen)
+        }
+
+        "error.drain" => {
+            let context = context_arg(field("context")?, method)?;
+            Ok(crate::errors::drain(&context))
+        }
+
         "reporting.stats.report" => {
             let stats: stats::Stats = serde_json::from_value(field("stats")?.clone())
                 .map_err(|e| format!("\"{method}\" got stats it could not read: {e}"))?;
@@ -1487,6 +1537,101 @@ mod tests {
         let reply: Value = serde_json::from_str(&raw).expect("replies are always JSON");
         assert_eq!(reply["ok"], false, "{method} unexpectedly succeeded: {raw}");
         reply["error"].as_str().unwrap().to_string()
+    }
+
+    // ─── app error reporting ────────────────────────────────────────────────
+
+    /// Serialise against the process-global ledger and start from empty.
+    ///
+    /// Shared with `crate::errors`' own tests through the same lock — the
+    /// ledger is one per process on purpose, so the tests over it have to be
+    /// one at a time.
+    fn error_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::crash::test_guard();
+        crate::errors::reset_ledger();
+        guard
+    }
+
+    fn error_context() -> Value {
+        json!({
+            "deviceId": "device-1",
+            "session": "session-1",
+            "platform": "android",
+            "appVersion": "0.4.2",
+            "apiUrl": "https://api.gethomerun.app",
+        })
+    }
+
+    #[test]
+    fn an_error_report_comes_back_as_a_request_the_host_can_sign() {
+        let _guard = error_test_guard();
+        // The shape both hosts parse. `Reporting.send` reads `auth` to pick
+        // between the device token and the user token, and a report signed
+        // with the wrong one is a silent 403.
+        let value = ok(
+            "error.report",
+            json!({
+                "context": error_context(),
+                "occurrence": {
+                    "source": "ui",
+                    "severity": "fatal",
+                    "kind": "TypeError",
+                    "message": "cannot read properties of undefined",
+                    "stack": "    at ServerCard (https://h/_next/static/chunks/a.js:1:2)",
+                    "atMs": 1_755_640_000_000i64,
+                },
+            }),
+        );
+
+        assert_eq!(value["request"]["method"], "post");
+        assert_eq!(value["request"]["path"], "/api/app-error/");
+        assert_eq!(value["request"]["auth"], "device");
+        assert_eq!(value["request"]["body"]["source"], "ui");
+        assert!(value["held"].is_null(), "{value}");
+    }
+
+    #[test]
+    fn a_held_report_is_a_success_with_no_request_rather_than_an_error() {
+        let _guard = error_test_guard();
+        // A hold is the common case by design. A host that saw it as a
+        // failure would log a warning per sighting and reproduce, in the
+        // log, exactly the flood the ledger just prevented on the network.
+        let occurrence = json!({
+            "source": "host",
+            "severity": "error",
+            "kind": "Repeat",
+            "message": "the very same thing, twice",
+            "atMs": 1_755_640_000_000i64,
+        });
+        let args = json!({ "context": error_context(), "occurrence": occurrence });
+
+        ok("error.report", args.clone());
+        let second = ok("error.report", args);
+
+        assert!(second["request"].is_null(), "{second}");
+        assert_eq!(second["held"], "cooldown");
+    }
+
+    #[test]
+    fn a_context_the_core_cannot_read_is_refused_rather_than_defaulted() {
+        let _guard = error_test_guard();
+        // Defaulting would file the report against an empty device and no
+        // version — a row nobody can act on that looks like a success.
+        let message = err(
+            "error.report",
+            json!({
+                "context": { "appVersion": 42 },
+                "occurrence": { "message": "boom", "atMs": 1i64 },
+            }),
+        );
+        assert!(message.contains("context"), "{message}");
+    }
+
+    #[test]
+    fn draining_answers_even_when_no_host_has_attached_a_directory() {
+        let _guard = error_test_guard();
+        let value = ok("error.drain", json!({ "context": error_context() }));
+        assert!(value["requests"].is_array(), "{value}");
     }
 
     // ─── the envelope ───────────────────────────────────────────────────────
