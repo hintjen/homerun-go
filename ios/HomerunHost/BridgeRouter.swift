@@ -61,7 +61,7 @@ final class BridgeRouter {
     /// So: bump this whenever the table below gains a channel, and add the
     /// matching ledger entry. `scripts/check-host-revision.js` compares the two
     /// and fails the build if you do one without the other.
-    static let hostRevision = 11
+    static let hostRevision = 12
 
     private(set) var handlers: [String: Handler] = [:]
 
@@ -111,6 +111,7 @@ final class BridgeRouter {
             "set-appearance": setAppearance,
             "splash-shown": splashShown,
             "haptic": haptic,
+            "report-error": reportError,
             "set-posthog-distinct-id": setPosthogDistinctID,
             "cache-client-nonce": cacheClientNonce,
             "clipboard-write-text": clipboardWriteText,

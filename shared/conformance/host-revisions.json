@@ -234,5 +234,18 @@
         ]
       }
     }
+    ,
+    {
+      "revision": 12,
+      "summary": "Both hosts take an error report from the page. The shared UI gained a real error boundary and global error listeners, and nothing was catching what they produce: a render throw was a blank screen and a rejected promise was nothing at all. Fire-and-forget rather than an invoke, because this is called from componentDidCatch during a commit on a screen that has already failed once, and an unanswered invoke hangs its promise forever; it also means an older host logs the unknown method and drops it, so an over-the-air bundle carrying the reporter onto a pre-12 binary is silent rather than broken. Both hosts land it in one revision on purpose: staggering would leave one platform quietly not reporting, which is the exact failure the channel exists to remove. The host decides nothing about the payload -- grouping, rate limiting and redaction are all homerun-core::reporting::app_error, so three platforms cannot disagree about what counts as the same bug.",
+      "adds": {
+        "android": [
+          "report-error"
+        ],
+        "ios": [
+          "report-error"
+        ]
+      }
+    }
   ]
 }

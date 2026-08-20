@@ -107,6 +107,30 @@ enum AppErrors {
         }
     }
 
+    /// Report a failure the page described.
+    ///
+    /// The payload is the page's, but `source` is not: a bundle is replaced
+    /// over the air and is the least trusted thing in the process, so it does
+    /// not get to file a report as a native crash or a host crash. Anything
+    /// that is not `api` is recorded as `ui`, which is what it is.
+    ///
+    /// `atMs` is filled in when the page omits it. Zero would be the epoch,
+    /// and a report dated 1970 sorts to the bottom of every view that matters.
+    static func reportFromPage(_ occurrence: [String: Any]) {
+        var safe = occurrence
+        let claimed = occurrence["source"] as? String
+        safe["source"] = claimed == sourceAPI ? sourceAPI : sourceUI
+        if (occurrence["atMs"] as? Int ?? 0) <= 0 {
+            safe["atMs"] = Int(Date().timeIntervalSince1970 * 1_000)
+        }
+
+        Task.detached(priority: .utility) {
+            guard let request = Core.appErrorReport(context: context(), occurrence: safe)
+            else { return }
+            await send(request)
+        }
+    }
+
     /// Report a Swift error.
     static func report(_ error: Error, location: String? = nil) {
         report(
@@ -224,6 +248,7 @@ enum AppErrors {
 
     static let sourceHost = "host"
     static let sourceUI = "ui"
+    static let sourceAPI = "api"
     static let severityFatal = "fatal"
     static let severityError = "error"
 }

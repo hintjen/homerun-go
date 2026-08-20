@@ -703,6 +703,25 @@ class BridgeRouter(
         // Main, because `performHapticFeedback` touches the view, and the view
         // is read inside the hop for the same reason `evaluate` does it: the
         // field belongs to whichever WebView currently exists.
+        // The page failed at something nobody expected. Handed straight to
+        // the core, which decides whether it is the same bug as the last one,
+        // whether it is worth sending again, and what has to be redacted
+        // first. Very often it decides not to send, and that is the rate
+        // limiter working rather than anything to log about.
+        //
+        // Nothing here ever reports a failure to report. That is how a
+        // reporter turns one bad response into a loop, fastest exactly when
+        // the API is already struggling.
+        "report-error" to { params ->
+            val occurrence = params as? JsonObject
+            if (occurrence == null) {
+                Log.w(TAG, "report-error wants an object, got: $params")
+            } else {
+                AppErrors.reportFromPage(occurrence)
+            }
+            null
+        },
+
         "haptic" to { params ->
             val pattern = (params as? JsonPrimitive)?.contentOrNull
             if (pattern == null) {
@@ -1853,7 +1872,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 10
+        const val HOST_REVISION = 12
 
         /**
          * Auth callbacks come home on this prefix rather than one of the

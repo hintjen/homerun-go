@@ -4,6 +4,9 @@ import android.app.Application
 import android.util.Log
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.UUID
@@ -109,6 +112,29 @@ object AppErrors {
         }
     }
 
+    /**
+     * Report a failure the page described.
+     *
+     * The payload is the page's, but `source` is not: a bundle is replaced
+     * over the air and is the least trusted thing in the process, so it does
+     * not get to file a report as a native crash or a host crash. Anything
+     * that is not `api` is recorded as `ui`, which is what it is.
+     *
+     * `atMs` is filled in when the page omits it. Zero would be the epoch, and
+     * a report dated 1970 sorts to the bottom of every view that matters.
+     */
+    fun reportFromPage(occurrence: JsonObject) {
+        val claimed = occurrence["source"]?.jsonPrimitive?.contentOrNull
+        val at = occurrence["atMs"]?.jsonPrimitive?.longOrNull
+        report(buildJsonObject {
+            occurrence.forEach { (key, value) ->
+                if (key != "source" && key != "atMs") put(key, value)
+            }
+            put("source", if (claimed == SOURCE_API) SOURCE_API else SOURCE_UI)
+            put("atMs", if (at != null && at > 0) at else System.currentTimeMillis())
+        })
+    }
+
     /** Report a Kotlin throwable. */
     fun report(
         throwable: Throwable,
@@ -184,6 +210,8 @@ object AppErrors {
     }
 
     const val SOURCE_HOST = "host"
+    const val SOURCE_UI = "ui"
+    const val SOURCE_API = "api"
     const val SEVERITY_FATAL = "fatal"
     const val SEVERITY_ERROR = "error"
 

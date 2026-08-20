@@ -75,6 +75,25 @@ extension BridgeRouter {
         return nil
     }
 
+    /// The page failed at something nobody expected.
+    ///
+    /// Handed straight to the core, which decides whether it is the same bug
+    /// as the last one, whether it is worth sending again, and what has to be
+    /// redacted first. Very often it decides not to send, and that is the rate
+    /// limiter working rather than anything to log about.
+    ///
+    /// Nothing here ever reports a failure to report. That is how a reporter
+    /// turns one bad response into a loop, fastest exactly when the API is
+    /// already struggling.
+    func reportError(_ params: Any?) async throws -> Any? {
+        guard let occurrence = params as? [String: Any] else {
+            HostLog.bridge.error("report-error wants an object; ignoring")
+            return nil
+        }
+        AppErrors.reportFromPage(occurrence)
+        return nil
+    }
+
     func setPosthogDistinctID(_ params: Any?) async throws -> Any? {
         HostStore.posthogDistinctID = params as? String
         return nil

@@ -2,9 +2,9 @@
   "bridgeVersion": 1,
   "counts": {
     "invoke": 81,
-    "send": 26,
+    "send": 27,
     "event": 54,
-    "total": 161
+    "total": 162
   },
   "channels": [
     {
@@ -513,6 +513,12 @@
       "kind": "send",
       "tier": "core",
       "note": "Fired on boot and on theme change. Mobile: set the status-bar text style to match (dark appearance → light text). Desktop: no-op."
+    },
+    {
+      "channel": "report-error",
+      "kind": "send",
+      "tier": "core",
+      "note": "Fired for an unexpected failure in the page. Mobile: hand it to the core (`error.report`) and send whatever request comes back — the core very often answers with none, which is the rate limiter working and not a failure. Never surface anything to the player, and never report a failure to report. Desktop: no-op — the UI routes to its telemetry port there instead."
     },
     {
       "channel": "haptic",
@@ -1086,6 +1092,7 @@
         "privilege-elevation-modal-cancelled",
         "push-notification",
         "quit-and-install",
+        "report-error",
         "restart-computer",
         "retry-download",
         "retry-installation",
@@ -1229,6 +1236,7 @@
         "push:request-permission",
         "push:token-changed",
         "quit-and-install",
+        "report-error",
         "server-files-exist",
         "set-api-url",
         "set-appearance",
@@ -1352,6 +1360,7 @@
         "push:request-permission",
         "push:token-changed",
         "quit-and-install",
+        "report-error",
         "server-files-exist",
         "set-api-url",
         "set-appearance",
