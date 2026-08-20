@@ -92,17 +92,38 @@ class PumpkinBackend(
     override var onStateChanged: ((String, ServerState, Boolean) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
-
-    // Pumpkin has no tunnel of its own, so this never fires here yet.
     override var onNetworkError: ((String, String) -> Unit)? = null
+    override var onBackupFinished: ((String) -> Unit)? = null
 
     /**
-     * Never fires here either: this backend runs no on-stop backup yet. That
-     * path belongs to [JavaServerBackend], so a stop here really does mean the
-     * device is idle — and `ServerHost` releases the engine on the terminal
-     * state rather than waiting for a callback that will not come.
+     * The gateway tunnel and the backup lifecycle, both shared with
+     * [JavaServerBackend].
+     *
+     * Neither is engine-specific: a tunnel forwards a TCP port and restic
+     * reads a `world/` directory, and which program wrote that directory is
+     * not something either can tell. They are shared because they were briefly
+     * *not* — this backend shipped without them, so a Pumpkin server ran
+     * unreachable and never backed anything up, while every surface reported
+     * it healthy.
      */
-    override var onBackupFinished: ((String) -> Unit)? = null
+    private val tunnel = TunnelSession(
+        context = context,
+        scope = scope,
+        note = ::note,
+        onNetworkError = { onNetworkError },
+        stopServer = { id, graceful -> stop(id, graceful) },
+    )
+
+    private val backups = BackupSession(
+        context = context,
+        scope = scope,
+        dataDir = ::dataDir,
+        note = ::note,
+        onFinished = { onBackupFinished },
+        // The pump outlives the engine so `[Backup]` lines still reach the UI;
+        // only the backup knows when there is genuinely nothing left to write.
+        finishConsole = { id -> drainLogs(id); stopLogPump() },
+    )
 
     // -----------------------------------------------------------------------
     // Storage
@@ -153,9 +174,43 @@ class PumpkinBackend(
         currentPort = port
         logCursor = 0
 
+        // A relaunch supersedes a backup still reading the world it is about
+        // to overwrite. The core answers whether this start is that.
+        if (ServerHost.lifecycle.supersedesOnStopBackup(serverId)) {
+            backups.cancelSuperseded(serverId)
+        }
+
         startLogPump(serverId)
 
+        // Started now and awaited once the engine is up. The gateway
+        // provisions the peer asynchronously and polls for up to a minute, so
+        // beginning here overlaps that with the world restore and the world
+        // generating rather than adding it to the end of the launch.
+        tunnel.begin(config.resolveTunnel)
+
+        // Before anything reads the world — a newer snapshot from another
+        // device has to win over this device's stale copy, and after the
+        // engine has opened the directory it is too late. Deliberately not
+        // caught: starting on a world we were told is out of date is the
+        // failure this exists to prevent.
+        try {
+            backups.restore(serverId, dir, config.backupContext)
+        } catch (err: Throwable) {
+            tunnel.cancel()
+            stopLogPump()
+            currentServerId = null
+            currentPort = null
+            transition(serverId, ServerState.STOPPED)
+            throw err as? ServerBackendException ?: ServerBackendException.Engine(
+                err.message ?: "This server's world could not be restored."
+            )
+        }
+
         writeSettings(serverId, dir, config)
+
+        // Held for the exit path, which needs the repository and device id
+        // long after the caller's config has gone out of scope.
+        backups.hold(serverId, config.backupContext)
 
         val invocation = JavaProcess.Invocation(
             program = binary.absolutePath,
@@ -181,19 +236,33 @@ class PumpkinBackend(
             val ok = parsed["ok"]?.jsonPrimitive?.booleanOrNull ?: false
             val error = parsed["error"]?.jsonPrimitive?.contentOrNull
             scope.launch {
+                // The last of the console, including whatever it said on the
+                // way down. The pump keeps running past this: an on-stop
+                // backup writes `[Backup]` lines for minutes after the engine
+                // is gone, and those are console lines like any other.
                 drainLogs(serverId)
-                stopLogPump()
                 // Whether this was a stop or a fall-over is the core's call,
                 // from whether one was asked for — the engine's own `ok` says
                 // only that it unwound cleanly.
                 val verdict = ServerHost.lifecycle.exited(serverId, if (ok) 0 else 1)
                 if (!ok && error != null) Log.e(TAG, "engine exited: $error")
+
+                // However the engine went — stopped, crashed, killed — a
+                // tunnel outliving it would hold the gateway's peer slot
+                // against the next start.
+                tunnel.shutdown()
+
+                val due = backups.claim(serverId, verdict.state)
                 transition(
                     serverId,
                     if (verdict.state == "crashed") ServerState.CRASHED else ServerState.STOPPED,
+                    backupInProgress = due != null,
                 )
                 currentServerId = null
                 currentPort = null
+
+                // The pump stops here only when nothing else will write to it.
+                if (due != null) backups.runAfterStop(serverId, due) else stopLogPump()
             }
         }
         // The engine is up; from here its exit needs judging.
@@ -211,6 +280,13 @@ class PumpkinBackend(
             when (status(serverId)) {
                 ServerState.RUNNING -> {
                     ServerHost.lifecycle.consoleReady(serverId)
+                    // Only now, and before `running` is announced. A server
+                    // accepting connections on loopback is not the same as
+                    // players being able to reach it, and reporting `running`
+                    // before the tunnel is up is how a server looks healthy to
+                    // everyone except the people trying to join. Throws if the
+                    // tunnel cannot be brought up, having stopped the server.
+                    tunnel.open(serverId, dir, port)
                     transition(serverId, ServerState.RUNNING)
                     return
                 }
@@ -223,6 +299,9 @@ class PumpkinBackend(
                     // likely to give up on it. Same check the JVM backend
                     // makes, and this backend was missing it.
                     if (ServerHost.lifecycle.shouldAbandon(serverId)) {
+                        // The gateway poll would otherwise outlive the launch
+                        // and hold a peer slot the next start needs.
+                        tunnel.cancel()
                         withContext(Dispatchers.IO) { NativeServer.nativeStop() }
                         return
                     }
@@ -292,7 +371,13 @@ class PumpkinBackend(
         if (currentServerId != serverId) throw ServerBackendException.NotRunning(serverId)
         transition(serverId, ServerState.STOPPING)
         // Blocking, and it waits for a world save — never on the main thread.
-        val result = withContext(Dispatchers.IO) { NativeServer.nativeStop() }
+        val result = withContext(Dispatchers.IO) {
+            // Before the engine, so the gateway's peer slot is free by the
+            // time the next start asks for one — a world save can take a
+            // while, and the slot is not ours to hold through it.
+            tunnel.shutdown()
+            NativeServer.nativeStop()
+        }
         val ok = parse(result)["ok"]?.jsonPrimitive?.booleanOrNull ?: false
         if (!ok) {
             val error = parse(result)["error"]?.jsonPrimitive?.contentOrNull
@@ -467,7 +552,25 @@ class PumpkinBackend(
         }
     }
 
-    private fun transition(serverId: String, state: ServerState) {
+    /**
+     * A line of Homerun's own narrative, into the server's console.
+     *
+     * Written to the supervisor's buffer rather than emitted directly, which
+     * is what keeps it in sequence with the engine's own output — and what
+     * stops it arriving twice, once from here and once from the pump reading
+     * the same buffer a moment later.
+     */
+    private fun note(serverId: String, line: String) {
+        Log.i(TAG, line)
+        runCatching { NativeServer.nativeNote(line) }
+            .onFailure { Log.w(TAG, "note did not reach the console: ${it.message}") }
+    }
+
+    private fun transition(
+        serverId: String,
+        state: ServerState,
+        backupInProgress: Boolean = false,
+    ) {
         // The same guard the JVM backend has, and for the same reason: a
         // launch still catching up must not announce `running` for a server
         // already on its way down.
@@ -478,7 +581,7 @@ class PumpkinBackend(
         if (!ServerHost.lifecycle.mayAnnounce(serverId, state.wire)) return
         if (lastAnnounced == state) return
         lastAnnounced = state
-        onStateChanged?.invoke(serverId, state, false)
+        onStateChanged?.invoke(serverId, state, backupInProgress)
     }
 
     private fun parse(raw: String): JsonObject =

@@ -197,9 +197,9 @@ object ServerHost {
             track(id, state, backingUp)
             forEach { it.onStateChanged(id, state, backingUp) }
             // A run that ends with nothing still backing up is done with its
-            // engine. `onBackupFinished` covers the other case, and only one
-            // backend fires it — so releasing solely there would pin a
-            // Pumpkin run's engine until the next launch replaced it.
+            // engine. `onBackupFinished` covers the other case — but a run
+            // that had no backup to make never fires it, so releasing solely
+            // there would pin the engine until the next launch replaced it.
             if (state == ServerState.STOPPED || state == ServerState.CRASHED) {
                 if (!backingUp) release(engine)
             }

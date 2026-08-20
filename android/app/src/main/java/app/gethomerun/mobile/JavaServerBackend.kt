@@ -60,16 +60,32 @@ class JavaServerBackend(
     /** Where this host has read the supervisor's console up to. */
     private var engineCursor = 0L
 
-    private val wireProxy = WireProxy(context, scope)
-    private val backups = BackupManager(context)
-
     /**
-     * The backup context for a server that is running, kept until it exits.
+     * The gateway tunnel and the backup lifecycle, both shared with
+     * [PumpkinBackend].
      *
-     * The exit handler needs the repository and device id, and by then the
-     * caller's `ServerConfig` is long out of scope.
+     * These used to live in this file, which was fine while it was the only
+     * backend that had them. It is not: neither is engine-specific — a tunnel
+     * forwards a TCP port and restic reads a `world/` directory — and Pumpkin
+     * shipped without either, so a Pumpkin server ran unreachable and backed
+     * nothing up while looking healthy everywhere.
      */
-    private val backupOnStop = java.util.concurrent.ConcurrentHashMap<String, BackupContext>()
+    private val tunnel = TunnelSession(
+        context = context,
+        scope = scope,
+        note = ::note,
+        onNetworkError = { onNetworkError },
+        stopServer = { id, graceful -> stop(id, graceful) },
+    )
+
+    private val backups = BackupSession(
+        context = context,
+        scope = scope,
+        dataDir = ::dataDir,
+        note = ::note,
+        onFinished = { onBackupFinished },
+        finishConsole = { id -> drainConsole(id); stopLogPump() },
+    )
 
     /**
      * Servers whose directory goes when they stop, recorded at the spawn.
@@ -78,7 +94,7 @@ class JavaServerBackend(
      * the server record behind it, so the world it made is worth nothing to
      * anybody the moment the JVM exits. The exit handler is where that gets
      * acted on and by then the caller's `ServerConfig` is long out of scope,
-     * which is the same reason [backupOnStop] exists.
+     * which is the same reason [BackupSession] holds its contexts.
      *
      * On a phone this is not tidiness. A Paper server with a generated world
      * is a gigabyte or two, and a player who hosts three games in an evening
@@ -88,18 +104,6 @@ class JavaServerBackend(
      */
     private val ephemeral: MutableSet<String> =
         java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-    /**
-     * On-stop backups still running, so a relaunch can cancel one.
-     *
-     * A backup outlives the server it backs up — restic reads `world/` long
-     * after the JVM is gone — and the user is entitled to press Start during
-     * it. See [cancelOnStopBackup] for why cancelling is safe.
-     */
-    private val backupJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
-
-    /** The tunnel lookup, resolved alongside the JVM booting rather than before it. */
-    private var tunnelJob: Deferred<WireProxy.Link?>? = null
 
     /**
      * Who owns a server right now, and what its last exit meant.
@@ -271,7 +275,7 @@ class JavaServerBackend(
         )
 
         order.at("cancelOnStopBackup")
-        if (lifecycle.supersedesOnStopBackup(serverId)) cancelOnStopBackup(serverId)
+        if (lifecycle.supersedesOnStopBackup(serverId)) backups.cancelSuperseded(serverId)
 
         // Open the console before the slow work, not after: unpacking the
         // runtime and downloading a jar are minutes of a launch, and their
@@ -305,9 +309,7 @@ class JavaServerBackend(
         // it here overlaps that with the download and the world generating,
         // exactly as the desktop provisions in parallel with Java booting.
         if (config.resolveTunnel != null) order.at("beginResolveTunnel")
-        tunnelJob = config.resolveTunnel?.let { resolve ->
-            scope.async { runCatching { resolve() }.getOrNull() }
-        }
+        tunnel.begin(config.resolveTunnel)
 
         // Nothing below has started a process, so a failure here is a launch
         // that did not happen — reported as stopped, with the reason on the
@@ -485,7 +487,7 @@ class JavaServerBackend(
 
         // Held for the stop path: the exit handler needs the repository and
         // device id, and by then the caller's config is long gone.
-        config.backupContext?.let { backupOnStop[serverId] = it }
+        backups.hold(serverId, config.backupContext)
 
         // Cheapest place to notice: nothing has been spawned, so there is
         // nothing to tear down.
@@ -512,15 +514,7 @@ class JavaServerBackend(
         // world we were told is out of date — quietly diverging two devices is
         // the failure this exists to prevent.
         if (config.backupContext != null && order.at("restoreWorld")) return
-        config.backupContext?.let { backup ->
-            backups.restoreBeforeLaunch(
-                serverId = serverId,
-                dir = dir,
-                settings = backup.settings,
-                deviceId = backup.deviceId,
-                onLog = { note(serverId, it) },
-            )
-        }
+        backups.restore(serverId, dir, config.backupContext)
 
         if (config.settingsEnv != null) order.at("writeSettings")
         config.settingsEnv?.let { env ->
@@ -647,7 +641,7 @@ class JavaServerBackend(
         }
 
         if (ready != true) {
-            tunnelJob?.cancel()
+            tunnel.cancel()
             val stillUp = engineThread?.isAlive == true
             if (stillUp) withContext(Dispatchers.IO) { NativeServer.nativeStop() }
             transition(serverId, ServerState.CRASHED)
@@ -667,17 +661,15 @@ class JavaServerBackend(
         // waits for the console itself.
         if (lifecycle.shouldAbandon(serverId)) {
             Log.i(TAG, "$serverId: honouring a stop that arrived during startup")
-            tunnelJob?.cancel()
-            tunnelJob = null
             withContext(Dispatchers.IO) {
-                wireProxy.stop()
+                tunnel.shutdown()
                 NativeServer.nativeStop()
             }
             return
         }
 
         if (config.resolveTunnel != null) order.at("openTunnel")
-        openTunnel(serverId, dir, port)
+        tunnel.open(serverId, dir, port)
 
         // Only now. The server accepting connections on loopback is not the
         // same as players being able to reach it, and reporting `running`
@@ -686,56 +678,6 @@ class JavaServerBackend(
         order.at("announceRunning")
         startedAt = Instant.now()
         transition(serverId, ServerState.RUNNING)
-    }
-
-    /**
-     * Bring up the gateway tunnel. Failing to is fatal to the launch.
-     *
-     * A server nobody can reach is not a working server, so the desktop stops
-     * it rather than leave something running that looks healthy and is not —
-     * `pollAndProvisionWireproxy` throws when the config never arrives, and
-     * `server-started`'s catch stops the server. This matches that exactly.
-     * Both paths also emit `native-server-network-error`, because a clean stop
-     * with no explanation is indistinguishable from the user's own Stop.
-     */
-    private suspend fun openTunnel(serverId: String, dir: File, port: Int) {
-        note(serverId, "[Homerun] Connecting to the Homerun gateway...")
-
-        val link = tunnelJob?.let { job -> runCatching { job.await() }.getOrNull() }
-        tunnelJob = null
-
-        if (link == null) {
-            failTunnel(
-                serverId, PROVISIONING,
-                "Failed to establish network tunnel: the gateway did not provide one.",
-            )
-        }
-
-        runCatching {
-            wireProxy.start(
-                serverId = serverId,
-                dir = dir,
-                link = link,
-                minecraftPort = port,
-                onLog = { line -> note(serverId, line) },
-                // The tunnel came up and then stopped being answered — the
-                // gateway regenerating its keys is the usual cause, and the
-                // credentials we hold are permanently dead. Same verdict, but
-                // reported as `handshake` so the UI can say so.
-                onHandshakeFailed = {
-                    scope.launch {
-                        runCatching { stopForNetworkError(serverId, HANDSHAKE) }
-                    }
-                },
-            )
-        }.onFailure { err ->
-            failTunnel(
-                serverId, PROVISIONING,
-                "Failed to establish network tunnel: ${err.message ?: "it could not be started"}.",
-            )
-        }
-
-        note(serverId, "[Homerun] Connected to the Homerun gateway.")
     }
 
     /**
@@ -766,21 +708,6 @@ class JavaServerBackend(
             next = index + 1
             return if (steps[index].checkpoint) abandonIfStopped(serverId) else false
         }
-    }
-
-    /**
-     * Carry out the core's decision to supersede an on-stop backup: cancel the
-     * coroutine, which kills restic's child process on its way out.
-     *
-     * The reasoning — why this is safe, and why no backup state is reported —
-     * is `homerun-core::lifecycle::supersedes_on_stop_backup`.
-     */
-    private fun cancelOnStopBackup(serverId: String) {
-        val job = backupJobs.remove(serverId) ?: return
-        if (!job.isActive) return
-        Log.i(TAG, "$serverId: cancelling the on-stop backup — this device is relaunching")
-        note(serverId, "[Backup] Starting again — the backup in progress was cancelled.")
-        job.cancel()
     }
 
     /**
@@ -815,44 +742,11 @@ class JavaServerBackend(
         if (!lifecycle.shouldAbandon(serverId)) return false
         lifecycle.abandoned(serverId)
         Log.i(TAG, "$serverId: launch abandoned — a stop arrived while it was preparing")
-        tunnelJob?.cancel()
-        tunnelJob = null
+        tunnel.cancel()
         // Reached before anything was spawned, so nothing else will stop it.
         stopLogPump()
         transition(serverId, ServerState.STOPPED)
         return true
-    }
-
-    /** Report, stop, and fail the launch. */
-    private suspend fun failTunnel(serverId: String, kind: String, message: String): Nothing {
-        note(serverId, "[Homerun] $message Stopping server.")
-        stopForNetworkError(serverId, kind)
-        throw ServerBackendException.Engine(message)
-    }
-
-    /**
-     * Stop a server because its tunnel failed.
-     *
-     * The event goes out *before* the stop so the UI has the reason in hand by
-     * the time the card flips — it stops through the normal clean path, so
-     * otherwise this is indistinguishable from the user pressing Stop.
-     */
-    private suspend fun stopForNetworkError(serverId: String, kind: String) {
-        Log.w(TAG, "$serverId: tunnel failed ($kind) — stopping")
-        onNetworkError?.invoke(serverId, kind)
-
-        // Through the core, exactly as a stop from the bridge would be. This
-        // is a stop somebody asked for — Homerun did, on the player's behalf —
-        // and recording the intent is what keeps the exit from being reported
-        // as a crash, which would also skip the on-stop backup.
-        val verdict = lifecycle.stopRequested(serverId)
-        try {
-            if (verdict.verdict != "notRunning") {
-                runCatching { stop(serverId, graceful = verdict.verdict == "graceful") }
-            }
-        } finally {
-            lifecycle.callFinished(serverId)
-        }
     }
 
     override suspend fun stop(serverId: String, graceful: Boolean) {
@@ -877,7 +771,7 @@ class JavaServerBackend(
         withContext(Dispatchers.IO) {
             // Before the JVM, so the gateway's peer slot is free by the time
             // the next start asks for one.
-            wireProxy.stop()
+            tunnel.shutdown()
             // The ladder is climbed inside the supervisor, which owns the
             // process and its stdin. `graceful` is the core's word for
             // "there is a console that can hear a stop", and the supervisor
@@ -1021,15 +915,12 @@ class JavaServerBackend(
             // outliving it would hold the gateway's peer slot against the
             // next start. The desktop kills it on java exit for the same
             // reason.
-            tunnelJob?.cancel()
-            tunnelJob = null
-            wireProxy.stop()
+            tunnel.shutdown()
             // The stop ack carries `backup_in_progress`, which is what opens
             // the backup lease — so it is claimed only when a backup is
             // actually about to run, and `backupAfterStop` reports an outcome
             // either way, because only that closes it again.
-            val backup = backupOnStop.remove(serverId)
-                ?.takeIf { outcome != "crashed" && backups.hasLocalWorld(dataDir(serverId)) }
+            val backup = backups.claim(serverId, outcome)
 
             transition(
                 serverId,
@@ -1041,39 +932,7 @@ class JavaServerBackend(
             startedAt = null
             currentPort = null
 
-            if (backup != null) {
-                val job = scope.launch {
-                    runCatching {
-                        backups.backupAfterStop(
-                            serverId = serverId,
-                            dir = dataDir(serverId),
-                            settings = backup.settings,
-                            deviceId = backup.deviceId,
-                            onLog = { note(serverId, it) },
-                        )
-                    }.onFailure {
-                        if (it is CancellationException) throw it
-                        Log.w(TAG, "on-stop backup failed for $serverId: ${it.message}")
-                    }
-                    // The backup's own last line, then the pump's work is done.
-                    // Cancellation skips this deliberately: the only thing that
-                    // cancels a backup is a relaunch, and that starts its own.
-                    drainConsole(serverId)
-                    stopLogPump()
-                }
-                backupJobs[serverId] = job
-                job.invokeOnCompletion {
-                    backupJobs.remove(serverId, job)
-                    // On completion rather than at the end of the block above,
-                    // so a cancelled backup announces itself too. The host uses
-                    // this to decide it may finally be reclaimed, and a
-                    // cancellation that stayed silent would leave it pinned in
-                    // the foreground for the life of the process.
-                    onBackupFinished?.invoke(serverId)
-                }
-            } else {
-                stopLogPump()
-            }
+            if (backup != null) backups.runAfterStop(serverId, backup) else stopLogPump()
 
             // Last, and only once nothing else is going to read the directory.
             // A minigame never has a backup to wait for — it is excluded from
@@ -1355,10 +1214,6 @@ class JavaServerBackend(
          * the heap ceiling and every refusal this file used to word for itself.
          */
         const val POLL_MS = 250L
-
-        /** The two `native-server-network-error` kinds the contract defines. */
-        const val PROVISIONING = "provisioning"
-        const val HANDSHAKE = "handshake"
 
 
     }
