@@ -2,7 +2,6 @@ package app.gethomerun.mobile
 
 import android.app.ActivityManager
 import android.content.Context
-import android.os.Process
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -11,34 +10,49 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
 import java.io.File
 import java.time.Instant
 
 /**
- * [ServerBackend] over the Rust FFI, in-process via JNI.
+ * [ServerBackend] running Pumpkin as a **child process**.
  *
- * Shared with iOS in spirit — the crate underneath is the same — but the
- * threading and the polling are Android's problem, and they are what this
- * class is mostly made of:
+ * # Why not in-process, when the library can link it
  *
- *  - `nativeStart` blocks for the server's whole lifetime, so it runs on its
- *    own 16 MB-stack thread and [start] waits for the state to turn *running*
- *    rather than for the call to return.
- *  - The engine pushes console output into a bounded ring buffer with a
- *    monotonic cursor. Nothing calls us when a line arrives, so a poller
- *    drains it and re-emits as events.
+ * `homerun-pumpkin-ffi` can compile Pumpkin straight into the app, and on iOS
+ * it must, because that platform cannot spawn anything. Android can, and every
+ * consequence of not doing so is one this app was paying for:
  *
- * One server at a time, enforced in the crate and again here — the engine
- * distinguishes worlds by process CWD, so a second concurrent run would
- * quietly share the first one's world.
+ *  - An engine fault took the **whole app** down — WebView, bridge, foreground
+ *    service. `catch_unwind` can hold that line for a Rust panic and for
+ *    nothing else.
+ *  - Memory could only ever be reported as this process, because there was no
+ *    other process to measure. The number included the browser engine.
+ *  - The engine picks its world by `set_current_dir`, so that choice was
+ *    global to the app.
+ *  - stdout and stderr had to be captured with a permanent, process-wide
+ *    `dup2`, after which the host's own printing landed in the game console.
+ *
+ * So this backend now looks much more like [JavaServerBackend] than it used
+ * to: it composes an [JavaProcess.Invocation] and hands it to the same
+ * supervisor, which owns the state machine, the stop ladder, the console and
+ * the sampling for a child process of any kind. The binary is
+ * `libpumpkin.so` — named that way because Android packages only `lib*.so`
+ * from `jniLibs`, and API 29+ execs only from `nativeLibraryDir`.
+ *
+ * One server at a time, enforced in the crate and again in `ServerHost`.
  */
 class PumpkinBackend(
     private val context: Context,
@@ -46,7 +60,16 @@ class PumpkinBackend(
 ) : ServerBackend {
 
     override val kind = "pumpkin"
-    override val engine = "linked"
+
+    /**
+     * A child process now, not a linked library.
+     *
+     * This is *not* what decides that Pumpkin runs vanilla only — that follows
+     * from the engine and is `homerun-core::minecraft::hosting`'s call, keyed
+     * on the game type. Reading it off this field is what broke the moment
+     * Pumpkin stopped being the linked one.
+     */
+    override val engine = "spawned"
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -66,26 +89,41 @@ class PumpkinBackend(
      */
     private var lastAnnounced: ServerState = ServerState.STOPPED
 
-    /**
-     * This run's graph, kept by `homerun-core::metrics`. One per run: a graph
-     * covers a session, so [start] resets it rather than this being reused.
-     */
-    private val metrics = Core.Metrics()
-    private var perfJob: Job? = null
-
     override var onStateChanged: ((String, ServerState, Boolean) -> Unit)? = null
     override var onLog: ((String, String) -> Unit)? = null
     override var onPlayersChanged: ((String) -> Unit)? = null
-
-    // Pumpkin has no tunnel of its own yet, so this never fires here.
     override var onNetworkError: ((String, String) -> Unit)? = null
+    override var onBackupFinished: ((String) -> Unit)? = null
 
     /**
-     * Never fires here either: this backend runs no on-stop backup. That path
-     * belongs to [JavaServerBackend], and this one exists for builds that ship
-     * no JRE — so a stop here really does mean the device is idle.
+     * The gateway tunnel and the backup lifecycle, both shared with
+     * [JavaServerBackend].
+     *
+     * Neither is engine-specific: a tunnel forwards a TCP port and restic
+     * reads a `world/` directory, and which program wrote that directory is
+     * not something either can tell. They are shared because they were briefly
+     * *not* — this backend shipped without them, so a Pumpkin server ran
+     * unreachable and never backed anything up, while every surface reported
+     * it healthy.
      */
-    override var onBackupFinished: ((String) -> Unit)? = null
+    private val tunnel = TunnelSession(
+        context = context,
+        scope = scope,
+        note = ::note,
+        onNetworkError = { onNetworkError },
+        stopServer = { id, graceful -> stop(id, graceful) },
+    )
+
+    private val backups = BackupSession(
+        context = context,
+        scope = scope,
+        dataDir = ::dataDir,
+        note = ::note,
+        onFinished = { onBackupFinished },
+        // The pump outlives the engine so `[Backup]` lines still reach the UI;
+        // only the backup knows when there is genuinely nothing left to write.
+        finishConsole = { id -> drainLogs(id); stopLogPump() },
+    )
 
     // -----------------------------------------------------------------------
     // Storage
@@ -125,77 +163,224 @@ class PumpkinBackend(
         if (!NativeServer.available) {
             throw ServerBackendException.Engine("The server engine failed to load on this device.")
         }
+        val binary = binary(context)
+            ?: throw ServerBackendException.Engine("This build cannot host this kind of server.")
         // Admission was decided by the core before this was called, in the
         // bridge's start handler — see `homerun-core::lifecycle`.
 
         val port = (config.extra["port"] as? Int) ?: DEFAULT_PORT
+        val dir = dataDir(serverId)
         currentServerId = serverId
         currentPort = port
         logCursor = 0
 
+        // A relaunch supersedes a backup still reading the world it is about
+        // to overwrite. The core answers whether this start is that.
+        if (ServerHost.lifecycle.supersedesOnStopBackup(serverId)) {
+            backups.cancelSuperseded(serverId)
+        }
+
         startLogPump(serverId)
-        startPerfSampler(serverId)
+
+        // Started now and awaited once the engine is up. The gateway
+        // provisions the peer asynchronously and polls for up to a minute, so
+        // beginning here overlaps that with the world restore and the world
+        // generating rather than adding it to the end of the launch.
+        tunnel.begin(config.resolveTunnel)
+
+        // Before anything reads the world — a newer snapshot from another
+        // device has to win over this device's stale copy, and after the
+        // engine has opened the directory it is too late. Deliberately not
+        // caught: starting on a world we were told is out of date is the
+        // failure this exists to prevent.
+        try {
+            backups.restore(serverId, dir, config.backupContext)
+        } catch (err: Throwable) {
+            tunnel.cancel()
+            stopLogPump()
+            currentServerId = null
+            currentPort = null
+            transition(serverId, ServerState.STOPPED)
+            throw err as? ServerBackendException ?: ServerBackendException.Engine(
+                err.message ?: "This server's world could not be restored."
+            )
+        }
+
+        writeSettings(serverId, dir, config)
+
+        // Held for the exit path, which needs the repository and device id
+        // long after the caller's config has gone out of scope.
+        backups.hold(serverId, config.backupContext)
+
+        val invocation = JavaProcess.Invocation(
+            program = binary.absolutePath,
+            // None. The server reads `pumpkin.toml`, `data/` and our own
+            // settings file out of the working directory, which the supervisor
+            // sets to [dir] — so there is no path to pass and nothing to parse.
+            args = emptyList(),
+            // Nothing to add: this is an ordinary Rust binary against bionic,
+            // with none of the JVM's `LD_LIBRARY_PATH`/`JAVA_HOME` needs.
+            env = emptyMap(),
+            workDir = dir,
+        )
 
         engineThread = NativeServer.startBlocking(
             serverId,
-            dataDir(serverId).absolutePath,
+            dir.absolutePath,
             port,
+            invocation.toJson().toString(),
         ) { result ->
             // The engine has exited — cleanly or not. Report before tearing
             // the pump down so the final lines still reach the UI.
-            val ok = parse(result)["ok"]?.jsonPrimitive?.booleanOrNull ?: false
-            val error = parse(result)["error"]?.jsonPrimitive?.contentOrNull
+            val parsed = parse(result)
+            val ok = parsed["ok"]?.jsonPrimitive?.booleanOrNull ?: false
+            val error = parsed["error"]?.jsonPrimitive?.contentOrNull
             scope.launch {
+                // The last of the console, including whatever it said on the
+                // way down. The pump keeps running past this: an on-stop
+                // backup writes `[Backup]` lines for minutes after the engine
+                // is gone, and those are console lines like any other.
                 drainLogs(serverId)
-                stopLogPump()
-                stopPerfSampler()
                 // Whether this was a stop or a fall-over is the core's call,
                 // from whether one was asked for — the engine's own `ok` says
-                // only that it unwound cleanly. Exit 0 stands in for a clean
-                // unwind; there is no process code to report here.
+                // only that it unwound cleanly.
                 val verdict = ServerHost.lifecycle.exited(serverId, if (ok) 0 else 1)
                 if (!ok && error != null) Log.e(TAG, "engine exited: $error")
+
+                // However the engine went — stopped, crashed, killed — a
+                // tunnel outliving it would hold the gateway's peer slot
+                // against the next start.
+                tunnel.shutdown()
+
+                val due = backups.claim(serverId, verdict.state)
+                // `force`: the core ruled on this exit a few lines ago, and
+                // `superseded` is how it says a newer launch owns this server.
                 transition(
                     serverId,
                     if (verdict.state == "crashed") ServerState.CRASHED else ServerState.STOPPED,
+                    backupInProgress = due != null,
+                    force = !verdict.superseded,
                 )
                 currentServerId = null
                 currentPort = null
+
+                // The pump stops here only when nothing else will write to it.
+                if (due != null) backups.runAfterStop(serverId, due) else stopLogPump()
             }
         }
         // The engine is up; from here its exit needs judging.
         ServerHost.lifecycle.spawned(serverId)
 
         // `start` is contracted to return once the server accepts connections,
-        // and the bridge has no timeout, so waiting here is correct. The cap
-        // exists only so a wedged engine reports rather than hangs forever.
-        val deadline = System.currentTimeMillis() + START_TIMEOUT_MS
-        while (System.currentTimeMillis() < deadline) {
+        // and the bridge has no timeout, so waiting here is correct.
+        //
+        // There is deliberately **no deadline**. First boot generates a world,
+        // which legitimately runs for minutes on a mid-range phone, and the
+        // old two-minute cap turned that into "The server did not finish
+        // starting in time" with a healthy server behind it. A wedged engine
+        // is caught by the run ending, which is what ends this wait.
+        while (currentServerId == serverId) {
             when (status(serverId)) {
                 ServerState.RUNNING -> {
                     ServerHost.lifecycle.consoleReady(serverId)
+                    // Only now, and before `running` is announced. A server
+                    // accepting connections on loopback is not the same as
+                    // players being able to reach it, and reporting `running`
+                    // before the tunnel is up is how a server looks healthy to
+                    // everyone except the people trying to join. Throws if the
+                    // tunnel cannot be brought up, having stopped the server.
+                    tunnel.open(serverId, dir, port)
                     transition(serverId, ServerState.RUNNING)
                     return
                 }
                 ServerState.CRASHED -> throw ServerBackendException.Engine(
                     "The server stopped unexpectedly while starting."
                 )
-                else -> delay(POLL_MS)
+                else -> {
+                    // A stop can arrive during world generation, which is
+                    // exactly when a launch is slowest and a player is most
+                    // likely to give up on it. Same check the JVM backend
+                    // makes, and this backend was missing it.
+                    if (ServerHost.lifecycle.shouldAbandon(serverId)) {
+                        // The gateway poll would otherwise outlive the launch
+                        // and hold a peer slot the next start needs.
+                        tunnel.cancel()
+                        withContext(Dispatchers.IO) { NativeServer.nativeStop() }
+                        return
+                    }
+                    delay(POLL_MS)
+                }
             }
         }
-        throw ServerBackendException.Engine("The server did not finish starting in time.")
+        // The run ended before it ever reported running.
+        throw ServerBackendException.Engine("The server stopped before it finished starting.")
     }
 
     /**
-     * [graceful] is unused: the engine's own stop always saves before it
-     * unwinds, and there is no second, harsher way to ask it. The parameter
-     * stays so every backend answers the same question.
+     * Hand the engine what the player configured.
+     *
+     * A file rather than arguments or environment: the values include a MOTD
+     * and player names, and a command line is world-readable on Android
+     * through `/proc`.
+     *
+     * The file carries the *raw* inputs, not a rendered `pumpkin.toml`. What
+     * a setting means — the clamps, the online-mode pairing Pumpkin asserts,
+     * which keys it even has — is `homerun-pumpkin-ffi`'s and the engine reads
+     * it with the same code the linked build uses. Rendering TOML here would
+     * be a second spelling of every key and every enum, and getting one wrong
+     * is silent: the value is dropped on load and the server starts on
+     * defaults with nothing to say so.
+     *
+     * Never fails a launch. The fallback is Pumpkin's own configuration, which
+     * includes `online_mode = true` — a server nobody can join — so the engine
+     * shouts about it on the console instead.
+     */
+    private suspend fun writeSettings(serverId: String, dir: File, config: ServerConfig) {
+        val env = config.settingsEnv
+        val file = File(dir, SETTINGS_FILE)
+        if (env == null) {
+            // A stale file from a previous run would otherwise be applied to
+            // this one, silently reinstating settings the API no longer has.
+            runCatching { file.delete() }
+            return
+        }
+        runCatching {
+            val resolved = ServerSettingsWriter.resolveIdentities(env, config.gameType) { line ->
+                onLog?.invoke(serverId, line)
+            }
+            val payload = buildJsonObject {
+                put("env", env)
+                put("gameType", config.gameType)
+                put("resolved", buildJsonArray {
+                    resolved.forEach { add(buildJsonObject { put("name", it.name); put("id", it.id) }) }
+                })
+            }
+            withContext(Dispatchers.IO) { file.writeText(payload.toString()) }
+        }.onFailure {
+            Log.w(TAG, "$serverId: could not write settings: ${it.message}")
+            onLog?.invoke(
+                serverId,
+                "[Homerun] Server settings could not be applied, so the server's defaults apply.",
+            )
+        }
+    }
+
+    /**
+     * [graceful] reaches the supervisor's stop ladder, which asks the server
+     * to save and shut down before it escalates — the same ladder the JVM
+     * backend climbs, because the supervisor cannot tell the two apart.
      */
     override suspend fun stop(serverId: String, graceful: Boolean) {
         if (currentServerId != serverId) throw ServerBackendException.NotRunning(serverId)
         transition(serverId, ServerState.STOPPING)
         // Blocking, and it waits for a world save — never on the main thread.
-        val result = withContext(Dispatchers.IO) { NativeServer.nativeStop() }
+        val result = withContext(Dispatchers.IO) {
+            // Before the engine, so the gateway's peer slot is free by the
+            // time the next start asks for one — a world save can take a
+            // while, and the slot is not ours to hold through it.
+            tunnel.shutdown()
+            NativeServer.nativeStop()
+        }
         val ok = parse(result)["ok"]?.jsonPrimitive?.booleanOrNull ?: false
         if (!ok) {
             val error = parse(result)["error"]?.jsonPrimitive?.contentOrNull
@@ -214,7 +399,6 @@ class PumpkinBackend(
      */
     override val runningServerIds: List<String>
         get() = ServerHost.lifecycle.runningIds()
-
 
     // -----------------------------------------------------------------------
     // Introspection
@@ -248,28 +432,23 @@ class PumpkinBackend(
     }
 
     /**
-     * The engine runs in this process, so process memory is the honest figure
-     * — there is no separate server process to measure.
+     * The server's own memory, at last.
      *
-     * Resident set, not `Debug.getNativeHeapAllocatedSize()`: the heap figure
-     * is the allocator's own bookkeeping, where RSS is what the OS accounts
-     * against this app and what it kills on. It is also what the graph is now
-     * drawn from, and a gauge that disagrees with the graph beside it is worse
-     * than either number alone.
+     * This used to be the whole app's resident set, because the engine ran
+     * inside it and there was nothing else to measure — a figure that included
+     * the WebView and everything the UI had loaded. The supervisor now reads
+     * `/proc/<pid>` for the child, so the number is the server's.
      *
-     * The ceiling is still `largeMemoryClass`, so RSS — which counts more
-     * than the heap — can read over 100% of it. Pre-existing on the JVM path.
-     * iOS reports its own equivalent, the limit the app is killed for
-     * exceeding, so the two platforms' gauges ask the same question even
-     * though neither number is directly comparable to the other's.
+     * The ceiling is still `largeMemoryClass`, which is the app's heap limit
+     * rather than the child's, so the gauge is a proportion of what this app
+     * would be killed for rather than a hard limit on the server. Same
+     * question the JVM backend's gauge answers.
      */
     override fun memoryUsage(serverId: String): MemoryUsage? {
         if (currentServerId != serverId) return null
+        val usedMb = engineSamples().lastOrNull()?.memUsedMb
         val manager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        return MemoryUsage(
-            usedKb = ProcMetrics.residentKb(Process.myPid().toLong())?.toInt(),
-            maxMb = manager.largeMemoryClass,
-        )
+        return MemoryUsage(usedKb = usedMb?.times(1024), maxMb = manager.largeMemoryClass)
     }
 
     /**
@@ -282,7 +461,7 @@ class PumpkinBackend(
      */
     override fun cpuUsage(serverId: String): Double? {
         if (currentServerId != serverId) return null
-        return metrics.samples().lastOrNull()?.cpuPercent
+        return engineSamples().lastOrNull()?.cpuPercent
     }
 
     override fun port(serverId: String): Int? =
@@ -308,10 +487,30 @@ class PumpkinBackend(
     }
 
     override fun perfHistory(serverId: String): List<PerfSample> =
-        if (currentServerId != serverId) emptyList()
-        else metrics.samples().map {
-            PerfSample(it.t, it.memUsedMb, it.cpuPercent, it.playerCount)
+        if (currentServerId != serverId) emptyList() else engineSamples()
+
+    /**
+     * The graph the supervisor built while this run was up.
+     *
+     * Nothing here samples anything. The supervisor owns the process, so it is
+     * the only thing that knows what to measure — and `homerun-core` decides
+     * what the readings mean and how much to keep. Identical to
+     * [JavaServerBackend]'s, which is the point: both backends' numbers now
+     * describe the same window in the same way, measured the same way.
+     */
+    private fun engineSamples(): List<PerfSample> = runCatching {
+        val obj = json.parseToJsonElement(NativeServer.nativeMetrics()).jsonObject
+        (obj["samples"] as? JsonArray).orEmpty().map { entry ->
+            val o = entry.jsonObject
+            fun num(key: String) = o[key]?.jsonPrimitive?.contentOrNull?.toDoubleOrNull()
+            PerfSample(
+                t = o["t"]?.jsonPrimitive?.longOrNull ?: 0L,
+                memUsedMb = num("memUsedMb")?.toInt(),
+                cpuPercent = num("cpuPercent"),
+                playerCount = num("playerCount")?.toInt(),
+            )
         }
+    }.getOrDefault(emptyList())
 
     // -----------------------------------------------------------------------
     // Log pump
@@ -356,67 +555,88 @@ class PumpkinBackend(
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Perf sampler
-    // -----------------------------------------------------------------------
-
     /**
-     * Feed the core a reading for as long as this run lasts.
+     * A line of Homerun's own narrative, into the server's console.
      *
-     * Its own job rather than a second passenger on the log pump, which ticks
-     * every second: the history crosses JNI *by value*, so offering there
-     * would ship up to 360 samples in each direction thirty times over for one
-     * kept point. The pump keeps the roster watch, which does need to be
-     * prompt. Same shape as [JavaServerBackend]'s sampler, so the two Android
-     * backends' numbers describe the same window.
-     *
-     * The engine runs **in this process**, so the process to measure is the
-     * app itself — unlike the JVM backend, which has a child to point at.
+     * Written to the supervisor's buffer rather than emitted directly, which
+     * is what keeps it in sequence with the engine's own output — and what
+     * stops it arriving twice, once from here and once from the pump reading
+     * the same buffer a moment later.
      */
-    private fun startPerfSampler(serverId: String) {
-        stopPerfSampler()
-        metrics.reset()
-        perfJob = scope.launch(Dispatchers.IO) {
-            val pid = Process.myPid().toLong()
-            while (true) {
-                metrics.record(
-                    atMs = System.currentTimeMillis(),
-                    memUsedKb = ProcMetrics.residentKb(pid),
-                    cpuSeconds = ProcMetrics.cpuSeconds(pid),
-                    playerCount = players(serverId)?.players?.size,
-                )
-                // Re-read every pass: it doubles once the graph fills.
-                delay(metrics.intervalMs())
-            }
-        }
+    private fun note(serverId: String, line: String) {
+        Log.i(TAG, line)
+        runCatching { NativeServer.nativeNote(line) }
+            .onFailure { Log.w(TAG, "note did not reach the console: ${it.message}") }
     }
 
-    private fun stopPerfSampler() {
-        perfJob?.cancel()
-        perfJob = null
-    }
-
-    private fun transition(serverId: String, state: ServerState) {
+    private fun transition(
+        serverId: String,
+        state: ServerState,
+        backupInProgress: Boolean = false,
+        /**
+         * Announce without asking the core's permission, for an exit it has
+         * just adjudicated itself.
+         *
+         * `exited` prunes a server's entry once the device has nothing left in
+         * flight, and `mayAnnounce` refuses `stopped` for a server it holds no
+         * entry for — so asking again turns "was this exit announced" into a
+         * race between the exit callback and the stop call returning. The
+         * in-app Stop wins that race; the notification's Stop loses it, and the
+         * server sticks at `stopping` for ever with the foreground service
+         * pinned behind it.
+         *
+         * Nothing is lost by not asking: `exited` already answers the question
+         * `mayAnnounce` exists for, with `superseded`.
+         */
+        force: Boolean = false,
+    ) {
         // The same guard the JVM backend has, and for the same reason: a
         // launch still catching up must not announce `running` for a server
-        // already on its way down. This backend was missing it.
+        // already on its way down.
         //
         // The core answers *may this be said*; the check below answers *have
         // we already said it*, which is about the event stream rather than the
         // server, and is this file's own business.
-        if (!ServerHost.lifecycle.mayAnnounce(serverId, state.wire)) return
+        if (!force && !ServerHost.lifecycle.mayAnnounce(serverId, state.wire)) return
         if (lastAnnounced == state) return
         lastAnnounced = state
-        onStateChanged?.invoke(serverId, state, false)
+        onStateChanged?.invoke(serverId, state, backupInProgress)
     }
 
     private fun parse(raw: String): JsonObject =
         runCatching { json.parseToJsonElement(raw).jsonObject }.getOrElse { JsonObject(emptyMap()) }
 
-    private companion object {
-        const val TAG = "HomerunBackend"
-        const val DEFAULT_PORT = 25565
-        const val POLL_MS = 1000L
-        const val START_TIMEOUT_MS = 120_000L
+    companion object {
+        private const val TAG = "HomerunBackend"
+        private const val DEFAULT_PORT = 25565
+        private const val POLL_MS = 1000L
+
+        /**
+         * What the host leaves in the server directory for the engine to read.
+         * The other half is `rust/homerun-pumpkin-bin/src/main.rs`.
+         */
+        private const val SETTINGS_FILE = "homerun-settings.json"
+
+        /**
+         * The server, staged as a library so Android will ship and exec it.
+         *
+         * Two platform rules, one rename: only `lib*.so` under `jniLibs` is
+         * packaged, and API 29+ execs only from `nativeLibraryDir`. Same trick
+         * as `libjavabin.so` — see `scripts/targets.js`.
+         */
+        private const val BINARY = "libpumpkin.so"
+
+        /** The binary, or null if this build shipped none for the device's ABI. */
+        fun binary(context: Context): File? =
+            File(context.applicationInfo.nativeLibraryDir, BINARY).takeIf { it.canExecute() }
+
+        /**
+         * Whether this build can host a Pumpkin server at all.
+         *
+         * A declaration, not an inference: a device that can spawn processes
+         * perfectly well still cannot run a server it did not ship.
+         */
+        fun isAvailable(context: Context): Boolean =
+            NativeServer.available && binary(context) != null
     }
 }

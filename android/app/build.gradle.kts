@@ -444,6 +444,10 @@ val verifyReleaseConfig by tasks.registering {
 val nativePayload = mapOf(
     "libhomerun_pumpkin_ffi.so" to "rust:android",
     "libjavabin.so" to "rust:java-launcher",
+    // The Pumpkin server itself. Android links no engine into the `.so` any
+    // more — it runs one as a child process — so a build without this stages
+    // a host that advertises Pumpkin and cannot start it.
+    "libpumpkin.so" to "rust:pumpkin-bin",
     "libwireproxy.so" to "wireproxy:android",
     "librestic.so" to "restic:android",
 )

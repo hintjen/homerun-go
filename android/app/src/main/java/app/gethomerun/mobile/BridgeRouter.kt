@@ -1329,19 +1329,23 @@ class BridgeRouter(
 
                         try {
                             // Before anything expensive. A modpack is minutes of
-                            // downloading and unpacking, and on a linked engine it
-                            // would then start vanilla and look like it worked.
+                            // downloading and unpacking, and on Pumpkin it would then
+                            // start vanilla and look like it worked.
+                            //
+                            // This both refuses and *routes*: the same core call that
+                            // says a server cannot run here says which of this device's
+                            // engines runs it when it can. Asking the selected backend
+                            // what it was would be backwards now that there are two.
                             //
                             // `rawGameType`, not `gameType` — the reduced form cannot
                             // tell `native-crossplay` from plain Java, and crossplay
-                            // needs a plugin. `bedrock = false`: no phone ships BDS.
-                            if (settings != null) {
-                                Core.hostingRefusal(
-                                    engine = backend.engine,
-                                    bedrock = false,
-                                    gameType = settings.rawGameType,
-                                    env = settings.env,
-                                )?.let { throw ServerBackendException.Engine(it) }
+                            // needs a plugin.
+                            val engine = if (settings != null) {
+                                ServerHost.select(settings.rawGameType, settings.env)
+                            } else {
+                                // No settings means no game type to route on, so this
+                                // is the device's ordinary answer for a Java server.
+                                ServerHost.select("native", JsonObject(emptyMap()))
                             }
 
                             // A minigame lobby is generated for one session and the
@@ -1366,7 +1370,7 @@ class BridgeRouter(
                                     throw ServerBackendException.Engine(it)
                                 }
                             }
-                            backend.start(
+                            engine.start(
                                 serverId,
                                 ServerConfig(
                                     name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,

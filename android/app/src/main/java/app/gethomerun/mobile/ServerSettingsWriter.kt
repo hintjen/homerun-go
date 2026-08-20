@@ -87,15 +87,7 @@ object ServerSettingsWriter {
 
             // 2. Fetch only the identities the core cannot derive itself. An
             //    offline server asks for none, so this costs nothing there.
-            val resolved = Core.requiredLookups(env, gameType).mapNotNull { name ->
-                val id = fetchIdentity(name)
-                if (id == null) {
-                    onLog("[Homerun] Could not resolve \"$name\" — skipping.")
-                    null
-                } else {
-                    Core.Identity(name, id)
-                }
-            }
+            val resolved = resolveIdentities(env, gameType, onLog)
 
             // 3. Write what it says, how it says.
             val files = Core.configFiles(
@@ -121,6 +113,35 @@ object ServerSettingsWriter {
             // outcome than refusing to start.
             Log.w(TAG, "$serverId: could not apply settings: ${err.message}")
             onLog("[Homerun] Server settings could not be applied, so the server's defaults apply.")
+        }
+    }
+
+    /**
+     * The identities the core needs looked up, resolved against Mojang.
+     *
+     * Shared with the Pumpkin backend, which hands the same list to its engine
+     * rather than writing it into a properties file. An operator is a name in
+     * the API and a UUID everywhere the server actually enforces anything, and
+     * only Mojang can join the two — so both engines have to make these calls
+     * and neither should make them differently.
+     *
+     * The core is asked *what* to look up rather than every name being
+     * resolved: an offline-mode server needs none of them, which on a phone
+     * with no signal is the difference between a free launch and one ten
+     * second timeout per operator. A name that cannot be resolved is dropped
+     * with a note, never a failed launch.
+     */
+    suspend fun resolveIdentities(
+        env: JsonObject,
+        gameType: String,
+        onLog: (String) -> Unit,
+    ): List<Core.Identity> = Core.requiredLookups(env, gameType).mapNotNull { name ->
+        val id = fetchIdentity(name)
+        if (id == null) {
+            onLog("[Homerun] Could not resolve \"$name\" — skipping.")
+            null
+        } else {
+            Core.Identity(name, id)
         }
     }
 

@@ -848,17 +848,75 @@ object Core {
      * server through verbatim, since reducing `game_type` first would hide
      * `native-crossplay`.
      */
-    fun hostingRefusal(engine: String, bedrock: Boolean, gameType: String, env: JsonObject): String? =
+    fun hostingRefusal(host: HostEngines, gameType: String, env: JsonObject): String? =
         call("minecraft.hosting.refuse", buildJsonObject {
-            put("host", buildJsonObject {
-                put("engine", engine)
-                put("bedrock", bedrock)
-            })
+            put("host", host.json())
             put("server", buildJsonObject {
                 put("gameType", gameType)
                 put("env", env)
             })
         }).let { if (it is JsonNull) null else it.jsonObject["message"]?.jsonPrimitive?.content }
+
+    /**
+     * What this device can actually run, which is the half of the question
+     * only the host can answer.
+     *
+     * Not "which engine is this device" — that had no answer once Android had
+     * two. A JRE staged in the APK and a Pumpkin binary in `nativeLibraryDir`
+     * are independent facts, and either can be missing from a build.
+     */
+    data class HostEngines(val jvm: Boolean, val pumpkin: Boolean, val bedrock: Boolean = false) {
+        fun json(): JsonObject = buildJsonObject {
+            put("jvm", jvm)
+            put("pumpkin", pumpkin)
+            put("bedrock", bedrock)
+        }
+    }
+
+    /** Which engine serves a server, or why none of this device's can. */
+    data class Serves(val engine: String?, val refusal: String?)
+
+    /**
+     * Which of this device's engines runs this server.
+     *
+     * The routing decision, and it is the core's rather than Kotlin's because
+     * it is three rules that iOS needs too: a Pumpkin server goes to Pumpkin
+     * and is never substituted, a Java server prefers a real JVM for the mods
+     * and plugins only a JVM can run, and a device with no JVM serves a plain
+     * Java server with Pumpkin anyway — which is every server that exists on
+     * iOS.
+     *
+     * Returns the refusal in the same call, so a caller needs one round trip
+     * rather than asking [hostingRefusal] and then asking again.
+     */
+    fun serves(host: HostEngines, gameType: String, env: JsonObject): Serves =
+        call("minecraft.hosting.serves", buildJsonObject {
+            put("host", host.json())
+            put("server", buildJsonObject {
+                put("gameType", gameType)
+                put("env", env)
+            })
+        }).jsonObject.let {
+            Serves(
+                engine = it["engine"]?.jsonPrimitive?.contentOrNull,
+                refusal = it["refusal"]?.let { r ->
+                    if (r is JsonNull) null else r.jsonObject["message"]?.jsonPrimitive?.content
+                },
+            )
+        }
+
+    /**
+     * Whether this kind of server has a jar to fetch and a `Main-Class` to
+     * read. False for Pumpkin, which *is* the server, and for Bedrock.
+     *
+     * Feeds [launchPlan]. Without it the plan is inferred from whether the
+     * engine is spawned — true of a Pumpkin child process, which would then be
+     * sent to download a Mojang jar it cannot use.
+     */
+    fun needsJvm(gameType: String): Boolean =
+        call("minecraft.hosting.needsJvm", buildJsonObject {
+            put("gameType", gameType)
+        }).jsonPrimitive.boolean
 
     /** One step of a launch, and whether a pending stop is honoured before it. */
     data class Step(val name: String, val checkpoint: Boolean)
@@ -874,11 +932,19 @@ object Core {
      * that no player can reach. `homerun-core::launch` has the reasoning and
      * the tests.
      */
-    fun launchPlan(backups: Boolean, settings: Boolean, tunnel: Boolean): List<Step> =
+    fun launchPlan(
+        backups: Boolean,
+        settings: Boolean,
+        tunnel: Boolean,
+        needsJvm: Boolean? = null,
+    ): List<Step> =
         (call("launch.plan", buildJsonObject {
             put("backups", backups)
             put("settings", settings)
             put("tunnel", tunnel)
+            // Omitted means "infer it from the engine", which is what this
+            // host did before a Pumpkin server could be spawned.
+            if (needsJvm != null) put("needsJvm", needsJvm)
         }) as JsonArray).map {
             Step(
                 name = it.jsonObject["step"]!!.jsonPrimitive.content,
