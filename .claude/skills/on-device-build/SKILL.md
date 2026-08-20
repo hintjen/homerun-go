@@ -177,6 +177,25 @@ adb logcat -d -s HomerunBundle:* | tail -3
 back to the assets floor. `docs/ota-bundles.md` covers testing the updater
 itself, which is a different job.
 
+**Check this after launching, not before.** `files/ui/current` being absent on
+a freshly installed app proves nothing: the updater fetches and activates at
+startup, so the first launch is where a days-old bundle appears. Deleting it
+before launch and concluding you are safe is the same mistake with an extra
+step.
+
+If the point of the build is to run *your* UI, do not race the updater —
+turn it off for that build:
+
+```bash
+node scripts/android-app.js install -PbundlePublicKey=
+```
+
+An empty key disables updates entirely (`BundleUpdater` will not fetch what it
+cannot verify), so the APK's own `assets/web` is what serves. Delete
+`files/ui` as well, or an already-activated bundle still outranks it. Both are
+per-build and per-device: a later install without the flag restores normal
+updating, and nothing about the branch changes.
+
 **Gradle can decide there is nothing to do.** Compare the installed APK against
 the built one rather than trusting `BUILD SUCCESSFUL`:
 
@@ -208,6 +227,26 @@ little that matters — but look before you do it, and say what will go.
 A wipe also drops the device registration, so the next login registers a *new*
 device. Servers already assigned to the old one will point at a device that never
 reports again.
+
+## A real phone is not an emulator that happens to be plastic
+
+Two things cost time here that never happen on an emulator.
+
+**A sleeping screen screenshots as solid black**, which reads exactly like a
+blank page or a crashed WebView — and the logs beside it will be full of
+network errors, because doze restricts the network too. Check before
+diagnosing anything:
+
+```bash
+adb shell dumpsys display | grep -m1 mScreenState   # ON or OFF
+adb shell input keyevent 224                        # WAKEUP
+adb shell settings put system screen_off_timeout 1800000
+```
+
+**A locked phone cannot be driven.** `input tap` goes to the lock screen, and
+the screenshot shows the owner's notifications rather than the app. There is no
+way around this from adb on a device with a real lock — ask the owner to unlock
+it, and keep verification to what logcat and `run-as` can prove.
 
 ## Verifying
 
