@@ -29,13 +29,32 @@ therefore has to ship inside the APK.
 PowerNukkitX is a Bedrock server written in Java, LGPL-3.0. Everything it needs
 already existed here.
 
-### What is built, and what is not
+### It runs. What that proved, and what it cost
 
-Everything below runs in the 725 host-native core tests and the 169 FFI tests,
-and the Android host compiles against it. **No PowerNukkitX process has ever
-been started on a phone.** M0 in the plan — does it boot on bionic, does
-JNA/OSHI blow up, does a client join — has not been run, and until it has, this
-subsystem is code that is verified and not proven.
+**A PowerNukkitX server has hosted a real player on a Pixel 9 Pro XL**
+(2026-08-21). M0 is answered:
+
+```
+19:30:10 Opening server on 127.0.0.1:25565
+19:30:10 Done (4.213s)! For help, type "help" or "?"
+19:31:17 elPTFO[/127.0.0.1:56926] logged in with entity id 1 at (world, 0.68, 68.0, 0.82)
+19:31:50 Stopping the server
+19:31:50 Unloading level "world" / "world_the_nether" / "world_the_end"
+```
+
+The world is real — `worlds/world/db/` held 36 MB of LevelDB with `level.dat`
+for all three dimensions — and the stop was clean.
+
+**JNA/OSHI did not kill it**, which was the one risk the plan could not retire
+on a desktop. It fails *gracefully*: `Failed to find a usable hardware address
+from the network interfaces` and `Your server does not support hardware data
+monitoring. This function has been turned off`. Turning metrics off removed the
+boot-path caller, and what is left degrades instead of throwing.
+
+Everything the plan predicted about the config held. What it got wrong was
+**the console**, and the cost was four defects that no host-native test could
+have caught, because every one of them is about a byte stream this repo had
+never seen. They are written up under *The console* and *Operators* below.
 
 ## The game type
 
@@ -258,6 +277,80 @@ the jar carries a PowerNukkitX release number, and the release metadata says
 nothing about Minecraft. The core extracts it and `Core.Line` carries it; no
 Android surface displays it yet.
 
+### Three things the first real run broke
+
+The first PowerNukkitX server on a phone parsed its ready line and then
+recognised **no join and no leave**, in either wording that engine emits.
+Presence reporting was dead for the whole session — no player count, no roster
+— and nothing in any log said so. The host reported `players=?` and that was
+the only visible symptom.
+
+Three independent defects, found by feeding the captured lines to the parser
+rather than by reading it:
+
+| | |
+|---|---|
+| **`[main]` was eaten** | `ansi_len` accepts an escape-less `[…m` on purpose — some log paths deliver the remnant `[0m` as text — and with no parameters that also matches a bare `[m`, so `[main]` became `ain]`. Pre-existing. Nothing hit it while every engine wrote `[Server thread/INFO]` or `[INFO]` |
+| **The timestamp is bare** | The console pattern is `%d{HH:mm:ss} [%t] [%level] %msg`, so the prefix does not start with a bracket and the scan never began |
+| **The next tag is a thread name** | `[Netty Server IO #1]` resembles nothing, so the scan stopped there |
+
+The prefix run is now consumed **up to the last recognised tag, never past
+it**, which lets a thread name through while keeping the forgery guard exactly
+as strong: `[Griefer] Notch joined the game` still has no real tag anywhere,
+and a trailing forgery after a genuine prefix is still left in the name.
+
+Requiring a parameter would have been the obvious fix for the first one and is
+wrong: a captured line already in these tests is `[m[36;22m[20:37:28 INFO]: …`,
+so parameterless remnants are real. What separates them is the next character —
+a reset is followed by another sequence or the end of the line, a thread name by
+the rest of a word.
+
+### Test against stdout, not `logs/server.log`
+
+`log4j2.xml` gives the two appenders different patterns. The file gets
+`%d{yyy-MM-dd HH:mm:ss} [%t] %level - %msg`; the console gets the one above.
+**The host reads stdout and nothing reads the file.** It is tempting to build
+fixtures from `logs/server.log` because that is the one you can pull off the
+device with `run-as` — the first attempt at these tests did exactly that, and
+pinned a format nothing consumes.
+
+Section-sign codes are stripped alongside ANSI either way, because whether the
+appender emits them depends on stdout being a terminal and a pipe is not one.
+`--disable-ansi` does nothing about them; they are not ANSI.
+
+## Operators
+
+Two files, two failures, and the second one is the sharpest thing in this
+subsystem.
+
+**Reading.** `native-server-get-ops` read `ops.json` and nothing else, so on a
+PowerNukkitX server the answer was always an empty list — every connected player
+rendered as *not* an operator however many the server had. The op toggle then
+made it worse: it sent a command the server honoured and wrote to its own file,
+then the panel re-read a file that does not exist and flipped the state back.
+`opsOnDisk` now reads whichever file is present, which needs no game type
+because only one is ever written.
+
+**Writing — the case rule.** Nukkit keys these lists by the lowercased name and
+never re-normalises what it loaded off disk:
+
+```java
+addOp:    operators.set(name.toLowerCase(ENGLISH), true);
+removeOp: operators.remove(name.toLowerCase(ENGLISH));
+isOp:     operators.exists(name, true);   // case-insensitive
+```
+
+Writing `ops.txt` from the API's `OPS` verbatim gave a player who typed
+`elPTFO` a key of exactly that. A later `/op` inserted a **second** key,
+`elptfo`; `/deop` removed only that one; and `isOp` went on matching the
+original case-insensitively. **The player could never be deopped** — every
+command succeeded, the file still named them, and nothing anywhere reported a
+failure. Six attempts in ninety seconds on a real device is what it took to
+see it.
+
+So [`name_list`] lowercases, which is the form Nukkit itself writes. The
+allowlist is keyed the same way and gets the same treatment.
+
 ## What did not need changing
 
 Longer than the list that did:
@@ -272,7 +365,9 @@ Longer than the list that did:
 - **Moderation and Insights.** Android uses no RCON for either — player tracking
   reads the console and `native-server-rcon` dispatches through the console
   command path — so this needs its console vocabulary and nothing else. Whether
-  PowerNukkitX implements RCON is irrelevant here.
+  PowerNukkitX implements RCON is irrelevant here. (The console *vocabulary*
+  turned out to be four fixes rather than two patterns; see above. The
+  architecture held, the parsing did not.)
 - **The stop ladder.** `stop` on stdin, then the ladder the supervisor already
   walks. The *timings* are unverified: a Bedrock world save is not a Java one.
 - **`ServerHost.select`.** It is served by `Served::Jvm`, so the routing that
@@ -301,6 +396,19 @@ version is whatever the release implements rather than anything a player picks,
 so `VERSION` stays `LATEST` and the host resolves the newest blessed release.
 `native-get-latest-bedrock-version` is about BDS and still answers with a
 refusal on a phone; nothing calls it for this type.
+
+## Known mismatch: view distance
+
+The core clamps `view-distance` to [`MAX_VIEW_DISTANCE`] (16) because the create
+wizard offers up to 64 and a phone cannot afford it — every chunk in view is
+heap, and Android kills the whole app rather than just the server. The settings
+screen still shows what the API stores, so a player who chose 32 sees 32 and the
+server runs 16.
+
+That is a real mismatch and it is deliberate only in the sense that the clamp
+is. It wants one of two fixes, and the choice has not been made: clamp in the
+wizard too, so the number shown is the number that runs; or raise the ceiling
+once M8 has measured what a phone actually sustains.
 
 ## What the API still has to learn
 
@@ -336,6 +444,8 @@ Not in this repo, and **the first one fails silently**:
 | `android/.../JavaServerBackend.kt` | `prepareNukkit`, the skipped EULA, the skipped mod and plugin sync, the exposure on the tunnel |
 | `android/.../WireProxy.kt`, `TunnelSession.kt` | The exposure, threaded to `tunnel.render` |
 | `android/.../HostCapabilities.kt` | `powernukkitxServers` |
+| `android/.../BridgeRouter.kt` | `opsOnDisk` reading whichever operator file is present |
+| `homerun-app-ui` `lib/gameType.ts` | `isBedrockGameType` counts it; `isPowerNukkitXGameType` for the one thing that differs |
 
 ## Triage
 
@@ -370,3 +480,19 @@ They need the host *and* the port, in the Add Server dialog's two fields.
 **Mods or plugins are missing.** They are not synced for this game type and never
 will be: PowerNukkitX loads no Fabric mod and no Bukkit plugin, and `mods::sweep`
 deletes jars it does not recognise — which on this engine is all of them.
+
+**The player count is `?` and nobody appears in Insights.** The console parser
+is not seeing joins. Check the FFI on the device is current — this is the one
+that hides behind a stale `libhomerun_pumpkin_ffi.so`, because `ui:android` and
+an install refresh neither the Rust nor anything that reports it. Then check the
+line shape against *Test against stdout* above.
+
+**A player cannot be deopped.** If the server predates the lowercase write, its
+`ops.txt` still holds a mixed-case entry no command can remove. Restarting
+rewrites the file from `OPS` and clears it.
+
+**Nothing was backed up on stop.** Check the server has a restic repository
+before suspecting this game type: `BackupManager` returns silently when
+`ResticEngine.Repo.from(settings.backup)` is null, and a server the API never
+gave a repository takes that path whatever it runs. The PowerNukkitX half is
+sound — `WORLD_DIRS` already accepts `worlds/`.
