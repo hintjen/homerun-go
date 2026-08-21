@@ -73,6 +73,12 @@ Secrets live on the `ios-publish` environment:
 | `IOS_GOOGLE_SERVICES_PLIST_PROD` | `GoogleService-Info.plist`, base64 — optional |
 | `IOS_GOOGLE_SERVICES_PLIST_STAGING` | same, for the staging Firebase project |
 
+The API key must have the **Admin** role, not App Manager. App Manager can
+upload builds and manage profiles, but creating the **cloud-managed Apple
+Distribution certificate** — the entire reason this pipeline needs no local
+signing key — fails under it as `Cloud signing permission error`, and a key's
+role cannot be changed after creation.
+
 The Firebase plists are chosen **by backend, not build type** — the pairing
 that matters is Firebase project ↔ backend FCM credential
 ([`building.md`](./building.md) § *Push credentials*). Missing is legal: the
@@ -128,19 +134,26 @@ and cargo's fetches of the other private repos come back `404 not found`,
 which reads like a wrong URL rather than the wrong token. The workflow passes
 `persist-credentials: false`.
 
-### Known gaps
+### How signing actually works here — proven 2026-08-21, build 2026082102
 
-- **The app record does not exist yet.** Create `app.gethomerun.ios` in App
-  Store Connect once, by hand; until then an upload has nothing to attach to.
-  Unlike Play there is no "first upload by hand" rule — the first build can
-  come through the workflow.
-- **The `ios-publish` environment and its secrets are not created yet** —
-  Settings → Environments, then the five secrets above.
-- **Cloud signing is unproven on this team.** `-allowProvisioningUpdates`
-  with the API key should mint the distribution certificate itself; if the
-  archive step fails asking for a signing identity, create one Apple
-  Distribution certificate in Xcode on any team machine once, or in the
-  developer portal, and keep it in the runner's login keychain.
+The pipeline runs end to end: app record created, environment populated, and
+the first TestFlight upload went through the workflow. The signing shape it
+landed on is not the obvious one, and each part was forced by a real failure:
+
+- **The archive is unsigned** (`CODE_SIGNING_ALLOWED=NO`). Automatic signing
+  wants an iOS App *Development* identity at archive time, and minting one
+  means a private-key write to the login keychain — which the runner's
+  non-interactive context refuses as `User interaction is not allowed`.
+  (Forcing `CODE_SIGN_IDENTITY="Apple Distribution"` instead fails twice
+  over: a command-line setting hits every SPM package target, and the app
+  target rejects it as conflicting with automatic signing.)
+- **Export signs**, with the cloud-managed Apple Distribution certificate —
+  no local key exists at all. This is why the API key must be Admin.
+- **Embedded frameworks are ad-hoc signed in the archive first**
+  (`codesign --sign -`, no keychain): export's re-sign *replaces* signatures
+  but does not create them, and Apple rejects the upload naming the
+  framework (`WireproxyIOS.framework is not properly signed`) if one arrives
+  unsigned.
 
 ## What Apple asks for
 
@@ -163,8 +176,15 @@ question* and [`../plans/ios-background-execution.md`](../plans/ios-background-e
 Mac is at the login window, or the login keychain is locked. Log the session
 in (`ssh` is not enough for the keychain) and re-run.
 
-**`No signing certificate "iOS Distribution" found`** — cloud signing did not
-mint one; see Known gaps above.
+**`Cloud signing permission error` at export, usually alongside `No signing
+certificate "iOS Distribution" found`** — the API key's role is App Manager
+or lower. Cloud-managed certificate creation needs Admin; generate a new key
+(roles are fixed at creation) and update `ASC_API_KEY_ID` + `ASC_API_KEY_P8`.
+
+**Upload rejected: `…framework is not properly signed`** — a new embedded
+framework reached export without any signature for the re-sign to replace.
+The ad-hoc signing loop in the *Prove what was archived* step covers
+`Frameworks/*.framework`; check the new framework actually lands there.
 
 **`error: exportArchive: The data couldn’t be read` naming ExportOptions** —
 the `plutil -replace` ran against a stale copy, or the plist was hand-edited
