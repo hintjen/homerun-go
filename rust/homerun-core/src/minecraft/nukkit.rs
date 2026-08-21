@@ -520,11 +520,34 @@ fn render_settings(settings: &[Setting]) -> String {
     out
 }
 
-/// One name per line, which is what `Config.ENUM` reads.
+/// One name per line, which is what `Config.ENUM` reads — **lowercased**.
+///
+/// # Why the case matters, and it really does
+///
+/// Nukkit keys these lists by the lowercased name and nothing re-normalises
+/// what it read off disk:
+///
+/// ```java
+/// addOp:    operators.set(name.toLowerCase(ENGLISH), true);
+/// removeOp: operators.remove(name.toLowerCase(ENGLISH));
+/// isOp:     operators.exists(name, true);   // case-insensitive
+/// ```
+///
+/// Write `elPTFO` and the map loads a key of exactly that. A later `/op`
+/// inserts a *second* key, `elptfo`; `/deop` removes only that one; and
+/// `isOp` still finds the original, case-insensitively. **The player can never
+/// be deopped** — every `deop` succeeds, the file still names them, and
+/// nothing anywhere reports a failure.
+///
+/// Found on a device by deopping the same player six times in ninety seconds.
+///
+/// Lowercasing costs nothing: the API's `OPS` is what the UI displays, matching
+/// is case-insensitive on both sides, and this is the form Nukkit itself
+/// writes.
 fn name_list(names: &[String]) -> String {
     let mut out = String::new();
     for name in names {
-        out.push_str(name);
+        out.push_str(&name.to_lowercase());
         out.push('\n');
     }
     out
@@ -996,15 +1019,26 @@ mod tests {
         assert!(required_lookups().is_empty());
     }
 
+    /// Lowercased, because Nukkit keys these by the lowercased name and a
+    /// mixed-case entry it loaded off disk is one that `/deop` can never
+    /// remove. See [`name_list`].
     #[test]
-    fn ops_and_the_allowlist_are_plain_names() {
+    fn ops_and_the_allowlist_are_plain_lowercased_names() {
         let files = config_files(&ctx(json!({
             "OPS": "Ada,Grace",
             "WHITELIST": "Ada",
         })))
         .unwrap();
-        assert_eq!(written(&files, OPS_FILE).unwrap().contents, "Ada\nGrace\n");
-        assert_eq!(written(&files, ALLOWLIST_FILE).unwrap().contents, "Ada\n");
+        assert_eq!(written(&files, OPS_FILE).unwrap().contents, "ada\ngrace\n");
+        assert_eq!(written(&files, ALLOWLIST_FILE).unwrap().contents, "ada\n");
+    }
+
+    /// The shape of the real failure: a name written in the case the player
+    /// typed it, which `/deop` then leaves behind for ever.
+    #[test]
+    fn a_mixed_case_operator_is_written_in_the_form_deop_can_remove() {
+        let files = config_files(&ctx(json!({ "OPS": "elPTFO" }))).unwrap();
+        assert_eq!(written(&files, OPS_FILE).unwrap().contents, "elptfo\n");
     }
 
     #[test]
