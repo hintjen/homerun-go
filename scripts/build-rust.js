@@ -152,7 +152,13 @@ if (target.kind === "ndk") {
 // --- stage the artifact ---------------------------------------------------
 
 const crate = target.crate || CRATE;
-const built = path.join(crate, "target", target.triple, profile, target.artifact);
+// Honor CARGO_TARGET_DIR the way cargo does (resolved against the cwd cargo
+// ran in, which is the crate dir). CI sets it to a directory outside the
+// workspace so `git clean` between runs cannot throw the build cache away.
+const targetRoot = process.env.CARGO_TARGET_DIR
+  ? path.resolve(crate, process.env.CARGO_TARGET_DIR)
+  : path.join(crate, "target");
+const built = path.join(targetRoot, target.triple, profile, target.artifact);
 if (!fs.existsSync(built)) {
   fail(
     `Build reported success but ${target.artifact} is not at:\n  ${built}\n` +
