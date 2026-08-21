@@ -34,6 +34,8 @@ final class PumpkinBackend: ServerBackend {
 
     /// Why the blocking start call returned, when it was not asked to.
     private var runFailure: String?
+    /// This run reached `spawn`, so there is an engine thread to answer for.
+    private var engineSpawned = false
     private var threadFinished = false
 
     private var logCursor = 0
@@ -56,6 +58,16 @@ final class PumpkinBackend: ServerBackend {
     /// caller's `ServerConfig` is long gone and the on-stop backup still needs
     /// the repository credentials and this device's id.
     private var backupContext: BackupContext?
+
+    /// The on-stop backup of the run that has just ended, while it runs.
+    ///
+    /// Kept because a start has to be able to *end* it, not merely ask: the
+    /// engine's cancel is cooperative and lands at a phase boundary, so
+    /// "cancelled" and "finished with the world" are minutes apart, and the
+    /// launch that supersedes it must not spawn a server into a directory
+    /// something else is still reading. Awaiting this handle is what makes
+    /// pressing Start override a stop rather than race it.
+    private var onStopBackup: Task<Void, Never>?
 
     /// Where a backup's `[Backup] …` lines go: the player's console, and the
     /// device log.
@@ -147,6 +159,7 @@ final class PumpkinBackend: ServerBackend {
         activeServerId = serverId
         startedAt = nil
         runFailure = nil
+        engineSpawned = false
         threadFinished = false
         logCursor = 0
         // This launch's console starts here, not at `serverStart`. Everything
@@ -174,6 +187,13 @@ final class PumpkinBackend: ServerBackend {
             serverId: serverId,
             lifecycle: lifecycle)
 
+        // Asked to stop at the first step and waited for at the last moment
+        // it can be, the same shape as the tunnel below: the cancel is coarse
+        // and a transfer already under way finishes before it lands, so the
+        // wait overlaps the rest of the preparation rather than being added to
+        // the front of it.
+        var supersededBackup: Task<Void, Never>?
+
         do {
             if try order.at("cancelOnStopBackup"), lifecycle.supersedesOnStopBackup(serverId) {
                 // This device is relaunching this server, so its own on-stop
@@ -197,6 +217,8 @@ final class PumpkinBackend: ServerBackend {
                         "[Backup] Cancelling the backup still running for this server…")
                 }
                 BackupFFI.cancel()
+                supersededBackup = onStopBackup
+                onStopBackup = nil
             }
 
             if try order.at("announceStarting") {
@@ -213,6 +235,14 @@ final class PumpkinBackend: ServerBackend {
 
             if try order.at("awaitPreviousExit") {
                 try await awaitPreviousExit(serverId: serverId)
+            }
+
+            // The last point at which the previous run can still be holding
+            // something this one needs. Everything below reads or writes the
+            // server directory, and the cancelled backup is walking it.
+            if let task = supersededBackup {
+                supersededBackup = nil
+                await awaitCancelledBackup(serverId: serverId, task: task)
             }
 
             if try order.at("restoreWorld"), let backup = config.backupContext {
@@ -238,6 +268,7 @@ final class PumpkinBackend: ServerBackend {
 
             if try order.at("spawn") {
                 startServerThread(serverId: serverId, port: port, settings: settings)
+                engineSpawned = true
                 lifecycle.spawned(serverId)
                 startPumps(serverId: serverId)
             }
@@ -245,17 +276,57 @@ final class PumpkinBackend: ServerBackend {
             _ = try order.at("awaitConsole")
             try await awaitConsole(serverId: serverId, port: port, order: &order)
         } catch {
+            // **An engine this launch spawned has to be stopped here.** Every
+            // post-spawn failure — a stop honoured at the `openTunnel`
+            // checkpoint, a gateway that never provisioned — leaves a server
+            // that is coming up perfectly well and that nothing else will end:
+            // `stopForNetworkError` does issue its own stop, but it does so
+            // from a `Task` that loses the race against this unwind, finds
+            // `activeServerId` already nil and throws `notRunning`. What is
+            // left is an engine holding the port with the app no longer
+            // believing in it, so the next start is refused with "Server … is
+            // already running" — a stop that never happened, reported as a
+            // start that cannot.
+            //
+            // Ahead of the teardown, because `stop` is guarded on
+            // `activeServerId` still being this launch's.
+            if engineSpawned, !threadFinished {
+                HostLog.host.info("unwinding a launch that had already spawned")
+                // Graceful when the console was reached, because then a world
+                // is loaded and worth saving — the same question the core asks
+                // when it picks between `graceful` and `terminate`.
+                do {
+                    try await stop(serverId: serverId, graceful: HomerunFFI.state() == .running)
+                } catch {
+                    // The engine did not go in time. The teardown below runs
+                    // anyway — leaving the app believing in a run it has given
+                    // up on is worse — but it is worth being loud about,
+                    // because the next start will meet the engine that is left.
+                    HostLog.host.error(
+                        "the engine did not stop while unwinding a failed launch: \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
+
             // Nothing has been announced as running and `finish` has nothing to
             // tear down unless the thread got as far as starting, so unwind by
-            // hand. `serverThreadExited` owns the case where it did.
+            // hand. `serverThreadExited` owns the case where it did — including
+            // the exit the stop above has just waited out.
             if !threadFinished {
                 activeServerId = nil
                 backupContext = nil
                 tunnelTask?.cancel()
                 tunnelTask = nil
+                stopPumps()
                 lifecycle.abandoned(serverId)
-                emitState(serverId, .stopped)
+                // Forced for the same reason `finish` forces: this launch is
+                // over, and it is the only thing that will say so.
+                emitState(serverId, .stopped, force: true)
             }
+            // Put back whatever this launch took over but never got to wait
+            // out, so the next start finds it rather than a nil handle and a
+            // job still running.
+            if onStopBackup == nil { onStopBackup = supersededBackup }
             throw error
         }
     }
@@ -273,6 +344,51 @@ final class PumpkinBackend: ServerBackend {
         while lifecycle.awaitPreviousExit(serverId) {
             try await Task.sleep(nanoseconds: 200_000_000)
         }
+    }
+
+    /// Wait out the on-stop backup this launch has already asked to stop.
+    ///
+    /// # Why a start waits for something it cancelled
+    ///
+    /// Pressing Start overrides a stop — that is the product rule, and the
+    /// core admits the restart for it. What it cannot do is *undo* work
+    /// already in flight: the backup engine's cancel is checked at phase
+    /// boundaries only (rustic exposes no interrupt, and unwinding out of a
+    /// progress callback would panic through rayon), so a cancel that arrives
+    /// mid-transfer lands when the transfer ends. Until it does, the job is
+    /// still walking the server directory.
+    ///
+    /// Spawning into that directory anyway is the one outcome worse than
+    /// waiting: the engine writes the world while the backup reads it, and
+    /// what reaches the repository is a snapshot torn across two states of the
+    /// same save — which another device will happily restore. So the launch
+    /// waits, and says so, rather than racing.
+    ///
+    /// The cancel is re-asserted each tick because `BackupJob::claim` clears
+    /// the flag: a cancel that arrived in the moment between `finish`
+    /// scheduling the backup and the engine taking the job slot would
+    /// otherwise be forgotten, and the backup this launch supersedes would run
+    /// to completion regardless.
+    private func awaitCancelledBackup(serverId: String, task: Task<Void, Never>) async {
+        task.cancel()
+
+        // Nothing to wait for is the common case — no backups configured, or
+        // the job finished while the previous engine was still exiting — and
+        // it must cost nothing and say nothing.
+        guard BackupFFI.progress(since: 0).running else {
+            await task.value
+            return
+        }
+
+        note(serverId, "[Homerun] Waiting for the cancelled backup to release the world…")
+        let reasserting = Task { @MainActor in
+            while !Task.isCancelled {
+                BackupFFI.cancel()
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        await task.value
+        reasserting.cancel()
     }
 
     /// Wait for the engine to report it is accepting connections, then bring
@@ -446,18 +562,39 @@ final class PumpkinBackend: ServerBackend {
     }
 
     private func serverThreadExited(_ reply: HomerunFFI.Reply) {
-        threadFinished = true
-        guard let serverId = activeServerId else { return }
+        guard let serverId = activeServerId else {
+            threadFinished = true
+            return
+        }
 
         let exit = lifecycle.exited(serverId, code: reply.ok ? 0 : 1)
 
         // A newer launch owns this id now; this exit belongs to the run it
         // replaced and says nothing about the one coming up. Tearing down here
         // would flip a starting server to stopped — the bug that bit Android.
+        //
+        // > **Nothing above this guard may touch the current run's state.**
+        // > `threadFinished` used to be set on the first line, and in a
+        // > restart it is *always* the superseded run that lands here: the new
+        // > launch is parked in `awaitPreviousExit` waiting for exactly this
+        // > exit, so it has already cleared the flag and cannot clear it
+        // > again. The new run then spawned, found `threadFinished` still true
+        // > and failed its own launch with "The server stopped before it
+        // > finished starting." — with a healthy engine coming up behind it,
+        // > and no unwind either, because the `catch` in `start` skips its
+        // > teardown on the same flag. Stopping and starting again is the
+        // > ordinary way to restart a server, so this fired for a player who
+        // > did nothing unusual.
         guard !exit.superseded else {
             HostLog.host.info("ignoring the exit of a superseded run")
+            // The pumps still belong to the run that just ended. The launch
+            // replacing it starts its own, and a timer left behind here would
+            // drain the new run's console from a cursor the old run owned.
+            stopPumps()
             return
         }
+
+        threadFinished = true
 
         if !exit.intentional {
             runFailure = reply.error ?? "The server stopped unexpectedly."
@@ -512,13 +649,7 @@ final class PumpkinBackend: ServerBackend {
         // way down, which is usually the reason.
         drainLogs(serverId: serverId)
 
-        heartbeat?.invalidate()
-        heartbeat = nil
-
-        logTimer?.invalidate()
-        logTimer = nil
-        pollTimer?.invalidate()
-        pollTimer = nil
+        stopPumps()
 
         // Cleared before the ack, so the instance report it sends is empty —
         // the backend stops believing this device hosts a server the moment it
@@ -550,11 +681,14 @@ final class PumpkinBackend: ServerBackend {
             && BackupFFI.isAvailable
             && backups.hasLocalWorld(HostStore.serverDirectory(id: serverId))
 
-        emitState(serverId, state, backupInProgress: willBackUp)
+        // Forced: the core ruled on this exit a few lines above, in
+        // `serverThreadExited`, and `superseded` is how it would have said not
+        // to announce. See `emitState`.
+        emitState(serverId, state, backupInProgress: willBackUp, force: true)
 
         if willBackUp, let context, let repo = context.settings.backup {
             let dir = HostStore.serverDirectory(id: serverId)
-            Task { [backups] in
+            onStopBackup = Task { [backups] in
                 await backups.backupAfterStop(
                     serverId: serverId, dir: dir, repo: repo, deviceId: context.deviceId,
                     onLog: backupLog(serverId: serverId))
@@ -692,6 +826,12 @@ final class PumpkinBackend: ServerBackend {
     }
 
     private func startPumps(serverId: String) {
+        // Whatever the previous run left. A restart reaches here with the
+        // outgoing run's timers still alive — its exit was superseded, so
+        // `finish` never ran for it — and two console pumps racing one cursor
+        // is how lines come out twice and out of order.
+        stopPumps()
+
         // The console is polled rather than pushed: the engine buffers lines
         // and hands them over by cursor, which survives the UI not asking for
         // a while (a backgrounded phone may not poll for minutes).
@@ -705,6 +845,21 @@ final class PumpkinBackend: ServerBackend {
         // A repeating timer does not fire on creation, so without this the
         // graph starts five seconds late and the rate anchor with it.
         sample(serverId: serverId)
+    }
+
+    /// Everything that ticks on behalf of one run.
+    ///
+    /// The heartbeat goes with them: it reports this device as hosting the
+    /// server, and a run that has ended must stop claiming that — a launch
+    /// that then fails would otherwise leave the API being told, every fifteen
+    /// seconds and for ever, that a dead run is up.
+    private func stopPumps() {
+        heartbeat?.invalidate()
+        heartbeat = nil
+        logTimer?.invalidate()
+        logTimer = nil
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 
     private func drainLogs(serverId: String) {
@@ -762,8 +917,25 @@ final class PumpkinBackend: ServerBackend {
     /// `backupInProgress` reaches the API only. It is true on exactly one kind
     /// of ack — a `stopped` whose world is about to be backed up — and sending
     /// it opens the backup lease.
+    ///
+    /// `force` is for an announcement the core has *already* ruled on.
+    ///
+    /// > **A final state must be forced.** `mayAnnounce` reads the entry, and
+    /// > `exited` has usually just deleted it — pruning is what stops a
+    /// > finished server being counted active for ever — and with no entry the
+    /// > core answers `false` for `stopped` specifically, because from nothing
+    /// > at all "it stopped" is not news. Asked anyway, iOS silently swallowed
+    /// > the `stopped` for every run that ended without a stop call still in
+    /// > flight: an engine that exited on its own, and any stop that outran the
+    /// > 30 s `serverStop` wait, which is an ordinary large world saving on a
+    /// > phone. The card sat at `stopping` until something else corrected it,
+    /// > and nothing else does. `Exit.superseded` is how an exit says it must
+    /// > not be announced, and `finish` is only reached when it is not — so by
+    /// > the time this is forced the question has been answered, in the core,
+    /// > already. Android has said this as `force` since it hit the same wall.
     private func emitState(
-        _ serverId: String, _ state: ServerState, backupInProgress: Bool = false
+        _ serverId: String, _ state: ServerState, backupInProgress: Bool = false,
+        force: Bool = false
     ) {
         // The core vetoes an announcement that would contradict a stop already
         // in flight — a `running` from a launch the user has since abandoned,
@@ -774,7 +946,7 @@ final class PumpkinBackend: ServerBackend {
         // must not be allowed to swallow an announcement the host needs to
         // make. Android suppressed repeats and got "the server never comes
         // online".
-        guard lifecycle.mayAnnounce(serverId, state: state.rawValue) else {
+        guard force || lifecycle.mayAnnounce(serverId, state: state.rawValue) else {
             HostLog.host.info(
                 "not announcing \(state.rawValue, privacy: .public) — a stop is in flight")
             return

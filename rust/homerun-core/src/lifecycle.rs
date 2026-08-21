@@ -801,6 +801,58 @@ mod tests {
         );
     }
 
+    /// What the restarting host is waiting on. The new launch parks in its
+    /// `awaitPreviousExit` step until the outgoing engine is gone, and the
+    /// superseded exit is the only thing that will say so — the early return
+    /// that keeps the new launch's *state* must not also keep its engine.
+    #[test]
+    fn a_superseded_exit_still_frees_the_new_launch_to_spawn() {
+        let mut life = one();
+        life.start_requested("s");
+        life.call_finished("s");
+        life.spawned("s");
+        life.console_ready("s");
+
+        life.stop_requested("s");
+        life.call_finished("s");
+        life.start_requested("s");
+        assert!(
+            life.await_previous_exit("s"),
+            "the outgoing engine is still there, so the restart must wait"
+        );
+
+        assert!(life.exited("s", 0).superseded);
+        assert!(
+            !life.await_previous_exit("s"),
+            "and once it is gone the restart may spawn"
+        );
+    }
+
+    /// Why every host has to *force* its final announcement.
+    ///
+    /// A run that ends with nothing else in flight prunes its entry — that is
+    /// what stops a finished server being counted active for ever — and from
+    /// no entry at all the core reads "it stopped" as not news. Asking here
+    /// rather than forcing is how a card sits at `stopping` until something
+    /// else corrects it, and nothing else does. [`Exit::superseded`] is how an
+    /// exit says it must not be announced; this is not that.
+    #[test]
+    fn a_pruned_exit_will_not_answer_for_its_own_stopped() {
+        let mut life = one();
+        life.start_requested("s");
+        life.call_finished("s"); // the start call has returned; nothing in flight
+        life.spawned("s");
+        life.console_ready("s");
+
+        // The engine goes on its own — no stop call holding the entry open.
+        let exit = life.exited("s", 0);
+        assert!(!exit.superseded, "nothing replaced this run");
+        assert!(
+            !life.may_announce("s", State::Stopped),
+            "the entry is gone, so the core cannot vouch for this — the host must force it"
+        );
+    }
+
     #[test]
     fn an_ordinary_exit_is_not_superseded() {
         let mut life = one();
