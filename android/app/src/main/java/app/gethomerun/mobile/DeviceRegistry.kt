@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.util.Log
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -153,7 +154,35 @@ object DeviceRegistry {
                 return existing
             }
 
-            if (registeredTo == account) return existing
+            if (registeredTo == account) {
+                // Same account, same device — but re-assert it **once per
+                // launch** rather than trusting the stored row.
+                //
+                // `/api/init/native/` is idempotent: it matches this device by
+                // name and returns the id it already issued. What it also does
+                // is add that device to every server the user is a member of,
+                // and that loop is the only thing that repairs an ordering
+                // failure nothing else can reach.
+                //
+                // The failure it repairs: a guest upgrading to an account
+                // re-registers here, and at that instant the guest's servers
+                // have not been migrated yet — so the user is not a member of
+                // them and the loop adds nothing. The migration then runs and
+                // grants membership to whichever device it was told about. Get
+                // that wrong once and the phone is a member of none of its own
+                // servers, with every launch refused as somebody else's
+                // hardware and no way back that does not delete the worlds.
+                //
+                // Once per launch, so this costs one request at startup and
+                // nothing afterwards.
+                if (reasserted.compareAndSet(false, true) && userToken.isNotBlank()) {
+                    scope.launch {
+                        runCatching { gate.withLock { register(apiUrl, userToken) } }
+                            .onFailure { Log.w(TAG, "could not re-assert this device: ${it.message}") }
+                    }
+                }
+                return existing
+            }
 
             Log.i(TAG, "signed in as a different account; re-registering this device")
             clear()
@@ -167,6 +196,15 @@ object DeviceRegistry {
             current() ?: register(apiUrl, userToken)
         }
     }
+
+    /**
+     * Whether this launch has already re-asserted an existing registration.
+     *
+     * Process-lifetime only and deliberately not persisted: the point is one
+     * request per app start, and a stored flag would turn "once per launch"
+     * into "once, ever" and take the self-heal with it.
+     */
+    private val reasserted = AtomicBoolean(false)
 
     private suspend fun register(apiUrl: String, userToken: String): Registration? {
         // Only re-sent when the backend gave it to us. The pre-registration
