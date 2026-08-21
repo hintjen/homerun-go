@@ -227,6 +227,23 @@ app, or clear the `apiUrl` key in Safari's Web Inspector.
 Never conclude which backend is in play by reading the build log. Read the value
 out of the running page — the doc gives the commands.
 
+**Check before you reach for `--fresh`, because it is the destructive one.** On
+Android the host's own copy is a line in its preferences, readable with the app
+closed and nothing installed:
+
+```bash
+adb shell "run-as app.gethomerun.mobile.debug grep -o 'name=\"api-url\">[^<]*' shared_prefs/homerun-host.xml"
+```
+
+If that already equals the backend you are building for, the page was seeded
+from it and **no wipe is needed** — build with `--api` and install over the top.
+`--fresh` deletes `files/servers`, which is the worlds: 598 MB across four
+servers on the phone this was written from, and the wipe would also have dropped
+the device registration that the session was in the middle of repairing. The
+warning `install` prints after a `--api` build is unconditional and does not
+know any of this; it says "if this device has run against a different backend",
+and answering that question is on you.
+
 ## Is the thing you built the thing that is running?
 
 Three ways a build lies about itself. All three read as "my change did not work".
