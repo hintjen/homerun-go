@@ -239,6 +239,25 @@ exists only in `hintjen/wireproxy-fork`; upstream has no inbound UDP tunnel at
 all. No voice forward: PowerNukkitX loads no Java mod, so `LISTEN_VOICE` has
 nothing behind it.
 
+### It carries RakNet
+
+Proven on 2026-08-21: a Bedrock client joined a phone-hosted server **through
+the gateway**, not over the LAN.
+
+```
+20:18:10 elPTFO[/127.0.0.1:51162] logged in with entity id 2 at (world, 1.32, 85.59, 45.18)
+20:19:01 elPTFO[/127.0.0.1:51162] logged out due to Kicked by admin.
+```
+
+The `127.0.0.1` is wireproxy handing off to the server after the gateway DNATed
+the player's traffic to 19132 on the WireGuard interface — the whole path, in
+one line. This was the milestone the plan called most likely to surprise,
+because RakNet's unconnected-ping is chatty in a way TCP Minecraft is not and
+nothing about a userspace netstack carrying it could be settled from a desktop.
+
+The kick in the second line is the moderation path working through the same
+console channel, which needs no RCON here.
+
 ### Bedrock ignores SRV, and that reaches past the tunnel
 
 Java servers are addressed by a flat, port-less name and the client follows an

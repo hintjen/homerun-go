@@ -197,8 +197,10 @@ Known gaps, so you do not rediscover them:
 - **Bedrock is served by PowerNukkitX, and it has hosted a player.** A phone
   hosts a Bedrock server through `native-powernukkitx` — a Bedrock server
   written in Java, on the JVM already staged here. Proven on a Pixel 9 Pro XL:
-  world generated, player joined, clean stop, UDP tunnel through the gateway.
-  JNA/OSHI survives bionic; it degrades rather than throwing.
+  world generated, clean stop, and a Bedrock client joined **through the
+  gateway** and was kicked from the UI — so RakNet survives the tunnel, which
+  the plan called the milestone most likely to surprise. JNA/OSHI survives
+  bionic too; it degrades rather than throwing.
 
   What that run cost was four console defects, because the byte stream was new
   to this repo — `[main]` being eaten by the ANSI stripper, a bare timestamp, a
