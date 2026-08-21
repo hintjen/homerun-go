@@ -102,18 +102,31 @@ before anything expensive starts:
 - `~/.cargo/config.toml` with `git-fetch-with-cli = true`
 - the wireproxy fork at `~/src/wireproxy-fork` (the workflow fast-forwards
   it each run, and clones it if missing)
-- a GitHub credential in the **macOS keychain** that reads the private
-  hintjen repos over https. Apple's git wires the `osxkeychain` helper in via
-  `/Library/Developer/CommandLineTools/usr/share/git-core/gitconfig` — a
-  Homebrew-installed git would not read that file, so if `brew install git`
-  ever lands on this machine, the credential helper must be configured for it
-  explicitly.
+- a GitHub credential that reads the private hintjen repos over https, held
+  by **gh in plaintext** (`gh auth login --with-token --insecure-storage`,
+  landing in `~/.config/gh/hosts.yml`, mode 0600), wired to git as the
+  credential helper for `github.com` in `~/.gitconfig`. Plaintext is not an
+  accident: gh's default keyring storage is the **login keychain, which the
+  runner's launchd context cannot read** — and the failure is not loud, it
+  is gh silently falling back to whatever stale token sits in `hosts.yml`.
+  On a Mac with automatic login the practical exposure is the same either
+  way. After any `gh auth refresh`, re-run the `--insecure-storage` login,
+  or the fresh token lands back in the keychain and the runner keeps the
+  stale one.
 - a **logged-in GUI session**. The runner is a LaunchAgent; at the login
   window there is no unlocked keychain and signing hangs. A dedicated CI Mac
   wants automatic login enabled.
 
 There are no deploy-key steps, unlike `publish-android.yml`: the machine's
-keychain credential covers all three private repos at once.
+gh credential covers all three private repos at once.
+
+One more trap, fixed in the workflow but worth knowing: `actions/checkout`
+defaults to writing the job's `GITHUB_TOKEN` into the workspace `.git/config`
+as an auth header. That token is scoped to **this repo only**, and it shadows
+the machine's credential for every git call made from the workspace — npm's
+and cargo's fetches of the other private repos come back `404 not found`,
+which reads like a wrong URL rather than the wrong token. The workflow passes
+`persist-credentials: false`.
 
 ### Known gaps
 
@@ -166,8 +179,23 @@ Pass `buildNumber` explicitly.
 secret for that backend is unset; the workflow warned about it at the
 *Stage the Firebase config* step. Push is inert, everything else works.
 
-**npm ci fails resolving `homerun-app-ui`, or cargo fails on a repository you
-do not recognise** — the keychain GitHub credential expired or was revoked.
-`printf 'protocol=https\nhost=github.com\n\n' | git credential fill` on the
-runner shows which account it is; refresh it with `gh auth login` as that
-account.
+**The credential preflight fails but `gh auth status` in its log shows a
+valid login** — something is shadowing the machine credential for git.
+The known cause is `actions/checkout` writing the job token into the
+workspace config; the workflow disables that with `persist-credentials:
+false`, so check whether that line survived.
+
+**`could not read Username for 'https://github.com'` from any fetch** — the
+machine credential produced nothing. Almost always: someone ran `gh auth
+login`/`refresh` without `--insecure-storage`, so the current token went to
+the keychain (unreachable from the runner) while `hosts.yml` kept a stale
+one. Fix from any interactive shell:
+
+```sh
+gh auth token | gh auth login -h github.com --with-token --insecure-storage
+```
+
+**A private fetch fails `404 not found` on a repo that exists** — the
+credentials offered were valid but wrong: usually the job token (see the
+preflight entry above), not the machine's. A wrong-account `hosts.yml` gives
+the same shape.
