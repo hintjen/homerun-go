@@ -1732,22 +1732,45 @@ class BridgeRouter(
      * environment.
      */
     /**
-     * The names in a server's `ops.json`.
+     * The names in a server's operator list, whichever file it keeps one in.
      *
      * Read from disk rather than from the API, so it reflects what the running
      * server actually honours — including an `/op` typed into the console,
      * which the server writes there itself and the API does not learn about
      * until [Reporting] mirrors it back.
      *
-     * Best-effort: a server that has never started has no file, and an empty
-     * list is the honest answer for that.
+     * **Two shapes, and only one is ever present.** A Mojang-derived server
+     * keeps `ops.json`, an array of `{name, uuid}`. PowerNukkitX keeps
+     * `ops.txt`, one plain name per line, because a Bedrock identity is a
+     * gamertag and there is no Mojang UUID to record against it
+     * (`homerun_core::minecraft::nukkit`). Which file exists is the honest
+     * signal of which server wrote it, so this needs no game type — and
+     * reading only the first shape is why every connected player on a
+     * PowerNukkitX server showed as *not* an operator, however many the server
+     * had. The op toggle then sent a command the server honoured and the panel
+     * re-read a file that does not exist, so the state flipped straight back.
+     *
+     * Best-effort: a server that has never started has neither file, and an
+     * empty list is the honest answer for that.
      */
     private fun opsOnDisk(serverId: String): List<String> = runCatching {
-        val file = File(context.filesDir, "servers/$serverId/ops.json")
-        if (!file.exists()) return emptyList()
-        (json.parseToJsonElement(file.readText()) as? JsonArray)
-            ?.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
-            ?: emptyList()
+        val dir = File(context.filesDir, "servers/$serverId")
+
+        val asJson = File(dir, "ops.json")
+        if (asJson.exists()) {
+            return@runCatching (json.parseToJsonElement(asJson.readText()) as? JsonArray)
+                ?.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
+                ?: emptyList()
+        }
+
+        val asLines = File(dir, "ops.txt")
+        if (asLines.exists()) {
+            return@runCatching asLines.readLines()
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        }
+
+        emptyList()
     }.getOrElse {
         Log.w(TAG, "could not read the operators for $serverId: ${it.message}")
         emptyList()
