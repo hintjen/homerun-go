@@ -393,6 +393,35 @@ it — it is how the host learns a pid to sample `/proc/<pid>` for the metrics
 graph, since `Process.pid()` does not resolve against the Android SDK — but
 nothing supervises an unsupervised run, so to a reader it is only noise.
 
+### Crossplay — `CrossplayInstaller`
+
+A `native-crossplay` server is an ordinary Paper server plus **Geyser** (speaks
+the Bedrock protocol) and **Floodgate** (lets those sessions in without a Mojang
+account). Both run as plugins *inside the server JVM* — there is no second
+process, unlike the desktop's Geyser Standalone.
+
+Nothing about the launch is special-cased for it. Three ordinary steps each
+answer "nothing to do" for every other server, so they run unconditionally:
+`ModInstaller.sync` folds `geyser` into the projects it was already resolving,
+`CrossplayInstaller.sync` fetches the one jar Modrinth has no Paper build of,
+and `TunnelSession.open` asks for `crossplay` exposure so the Bedrock UDP
+forward exists.
+
+Two properties matter to a reader of *this* file:
+
+- **`CrossplayInstaller` runs after `ModInstaller` and cannot fail a launch.**
+  The ordering is the same convention `PluginInstaller` follows. The
+  non-fatality is the opposite of `PluginInstaller`'s rule and deliberate: a
+  crossplay server without Floodgate is still a working Java server, and only
+  the Bedrock players lose out.
+- **Geyser is derived from the game type at launch, never stored.** So a
+  crossplay server made before the feature existed starts working on its next
+  launch, with nothing to recreate.
+
+Everything else — why Paper and not Fabric, why the config is a seed rather than
+a sync, why there is no port probe, and the triage path from the jars out to the
+gateway — is in [crossplay.md](./crossplay.md).
+
 ### Getting a server jar onto the device — `ServerJar`
 
 Server jars **are** downloaded, and that is consistent with the runtime being

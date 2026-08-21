@@ -64,6 +64,14 @@ record rather than being deleted; a `server_side` lookup that fails makes the
 whole exclusion pass fail open, because without the dependency graph, dropping
 a client-only mod could strip a hard dependency of one being kept.
 
+## What the projects list is, and what it is not
+
+`MODRINTH_PROJECTS` is the player's list, and it is **not** the whole input.
+`crossplay::merge_projects` folds in what the game type implies before the
+resolver ever sees it, which is how a crossplay server gets Geyser without
+anything having been written into its environment. A slug the player already
+pinned is left alone. See [crossplay.md](./crossplay.md).
+
 ## What runs when
 
 `ModInstaller.sync` runs **after settings are written and before the spawn**,
@@ -155,6 +163,11 @@ not managed and is never touched.
 Getting that wrong deletes somebody's mods, which is the worst thing this
 pipeline can do. It has a fixture of its own
 (`hand-added-jars-survive-the-sweep.json`) for exactly that reason.
+
+The same rule is what makes it safe for another installer to put a jar in the
+same directory. `CrossplayInstaller`'s Floodgate jar and `PluginInstaller`'s
+minigame jars have no record here, so the sweep never considers them — see
+[crossplay.md](./crossplay.md).
 
 ## Testing
 

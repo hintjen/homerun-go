@@ -280,6 +280,37 @@ rather than promoted.
 | `minecraft.settings.whitelistJson` | `players` | `whitelist.json` content |
 | `minecraft.settings.bannedMissing` | `existing?`, `banned` | names not already banned |
 | `minecraft.settings.mergeBanned` | `existing?`, `additions`, `created` | the merged file, or `null` |
+| `minecraft.exposure` | `gameType` | `java`, `bedrock` or `crossplay` — what [`tunnel.render`](#the-tunnel) needs |
+| `minecraft.crossplay.isCrossplay` | `gameType` | bool |
+| `minecraft.crossplay.mergeProjects` | `gameType`, `loader`, `configured?` | `MODRINTH_PROJECTS` with the crossplay plugins folded in |
+| `minecraft.crossplay.floodgate` | `gameType`, `loader` | `{ metaUrl, flavour }`, or `null` when Modrinth already has Floodgate |
+| `minecraft.crossplay.floodgateBuild` | `meta`, `flavour` | `{ url, fileName, sha256, subDir }` |
+| `minecraft.crossplay.config` | `gameType`, `loader` | a `FileWrite` for Geyser, or `null` |
+
+#### Crossplay
+
+A crossplay server is an ordinary Java server plus two plugins — Geyser to speak
+the Bedrock protocol, Floodgate to let those sessions in without a Mojang
+account. The five methods above exist because the work happens at four different
+moments in one launch, and every one of them answers `null` or "nothing to do"
+for a server that is not crossplay. Call them unconditionally.
+
+`mergeProjects` is a merge rather than a list because a server may already carry
+a pinned `geyser:<versionId>` from the desktop, and a bare slug appended beside
+it installs the plugin twice under two names — which Bukkit refuses to load.
+
+`floodgate` returns `null` on Fabric and NeoForge, where Modrinth publishes
+Floodgate and the ordinary mod resolver gets it. On the Bukkit family Modrinth
+has **no** build, so it comes from GeyserMC's own API instead; asking the
+resolver for one there returns nothing and installs nothing, silently.
+
+`config` is a **seed, not a sync**: Geyser rewrites the file with every default
+expanded the first time it starts, so a host writes it only when it is absent.
+
+**Nothing here chooses a Bedrock port.** The gateway's `ListenPort` is fixed at
+19132, Geyser's own default is the same, and Android hosts one server at a time
+— so the port is a constant in both the config file and `tunnel.render`, and
+there is no probe whose answer two places would have to agree on.
 
 **Artifact resolution is deliberately not on the `Game` trait.** Minecraft
 resolves a jar from Mojang's manifest; another game might resolve a Steam

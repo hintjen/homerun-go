@@ -225,6 +225,7 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
 - Who owns a server and what order a launch runs in — both answered by the core
 - Getting a server jar onto the device, and the three ways to avoid downloading
   one this device already has
+- Crossplay: Geyser and Floodgate as plugins, and why there is no second JVM
 - Why `start` polls for *running* instead of waiting on the call
 - The log pump, the perf sampler, and one-server-at-a-time
 - What each backend's memory and CPU numbers actually measure
@@ -535,6 +536,31 @@ loader, while advertising that it could.
 
 **Read this for**: Touching mod resolution, or wondering why a plugin did not
 install.
+
+---
+
+### 🌉 [Crossplay on Android](./crossplay.md)
+
+How a Java server on a phone becomes one Bedrock players can join — Geyser and
+Floodgate as plugins inside the server's own JVM, with no second process. **Was
+offered and did not work**: the wizard sold it, the gateway forwarded a Bedrock
+port, and nothing ever installed Geyser.
+
+**Contains**:
+- Why plugin mode rather than the desktop's Geyser Standalone
+- Why Paper and not Fabric, decided on how many Minecraft versions each
+  Geyser build spans
+- Why Geyser is derived at launch and never stored, and what that buys
+- Why Floodgate needs its own downloader when Geyser does not
+- Why the config is a seed rather than a sync, and why there is no port probe
+- What the gateway forwards, and why `geyser_enabled` is `False` on a working
+  crossplay server
+- A real device run: the log lines, the Floodgate UUID, and the protocol number
+  that is **not** a cause of failure
+- Triage from the jars outward, and one failure recorded as unexplained
+
+**Read this for**: A Bedrock player who cannot join, or touching anything
+between `MODRINTH_PROJECTS` and the UDP tunnel.
 
 ---
 
