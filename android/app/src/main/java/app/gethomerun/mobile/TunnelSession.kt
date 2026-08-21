@@ -92,7 +92,7 @@ class TunnelSession(
      *
      * A no-op when there is no tunnel to open, so a caller need not ask.
      */
-    suspend fun open(serverId: String, dir: File, port: Int) {
+    suspend fun open(serverId: String, dir: File, port: Int, exposure: String = "java") {
         val pending = job ?: return
         note(serverId, "[Homerun] Connecting to the Homerun gateway...")
 
@@ -112,6 +112,12 @@ class TunnelSession(
                 dir = dir,
                 link = link,
                 minecraftPort = port,
+                // `java` forwards one TCP port and nothing else, which is right
+                // for every server except a crossplay one — that needs the
+                // Bedrock UDP forward as well, and a tunnel without it is a
+                // server that starts, logs nothing wrong, and that no Bedrock
+                // player can reach.
+                exposure = exposure,
                 onLog = { line -> note(serverId, line) },
                 // The tunnel came up and then stopped being answered — the
                 // gateway regenerating its keys is the usual cause, and the

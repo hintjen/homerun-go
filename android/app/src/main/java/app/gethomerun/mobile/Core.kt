@@ -446,6 +446,120 @@ object Core {
         }).jsonPrimitive.content
 
     // -----------------------------------------------------------------------
+    // Crossplay
+    //
+    // A Java server Bedrock clients can also join. Geyser translates the
+    // Bedrock protocol into a Java session; Floodgate lets those sessions in
+    // without a Mojang account, so the server keeps `online-mode=true`.
+    //
+    // Both run as ordinary plugins inside the server's own JVM — there is no
+    // second process here, unlike the desktop's Geyser Standalone. Which jars,
+    // from where, and what Geyser is told are all `minecraft::crossplay`'s.
+    // -----------------------------------------------------------------------
+
+    /**
+     * [configured] with whatever this game type adds folded in.
+     *
+     * Returned unchanged for every server that is not crossplay, which is
+     * nearly all of them — so this is safe to call on every launch. A slug the
+     * player has already pinned is left exactly as it is.
+     */
+    fun crossplayProjects(gameType: String, loader: String, configured: String): String =
+        call("minecraft.crossplay.mergeProjects", buildJsonObject {
+            put("gameType", gameType)
+            put("loader", loader)
+            put("configured", configured)
+        }).jsonPrimitive.content
+
+    /** Is this the game type that wants a Bedrock bridge? */
+    fun isCrossplay(gameType: String): Boolean =
+        call("minecraft.crossplay.isCrossplay", buildJsonObject {
+            put("gameType", gameType)
+        }).jsonPrimitive.boolean
+
+    /**
+     * How this server has to be exposed through the tunnel.
+     *
+     * `java`, `bedrock` or `crossplay`, and derived from the game type because
+     * that is the only field that can decide it — a crossplay server's `TYPE`
+     * is an ordinary loader, so a host reading the loader instead builds a
+     * Java-only tunnel for a server sold as crossplay.
+     */
+    fun exposureFor(gameType: String): String =
+        call("minecraft.exposure", buildJsonObject {
+            put("gameType", gameType)
+        }).jsonPrimitive.content
+
+    /** Where GeyserMC's build metadata lives, and which flavour to read out. */
+    data class FloodgateSource(val metaUrl: String, val flavour: String)
+
+    /**
+     * Null when Modrinth already supplies Floodgate for this loader, which it
+     * does for everything except the Bukkit family.
+     */
+    fun crossplayFloodgate(gameType: String, loader: String): FloodgateSource? =
+        call("minecraft.crossplay.floodgate", buildJsonObject {
+            put("gameType", gameType)
+            put("loader", loader)
+        }).let { reply ->
+            if (reply is JsonNull) null
+            else reply.jsonObject.let {
+                FloodgateSource(
+                    metaUrl = it["metaUrl"]!!.jsonPrimitive.content,
+                    flavour = it["flavour"]!!.jsonPrimitive.content,
+                )
+            }
+        }
+
+    /** One jar to fetch, named and checksummed by the build metadata itself. */
+    data class Fetch(
+        val url: String,
+        /** Stable across builds, so an update replaces rather than joins. */
+        val fileName: String,
+        val sha256: String?,
+        val subDir: String,
+    )
+
+    /** Read GeyserMC's build metadata into the download [flavour] names. */
+    fun crossplayFloodgateBuild(meta: JsonElement, flavour: String): Fetch? =
+        call("minecraft.crossplay.floodgateBuild", buildJsonObject {
+            put("meta", meta)
+            put("flavour", flavour)
+        }).let { reply ->
+            if (reply is JsonNull) null
+            else reply.jsonObject.let {
+                Fetch(
+                    url = it["url"]!!.jsonPrimitive.content,
+                    fileName = it["fileName"]!!.jsonPrimitive.content,
+                    sha256 = it["sha256"]?.jsonPrimitive?.contentOrNull,
+                    subDir = it["subDir"]!!.jsonPrimitive.content,
+                )
+            }
+        }
+
+    /**
+     * Geyser's own configuration, or null when there is nothing to configure.
+     *
+     * **A seed, not a sync** — see `minecraft::crossplay::config`. Geyser
+     * rewrites this file with every default expanded the first time it starts,
+     * so it is written only when absent.
+     */
+    fun crossplayConfig(gameType: String, loader: String): ConfigFile? =
+        call("minecraft.crossplay.config", buildJsonObject {
+            put("gameType", gameType)
+            put("loader", loader)
+        }).let { reply ->
+            if (reply is JsonNull) null
+            else reply.jsonObject.let {
+                ConfigFile(
+                    path = it["path"]!!.jsonPrimitive.content,
+                    contents = it["contents"]!!.jsonPrimitive.content,
+                    encoding = Encoding.parse(it["encoding"]?.jsonPrimitive?.contentOrNull),
+                )
+            }
+        }
+
+    // -----------------------------------------------------------------------
     // Minigames
     //
     // A minigame server is a public Paper server built from a template in the

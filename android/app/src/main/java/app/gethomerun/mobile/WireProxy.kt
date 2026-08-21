@@ -108,10 +108,24 @@ class WireProxy(
      * that loads, connects, and is unreachable. `homerun-core::wireproxy` has
      * that written down and tested byte-for-byte.
      */
-    fun render(link: Link, minecraftPort: Int, voiceChatPort: Int? = null): String =
+    fun render(
+        link: Link,
+        minecraftPort: Int,
+        exposure: String = "java",
+        voiceChatPort: Int? = null,
+    ): String =
         Core.renderWireproxy(
             link = link.toJson(),
             port = minecraftPort,
+            exposure = exposure,
+            // Deliberately not passed. The core defaults it to the gateway's
+            // 19132, which is also Geyser's default and what
+            // `minecraft::crossplay::config` writes — and Android hosts one
+            // server at a time (`multipleRunningServers: false`), so there is
+            // no second Geyser to collide with and no port to negotiate. A
+            // probe here would have to agree with that config file, and two
+            // places choosing a port is how they come to disagree.
+            geyserPort = null,
             voiceChatPort = voiceChatPort,
         )
 
@@ -131,9 +145,17 @@ class WireProxy(
         dir: File,
         link: Link,
         minecraftPort: Int,
+        exposure: String = "java",
+        voiceChatPort: Int? = null,
         onLog: (String) -> Unit,
         onHandshakeFailed: () -> Unit,
-    ) = startRendered(serverId, dir, render(link, minecraftPort), onLog, onHandshakeFailed)
+    ) = startRendered(
+        serverId,
+        dir,
+        render(link, minecraftPort, exposure, voiceChatPort),
+        onLog,
+        onHandshakeFailed,
+    )
 
     /**
      * Start a tunnel from a config that is already rendered.

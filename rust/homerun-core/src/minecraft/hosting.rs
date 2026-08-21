@@ -53,6 +53,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::crossplay::is_crossplay;
 use super::loader_of;
 use crate::launch::Engine;
 
@@ -288,7 +289,10 @@ pub fn needs_jvm(game_type: &str) -> bool {
 
 /// Both spellings the API uses. `bedrock` is the reduced form some hosts pass
 /// on; `native-bedrock` is the verbatim one.
-fn is_bedrock(game_type: &str) -> bool {
+///
+/// Public because [`super::exposure_for`] asks the same question about the same
+/// strings, and a second copy of this list is how one of them ends up stale.
+pub fn is_bedrock(game_type: &str) -> bool {
     matches!(game_type, "bedrock" | "native-bedrock")
 }
 
@@ -301,10 +305,6 @@ fn is_bedrock(game_type: &str) -> bool {
 /// engine must not be opened by the other.
 pub fn is_pumpkin(game_type: &str) -> bool {
     matches!(game_type, "pumpkin" | "native-pumpkin")
-}
-
-fn is_crossplay(game_type: &str) -> bool {
-    game_type == "native-crossplay"
 }
 
 #[cfg(test)]

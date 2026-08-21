@@ -538,7 +538,25 @@ class JavaServerBackend(
             dir = dir,
             loader = prepared.loader,
             mcVersion = prepared.mcVersion,
+            gameType = config.gameType,
             env = config.settingsEnv,
+            onLog = { note(serverId, it) },
+        )
+
+        // After the mods and for the same reason [PluginInstaller] is: this
+        // jar is not on Modrinth, so `mods::sweep` has no record of it. That
+        // makes it safe from the sweep rather than at risk from it — the sweep
+        // only ever deletes what it installed itself — but the ordering is the
+        // convention and there is no reason to be the exception.
+        //
+        // A no-op for every server that is not crossplay, and never fatal: a
+        // crossplay server without Floodgate is still a working Java server,
+        // and the players who lose out are the Bedrock ones. That is a smaller
+        // loss than not starting at all.
+        CrossplayInstaller.sync(
+            dir = dir,
+            loader = prepared.loader,
+            gameType = config.gameType,
             onLog = { note(serverId, it) },
         )
 
@@ -669,7 +687,7 @@ class JavaServerBackend(
         }
 
         if (config.resolveTunnel != null) order.at("openTunnel")
-        tunnel.open(serverId, dir, port)
+        tunnel.open(serverId, dir, port, Core.exposureFor(config.gameType))
 
         // Only now. The server accepting connections on loopback is not the
         // same as players being able to reach it, and reporting `running`

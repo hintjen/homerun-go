@@ -90,10 +90,27 @@ object ModInstaller {
         dir: File,
         loader: String,
         mcVersion: String,
+        gameType: String,
         env: JsonObject?,
         onLog: (String) -> Unit,
     ) = withContext(Dispatchers.IO) {
-        val listed = env?.get(ENV_PROJECTS)?.jsonPrimitive?.contentOrNull.orEmpty()
+        // A crossplay server's Geyser is not in `MODRINTH_PROJECTS` — nothing
+        // ever put it there. It is implied by the game type, so it is folded in
+        // here rather than at creation: a server made before this existed then
+        // gets it on its next launch, and a bundle cannot be the thing that
+        // decides what a crossplay server is.
+        val configured = env?.get(ENV_PROJECTS)?.jsonPrimitive?.contentOrNull.orEmpty()
+        val listed = runCatching {
+            Core.crossplayProjects(gameType = gameType, loader = loader, configured = configured)
+        }.getOrElse {
+            // This function's contract is that it never fails a launch for a
+            // mod-shaped reason, and it is called outside the resolver's own
+            // catch. Falling back to what the server configured loses Geyser
+            // and starts a Java server, which is the same outcome every other
+            // failure here has.
+            Log.w(TAG, "could not merge crossplay projects: ${it.message}")
+            configured
+        }
         val marker = LoaderMarker.read(dir)
         val existing = marker?.get("mods")?.takeIf { it !is JsonNull }?.jsonObject
 

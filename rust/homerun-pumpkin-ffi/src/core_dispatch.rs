@@ -36,7 +36,8 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{
-    self, account, argfile, hosting, jar, jvm, loader, modjar, modpack, mods, ops, settings,
+    self, account, argfile, crossplay, hosting, jar, jvm, loader, modjar, modpack, mods, ops,
+    settings,
 };
 use homerun_core::reporting::{app_error, crash, minigame, stats};
 use homerun_core::{
@@ -570,6 +571,49 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         }
 
         "minecraft.mods.subDir" => Ok(Value::from(mods::sub_dir(&text("loader")?))),
+
+        // --- crossplay ------------------------------------------------------
+        //
+        // A Java server Bedrock clients can also join: Geyser and Floodgate, as
+        // plugins, inside the server's own JVM. Four calls because the work
+        // happens at four different moments in a launch — before the mods are
+        // resolved, around the Floodgate fetch, and when the settings are
+        // written. See `minecraft::crossplay`.
+        "minecraft.crossplay.isCrossplay" => {
+            Ok(Value::Bool(crossplay::is_crossplay(&text("gameType")?)))
+        }
+
+        "minecraft.exposure" => Ok(Value::from(minecraft::exposure_for(&text("gameType")?))),
+
+        "minecraft.crossplay.mergeProjects" => Ok(Value::from(crossplay::merge_projects(
+            &text("gameType")?,
+            &text("loader")?,
+            &optional_text("configured").unwrap_or_default(),
+        ))),
+
+        "minecraft.crossplay.floodgate" => Ok(
+            match crossplay::floodgate(&text("gameType")?, &text("loader")?) {
+                Some(flavour) => json!({
+                    "metaUrl": crossplay::FLOODGATE_META,
+                    "flavour": flavour,
+                }),
+                None => Value::Null,
+            },
+        ),
+
+        "minecraft.crossplay.floodgateBuild" => {
+            match crossplay::floodgate_build(field("meta")?, &text("flavour")?) {
+                Some(fetch) => serde_json::to_value(fetch).map_err(|e| e.to_string()),
+                None => Ok(Value::Null),
+            }
+        }
+
+        "minecraft.crossplay.config" => {
+            match crossplay::config(&text("gameType")?, &text("loader")?) {
+                Some(file) => serde_json::to_value(file).map_err(|e| e.to_string()),
+                None => Ok(Value::Null),
+            }
+        }
 
         // --- minigames ------------------------------------------------------
         //
@@ -1931,6 +1975,98 @@ mod tests {
                 "exposure": "crossplaY",
                 "port": 25565
             }),
+        );
+    }
+
+    // ─── crossplay ──────────────────────────────────────────────────────────
+
+    /// The four calls a launch makes, in the order it makes them, over the
+    /// wire a host actually sends. The point is the JSON shapes: a host reads
+    /// `metaUrl`, `flavour`, `fileName` and `sha256` by name, and a rename here
+    /// is a silent no-op at the other end rather than a compile error.
+    #[test]
+    fn a_paper_crossplay_launch_gets_all_four_answers() {
+        let projects = ok(
+            "minecraft.crossplay.mergeProjects",
+            json!({ "gameType": "native-crossplay", "loader": "paper", "configured": "worldedit" }),
+        );
+        assert_eq!(
+            projects,
+            json!(
+                "worldedit
+geyser"
+            )
+        );
+
+        let floodgate = ok(
+            "minecraft.crossplay.floodgate",
+            json!({ "gameType": "native-crossplay", "loader": "paper" }),
+        );
+        assert_eq!(floodgate["flavour"], "spigot");
+        assert!(floodgate["metaUrl"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://download.geysermc.org/"));
+
+        let fetch = ok(
+            "minecraft.crossplay.floodgateBuild",
+            json!({
+                "meta": {
+                    "version": "2.2.5",
+                    "build": 140,
+                    "downloads": {
+                        "spigot": { "name": "floodgate-spigot.jar", "sha256": "9f43" }
+                    }
+                },
+                "flavour": "spigot"
+            }),
+        );
+        assert_eq!(fetch["fileName"], "floodgate-spigot.jar");
+        assert_eq!(fetch["sha256"], "9f43");
+        assert_eq!(fetch["subDir"], "plugins");
+
+        assert_eq!(
+            ok(
+                "minecraft.exposure",
+                json!({ "gameType": "native-crossplay" })
+            ),
+            json!("crossplay")
+        );
+
+        let config = ok(
+            "minecraft.crossplay.config",
+            json!({ "gameType": "native-crossplay", "loader": "paper" }),
+        );
+        assert_eq!(config["path"], "plugins/Geyser-Spigot/config.yml");
+        assert!(config["contents"].as_str().unwrap().contains("19132"));
+    }
+
+    /// **`null`, not an error, and not an empty object.** Every one of these is
+    /// called on every Java launch, so the ordinary answer for the ordinary
+    /// server has to be cheap and unmistakable — a host that read an error here
+    /// would log a failure on every start of every server that is not crossplay.
+    #[test]
+    fn an_ordinary_java_server_is_told_there_is_nothing_to_do() {
+        assert_eq!(
+            ok(
+                "minecraft.crossplay.mergeProjects",
+                json!({ "gameType": "native", "loader": "paper", "configured": "sodium" })
+            ),
+            json!("sodium")
+        );
+        assert_eq!(
+            ok(
+                "minecraft.crossplay.floodgate",
+                json!({ "gameType": "native", "loader": "paper" })
+            ),
+            Value::Null
+        );
+        assert_eq!(
+            ok(
+                "minecraft.crossplay.config",
+                json!({ "gameType": "native", "loader": "paper" })
+            ),
+            Value::Null
         );
     }
 

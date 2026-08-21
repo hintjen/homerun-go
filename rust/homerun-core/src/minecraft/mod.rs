@@ -13,6 +13,7 @@
 pub mod account;
 pub mod argfile;
 pub mod console;
+pub mod crossplay;
 pub mod hosting;
 pub mod jar;
 pub mod jvm;
@@ -218,6 +219,26 @@ impl Game for Minecraft {
         }
 
         Ok(forwards)
+    }
+}
+
+/// How a server of this game type has to be exposed through the tunnel.
+///
+/// The answer [`Minecraft::forwards`] expects, derived from the one field that
+/// can decide it. A host that inferred this from `TYPE` instead would get
+/// crossplay wrong every time — a crossplay server's `TYPE` is an ordinary
+/// loader, and the only thing that says Bedrock players are coming is the game
+/// type.
+///
+/// Unknown types answer `java`, which is what every game type that is not one
+/// of the two special cases has always been.
+pub fn exposure_for(game_type: &str) -> &'static str {
+    if hosting::is_bedrock(game_type) {
+        "bedrock"
+    } else if crossplay::is_crossplay(game_type) {
+        "crossplay"
+    } else {
+        "java"
     }
 }
 
@@ -450,6 +471,20 @@ mod tests {
     fn bedrock_is_udp() {
         let forwards = Minecraft.forwards("bedrock", 19140, &json!({})).unwrap();
         assert_eq!(forwards, vec![Forward::udp(LISTEN_BEDROCK, 19140)]);
+    }
+
+    /// The tunnel's `exposure` comes from the game type and nothing else. A
+    /// crossplay server's `TYPE` is an ordinary loader, so a host deriving this
+    /// from the loader produces a Java-only tunnel for a server sold as
+    /// crossplay — it runs, and no Bedrock player can reach it.
+    #[test]
+    fn exposure_follows_the_game_type() {
+        assert_eq!(exposure_for("native-crossplay"), "crossplay");
+        assert_eq!(exposure_for("native-bedrock"), "bedrock");
+        assert_eq!(exposure_for("bedrock"), "bedrock");
+        assert_eq!(exposure_for("native"), "java");
+        assert_eq!(exposure_for("native-pumpkin"), "java");
+        assert_eq!(exposure_for(""), "java");
     }
 
     #[test]

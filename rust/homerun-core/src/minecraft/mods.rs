@@ -867,7 +867,11 @@ fn dep_key(project_id: &str) -> String {
 }
 
 /// Newline- or comma-separated, trimmed, blanks dropped.
-fn split_list(raw: &str) -> Vec<String> {
+///
+/// Public because [`super::crossplay`] merges into one of these strings and
+/// must split it exactly as this module later will — two splitters that
+/// disagree would let a duplicate slug through and install one plugin twice.
+pub fn split_list(raw: &str) -> Vec<String> {
     raw.split(['\n', ','])
         .map(str::trim)
         .filter(|s| !s.is_empty())
