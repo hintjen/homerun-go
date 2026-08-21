@@ -58,6 +58,26 @@ policy questionnaire.
 
 ---
 
+### 🛫 [Publishing to TestFlight](./publishing-ios.md)
+
+The iOS delivery half, written as the delta from Android: automatic signing,
+one API key instead of a keystore, and a workflow that runs on our own Mac.
+
+**Contains**:
+- Why there is no upload key: automatic signing, and the App Store Connect
+  API key that replaces both it and Play's service account
+- Publishing by hand, and why the committed `ExportOptions.plist` can never
+  accidentally ship
+- The CI workflow, its five secrets, and the three things still blocking it
+- The self-hosted Mac runner: what the machine must hold, the keychain
+  credential the private repos ride on, and why it needs a logged-in session
+- What Apple asks for at review, pointered to where each answer is argued
+
+**Read this for**: Shipping an iOS build, setting up the runner, or a signing
+failure in CI.
+
+---
+
 ### 🦀 [Pumpkin FFI](./ffi.md)
 
 The Rust library both hosts link — server lifecycle, console buffering,

@@ -64,7 +64,10 @@ add(
 // system git can, because gh or ssh already holds the credentials.
 const fetchWithCli =
   process.env.CARGO_NET_GIT_FETCH_WITH_CLI === "true" ||
-  /net\.git-fetch-with-cli\s*=\s*true/.test(
+  // Cargo accepts both spellings — `net.git-fetch-with-cli = true` and a
+  // `[net]` section with `git-fetch-with-cli = true`. The fix text below
+  // recommends the section form, so the check must accept it too.
+  /git-fetch-with-cli\s*=\s*true/.test(
     (() => {
       try {
         return fs.readFileSync(

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Export options for `xcodebuild -exportArchive` — the second half of
+  "Publishing a build" in plans/ios-ota.md, and what publish-ios.yml uses.
+
+  `destination` is `export` here (produce an .ipa on disk). The publish
+  workflow flips it to `upload` with plutil for a TestFlight run, so this
+  file stays safe to use by hand: exporting locally can never accidentally
+  ship.
+-->
+<plist version="1.0">
+<dict>
+	<!-- app-store-connect covers both TestFlight and the App Store; the
+	     distinction is made later, in App Store Connect, not here. -->
+	<key>method</key>
+	<string>app-store-connect</string>
+	<!-- The Hintjen PBC team, same value as DEVELOPMENT_TEAM in project.yml. -->
+	<key>teamID</key>
+	<string>35DS8JGY4Y</string>
+	<key>destination</key>
+	<string>export</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<!-- dSYMs go up with the build so crashes symbolicate — the same reason
+	     the Android workflow uploads mapping.txt. -->
+	<key>uploadSymbols</key>
+	<true/>
+	<!-- Version and build number are OURS: CURRENT_PROJECT_VERSION is
+	     yyyymmddNN by convention (project.yml) and the workflow passes it
+	     explicitly. Letting Xcode invent one would break traceability. -->
+	<key>manageAppVersionAndBuildNumber</key>
+	<false/>
+</dict>
+</plist>
