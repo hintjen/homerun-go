@@ -26,6 +26,26 @@ const LAUNCHER_CRATE = path.join(ROOT, "rust", "homerun-java-launcher");
 const PUMPKIN_CRATE = path.join(ROOT, "rust", "homerun-pumpkin-bin");
 
 /**
+ * The Android API level the native code is linked against. The iOS
+ * equivalent is `deploymentTarget` on the two targets below; this one is
+ * shared, because every Android target ships in the same app and that app
+ * has one `minSdk`.
+ *
+ * **Keep this equal to `minSdk` in `android/app/build.gradle.kts`.**
+ * cargo-ndk defaults to 21 when it is not told, and 21 is five years below
+ * what the app claims to support — so the NDK hands the linker the API 21
+ * stubs and every symbol added since is simply absent. That is survivable
+ * for the `.so`, which is allowed to carry undefined symbols and resolve
+ * them against the real libc at load time, and fatal for the two
+ * executables, which must resolve everything at link.
+ *
+ * It stayed invisible for as long as nothing reached past API 21. The
+ * Pumpkin pin bump to 09f1d4df pulled in webrtc, which calls `getifaddrs`
+ * — added to Bionic in API 24 — and `homerun-pumpkin-bin` stopped linking.
+ */
+const ANDROID_API_LEVEL = 26;
+
+/**
  * `kind` decides how it is built:
  *   cargo — plain `cargo build --target <triple>`
  *   ndk   — `cargo ndk -t <abi> build`, which supplies the NDK toolchain
@@ -163,4 +183,4 @@ const UI_DESTINATIONS = {
   android: path.join(ROOT, "android", "app", "src", "main", "assets", "web"),
 };
 
-module.exports = { ROOT, CRATE, CRATE_NAME, LAUNCHER_CRATE, PUMPKIN_CRATE, TARGETS, PLATFORM_TARGETS, UI_DESTINATIONS };
+module.exports = { ROOT, CRATE, CRATE_NAME, LAUNCHER_CRATE, PUMPKIN_CRATE, ANDROID_API_LEVEL, TARGETS, PLATFORM_TARGETS, UI_DESTINATIONS };

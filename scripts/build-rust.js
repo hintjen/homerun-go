@@ -15,7 +15,7 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const { CRATE, TARGETS } = require("./targets");
+const { CRATE, TARGETS, ANDROID_API_LEVEL } = require("./targets");
 
 const args = process.argv.slice(2);
 const name = args.find((a) => !a.startsWith("-"));
@@ -132,7 +132,19 @@ if (target.kind === "host") {
 
 if (target.kind === "ndk") {
   // cargo-ndk wants its own flags before `build`.
-  run("cargo", ["ndk", "-t", target.abi, "build", ...profileArgs, ...engineArgs]);
+  // --platform, or cargo-ndk links against its own default of API 21 and
+  // anything Bionic gained since is an undefined symbol. See
+  // ANDROID_API_LEVEL in targets.js for what that cost.
+  run("cargo", [
+    "ndk",
+    "-t",
+    target.abi,
+    "--platform",
+    String(ANDROID_API_LEVEL),
+    "build",
+    ...profileArgs,
+    ...engineArgs,
+  ]);
 } else {
   run(
     "cargo",
