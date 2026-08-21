@@ -42,9 +42,29 @@ The fast loop, for a change to the FFI or the UI bundle, on a device that is
 already carrying everything else:
 
 ```bash
-npm run ui:android          # stage the shared UI bundle into assets/web
+npm run ui:android          # stage the PINNED bundle - see below
 npm run rust:android        # rebuild the FFI into jniLibs (gradle will not)
 node scripts/android-app.js install
+```
+
+**`ui:android` does not stage your UI branch.** It copies
+`node_modules/homerun-app-ui/out` — the *pinned published dependency* — so a
+local checkout of the UI repo, on a branch, with the change you are trying to
+test, is not in it and nothing says so. Point it at the local build instead:
+
+```bash
+cd ../homerun-app-ui && npm run build     # produces out/
+cd -    # back to homerun-mobile
+HOMERUN_UI_DIR=../homerun-app-ui/out npm run ui:android
+```
+
+It announces which it took — `Shared UI: HOMERUN_UI_DIR is set — using that
+build.` versus a bare `android <- …` — and that one line is the only difference
+between the two outcomes. Grep the staged bundle for a string only your change
+introduces before installing:
+
+```bash
+grep -rl "PowerNukkitX" android/app/src/main/assets/web/ | head -1
 ```
 
 **That is not a whole app.** None of it stages the Java runtime, restic, the
@@ -260,6 +280,15 @@ that arrives now **applies itself immediately** rather than waiting for a
 relaunch or a prompt, so a long session on a build with updates on can move
 underneath you mid-run. `docs/ota-bundles.md` § *Applying it: as soon as it
 arrives*.
+
+**The bundle can be the published one.** The most common of these, and the
+quietest: `npm run ui:android` stages the pinned npm dependency, not the UI repo
+checked out next door. The app installs, launches, serves a perfectly good UI —
+the one from the last release — and every capability gate, tile and screen you
+added is simply absent. It reads exactly like a capability that failed to inject.
+`HOMERUN_UI_DIR` is the fix; see *The loop*. This cost a full build-install-drive
+round trip on 2026-08-21, and the screenshot at the end of it looked like a
+working app.
 
 **Gradle can decide there is nothing to do.** Compare the installed APK against
 the built one rather than trusting `BUILD SUCCESSFUL`:
