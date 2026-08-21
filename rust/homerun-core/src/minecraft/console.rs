@@ -15,6 +15,10 @@ use std::collections::VecDeque;
 
 const ESC: u8 = 0x1b;
 
+/// `§` in UTF-8. Minecraft's formatting prefix, which is not ANSI and which no
+/// `--disable-ansi` flag suppresses.
+const SECTION: [u8; 2] = [0xc2, 0xa7];
+
 /// A line with its colour codes taken out, borrowed when there were none.
 ///
 /// Paper colours its console — including the join and leave messages — so on
@@ -22,6 +26,18 @@ const ESC: u8 = 0x1b;
 /// The escape byte is optional here on purpose: some log paths (a pty stripped
 /// of control characters, a Java `PrintStream` that dropped it) deliver the
 /// remnant `[0m` as plain text, and the desktop learned the same thing.
+///
+/// **Two vocabularies, not one.** ANSI is what a terminal understands;
+/// `§`-prefixed codes are Minecraft's own, and a server writes them straight
+/// into its output. PowerNukkitX writes them on every join, leave and level
+/// message — `§belPTFO§f[/127.0.0.1:56926] logged in …` — and its
+/// `--disable-ansi` flag does nothing about them, because they are not ANSI.
+///
+/// That was found on a phone, not in a test: the first real PowerNukkitX run
+/// parsed its ready line correctly and then recognised **no** join and **no**
+/// leave, in either of the two forms that engine emits, because every name
+/// arrived with `§b` welded to the front of it. Presence reporting was silently
+/// dead for the whole session while the server ran perfectly.
 ///
 /// This runs on every line during world generation, a few hundred a second, so
 /// the clean case must not allocate — hence [`Cow`] and a single pass.
@@ -32,6 +48,20 @@ pub fn strip_ansi(line: &str) -> Cow<'_, str> {
     while at < bytes.len() {
         // Multi-byte UTF-8 is all >= 0x80, so no sequence can start mid-char
         // and every index below lands on a character boundary.
+        // `§` is U+00A7: two bytes, and the code that follows it is one
+        // character which may itself be multi-byte if a server emits nonsense.
+        // Measured in bytes so the index never lands mid-character.
+        if bytes[at] == SECTION[0] && bytes.get(at + 1) == Some(&SECTION[1]) {
+            let after = at + SECTION.len();
+            let code = line[after..].chars().next().map(char::len_utf8).unwrap_or(0);
+            if code > 0 {
+                let out = out.get_or_insert_with(|| String::with_capacity(line.len()));
+                out.push_str(&line[copied..at]);
+                at = after + code;
+                copied = at;
+                continue;
+            }
+        }
         if bytes[at] == ESC || bytes[at] == b'[' {
             if let Some(len) = ansi_len(bytes, at) {
                 let out = out.get_or_insert_with(|| String::with_capacity(line.len()));
@@ -57,19 +87,44 @@ pub fn strip_ansi(line: &str) -> Cow<'_, str> {
 /// Only SGR (`m`) is matched. Cursor moves and the like do not appear in a
 /// server log, and matching them too would risk eating real text — `[20:37:28`
 /// is one character away from looking like a sequence already.
+///
+/// # `[m` versus `[main]`
+///
+/// `ESC [ m` is a legal reset with no parameters, and the escape byte is
+/// optional here (see [`strip_ansi`]) — so a bare `[m` matches, and **`[main]`
+/// was silently cut to `ain]`**. Nothing hit it while every engine wrote
+/// `[Server thread/INFO]` or `[INFO]`; PowerNukkitX writes `[main]`, and its
+/// joins and leaves went unrecognised because the log prefix no longer looked
+/// like one.
+///
+/// Requiring a parameter would fix it and is wrong: a captured line in these
+/// tests is `[m[36;22m[20:37:28 INFO]: …`, so parameterless remnants are real.
+///
+/// What separates them is the character *after* the `m`. A reset is followed by
+/// another sequence or by the end of the line; a thread name is followed by the
+/// rest of a word. So an escape-less, parameterless `[m` is a colour code only
+/// when what follows it could not be one — which is the whole of the rule.
 fn ansi_len(bytes: &[u8], at: usize) -> Option<usize> {
     let mut end = at;
-    if bytes.get(end) == Some(&ESC) {
+    let escaped = bytes.get(end) == Some(&ESC);
+    if escaped {
         end += 1;
     }
     if bytes.get(end) != Some(&b'[') {
         return None;
     }
     end += 1;
+    let params = end;
     while matches!(bytes.get(end), Some(b'0'..=b'9' | b';')) {
         end += 1;
     }
-    (bytes.get(end) == Some(&b'm')).then_some(end + 1 - at)
+    if bytes.get(end) != Some(&b'm') {
+        return None;
+    }
+    if !escaped && end == params && bytes.get(end + 1).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    Some(end + 1 - at)
 }
 
 /// The server is accepting connections. Two spellings, because the engines
@@ -180,9 +235,30 @@ pub fn max_players(line: &str) -> Option<u32> {
 /// [INFO] Kologgs joined the game                           // Pumpkin
 /// ```
 ///
+/// ```text
+/// 19:31:17 [Netty Server IO #1] [INFO] Ada[/10.0.0.4:1] logged in …  // PowerNukkitX
+/// ```
+///
 /// A prefix is a run of bracketed tags that **look like log tags** — a
 /// timestamp, or something naming a level — each followed by a space or by
-/// `: `. Consuming exactly those is what makes the two formats one case.
+/// `: `. Consuming exactly those is what makes the formats one case.
+///
+/// PowerNukkitX adds the third line above and it breaks two assumptions at
+/// once: its log4j console pattern is `%d{HH:mm:ss} [%t] [%level] %msg`, so
+/// the timestamp is **bare**, and the tag after it is a **thread name** that
+/// resembles nothing. Without both fixes below the whole prefix stayed in the
+/// name, every join and leave on that engine went unrecognised, and presence
+/// reporting was silently dead while the server ran perfectly.
+///
+/// # The forgery guard, kept
+///
+/// The tag test is the security property and it survives: consumption always
+/// stops at the **last recognised** tag in the run, never past it. An
+/// unrecognised tag is skipped only when a real one follows it, which is what
+/// lets a thread name through while `[Griefer] Notch joined the game` — with
+/// no real tag anywhere — still consumes nothing. A trailing forgery after a
+/// genuine prefix (`[19:00:00] [INFO]: [Griefer] Notch joined the game`) stays
+/// in the name too, because the last real tag was `[INFO]`.
 ///
 /// This used to split on the first `]: `, which Pumpkin never writes: the
 /// whole prefix stayed in the name, so on that engine every join and leave
@@ -212,19 +288,54 @@ fn after_log_prefix(line: &str) -> &str {
     }
 
     let mut rest = line.trim_start();
-    while let Some(open) = rest.strip_prefix('[') {
-        let Some(close) = open.find(']') else { break };
-        if !is_log_tag(&open[..close]) {
-            break;
+
+    // A bare leading timestamp: `19:31:17`, or a full `2026-08-21 19:31:17`.
+    // Digits and separators only, and it has to be followed by whitespace —
+    // which is what keeps it from eating the start of a message that merely
+    // begins with a number.
+    //
+    // Safe against the forgery this function exists to prevent for the same
+    // reason the bracket test is: chat arrives wrapped (`<Ada> …`), so a
+    // player typing a timestamp cannot reach the name test below.
+    fn stamp(text: &str) -> Option<&str> {
+        let token = text.split_whitespace().next()?;
+        let digits = token.chars().filter(|c| c.is_ascii_digit()).count();
+        if digits >= 4
+            && token
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, ':' | '-' | '.'))
+        {
+            return Some(text[token.len()..].trim_start());
         }
+        None
+    }
+    // Twice: a date and a time are two tokens.
+    for _ in 0..2 {
+        match stamp(rest) {
+            Some(after) => rest = after,
+            None => break,
+        }
+    }
+
+    // Walk the run of bracketed tags, remembering where the last *recognised*
+    // one ended. That offset is what gets consumed; anything past it is the
+    // message, tag-shaped or not.
+    let mut scan = rest;
+    while let Some(open) = scan.strip_prefix('[') {
+        let Some(close) = open.find(']') else { break };
+        let tag = &open[..close];
         let tail = &open[close + 1..];
-        // `]: ` on vanilla, `] ` on Pumpkin. A tag butted straight against
-        // text is not a prefix — it is text that happens to start with one.
+        // `]: ` on vanilla, `] ` on Pumpkin and PowerNukkitX. A tag butted
+        // straight against text is not a prefix — it is text that happens to
+        // start with one.
         let tail = tail.strip_prefix(':').unwrap_or(tail);
         let Some(after) = tail.strip_prefix(' ') else {
             break;
         };
-        rest = after.trim_start();
+        scan = after.trim_start();
+        if is_log_tag(tag) {
+            rest = scan;
+        }
     }
     unbracketed(rest).unwrap_or(rest)
 }
@@ -307,6 +418,9 @@ fn player_before_address<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     }
     let clean = strip_ansi(head);
     let name = after_log_prefix(&clean).trim();
+    // The slice handed back is of `head`, so a name that only became valid
+    // once its colour codes were removed has to be found there by content.
+    // `rfind` below does that; this is the guard that it can.
     if name.is_empty()
         || !name
             .chars()
@@ -773,6 +887,107 @@ mod tests {
             Some("v1.21.100")
         );
         assert_eq!(bedrock_version("[09:15:00] [INFO]: Loading pnx.yml..."), None);
+    }
+
+
+
+    // ─── the section sign, from a real device ───────────────────────────────
+
+    /// Captured from the first PowerNukkitX run on a phone, 2026-08-21,
+    /// rendered in the layout the host actually reads.
+    ///
+    /// `log4j2.xml` gives the `<TerminalConsole>` appender
+    /// `%d{HH:mm:ss} [%t] [%level] %msg` — a **bare** timestamp, then a thread
+    /// name, then the level. The `logs/server.log` appender uses a different
+    /// pattern entirely, and it is tempting to test against that file because
+    /// it is the one you can read off the device; nothing consumes it.
+    ///
+    /// Colour codes are covered both ways: whether the appender strips them
+    /// depends on stdout being a terminal, and a pipe is not one.
+    ///
+    /// Every assertion here returned `None` before this change.
+    #[test]
+    fn the_console_format_the_host_reads_is_recognised() {
+        let plain = "19:31:17 [Netty Server IO #1] [INFO] elPTFO[/127.0.0.1:56926] logged in with entity id 1 at (world, 0.6852, 68.0, 0.8249)";
+        assert_eq!(joined(plain), Some("elPTFO"));
+
+        let coloured = "19:31:17 [Netty Server IO #1] [INFO] \u{a7}belPTFO\u{a7}f[/127.0.0.1:56926] logged in with entity id 1 at (world, 0, 64, 0)";
+        assert_eq!(joined(coloured), Some("elPTFO"));
+
+        let out = "19:31:50 [main] [INFO] elPTFO[/127.0.0.1:56926] logged out due to Server closed";
+        assert_eq!(left(out), Some("elPTFO"));
+
+        let vanilla = "19:31:21 [main] [INFO] elPTFO joined the game";
+        assert_eq!(joined(vanilla), Some("elPTFO"));
+
+        assert!(is_ready(
+            "19:30:10 [main] [INFO] Done (4.213s)! For help, type \"help\" or \"?\""
+        ));
+    }
+
+    /// A bare number at the start of a message is not a timestamp.
+    #[test]
+    fn a_leading_number_is_not_mistaken_for_a_prefix() {
+        assert_eq!(joined("12345 joined the game"), None);
+        assert_eq!(joined("[19:31:17] [Server thread/INFO]: Ada joined the game"), Some("Ada"));
+    }
+
+    /// This one always worked, and is pinned so it keeps working.
+    #[test]
+    fn a_real_powernukkitx_ready_line_is_recognised() {
+        assert!(is_ready(
+            "2026-08-21 19:30:10 [main] INFO - Done (4.213s)! For help, type \"help\" or \"?\""
+        ));
+    }
+
+    #[test]
+    fn section_codes_are_stripped_like_ansi_is() {
+        assert_eq!(strip_ansi("\u{a7}aworld\u{a7}r"), "world");
+        assert_eq!(strip_ansi("\u{a7}e100\u{a7}f%"), "100%");
+        // A trailing `§` with nothing after it is left alone rather than
+        // eating past the end of the line.
+        assert_eq!(strip_ansi("done \u{a7}"), "done \u{a7}");
+        // Untouched when there is nothing to strip, and still borrowed.
+        assert!(matches!(strip_ansi("plain"), std::borrow::Cow::Borrowed(_)));
+    }
+
+    /// The colour codes are a griefer's tool too: they must not let a chat
+    /// line masquerade as a join once they are gone.
+    #[test]
+    fn stripping_colour_does_not_open_the_forgery_hole() {
+        assert_eq!(
+            joined("[19:31:17] [INFO]: \u{a7}b<Ada>\u{a7}f Griefer[/1.2.3.4:1] logged in with entity id 5 at (world, 0, 0, 0)"),
+            None
+        );
+    }
+
+
+
+    /// `[main]` is a thread name, not a reset sequence. Cutting it to `ain]`
+    /// left the log prefix unrecognisable and killed presence reporting on
+    /// PowerNukkitX, which is the only engine here that writes it.
+    #[test]
+    fn a_bare_bracket_m_is_not_a_colour_code() {
+        assert_eq!(strip_ansi("19:31:21 [main] [INFO] Ada joined the game"),
+                   "19:31:21 [main] [INFO] Ada joined the game");
+        assert_eq!(strip_ansi("[monster] spawned"), "[monster] spawned");
+    }
+
+    /// The leniency that motivated the escape-less path still works, both with
+    /// parameters and without: a parameterless reset is real, it is just never
+    /// followed by the rest of a word.
+    #[test]
+    fn an_escapeless_remnant_is_still_stripped() {
+        assert_eq!(strip_ansi("[0mAda joined the game"), "Ada joined the game");
+        assert_eq!(strip_ansi("[0;39;22mAda"), "Ada");
+        assert_eq!(strip_ansi("[m[0;39;22mAda"), "Ada");
+        assert_eq!(strip_ansi("Ada left the game[m"), "Ada left the game");
+    }
+
+    /// With the escape byte present, a parameterless reset is a real sequence.
+    #[test]
+    fn a_real_escaped_reset_is_still_stripped() {
+        assert_eq!(strip_ansi("\u{1b}[mAda"), "Ada");
     }
 
 }
