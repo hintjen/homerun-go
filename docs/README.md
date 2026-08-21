@@ -256,6 +256,32 @@ adapter, the thread it needs, and the polling that stands in for callbacks.
 
 ---
 
+### 🧊 [Bedrock on Android](./android-bedrock.md)
+
+How a phone hosts a **Bedrock** server: PowerNukkitX, a Bedrock server written
+in Java, on the JVM this host already stages. Closes a live hole — the wizard
+has offered the Bedrock tile on Android all along and the launch was then
+refused.
+
+**Contains**:
+- Why Mojang's Bedrock Dedicated Server cannot ship here at all
+- The five PowerNukkitX facts that were nearly wrong, `pnx.yml` first
+- The YAML merge, and the two rules that keep it from corrupting the file
+- Where a seed can go, and why it is written exactly once
+- The command line, and why every flag on it is load-bearing
+- Updating the jar without a store release, and the pin that makes a bad
+  release stoppable
+- **The tunnel bug that predates this**: `java` for everything, and a Bedrock
+  server behind a TCP tunnel that runs, goes green and cannot be joined
+- Why Bedrock ignoring SRV reaches further than the tunnel
+- What did not need changing — backups, the lease, the stop ladder, RCON
+- Triage, symptom first
+
+**Read this for**: Working on the Bedrock backend, or wondering why a server
+that looks healthy has nobody in it.
+
+---
+
 ### 🔋 [Android lifecycle](./android-lifecycle.md)
 
 How a server — and the backup that follows it — keeps running once the app is no

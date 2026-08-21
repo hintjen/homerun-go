@@ -194,6 +194,18 @@ Known gaps, so you do not rediscover them:
   JVM backend uses. `ServerHost` holds both backends and routes per launch on
   the game type, which the core decides (`minecraft.hosting.serves`). iOS still
   links the engine, because it cannot spawn one.
+- **Bedrock is served by PowerNukkitX, and has never been run.** A phone hosts
+  a Bedrock server through `native-powernukkitx` — a Bedrock server written in
+  Java, on the JVM already staged here. The core rules, the launch, the config,
+  the console vocabulary, the jar resolution and the UDP tunnel are written and
+  tested host-native; the Kotlin compiles. **No PowerNukkitX process has ever
+  started on a device.** Whether JNA/OSHI survives bionic is the open question
+  and it is what M0 in [`plans/android-bedrock.md`](./plans/android-bedrock.md)
+  exists to answer. The API half — a `19132/udp` forward for the new game type,
+  and a Bedrock-shaped connect address, since Bedrock clients do no SRV lookup —
+  is not written at all, and without the first of those the tunnel carries
+  nothing. `docs/android-bedrock.md`.
+
 - **arm64 builds and installs; no server has been started on it.** The whole
   payload — FFI, launcher, `libpumpkin.so` at 65 MB, restic, wireproxy, a JRE —
   is staged and extracted to `nativeLibraryDir` on a Pixel 9 Pro XL, and the

@@ -54,6 +54,16 @@ pub struct LineMeaning {
     /// shape still deserialises — it simply never learns a ceiling.
     #[serde(default)]
     pub max_players: Option<u32>,
+    /// The game version this line announced, if it announced one.
+    ///
+    /// Only PowerNukkitX fills it in today, and it is the only trustworthy
+    /// source there: the jar the host downloaded is a *PowerNukkitX* release
+    /// number, and the Bedrock version it implements appears nowhere except in
+    /// the banner the server prints about itself.
+    ///
+    /// Additive for the same reason `max_players` is.
+    #[serde(default)]
+    pub announced_version: Option<String>,
 }
 
 /// How a config file must be written.
@@ -193,6 +203,24 @@ pub trait Game: Sync {
     /// from [`BuildContext::existing`] — never an error.
     fn config_inputs(&self, env: &Value) -> Vec<ConfigInput>;
 
+    /// [`Game::config_inputs`], for a host that knows the game type.
+    ///
+    /// # Why this exists rather than a parameter
+    ///
+    /// A game type can change which files matter — PowerNukkitX reads a
+    /// `pnx.yml` where a Java server reads `server.properties` — and
+    /// [`Game::config_inputs`] cannot see it. Adding the parameter there is
+    /// exactly what the stability note above forbids, so this is the additive
+    /// form: a new method with a default, which every existing implementation
+    /// and every host that has not been rebuilt keeps working through.
+    ///
+    /// New hosts should call this. The default answers the old question, so a
+    /// host that does not is no worse off than it was.
+    fn config_inputs_for(&self, env: &Value, game_type: &str) -> Vec<ConfigInput> {
+        let _ = game_type;
+        self.config_inputs(env)
+    }
+
     /// Players whose identity the host must fetch before config can be
     /// written. See [`Lookup`] — this is only what the game cannot derive.
     /// `game_type` is the API's verbatim, as on [`BuildContext`] — it can
@@ -286,12 +314,14 @@ mod tests {
             joined: Some("Notch".into()),
             left: None,
             max_players: Some(20),
+            announced_version: Some("v1.21.100".into()),
         })
         .unwrap();
         assert_eq!(json["ready"], true);
         assert_eq!(json["joined"], "Notch");
         assert!(json.get("left").is_some(), "absent is null, not missing");
         assert_eq!(json["maxPlayers"], 20);
+        assert_eq!(json["announcedVersion"], "v1.21.100");
     }
 
     /// The freeze rule in practice: a host built before `max_players` existed

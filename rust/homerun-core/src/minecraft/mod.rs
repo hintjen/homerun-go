@@ -22,6 +22,7 @@ pub mod minigame;
 pub mod modjar;
 pub mod modpack;
 pub mod mods;
+pub mod nukkit;
 pub mod ops;
 pub mod settings;
 pub mod slp;
@@ -56,10 +57,16 @@ impl Game for Minecraft {
             joined: console::joined(line).map(str::to_string),
             left: console::left(line).map(str::to_string),
             max_players: console::max_players(line),
+            announced_version: console::bedrock_version(line).map(str::to_string),
         }
     }
 
     fn config_inputs(&self, env: &Value) -> Vec<ConfigInput> {
+        // No game type here, and the trait is frozen — see
+        // `config_inputs_for`, which is the one a host with a game type in
+        // hand should call. Reaching this with a PowerNukkitX server means an
+        // older host asked; answering with Java's files is the safe wrong
+        // answer, because a file that is not there simply comes back absent.
         let mut inputs = vec![
             // Read so the merge preserves what the server wrote itself, and
             // latin-1 both ways — a MOTD's `§` does not survive a UTF-8
@@ -90,7 +97,19 @@ impl Game for Minecraft {
         inputs
     }
 
+    fn config_inputs_for(&self, env: &Value, game_type: &str) -> Vec<ConfigInput> {
+        if hosting::is_nukkit(game_type) {
+            return nukkit::config_inputs();
+        }
+        self.config_inputs(env)
+    }
+
     fn required_lookups(&self, env: &Value, game_type: &str) -> Vec<Lookup> {
+        // A gamertag has no Mojang UUID. See `nukkit`.
+        if hosting::is_nukkit(game_type) {
+            return nukkit::required_lookups();
+        }
+
         let resolved = settings::from_env(env, game_type, loader_of(env), None);
 
         // An offline server's UUIDs are an MD5 of the name, so there is
@@ -119,6 +138,13 @@ impl Game for Minecraft {
     }
 
     fn config_files(&self, ctx: &BuildContext) -> Result<Vec<FileWrite>> {
+        // A different file set entirely: YAML rather than properties, plain
+        // names rather than UUIDs, and a per-world config the seed has to go
+        // into. Same settings, resolved the same way.
+        if hosting::is_nukkit(&ctx.game_type) {
+            return nukkit::config_files(ctx);
+        }
+
         let resolved = settings::from_env(&ctx.env, &ctx.game_type, loader_of(&ctx.env), None);
 
         let runtime = settings::Runtime {
@@ -230,10 +256,16 @@ impl Game for Minecraft {
 /// loader, and the only thing that says Bedrock players are coming is the game
 /// type.
 ///
+/// PowerNukkitX answers `bedrock` for the same reason a Bedrock server does,
+/// and it is worth saying out loud because it is the one entry here that is not
+/// obvious from its name: what decides this is the protocol the *client*
+/// speaks, not what the server is written in. It is a Java process serving
+/// Bedrock players over UDP.
+///
 /// Unknown types answer `java`, which is what every game type that is not one
-/// of the two special cases has always been.
+/// of the special cases has always been.
 pub fn exposure_for(game_type: &str) -> &'static str {
-    if hosting::is_bedrock(game_type) {
+    if hosting::is_bedrock(game_type) || hosting::is_nukkit(game_type) {
         "bedrock"
     } else if crossplay::is_crossplay(game_type) {
         "crossplay"
@@ -536,4 +568,88 @@ mod tests {
         assert!(rendered.contains("[TCPServerTunnel]"));
         assert!(rendered.contains("ListenPort = 25565"));
     }
+
+    // ─── exposure ───────────────────────────────────────────────────────────
+
+    /// The clause this branch adds. PowerNukkitX is a Java process serving
+    /// Bedrock players, so what decides its exposure is the protocol the
+    /// *client* speaks — get this wrong and the tunnel handshakes, the server
+    /// runs, and nobody can join.
+    #[test]
+    fn a_bedrock_style_game_type_is_exposed_over_udp() {
+        for game_type in ["native-bedrock", "bedrock", "native-powernukkitx"] {
+            assert_eq!(exposure_for(game_type), "bedrock", "{game_type}");
+            let forwards = Minecraft
+                .forwards(exposure_for(game_type), 19140, &json!({}))
+                .unwrap();
+            assert_eq!(forwards, vec![Forward::udp(LISTEN_BEDROCK, 19140)]);
+        }
+    }
+
+    #[test]
+    fn java_game_types_are_unchanged() {
+        assert_eq!(exposure_for("native"), "java");
+        assert_eq!(exposure_for("native-pumpkin"), "java");
+        assert_eq!(exposure_for(""), "java");
+        assert_eq!(exposure_for("native-crossplay"), "crossplay");
+    }
+
+    // ─── the PowerNukkitX branch ────────────────────────────────────────────
+
+    fn nukkit_ctx(env: Value) -> BuildContext {
+        BuildContext {
+            game_type: "native-powernukkitx".into(),
+            ..ctx(env)
+        }
+    }
+
+    #[test]
+    fn a_powernukkitx_launch_writes_nukkits_files_and_not_javas() {
+        let files = Minecraft.config_files(&nukkit_ctx(json!({}))).unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&nukkit::SETTINGS_FILE));
+        assert!(!paths.contains(&"server.properties"));
+        assert!(!paths.contains(&"ops.json"));
+    }
+
+    #[test]
+    fn a_powernukkitx_launch_looks_nobody_up() {
+        assert!(Minecraft
+            .required_lookups(&json!({ "OPS": "Ada" }), "native-powernukkitx")
+            .is_empty());
+        // And the Java path is untouched by that.
+        assert!(!Minecraft
+            .required_lookups(&json!({ "OPS": "Ada" }), "native")
+            .is_empty());
+    }
+
+    #[test]
+    fn config_inputs_follow_the_game_type() {
+        let nukkit: Vec<String> = Minecraft
+            .config_inputs_for(&json!({}), "native-powernukkitx")
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert!(nukkit.contains(&nukkit::SETTINGS_FILE.to_string()));
+
+        let java: Vec<String> = Minecraft
+            .config_inputs_for(&json!({}), "native")
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert!(java.contains(&PROPERTIES.to_string()));
+    }
+
+    /// The default on the trait answers the old question, so a host that has
+    /// not been rebuilt is no worse off than it was.
+    #[test]
+    fn the_defaulted_method_still_answers_java() {
+        let paths: Vec<String> = Minecraft
+            .config_inputs(&json!({}))
+            .into_iter()
+            .map(|i| i.path)
+            .collect();
+        assert!(paths.contains(&PROPERTIES.to_string()));
+    }
+
 }

@@ -948,6 +948,7 @@
           "javaNative"
         ],
         "pumpkinServers": false,
+        "powernukkitxServers": false,
         "installation": true,
         "moveInstallation": true,
         "clientLauncher": true,
@@ -1146,6 +1147,7 @@
           "pumpkin"
         ],
         "pumpkinServers": false,
+        "powernukkitxServers": false,
         "installation": false,
         "moveInstallation": false,
         "clientLauncher": false,
@@ -1264,6 +1266,7 @@
           "pumpkin"
         ],
         "pumpkinServers": true,
+        "powernukkitxServers": true,
         "installation": false,
         "moveInstallation": false,
         "clientLauncher": false,

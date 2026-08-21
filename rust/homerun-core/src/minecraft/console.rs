@@ -102,13 +102,45 @@ pub fn is_ready(line: &str) -> bool {
 }
 
 /// The player named in a join line, if this is one.
+///
+/// Two vocabularies, because the servers word it differently:
+///
+/// ```text
+/// Notch joined the game                                  // vanilla, Paper, Pumpkin
+/// Notch[/127.0.0.1:52134] logged in with entity id 12 ... // PowerNukkitX
+/// ```
+///
+/// The second is Nukkit's `nukkit.player.logIn`, and it is why presence works
+/// on a Bedrock server at all — nothing else on that engine announces a join.
 pub fn joined(line: &str) -> Option<&str> {
     player_before(line, " joined the game")
+        .or_else(|| player_before_address(line, "logged in with entity id"))
 }
 
 /// The player named in a leave line, if this is one.
 pub fn left(line: &str) -> Option<&str> {
     player_before(line, " left the game")
+        .or_else(|| player_before_address(line, "logged out due to"))
+}
+
+/// The Bedrock version a server announced at boot.
+///
+/// `nukkit.server.start` — `Starting Minecraft: BE server version v1.21.100`.
+/// This is the only honest source for it: a PowerNukkitX *release* number is
+/// not a Minecraft version, and the release metadata does not carry one, so
+/// what the server says about itself is what the player should be shown.
+pub fn bedrock_version(line: &str) -> Option<&str> {
+    const MARKER: &str = "Starting Minecraft: BE server version ";
+    let clean = strip_ansi(line);
+    // Position in the stripped copy, then the same slice of the caller's line —
+    // a version never contains a colour code, so the two agree.
+    let at = clean.find(MARKER)? + MARKER.len();
+    let version = clean[at..].trim();
+    if version.is_empty() {
+        return None;
+    }
+    let start = line.rfind(version)?;
+    Some(&line[start..start + version.len()])
 }
 
 /// The player ceiling, if this line announces one.
@@ -252,6 +284,40 @@ fn unbracketed(rest: &str) -> Option<&str> {
 /// apart — the desktop does not attempt this distinction at all, and its
 /// presence check `/ \S+ (?:joined|left) the game\s*$/` is satisfied by any
 /// chat message.
+/// The name in front of a `name[/ip:port] did something` line.
+///
+/// PowerNukkitX's shape, and it needs its own reader: the name is not adjacent
+/// to the marker, an address sits between them.
+///
+/// The forgery guard from [`player_before`] applies here too and is the reason
+/// the marker is checked *after* the address rather than anywhere in the line.
+/// Chat is `<Notch> hello`, so a griefer typing
+/// `Griefer[/1.2.3.4:1] logged in with entity id 5` produces a line whose text
+/// before `[/` is `<Notch> Griefer` — which fails the name test below on the
+/// angle brackets, exactly as `[Griefer] Notch joined the game` fails the log
+/// tag test.
+///
+/// Names may contain spaces here and cannot on a Java server: a Bedrock
+/// identity is an Xbox gamertag, and legacy gamertags have them.
+fn player_before_address<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
+    let (head, tail) = line.split_once("[/")?;
+    let after_address = tail.split_once("] ")?.1;
+    if !strip_ansi(after_address).trim_start().starts_with(marker) {
+        return None;
+    }
+    let clean = strip_ansi(head);
+    let name = after_log_prefix(&clean).trim();
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ' '))
+    {
+        return None;
+    }
+    let at = head.rfind(name)?;
+    Some(&head[at..at + name.len()])
+}
+
 fn player_before<'a>(line: &'a str, marker: &str) -> Option<&'a str> {
     let head = line.split_once(marker)?.0;
     let clean = strip_ansi(head);
@@ -644,4 +710,69 @@ mod tests {
         assert_eq!(max_players("Notch joined the game"), None);
         assert_eq!(max_players(""), None);
     }
+
+    // ─── PowerNukkitX ───────────────────────────────────────────────────────
+
+    const PNX_JOIN: &str = "[09:15:02] [Server thread/INFO]: Ada[/10.0.0.4:52134] logged in with entity id 12 at (world, 0.5, 64.0, 0.5)";
+    const PNX_LEFT: &str =
+        "[09:20:11] [Server thread/INFO]: Ada[/10.0.0.4:52134] logged out due to Disconnected";
+
+    #[test]
+    fn a_bedrock_join_names_the_player() {
+        assert_eq!(joined(PNX_JOIN), Some("Ada"));
+        assert_eq!(left(PNX_JOIN), None);
+    }
+
+    #[test]
+    fn a_bedrock_leave_names_the_player() {
+        assert_eq!(left(PNX_LEFT), Some("Ada"));
+        assert_eq!(joined(PNX_LEFT), None);
+    }
+
+    /// Xbox gamertags have them; Java names cannot.
+    #[test]
+    fn a_gamertag_with_a_space_survives() {
+        let line = "[09:15:02] [Server thread/INFO]: Ada Lovelace[/10.0.0.4:1] logged in with entity id 12 at (world, 0, 64, 0)";
+        assert_eq!(joined(line), Some("Ada Lovelace"));
+    }
+
+    /// The same forgery the vanilla parser is guarded against, in the shape
+    /// this engine writes. Chat is `<Ada> ...`, so the angle brackets are what
+    /// give it away.
+    #[test]
+    fn a_join_typed_into_chat_is_not_a_join() {
+        let line = "[09:15:02] [Server thread/INFO]: <Ada> Griefer[/1.2.3.4:1] logged in with entity id 5 at (world, 0, 0, 0)";
+        assert_eq!(joined(line), None);
+    }
+
+    /// An address in a line that is not about a player joining.
+    #[test]
+    fn an_unrelated_bracketed_address_is_not_a_join() {
+        assert_eq!(
+            joined("[09:15:02] [Server thread/INFO]: Query[/0.0.0.0:19132] is running"),
+            None
+        );
+    }
+
+    /// Verified against `nukkit.server.startFinished` in `language/eng`.
+    #[test]
+    fn powernukkitx_announces_ready_in_words_this_already_knew() {
+        assert!(is_ready(
+            "[09:15:02] [Server thread/INFO]: Done (12.345s)! For help, type \"help\" or \"?\""
+        ));
+    }
+
+    /// `nukkit.server.start`. The only place the Bedrock version appears — a
+    /// PowerNukkitX release number is not a Minecraft version.
+    #[test]
+    fn the_boot_banner_carries_the_bedrock_version() {
+        assert_eq!(
+            bedrock_version(
+                "[09:15:00] [Server thread/INFO]: Starting Minecraft: BE server version v1.21.100"
+            ),
+            Some("v1.21.100")
+        );
+        assert_eq!(bedrock_version("[09:15:00] [INFO]: Loading pnx.yml..."), None);
+    }
+
 }

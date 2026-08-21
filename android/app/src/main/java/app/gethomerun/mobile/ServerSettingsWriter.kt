@@ -77,7 +77,10 @@ object ServerSettingsWriter {
     ) {
         try {
             // 1. Read what the core asks for, with the encoding it asks for.
-            val existing = Core.configInputs(env)
+            // With the game type: a PowerNukkitX server reads a `pnx.yml`
+            // and its world config where a Java one reads `server.properties`,
+            // and asking without it gets the Java answer for both.
+            val existing = Core.configInputs(env, gameType)
                 .mapNotNull { input ->
                     val file = File(dir, input.path)
                     if (!file.exists()) return@mapNotNull null
@@ -104,8 +107,16 @@ object ServerSettingsWriter {
             )
 
             for (file in files) {
-                runCatching { File(dir, file.path).writeText(file.contents, file.encoding.charset) }
-                    .onFailure { Log.w(TAG, "$serverId: could not write ${file.path}: ${it.message}") }
+                runCatching {
+                    val target = File(dir, file.path)
+                    // A path with a directory in it is new here: PowerNukkitX
+                    // puts a world's seed in `worlds/<name>/config.json`, and
+                    // that directory does not exist before the first launch.
+                    // Without this the write throws and the seed is silently
+                    // lost.
+                    target.parentFile?.mkdirs()
+                    target.writeText(file.contents, file.encoding.charset)
+                }.onFailure { Log.w(TAG, "$serverId: could not write ${file.path}: ${it.message}") }
             }
             Log.i(TAG, "$serverId: wrote ${files.joinToString { it.path }}")
         } catch (err: Exception) {

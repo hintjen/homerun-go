@@ -146,11 +146,20 @@ object ServerHost {
     /**
      * What this device can run, for the core to route with.
      *
-     * Both facts are things only the host can know: whether a JRE was staged
-     * into the APK, and whether a Pumpkin binary shipped for this ABI.
+     * Every fact here is something only the host can know: whether a JRE was
+     * staged into the APK, and whether a Pumpkin binary shipped for this ABI.
+     *
+     * `nukkit` follows the JVM because PowerNukkitX *is* a jar — but it is
+     * declared rather than inferred by the core, so that a JVM host without
+     * PowerNukkitX support (the desktop) is not handed a game type it cannot
+     * configure. Here the two genuinely coincide.
      */
-    fun engines(): Core.HostEngines =
-        Core.HostEngines(jvm = java != null, pumpkin = pumpkin != null, bedrock = false)
+    fun engines(): Core.HostEngines = Core.HostEngines(
+        jvm = java != null,
+        pumpkin = pumpkin != null,
+        bedrock = false,
+        nukkit = java != null,
+    )
 
     /**
      * Choose the engine for a launch, and hold it for the run.
@@ -164,6 +173,9 @@ object ServerHost {
         verdict.refusal?.let { throw ServerBackendException.Engine(it) }
         val chosen = when (verdict.engine) {
             "pumpkin" -> pumpkin
+            // PowerNukkitX lands here too: it is a Bedrock server, but it is a
+            // jar, so the core serves it with the same engine a Java server
+            // gets and this needs no arm of its own.
             "jvm" -> java
             // `bedrock` is refused above on this device, so anything else is
             // the core naming an engine this host has not been taught about.

@@ -72,6 +72,33 @@ pub const PROGRAM_ARGS: &[&str] = &["nogui"];
 pub const EULA_FILE: &str = "eula.txt";
 pub const EULA_CONTENTS: &str = "eula=true\n";
 
+/// What PowerNukkitX's own main takes, and **every one of these is
+/// load-bearing**.
+///
+/// Without `--skip-setup` a first boot runs an interactive setup wizard that
+/// reads a language, a port and a gamemode off stdin. Without
+/// `--accept-license` — even *with* `--skip-setup` — it still prints the LGPL
+/// and waits for an answer. Either way a phone sits at `starting` forever with
+/// a healthy process that will never announce itself. Read out of
+/// `PowerNukkitX.java`, which branches on exactly these two.
+///
+/// `--disable-ansi` because the console is a pipe, not a terminal, and colour
+/// codes in a buffer the UI renders are noise the parser then has to strip.
+pub const NUKKIT_PROGRAM_ARGS: &[&str] = &[
+    "--skip-setup",
+    "--accept-license",
+    "--disable-ansi",
+    "--language",
+    "eng",
+];
+
+/// Forced off at the command line as well as in the config.
+///
+/// PowerNukkitX ships Sentry auto bug reporting **on**. A player's phone does
+/// not send crash reports to a third party, and a config key alone is not a
+/// guarantee — a world restore can bring another device's config file with it.
+pub const NUKKIT_JVM_OPTIONS: &[&str] = &["-DdisableSentry=true"];
+
 /// What a host does to a JVM at one rung of the stop ladder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -318,7 +318,9 @@ class JavaServerBackend(
         // Heap size, the flags that carry it, what Minecraft's own main takes
         // and the EULA file — all the core's. This file supplies the one
         // thing only it can know, which is how much RAM the device has.
-        val jvm = Core.jvmLaunch(config.memoryMb, deviceTotalMb())
+        // PowerNukkitX takes its own main, its own flags and no EULA, so the
+        // game type is part of the question — see `jvm::NUKKIT_PROGRAM_ARGS`.
+        val jvm = Core.jvmLaunch(config.memoryMb, deviceTotalMb(), config.gameType)
         lastHeapMb = jvm.heapMb
         // Both inputs and the answer, because a heap that comes out at the
         // floor is indistinguishable from one that was asked for — and the
@@ -329,8 +331,19 @@ class JavaServerBackend(
                 "(asked ${config.memoryMb}, device ${deviceTotalMb() ?: -1})",
         )
 
+        // A Bedrock server that happens to be a jar. Everything about the
+        // *shape* of the launch is the same — download, pick a runtime, read a
+        // `Main-Class`, spawn — and everything about its content differs, so
+        // it forks here rather than threading conditionals through the loader
+        // path it has nothing to do with.
+        val nukkit = runCatching { Core.isNukkit(config.gameType) }.getOrDefault(false)
+
         val prepared = runCatching {
             val bundled = JavaRuntime.available(context)
+
+            if (nukkit) {
+                return@runCatching prepareNukkit(serverId, dir, config, bundled)
+            }
 
             // A modpack goes first and outranks the server's own settings: the
             // manifest decides the loader, the Minecraft version *and* the
@@ -437,7 +450,11 @@ class JavaServerBackend(
             // `nativeServerManager.startServer`. The server will not boot
             // without it, and there is no acceptance step anywhere in the
             // product; `docs/android-server-backend.md` records that.
-            File(dir, jvm.eulaFile).writeText(jvm.eulaContents)
+            //
+            // Empty means this server has no EULA to accept, which is how the
+            // core says so for PowerNukkitX. Writing it unconditionally would
+            // create a file named `""`.
+            if (jvm.eulaFile.isNotEmpty()) File(dir, jvm.eulaFile).writeText(jvm.eulaContents)
 
             // Where the main class comes from is the last thing that differs
             // between the three shapes. A jar carries it in its manifest;
@@ -534,7 +551,11 @@ class JavaServerBackend(
         // not stop a server starting, and `sync` never throws for a mod-shaped
         // reason. Every loader gets this — a Paper server's plugins go through
         // exactly the same resolver as a Fabric server's mods.
-        ModInstaller.sync(
+        // Not for a Bedrock server: PowerNukkitX loads no Fabric mod and no
+        // Bukkit plugin, so the resolver would go looking for facets that do
+        // not exist — and `mods::sweep` deletes jars it does not recognise,
+        // which on this engine is all of them.
+        if (!nukkit) ModInstaller.sync(
             dir = dir,
             loader = prepared.loader,
             mcVersion = prepared.mcVersion,
@@ -569,7 +590,7 @@ class JavaServerBackend(
         // decoration on a world that exists without it; these jars *are* the
         // game, and a BedWars lobby with no BedWars in it is not a server
         // anybody asked for. See [PluginInstaller].
-        PluginInstaller.sync(
+        if (!nukkit) PluginInstaller.sync(
             dir = dir,
             loader = prepared.loader,
             env = config.settingsEnv,
@@ -696,6 +717,55 @@ class JavaServerBackend(
         order.at("announceRunning")
         startedAt = Instant.now()
         transition(serverId, ServerState.RUNNING)
+    }
+
+    /**
+     * The PowerNukkitX half of a launch.
+     *
+     * Everything the Java path does before spawning, minus everything that is
+     * about Java servers: no modpack, no loader, no installer, no argfile, no
+     * EULA. What is left is a jar with a `Main-Class`, which is why this ends
+     * up in the same [Launch] the other three shapes produce and why nothing
+     * downstream of it knows the difference.
+     *
+     * The version pin is the server's `VERSION`, which is the API's field and
+     * therefore the pin of record. `LATEST` or nothing means the newest stable
+     * release — the jar is data, so that is how a new PowerNukkitX reaches
+     * players without a store update, and naming a release here is how a bad
+     * one is stopped without one either.
+     */
+    private suspend fun prepareNukkit(
+        serverId: String,
+        dir: File,
+        config: ServerConfig,
+        bundled: List<Int>,
+    ): Launch {
+        val blessed = config.version
+            ?.takeIf { it.isNotBlank() && !it.equals("LATEST", ignoreCase = true) }
+
+        val downloaded = ServerJar.ensureNukkit(
+            dir = dir,
+            cacheDir = jarCacheDir(),
+            blessed = blessed,
+            bundled = bundled,
+            onLog = { note(serverId, it) },
+        )
+
+        val mainClass = JavaProcess.mainClassOf(downloaded.jar)
+            ?: throw ServerBackendException.Engine(Core.refusal("noMainClass"))
+
+        Log.i(TAG, "$serverId: PowerNukkitX ${downloaded.mcVersion} on Java ${downloaded.javaMajor}")
+
+        return Launch(
+            javaHome = unpackRuntime(downloaded.javaMajor),
+            libjvm = libjvmOrRefuse(downloaded.javaMajor),
+            classpath = listOf(downloaded.jar),
+            mainClass = mainClass,
+            // Not a loader anyone can install; the field is what `ModInstaller`
+            // would resolve against, and nothing calls it for this game type.
+            loader = "vanilla",
+            mcVersion = downloaded.mcVersion,
+        )
     }
 
     /**

@@ -979,11 +979,25 @@ object Core {
      * two. A JRE staged in the APK and a Pumpkin binary in `nativeLibraryDir`
      * are independent facts, and either can be missing from a build.
      */
-    data class HostEngines(val jvm: Boolean, val pumpkin: Boolean, val bedrock: Boolean = false) {
+    data class HostEngines(
+        val jvm: Boolean,
+        val pumpkin: Boolean,
+        val bedrock: Boolean = false,
+        /**
+         * PowerNukkitX: a Bedrock server that is a jar, so it runs on the same
+         * JVM as a Java server.
+         *
+         * Declared rather than inferred from [jvm]. Every host with a JVM would
+         * otherwise be offered a game type it has no config writer for — see
+         * `hosting::Host::nukkit`.
+         */
+        val nukkit: Boolean = false,
+    ) {
         fun json(): JsonObject = buildJsonObject {
             put("jvm", jvm)
             put("pumpkin", pumpkin)
             put("bedrock", bedrock)
+            put("nukkit", nukkit)
         }
     }
 
@@ -1031,6 +1045,34 @@ object Core {
         call("minecraft.hosting.needsJvm", buildJsonObject {
             put("gameType", gameType)
         }).jsonPrimitive.boolean
+
+    /**
+     * Whether this game type is PowerNukkitX.
+     *
+     * Asked of the core rather than compared here, for the reason every other
+     * game-type test is: there are two spellings, the reduced one and the
+     * verbatim one, and a host that knows only one of them is a host that
+     * launches a Bedrock server as a Java one.
+     */
+    fun isNukkit(gameType: String): Boolean =
+        call("minecraft.hosting.isNukkit", buildJsonObject {
+            put("gameType", gameType)
+        }).jsonPrimitive.boolean
+
+    /**
+     * Which PowerNukkitX release to run, out of the GitHub releases array.
+     *
+     * [blessed] is the API's pin. It is what makes a bad release stoppable
+     * without a store update: the jar is data, so nothing else sits between
+     * PowerNukkitX publishing and every phone running it.
+     */
+    fun nukkitRelease(releases: JsonElement, blessed: String? = null): ServerJar.Artifact =
+        ServerJar.Artifact.fromCore(
+            call("minecraft.nukkit.release", buildJsonObject {
+                put("releases", releases)
+                blessed?.let { put("blessed", it) }
+            }).jsonObject
+        )
 
     /** One step of a launch, and whether a pending stop is honoured before it. */
     data class Step(val name: String, val checkpoint: Boolean)
@@ -1273,10 +1315,18 @@ object Core {
     data class Identity(val name: String, val id: String)
 
     /** Which files to read, and how to decode each. */
-    fun configInputs(env: JsonObject, game: String = MINECRAFT): List<ConfigInput> =
+    fun configInputs(
+        env: JsonObject,
+        gameType: String = "java",
+        game: String = MINECRAFT,
+    ): List<ConfigInput> =
         call("game.configInputs", buildJsonObject {
             put("game", game)
             put("env", env)
+            // Not optional in practice: a PowerNukkitX server reads a `pnx.yml`
+            // where a Java one reads `server.properties`, and asking without
+            // the game type gets the Java answer for both.
+            put("gameType", gameType)
         }).jsonArray.map {
             val entry = it.jsonObject
             ConfigInput(
@@ -1483,6 +1533,13 @@ object Core {
         val options: List<String>,
         /** What Minecraft's own main takes. */
         val programArgs: List<String>,
+        /**
+         * Empty when this server has no EULA to accept.
+         *
+         * `AcceptEula` is in every launch plan on purpose, so "there is no
+         * file" is said here rather than by the plan growing a branch. A caller
+         * that writes it unconditionally creates a file named `""`.
+         */
         val eulaFile: String,
         val eulaContents: String,
     )
@@ -1494,10 +1551,13 @@ object Core {
      * null on a machine with no such limit. The core decides what fraction of
      * it is safe; this host only measures it.
      */
-    fun jvmLaunch(memoryMb: Int, deviceTotalMb: Int?): Launch =
+    fun jvmLaunch(memoryMb: Int, deviceTotalMb: Int?, gameType: String = "java"): Launch =
         call("minecraft.jvm.launch", buildJsonObject {
             put("memoryMb", memoryMb)
             deviceTotalMb?.let { put("deviceTotalMb", it) }
+            // PowerNukkitX takes a different main, different flags, and no
+            // EULA — see `jvm::NUKKIT_PROGRAM_ARGS`.
+            put("gameType", gameType)
         }).jsonObject.let { obj ->
             fun strings(key: String) =
                 (obj[key] as? JsonArray).orEmpty().mapNotNull { it.jsonPrimitive.contentOrNull }
@@ -1686,6 +1746,14 @@ object Core {
         val left: String?,
         /** The player ceiling, when the line announced one. */
         val maxPlayers: Int?,
+        /**
+         * The game version this line announced.
+         *
+         * PowerNukkitX only, and the only trustworthy source there: the jar is
+         * a *PowerNukkitX* release number, and the Bedrock version it
+         * implements appears nowhere but the banner it prints about itself.
+         */
+        val announcedVersion: String? = null,
     )
 
     fun classify(line: String): Line {
@@ -1698,6 +1766,7 @@ object Core {
             joined = name("joined"),
             left = name("left"),
             maxPlayers = reply["maxPlayers"]?.jsonPrimitive?.intOrNull,
+            announcedVersion = name("announcedVersion"),
         )
     }
 

@@ -74,6 +74,15 @@ pub struct Host {
     /// This device can run a Bedrock server. False on both phones; true on the
     /// desktop, which has BDS.
     pub bedrock: bool,
+    /// This device can run PowerNukkitX: a Bedrock server that is a jar, so it
+    /// lands on the same JVM a Java server does.
+    ///
+    /// True on Android, false everywhere else — and a *declaration*, not
+    /// something inferred from [`Host::jvm`]. The desktop has a JVM and no
+    /// PowerNukkitX support at all, so inferring it would offer the desktop a
+    /// game type it has no config writer for, which is the exact mistake
+    /// [`Host::pumpkin`] exists to prevent.
+    pub nukkit: bool,
 }
 
 impl Default for Host {
@@ -85,6 +94,7 @@ impl Default for Host {
             jvm: false,
             pumpkin: true,
             bedrock: false,
+            nukkit: false,
         }
     }
 }
@@ -105,6 +115,8 @@ struct HostWire {
     engine: Option<Engine>,
     #[serde(default)]
     bedrock: bool,
+    #[serde(default)]
+    nukkit: bool,
 }
 
 impl From<HostWire> for Host {
@@ -117,6 +129,7 @@ impl From<HostWire> for Host {
                 jvm: wire.jvm.unwrap_or(false),
                 pumpkin: wire.pumpkin.unwrap_or(false),
                 bedrock: wire.bedrock,
+                nukkit: wire.nukkit,
             };
         }
         match wire.engine {
@@ -125,15 +138,18 @@ impl From<HostWire> for Host {
                 jvm: true,
                 pumpkin: false,
                 bedrock: wire.bedrock,
+                nukkit: wire.nukkit,
             },
             // "I link my engine" meant Pumpkin, every time it was sent.
             Some(Engine::Linked) => Host {
                 jvm: false,
                 pumpkin: true,
                 bedrock: wire.bedrock,
+                nukkit: wire.nukkit,
             },
             None => Host {
                 bedrock: wire.bedrock,
+                nukkit: wire.nukkit,
                 ..Host::default()
             },
         }
@@ -217,6 +233,35 @@ pub fn serves(host: Host, server: &Server) -> Result<Served, Refusal> {
                 "This is a Bedrock server, and this device can only host Java Edition.",
             ))
         };
+    }
+
+    // Ahead of the generic JVM arm below, and that ordering is the whole
+    // change: with no arm at all this game type already reaches `Served::Jvm`
+    // on any host with a JVM — including the desktop, which has no
+    // PowerNukkitX support. The refusal is what is being added here, not the
+    // routing.
+    if is_nukkit(game_type) {
+        // Both flags. `nukkit` is the declaration that this host knows how to
+        // configure one, and `jvm` is what actually runs it — it is a jar, so
+        // a host claiming the first without the second has nothing to serve it
+        // with. They coincide on Android, and a rule that only holds because
+        // two inputs happen to agree is not a rule.
+        if !host.nukkit || !host.jvm {
+            return Err(Refusal::new(
+                "engine-unavailable",
+                "This device can't host this kind of server.",
+            ));
+        }
+        // PowerNukkitX is a Bedrock server. It loads no Fabric mod and no
+        // Bukkit plugin, and nothing offers a `TYPE` for this game type — so
+        // one that arrived anyway came from somewhere that did not know that.
+        if loader_of(&server.env) != "vanilla" {
+            return Err(Refusal::new(
+                "mods-unsupported",
+                "This is a Bedrock server, so it can't load Java mods or plugins.",
+            ));
+        }
+        return Ok(Served::Jvm);
     }
 
     let engine = if is_pumpkin(game_type) {
@@ -307,6 +352,17 @@ pub fn is_pumpkin(game_type: &str) -> bool {
     matches!(game_type, "pumpkin" | "native-pumpkin")
 }
 
+/// Both spellings, for the same reason as [`is_bedrock`].
+///
+/// PowerNukkitX is a Bedrock server written in Java, so it is named by the game
+/// type rather than by `TYPE` — it is different server software, not a loader
+/// on top of some. That also makes it immutable in the places that matter: a
+/// world written by PowerNukkitX is a LevelDB Bedrock world and no Java engine
+/// can open it.
+pub fn is_nukkit(game_type: &str) -> bool {
+    matches!(game_type, "powernukkitx" | "native-powernukkitx")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,16 +372,19 @@ mod tests {
         jvm: false,
         pumpkin: true,
         bedrock: false,
+        nukkit: false,
     };
     const ANDROID: Host = Host {
         jvm: true,
         pumpkin: true,
         bedrock: false,
+        nukkit: true,
     };
     const DESKTOP: Host = Host {
         jvm: true,
         pumpkin: false,
         bedrock: true,
+        nukkit: false,
     };
 
     fn server(game_type: &str, env: Value) -> Server {
@@ -520,7 +579,7 @@ mod tests {
 
         // And the new spelling wins outright when both are somehow present.
         let both: Host =
-            serde_json::from_value(json!({ "engine": "linked", "jvm": true, "pumpkin": true }))
+            serde_json::from_value(json!({ "engine": "linked", "jvm": true, "pumpkin": true, "nukkit": true }))
                 .unwrap();
         assert_eq!(both, ANDROID);
     }
@@ -565,4 +624,108 @@ mod tests {
             }
         }
     }
+
+    // ─── PowerNukkitX ───────────────────────────────────────────────────────
+
+    /// It is a jar, so it lands on the JVM the phone already runs.
+    #[test]
+    fn android_serves_powernukkitx_on_the_jvm() {
+        assert_eq!(
+            serves(ANDROID, &vanilla("native-powernukkitx")),
+            Ok(Served::Jvm)
+        );
+    }
+
+    /// The point of `Host::nukkit`. The desktop has a JVM, so without an
+    /// explicit refusal this game type would fall through the generic arm
+    /// below and be served by an engine with no config writer for it.
+    #[test]
+    fn a_jvm_host_that_does_not_declare_it_still_refuses() {
+        let r = refuse(DESKTOP, &vanilla("native-powernukkitx")).unwrap();
+        assert_eq!(r.code, "engine-unavailable");
+    }
+
+    /// It is a jar. A host that declares it and has no JVM has nothing to run
+    /// it with, however it came to be configured that way.
+    #[test]
+    fn declaring_it_without_a_jvm_is_still_a_refusal() {
+        let host = Host {
+            jvm: false,
+            pumpkin: true,
+            bedrock: false,
+            nukkit: true,
+        };
+        assert_eq!(
+            refuse(host, &vanilla("native-powernukkitx")).unwrap().code,
+            "engine-unavailable"
+        );
+    }
+
+    #[test]
+    fn ios_cannot_serve_it_either() {
+        let r = refuse(IOS, &vanilla("native-powernukkitx")).unwrap();
+        assert_eq!(r.code, "engine-unavailable");
+    }
+
+    /// Nothing offers a `TYPE` for this game type, so one that arrived came
+    /// from somewhere that did not know it is a Bedrock server.
+    #[test]
+    fn powernukkitx_refuses_a_java_loader() {
+        let r = refuse(
+            ANDROID,
+            &server("native-powernukkitx", json!({ "TYPE": "PAPER" })),
+        )
+        .unwrap();
+        assert_eq!(r.code, "mods-unsupported");
+    }
+
+    /// Both spellings, the way `is_pumpkin` and `is_bedrock` take both.
+    #[test]
+    fn the_reduced_spelling_is_recognised() {
+        assert!(is_nukkit("powernukkitx"));
+        assert!(is_nukkit("native-powernukkitx"));
+        assert!(!is_nukkit("nukkit"));
+        assert!(!is_nukkit("native-bedrock"));
+    }
+
+    /// It has a jar and a `Main-Class`, unlike the other two game types named
+    /// by their server software — so the launch plan keeps `EnsureJar` and
+    /// `ResolveMainClass`, and it gets them without `needs_jvm` changing.
+    #[test]
+    fn powernukkitx_needs_a_jvm() {
+        assert!(needs_jvm("native-powernukkitx"));
+        assert!(needs_jvm("powernukkitx"));
+    }
+
+    /// Adding an arm ahead of the others is exactly how the others get broken.
+    #[test]
+    fn the_existing_game_types_are_untouched() {
+        assert_eq!(serves(ANDROID, &vanilla("native")), Ok(Served::Jvm));
+        assert_eq!(
+            serves(ANDROID, &vanilla("native-pumpkin")),
+            Ok(Served::Pumpkin)
+        );
+        assert_eq!(serves(IOS, &vanilla("native")), Ok(Served::Pumpkin));
+        assert_eq!(
+            serves(DESKTOP, &vanilla("native-bedrock")),
+            Ok(Served::Bedrock)
+        );
+        assert_eq!(
+            refuse(ANDROID, &vanilla("native-bedrock")).unwrap().code,
+            "bedrock-unsupported"
+        );
+    }
+
+    /// A host that predates the field says nothing and must not be handed a
+    /// game type it cannot configure.
+    #[test]
+    fn a_host_that_does_not_mention_it_does_not_get_it() {
+        let host: Host = serde_json::from_value(json!({ "jvm": true, "pumpkin": true })).unwrap();
+        assert!(!host.nukkit);
+        assert_eq!(
+            refuse(host, &vanilla("native-powernukkitx")).unwrap().code,
+            "engine-unavailable"
+        );
+    }
+
 }

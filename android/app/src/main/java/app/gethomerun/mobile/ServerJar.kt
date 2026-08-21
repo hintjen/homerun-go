@@ -83,6 +83,27 @@ object ServerJar {
     private const val PAPER_BUILDS = "https://fill.papermc.io/v3/projects/paper/versions"
 
     /**
+     * PowerNukkitX publishes one asset per release, and this is the list.
+     *
+     * Unauthenticated, which GitHub rate-limits by IP — acceptable because it
+     * is asked once per launch and the failure falls back to the jar on disk.
+     */
+    private const val NUKKIT_RELEASES =
+        "https://api.github.com/repos/PowerNukkitX/PowerNukkitX/releases"
+
+    /**
+     * The cache key a PowerNukkitX jar is filed under.
+     *
+     * Not one of the loaders: it is different server software, not something
+     * anyone can put on a Java server. It only has to be a name no Mojang jar
+     * shares, so a PowerNukkitX 3.0.3 and a Minecraft 3.0.3 cannot collide.
+     * Matches `nukkit::LOADER`.
+     */
+    private const val NUKKIT_LOADER = "powernukkitx"
+
+    private const val NUKKIT_JAVA = 21
+
+    /**
      * Honest, and accepted by every endpoint here — checked against Mojang and
      * PaperMC. The desktop spoofs Chrome; that was for endpoints that 403 an
      * unfamiliar agent, and none of these do. PaperMC's docs ask for a
@@ -213,6 +234,87 @@ object ServerJar {
         val javaMajor = runCatching { Core.selectRuntime(artifact.toJson(), loader, bundled) }
             .getOrElse { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
 
+        place(dir, cacheDir, artifact, javaMajor, onLog)
+    }
+
+    /**
+     * The PowerNukkitX jar, which resolves from somewhere else entirely.
+     *
+     * Not a Mojang manifest and not a loader: one GitHub release with one
+     * asset. Everything after the resolution is the same — the shared cache,
+     * the digest, the resume, the marker — so only this half is its own.
+     *
+     * [blessed] is the API pin. Absent means the newest stable release, which
+     * is what makes a new PowerNukkitX reach players with no store update; the
+     * pin is what makes a bad one stoppable the same way.
+     */
+    suspend fun ensureNukkit(
+        dir: File,
+        cacheDir: File,
+        blessed: String?,
+        bundled: List<Int>,
+        onLog: (String) -> Unit,
+    ): Prepared = withContext(Dispatchers.IO) {
+        val jar = File(dir, JAR_NAME)
+        val onDisk = readMeta(dir)
+
+        val artifact = try {
+            Core.nukkitRelease(fetchJson(NUKKIT_RELEASES), blessed)
+        } catch (err: Exception) {
+            // Same rule as above: a phone on a LAN with no internet can still
+            // serve the world it already has, so only fail when there is
+            // nothing here to fall back to.
+            if (jar.isFile && onDisk?.loader == NUKKIT_LOADER) {
+                Log.w(TAG, "PowerNukkitX lookup failed (${err.message}) — using the jar on disk")
+                onLog(
+                    "[Homerun] Could not reach the release servers — starting the " +
+                        "PowerNukkitX ${onDisk.version} already downloaded."
+                )
+                return@withContext Prepared(jar, nukkitRuntime(bundled), onDisk.version)
+            }
+            throw ServerBackendException.Engine(
+                "Could not look up the PowerNukkitX server: ${err.message ?: "no connection"}"
+            )
+        }
+
+        // A moved pin is worth a console line: it is the only evidence a player
+        // has that their server changed underneath them, and the desktop logs
+        // the same transition for Bedrock Dedicated Server.
+        if (onDisk?.loader == NUKKIT_LOADER && onDisk.version != artifact.version) {
+            onLog("[Homerun] PowerNukkitX update: ${onDisk.version} to ${artifact.version}.")
+        }
+
+        place(dir, cacheDir, artifact, nukkitRuntime(bundled), onLog)
+    }
+
+    /**
+     * Java 21, exactly. Not a floor picked from an artifact.
+     *
+     * PowerNukkitX targets 21, and 25 removes the `sun.misc.Unsafe` memory
+     * access Netty and fastutil still reach for. [Core.selectRuntimeFor] is the
+     * right question here because there is no Mojang artifact to read a level
+     * out of — only a number.
+     */
+    private fun nukkitRuntime(bundled: List<Int>): Int =
+        runCatching { Core.selectRuntimeFor(NUKKIT_JAVA, "PowerNukkitX", "vanilla", bundled) }
+            .getOrElse { throw ServerBackendException.Engine(it.message ?: "Unsupported runtime.") }
+
+    /**
+     * Put a resolved artifact in place, wherever it was resolved from.
+     *
+     * The cache, the adoption rules, the resumed download and the marker — the
+     * half of [ensure] that does not care what published the jar.
+     */
+    private suspend fun place(
+        dir: File,
+        cacheDir: File,
+        artifact: Artifact,
+        javaMajor: Int,
+        onLog: (String) -> Unit,
+    ): Prepared = withContext(Dispatchers.IO) {
+        val jar = File(dir, JAR_NAME)
+        val onDisk = readMeta(dir)
+
         val entry = Core.jarCacheKey(artifact.toJson())?.let { File(cacheDir, it) }
 
         // Whether the jar already here can be kept is the core's call, and it
@@ -339,9 +441,13 @@ object ServerJar {
         return bundled.filter { it >= required }.minOrNull() ?: newest
     }
 
-    private fun label(artifact: Artifact): String =
-        if (artifact.loader == "vanilla") "Minecraft ${artifact.version}"
-        else "${artifact.loader.replaceFirstChar(Char::uppercase)} for Minecraft ${artifact.version}"
+    private fun label(artifact: Artifact): String = when (artifact.loader) {
+        "vanilla" -> "Minecraft ${artifact.version}"
+        // Its version is its own, not a Minecraft one — saying "for Minecraft
+        // 3.0.3" would name a Minecraft release that does not exist.
+        NUKKIT_LOADER -> "PowerNukkitX ${artifact.version}"
+        else -> "${artifact.loader.replaceFirstChar(Char::uppercase)} for Minecraft ${artifact.version}"
+    }
 
     // -----------------------------------------------------------------------
     // Resolution

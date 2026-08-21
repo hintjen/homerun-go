@@ -871,8 +871,18 @@ launches and loads the native library; the last mile is untested.
 
 ### The EULA is accepted for the user
 
-`JavaServerBackend.start` writes `eula=true` on **every** start, which is
-byte-for-byte what the desktop does in `nativeServerManager.startServer`.
+`JavaServerBackend.start` writes `eula=true` on **every** start of a Mojang-
+derived server, which is byte-for-byte what the desktop does in
+`nativeServerManager.startServer`.
+
+Every start of one. There is now a game type on this backend that has no
+Mojang EULA at all — PowerNukkitX, which takes its own licence on the command
+line — and the way that is said is the core answering `minecraft.jvm.launch`
+with an **empty** `eulaFile`. `AcceptEula` stays in every launch plan on
+purpose (`launch.rs` explains why), so the host skips the write when there is
+no file to write rather than the plan growing a branch. A host that wrote it
+unconditionally would create a file called `""`. See
+[`android-bedrock.md`](./android-bedrock.md).
 
 Worth being explicit about what that means: Mojang's EULA binds the person
 operating the server, and no Homerun client — desktop, web or mobile — shows

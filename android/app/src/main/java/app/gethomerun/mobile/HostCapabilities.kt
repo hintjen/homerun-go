@@ -55,6 +55,18 @@ data class HostCapabilities(
      * and the UI reads absent as false.
      */
     val pumpkinServers: Boolean,
+    /**
+     * This host can create and run a **PowerNukkitX** server: a Bedrock server
+     * written in Java, so it runs on the JVM this host already has.
+     *
+     * Where it is true it *replaces* the Bedrock tile rather than joining it.
+     * That is the point: the wizard has offered Bedrock on Android all along —
+     * it gates on `serverBackends` containing `javaNative`, which this host
+     * declares — so a player could create a `native-bedrock` server that this
+     * device then refused to start. Offering both would be two names for one
+     * thing on a device that can only do one of them.
+     */
+    val powernukkitxServers: Boolean,
 ) {
     companion object {
         /**
@@ -70,6 +82,11 @@ data class HostCapabilities(
         val ANDROID = HostCapabilities(
             platform = "android",
             serverBackends = listOf("javaNative", "pumpkin"),
+            // The JVM staged in this APK is what runs it, so this coincides
+            // with `jvm` on this platform. It is still declared rather than
+            // inferred, because a host with a JVM and no PowerNukkitX support
+            // is a real thing — the desktop is one.
+            powernukkitxServers = true,
             installation = false,
             moveInstallation = false,
             clientLauncher = false,

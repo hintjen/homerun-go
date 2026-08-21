@@ -36,8 +36,8 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{
-    self, account, argfile, crossplay, hosting, jar, jvm, loader, modjar, modpack, mods, ops,
-    settings,
+    self, account, argfile, crossplay, hosting, jar, jvm, loader, modjar, modpack, mods, nukkit,
+    ops, settings,
 };
 use homerun_core::reporting::{app_error, crash, minigame, stats};
 use homerun_core::{
@@ -861,6 +861,30 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u32);
             let heap = jvm::heap_mb(requested, total);
+            let game_type = optional_text("gameType").unwrap_or_default();
+
+            // PowerNukkitX is a different server that happens to take a JVM, so
+            // everything past the heap differs: its own main takes a licence
+            // and a skip-the-wizard flag instead of `nogui`, Sentry is turned
+            // off at the command line, and there is no Mojang EULA to write.
+            //
+            // An **empty `eulaFile`** is how "write no EULA" is said, rather
+            // than `launch::plan` growing a branch: `AcceptEula` is in every
+            // plan on purpose, and the host skips the write when there is no
+            // file to write. A host that predates this sends no game type and
+            // gets exactly what it got before.
+            if hosting::is_nukkit(&game_type) {
+                let mut options = jvm::heap_options(heap);
+                options.extend(jvm::NUKKIT_JVM_OPTIONS.iter().map(|o| o.to_string()));
+                return Ok(json!({
+                    "heapMb": heap,
+                    "options": options,
+                    "programArgs": jvm::NUKKIT_PROGRAM_ARGS,
+                    "eulaFile": "",
+                    "eulaContents": "",
+                }));
+            }
+
             Ok(json!({
                 "heapMb": heap,
                 "options": jvm::heap_options(heap),
@@ -941,6 +965,23 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         // one thing that knows: the game type. Feeds `needsJvm` above.
         "minecraft.hosting.needsJvm" => Ok(Value::Bool(hosting::needs_jvm(&text("gameType")?))),
 
+        // Whether a game type is PowerNukkitX, in either spelling. Asked
+        // rather than compared in the host, for the reason `is_pumpkin` is:
+        // a host that knows one spelling launches a Bedrock server as a Java
+        // one when it meets the other.
+        "minecraft.hosting.isNukkit" => {
+            Ok(Value::Bool(hosting::is_nukkit(&text("gameType")?)))
+        }
+
+        // The PowerNukkitX release to run. `blessed` is the API's pin, which is
+        // what makes a bad release stoppable without a store update — see
+        // `nukkit::release`.
+        "minecraft.nukkit.release" => {
+            nukkit::release(field("releases")?, optional_text("blessed").as_deref())
+                .map_err(|e| e.to_string())
+                .and_then(|a| serde_json::to_value(a).map_err(|e| e.to_string()))
+        }
+
         // One wording per refusal, so two apps turning down the same thing say
         // the same sentence. An unknown kind is an error rather than a shrug:
         // a host asking for wording that does not exist would otherwise show
@@ -995,8 +1036,14 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             serde_json::to_value(meaning).map_err(|e| e.to_string())
         }
 
+        // `configInputsFor` in all but name: the game type decides which
+        // files matter, and a host that does not send one gets the answer it
+        // always got.
         "game.configInputs" => {
-            let inputs = resolve_game(&args)?.config_inputs(field("env")?);
+            let inputs = resolve_game(&args)?.config_inputs_for(
+                field("env")?,
+                optional_text("gameType").as_deref().unwrap_or("java"),
+            );
             serde_json::to_value(inputs).map_err(|e| e.to_string())
         }
 
@@ -3061,4 +3108,205 @@ geyser"
             );
         }
     }
+
+    // ─── PowerNukkitX ───────────────────────────────────────────────────────
+
+    /// The whole point of threading a game type through this call: a different
+    /// main, different flags, and no EULA file to write.
+    #[test]
+    fn the_powernukkitx_command_line_is_not_minecrafts() {
+        let launch = ok(
+            "minecraft.jvm.launch",
+            json!({ "memoryMb": 2048, "gameType": "native-powernukkitx" }),
+        );
+        let args: Vec<&str> = launch["programArgs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        // Without both of these a first boot reads an answer off stdin and a
+        // phone sits at `starting` forever.
+        assert!(args.contains(&"--skip-setup"), "{args:?}");
+        assert!(args.contains(&"--accept-license"), "{args:?}");
+        assert!(!args.contains(&"nogui"), "{args:?}");
+
+        let options: Vec<&str> = launch["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(options.contains(&"-Xmx2048M"), "{options:?}");
+        assert!(options.contains(&"-DdisableSentry=true"), "{options:?}");
+
+        // Empty means "write none". A host that writes it unconditionally
+        // creates a file with no name.
+        assert_eq!(launch["eulaFile"], "");
+    }
+
+    /// A host that predates the game type argument gets exactly what it got.
+    #[test]
+    fn a_launch_with_no_game_type_is_unchanged() {
+        let launch = ok("minecraft.jvm.launch", json!({ "memoryMb": 2048 }));
+        assert_eq!(launch["programArgs"][0], "nogui");
+        assert_eq!(launch["eulaFile"], "eula.txt");
+        assert_eq!(launch["eulaContents"], "eula=true\n");
+    }
+
+    /// The host used to answer `java` for everything, and a Bedrock server
+    /// behind a TCP tunnel runs, goes green, and cannot be joined.
+    #[test]
+    fn the_exposure_follows_the_game_type() {
+        assert_eq!(
+            ok("minecraft.exposure", json!({ "gameType": "native-powernukkitx" })),
+            "bedrock"
+        );
+        assert_eq!(ok("minecraft.exposure", json!({ "gameType": "native" })), "java");
+        assert_eq!(
+            ok("minecraft.exposure", json!({ "gameType": "native-crossplay" })),
+            "crossplay"
+        );
+    }
+
+    #[test]
+    fn a_host_can_ask_whether_a_game_type_is_powernukkitx() {
+        assert_eq!(
+            ok("minecraft.hosting.isNukkit", json!({ "gameType": "native-powernukkitx" })),
+            true
+        );
+        assert_eq!(
+            ok("minecraft.hosting.isNukkit", json!({ "gameType": "native-bedrock" })),
+            false
+        );
+    }
+
+    /// Android declares it, so the launch is routed rather than refused.
+    #[test]
+    fn an_android_host_serves_powernukkitx() {
+        let reply = ok(
+            "minecraft.hosting.serves",
+            json!({
+                "host": { "jvm": true, "pumpkin": true, "nukkit": true },
+                "server": { "gameType": "native-powernukkitx", "env": {} },
+            }),
+        );
+        assert_eq!(reply["engine"], "jvm");
+        assert!(reply["refusal"].is_null());
+    }
+
+    /// A host that does not mention the field is not handed a game type it has
+    /// no config writer for.
+    #[test]
+    fn a_jvm_host_that_does_not_declare_it_is_refused() {
+        let reply = ok(
+            "minecraft.hosting.serves",
+            json!({
+                "host": { "jvm": true, "pumpkin": false, "bedrock": true },
+                "server": { "gameType": "native-powernukkitx", "env": {} },
+            }),
+        );
+        assert!(reply["engine"].is_null());
+        assert_eq!(reply["refusal"]["code"], "engine-unavailable");
+    }
+
+    #[test]
+    fn the_config_files_follow_the_game_type() {
+        let files = ok(
+            "game.configFiles",
+            json!({
+                "context": {
+                    "env": { "SERVER_NAME": "Ada" },
+                    "game_type": "native-powernukkitx",
+                    "port": 19140,
+                    "bind_address": "127.0.0.1",
+                },
+            }),
+        );
+        let paths: Vec<&str> = files
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"pnx.yml"), "{paths:?}");
+        assert!(!paths.contains(&"server.properties"), "{paths:?}");
+    }
+
+    #[test]
+    fn the_config_inputs_follow_the_game_type() {
+        let inputs = ok(
+            "game.configInputs",
+            json!({ "env": {}, "gameType": "native-powernukkitx" }),
+        );
+        let paths: Vec<&str> = inputs
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert!(paths.contains(&"pnx.yml"), "{paths:?}");
+
+        // And a host that sends none still gets the Java answer.
+        let old = ok("game.configInputs", json!({ "env": {} }));
+        let old_paths: Vec<&str> = old
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["path"].as_str().unwrap())
+            .collect();
+        assert!(old_paths.contains(&"server.properties"), "{old_paths:?}");
+    }
+
+    #[test]
+    fn a_powernukkitx_release_resolves_to_a_downloadable_jar() {
+        let artifact = ok(
+            "minecraft.nukkit.release",
+            json!({
+                "releases": [{
+                    "tag_name": "v3.0.3",
+                    "published_at": "2026-08-14T10:00:00Z",
+                    "assets": [{
+                        "name": "powernukkitx.jar",
+                        "browser_download_url": "https://example/pnx.jar",
+                        "size": 60139230,
+                    }],
+                }],
+            }),
+        );
+        assert_eq!(artifact["version"], "3.0.3");
+        assert_eq!(artifact["loader"], "powernukkitx");
+        assert_eq!(artifact["required_java"], 21);
+        assert_eq!(artifact["url"], "https://example/pnx.jar");
+    }
+
+    #[test]
+    fn a_release_pin_that_does_not_exist_is_an_error_a_host_can_show() {
+        let message = err(
+            "minecraft.nukkit.release",
+            json!({ "releases": [], "blessed": "3.0.3" }),
+        );
+        assert!(message.contains("3.0.3"), "{message}");
+    }
+
+    /// The banner is the only place a Bedrock version appears — the jar is a
+    /// PowerNukkitX release number.
+    #[test]
+    fn a_classified_line_carries_an_announced_version() {
+        let meaning = ok(
+            "game.classify",
+            json!({ "line": "[09:15:00] [Server thread/INFO]: Starting Minecraft: BE server version v1.21.100" }),
+        );
+        assert_eq!(meaning["announcedVersion"], "v1.21.100");
+    }
+
+    #[test]
+    fn a_bedrock_join_is_classified() {
+        let meaning = ok(
+            "game.classify",
+            json!({ "line": "[09:15:02] [Server thread/INFO]: Ada[/10.0.0.4:52134] logged in with entity id 12 at (world, 0, 64, 0)" }),
+        );
+        assert_eq!(meaning["joined"], "Ada");
+    }
+
 }
