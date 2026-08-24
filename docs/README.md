@@ -51,7 +51,7 @@ discoverable from the Console.
 - Publishing by hand, and why saving a release is not rolling one out
 - The CI workflow, its five secrets, and the two things still blocking it
 - What Play asks for: foreground-service review, account deletion, data safety
-- The targetSdk 36 deadline, and what any of this actually costs
+- Play's deadlines, which are met, and what any of this actually costs
 
 **Read this for**: Shipping a build, setting up CI publishing, or answering a
 policy questionnaire.

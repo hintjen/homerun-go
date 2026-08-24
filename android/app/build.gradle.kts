@@ -76,7 +76,7 @@ val releaseJavaRuntimes = listOf(21, 25)
 
 android {
     namespace = "app.gethomerun.mobile"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "app.gethomerun.mobile"
@@ -84,7 +84,7 @@ android {
         // The W^X restriction that forces the JRE into jniLibs starts at 29,
         // but honouring it unconditionally is simpler than branching.
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
 
         // Play refuses an upload whose versionCode it has already seen, so the
         // number has to be settable from CI:
