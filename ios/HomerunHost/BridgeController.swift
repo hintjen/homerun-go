@@ -1,3 +1,4 @@
+import Darwin
 import UIKit
 import WebKit
 
@@ -24,9 +25,16 @@ final class BridgeController: NSObject, BridgeEventSink {
 
     private let router: BridgeRouter
 
-    /// The engine, for one question this class asks it: is this device
-    /// hosting? A staged bundle waits until it is not — see
-    /// ``applyStagedBundle(_:)``.
+    /// The engine, for the one question this class asks it: is this device
+    /// hosting?
+    ///
+    /// Two callers, both long after init — a staged bundle waits until this
+    /// answers no (``applyStagedBundle(_:)``), and the navigation delegate
+    /// stamps the answer onto `host:recovered_from_renderer_death`. The `on*`
+    /// closures set on the backend at init need no stored reference; these do.
+    ///
+    /// No cycle: every closure it holds captures `self` weakly, and
+    /// `AppDelegate` owns the backend for the life of the process either way.
     private let backend: PumpkinBackend
 
     /// The scheme the page has resolved, or nil until it says. Nil means the
@@ -41,11 +49,33 @@ final class BridgeController: NSObject, BridgeEventSink {
 
     /// When the process started, in epoch milliseconds, for `host:page_ready`.
     ///
-    /// Set by `AppDelegate` at the top of `didFinishLaunching`. The default is
-    /// a fallback for any path that reaches a controller without going through
-    /// there, and would read as a suspiciously fast launch rather than as a
-    /// crash, which is the right way round for a diagnostic.
-    static var launchedAtMs: Double = Date().timeIntervalSince1970 * 1000
+    /// Asked of the kernel, not stamped by `AppDelegate`. An earlier version of
+    /// this was a `var` documented as "set at the top of `didFinishLaunching`"
+    /// and nothing ever set it — a Swift static initialises lazily, so the
+    /// default ran on the *first read*, which is the subtraction below, and
+    /// every `since_launch_ms` would have been `0`. There is no assignment here
+    /// to forget.
+    ///
+    /// It also measures the span Android measures
+    /// (`Process.getStartElapsedRealtime`) rather than a shorter one: dyld and
+    /// the Swift runtime come before `didFinishLaunching` and are most of a cold
+    /// start on a phone. Same number on both platforms, one funnel.
+    static let launchedAtMs: Double = processStartMs()
+
+    /// `kp_proc.p_starttime` for this process, in epoch milliseconds.
+    ///
+    /// Falls back to now, which reads as a suspiciously fast launch rather than
+    /// as a crash — the right way round for a diagnostic.
+    private static func processStartMs() -> Double {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else {
+            return Date().timeIntervalSince1970 * 1000
+        }
+        let started = info.kp_proc.p_starttime
+        return Double(started.tv_sec) * 1000 + Double(started.tv_usec) / 1000
+    }
 
     /// What killed the last page, waiting for the next one to say so.
     ///
@@ -80,17 +110,9 @@ final class BridgeController: NSObject, BridgeEventSink {
     /// unrelated promise with someone else's data.
     private var generation = 0
 
-    /// Held only to answer "was this device hosting" when the content process
-    /// dies. The `on*` closures below are set on it at init and need no
-    /// reference afterwards; this one is read long after, from the navigation
-    /// delegate. No cycle: every closure it holds captures `self` weakly, and
-    /// `AppDelegate` owns the backend for the life of the process either way.
-    private let backend: PumpkinBackend
-
     init(deepLinks: DeepLinkManager, backend: PumpkinBackend) {
         self.backend = backend
         router = BridgeRouter(deepLinks: deepLinks, backend: backend)
-        self.backend = backend
 
         let config = WKWebViewConfiguration()
         // Both must be set before the WebView exists. The configuration retains
