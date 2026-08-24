@@ -941,6 +941,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun onResume() {
         super.onResume()
+        router.capture("host:foregrounded", mapOf(Incidents.hosting(ServerHost.hostingSummary())))
         router.resyncServerState()
         // A dismissed sign-in tab reports nothing, so being visible again with
         // one outstanding is the only evidence the user backed out.
@@ -953,6 +954,21 @@ class MainActivity : ComponentActivity() {
         // the page was mid-call — takes the first chance it gets. The check
         // above will not re-announce one it has already staged.
         applyStagedBundle("the app came back to the foreground")
+    }
+
+    /**
+     * Leaving, with what was running at the time.
+     *
+     * The pair of this and `host:foregrounded` is the only way to measure the
+     * thing this platform actually does to people: backgrounding while hosting
+     * is how a session ends on a phone, and nothing in the page can see it
+     * happen. The page is still alive here, so this goes over the bridge
+     * rather than to disk — unlike the two failures in [Incidents], which kill
+     * their own reporter.
+     */
+    override fun onPause() {
+        super.onPause()
+        router.capture("host:backgrounded", mapOf(Incidents.hosting(ServerHost.hostingSummary())))
     }
 
     /**
@@ -1080,6 +1096,23 @@ class MainActivity : ComponentActivity() {
          */
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             Log.w(TAG, "render process gone (crashed=${detail.didCrash()}); rebuilding")
+            // To disk, not to the page: the page is what just died, and
+            // `onPageGone` is about to clear the queue anything emitted here
+            // would sit in. The replacement page reports it at its handshake.
+            //
+            // `didCrash` was already being read for the log line above and
+            // thrown away. It is the difference between the renderer falling
+            // over and Android reclaiming it for memory, which is the whole
+            // question when the memory pressure is a Minecraft server we
+            // started.
+            Incidents.record(
+                this@MainActivity,
+                Incidents.RENDERER_DEATH,
+                mapOf(
+                    Incidents.didCrash(detail.didCrash()),
+                    Incidents.hosting(ServerHost.hostingSummary()),
+                )
+            )
             router.onPageGone()
             if (!isFinishing && !isDestroyed) installWebView()
             return true

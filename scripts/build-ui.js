@@ -28,6 +28,17 @@ const { ROOT, UI_DESTINATIONS } = require("./targets");
 
 const PACKAGE_DIR = path.join(ROOT, "node_modules", "homerun-app-ui", "out");
 
+/**
+ * The dev PostHog project, quoted in the warning below so the fix is a
+ * copy-paste rather than a hunt.
+ *
+ * Safe to write down: a PostHog *project* key is a write-only client
+ * credential that `next build` inlines into the bundle, so it already sits
+ * unencrypted inside every APK and IPA. The production key lives in
+ * `.github/workflows/publish-android.yml` for the same reason.
+ */
+const DEV_POSTHOG_KEY = "phc_rAEnP6ZV9S92jIbibRRUgJjiF4tRGEUYcd9Ws2o73ET";
+
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const platforms = requested.length ? requested : Object.keys(UI_DESTINATIONS);
 
@@ -137,8 +148,55 @@ function shipped(source) {
   return !source.endsWith(".js.map");
 }
 
+/**
+ * Whether the bundle about to be staged can report anything at all.
+ *
+ * `NEXT_PUBLIC_*` is inlined by `next build`, and only when it is set. When it
+ * is not, Next leaves the lookup in place, it resolves to `undefined` inside a
+ * WebView, and `posthog.init(undefined)` runs — so the app reports nothing, on
+ * any screen, however well instrumented it is. That shipped for a long time
+ * precisely because nothing said so: the bundle builds, stages and runs
+ * perfectly without a key.
+ *
+ * The tell is the variable name surviving into a chunk, which is what an
+ * un-inlined lookup leaves behind. A warning rather than an error: a local
+ * debug build has no business needing analytics, and failing here would stop
+ * anyone without the secret from building the app.
+ */
+function warnIfUnkeyed(dir) {
+  const chunks = path.join(dir, "_next", "static", "chunks");
+  if (!fs.existsSync(chunks)) return;
+  const unkeyed = fs
+    .readdirSync(chunks)
+    .filter((f) => f.endsWith(".js"))
+    .some((f) =>
+      fs
+        .readFileSync(path.join(chunks, f), "utf8")
+        .includes("NEXT_PUBLIC_POSTHOG_KEY")
+    );
+  if (!unkeyed) return;
+  console.warn(
+    "\nWARNING: this bundle carries no PostHog key, so it will report nothing.\n" +
+      "         The key has to be set when the shared UI is BUILT, which is\n" +
+      "         during `npm ci` — homerun-app-ui is a git dependency and its\n" +
+      "         `prepare` script runs `next build`. Exporting it now and\n" +
+      "         re-running this script will not help; reinstall instead:\n" +
+      "\n" +
+      "           NEXT_PUBLIC_POSTHOG_KEY=" +
+      DEV_POSTHOG_KEY +
+      " \\\n" +
+      "           NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com \\\n" +
+      "             npm ci && node scripts/build-ui.js\n" +
+      "\n" +
+      "         That is the dev project. Android CI picks the right one per\n" +
+      "         backend in publish-android.yml; iOS has no CI at all, so a\n" +
+      "         release IPA needs the production key exported the same way.\n"
+  );
+}
+
 refresh();
 const src = sourceDir();
+warnIfUnkeyed(src);
 
 for (const platform of platforms) {
   const dest = UI_DESTINATIONS[platform];

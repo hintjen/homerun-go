@@ -500,6 +500,35 @@ class BridgeRouter(
         }
     }
 
+    /**
+     * Send one analytics event, through the page.
+     *
+     * This host carries no PostHog SDK and deliberately should not: the shared
+     * UI already holds the user's identity, and `pages/_app.tsx` forwards this
+     * channel straight to `posthog.capture`. That is the desktop's pattern
+     * exactly — `captureRendererEvent` in homerun/homerun-ui `src/electron/
+     * main.ts` sends the same channel name over IPC — and using it costs no
+     * ledger entry, because `posthog-capture-event` is already a `core` event
+     * in `bridge-v1.json` that no host has ever emitted.
+     *
+     * Only for what the page cannot observe about itself. Anything the UI
+     * already subscribes to gets named in the UI, where it merges with
+     * identity naturally, which is why this list stays short.
+     *
+     * Queued before the handshake like any other event, so a launch event
+     * emitted while the page is still parsing arrives once it is listening.
+     * The exception is anything emitted while a page is *dying*: that queue is
+     * cleared by [onPageGone], which is why incidents go to disk instead. See
+     * [Incidents].
+     */
+    fun capture(event: String, properties: Map<String, JsonElement> = emptyMap()) {
+        emit(
+            "posthog-capture-event",
+            if (properties.isEmpty()) listOf(JsonPrimitive(event))
+            else listOf(JsonPrimitive(event), JsonObject(properties))
+        )
+    }
+
     private fun onReady() {
         ready = true
         // The handshake is also the health signal for an over-the-air bundle:
@@ -507,6 +536,30 @@ class BridgeRouter(
         // has proved it can run. Nothing else in the protocol says that.
         BundleStore.confirm(context)
         while (queued.isNotEmpty()) evaluate(queued.removeFirst())
+        /*
+          How long the app took to become usable, measured from process start
+          rather than from anything this class can see, so a cold start and a
+          renderer rebuild are told apart by the number rather than by a flag.
+
+          There is deliberately no `host:launched` to pair with it. Every event
+          emitted before the handshake is only *delivered* at the handshake, so
+          a launch that never reaches ready could never report itself, and a
+          launch event would be nothing but this one with worse timing. A boot
+          that fails this far is the bundle rollback's business
+          (`BundleStore`), not analytics'.
+        */
+        capture(
+            "host:page_ready",
+            mapOf(
+                "since_launch_ms" to JsonPrimitive(
+                    android.os.SystemClock.elapsedRealtime() -
+                        android.os.Process.getStartElapsedRealtime()
+                )
+            )
+        )
+        // After the flush, so it lands in the order a reader expects and never
+        // ahead of the page-ready event that dates it.
+        Incidents.drain(context, ::capture)
         resyncServerState()
         // A page that has just announced itself with nothing outstanding is
         // idle, and this is the only transition into idle that no handler

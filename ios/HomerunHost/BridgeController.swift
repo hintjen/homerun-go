@@ -39,6 +39,14 @@ final class BridgeController: NSObject, BridgeEventSink {
     /// the page goes away and the blue shows through again.
     var onThemeChanged: ((PageTheme?) -> Void)?
 
+    /// When the process started, in epoch milliseconds, for `host:page_ready`.
+    ///
+    /// Set by `AppDelegate` at the top of `didFinishLaunching`. The default is
+    /// a fallback for any path that reaches a controller without going through
+    /// there, and would read as a suspiciously fast launch rather than as a
+    /// crash, which is the right way round for a diagnostic.
+    static var launchedAtMs: Double = Date().timeIntervalSince1970 * 1000
+
     /// Events emitted before the page is listening are lost, so they queue
     /// until it announces itself and then flush in order (PROTOCOL.md §4.2).
     private enum Delivery {
@@ -56,7 +64,15 @@ final class BridgeController: NSObject, BridgeEventSink {
     /// unrelated promise with someone else's data.
     private var generation = 0
 
+    /// Held only to answer "was this device hosting" when the content process
+    /// dies. The `on*` closures below are set on it at init and need no
+    /// reference afterwards; this one is read long after, from the navigation
+    /// delegate. No cycle: every closure it holds captures `self` weakly, and
+    /// `AppDelegate` owns the backend for the life of the process either way.
+    private let backend: PumpkinBackend
+
     init(deepLinks: DeepLinkManager, backend: PumpkinBackend) {
+        self.backend = backend
         router = BridgeRouter(deepLinks: deepLinks, backend: backend)
         self.backend = backend
 
@@ -274,6 +290,34 @@ final class BridgeController: NSObject, BridgeEventSink {
         }
     }
 
+    /// Send one analytics event, through the page.
+    ///
+    /// This host carries no PostHog SDK and deliberately should not: the shared
+    /// UI already holds the user's identity, and `pages/_app.tsx` forwards this
+    /// channel straight to `posthog.capture`. That is the desktop's pattern
+    /// exactly — `captureRendererEvent` in homerun/homerun-ui
+    /// `src/electron/main.ts` sends the same channel name over IPC — and it
+    /// costs no ledger entry and no revision bump, because
+    /// `posthog-capture-event` is already a `core` event in `bridge-v1.json`
+    /// that no host has ever emitted.
+    ///
+    /// Only for what the page cannot observe about itself. Anything the UI
+    /// already subscribes to is named in the UI, where it merges with identity
+    /// naturally, which is why the list of call sites here stays short.
+    ///
+    /// Queued before the handshake like any other event. The exception is
+    /// anything emitted while a page is *dying*: `resetForNewPage` throws that
+    /// queue away, which is why incidents go to `UserDefaults` instead. See
+    /// `Incidents`.
+    func capture(_ event: String, _ properties: [String: Any] = [:]) {
+        // Spelled out rather than a ternary: the two branches are `[String]`
+        // and `[Any]`, and letting the compiler reconcile them is the kind of
+        // inference that breaks on a compiler upgrade.
+        var args: [Any] = [event]
+        if !properties.isEmpty { args.append(properties) }
+        emit("posthog-capture-event", args)
+    }
+
     private func deliver(_ envelope: [String: Any]) {
         let literal = BridgeEnvelope.jsLiteral(object: envelope)
         // Guarded on the JS side: a reply can land between a reload starting
@@ -431,6 +475,23 @@ extension BridgeController: WKScriptMessageHandler {
         // URL by emitting an event and the UI answers with a `set-api-url`
         // send (PROTOCOL.md §1).
         emit("get-api-url", [])
+
+        /*
+          How long the app took to become usable.
+
+          There is deliberately no `host:launched` to pair with it: every event
+          emitted before the handshake is only *delivered* at the handshake, so
+          a launch that never gets this far could never report itself, and a
+          launch event would be this one with worse timing. A boot that fails
+          that badly is `BundleStore`'s probation to catch, not analytics'.
+        */
+        capture(
+            "host:page_ready",
+            ["since_launch_ms": Int(Date().timeIntervalSince1970 * 1000 - Self.launchedAtMs)])
+
+        // After the flush, so it lands in the order a reader expects and never
+        // ahead of the page-ready event that dates it.
+        Incidents.drain { event, properties in capture(event, properties) }
     }
 
     /// `set-appearance`, from the router.
@@ -587,6 +648,16 @@ extension BridgeController: WKNavigationDelegate {
     /// part of normal operation, not a defensive extra (PROTOCOL.md §4.3).
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         HostLog.bridge.error("WebView content process died; reloading")
+        // To disk, not to the page: the page is what just died, and
+        // `resetForNewPage` below is about to throw away the queue anything
+        // emitted here would sit in. The replacement page reports it at its
+        // handshake, seconds from now.
+        //
+        // No `did_crash` counterpart to Android's: WebKit does not say whether
+        // this was a crash or a jetsam, and on this device the answer is
+        // almost always the server we are running.
+        Incidents.record(
+            Incidents.contentProcessDeath, hosting: !backend.runningServerIds.isEmpty)
         resetForNewPage()
         // This one really does blank the view: what is on screen until the
         // reload paints is the launch blue, which wants a white clock.
