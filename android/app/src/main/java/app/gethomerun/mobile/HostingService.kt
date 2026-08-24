@@ -116,6 +116,20 @@ class HostingService : Service(), ServerHost.Listener {
     override fun onDestroy() {
         ServerHost.removeListener(this)
         releaseWakeLock()
+        // Take the notification with us.
+        //
+        // `stopService` alone does not: the notification is ONGOING, and an
+        // ongoing notification whose service has died stays in the shade with
+        // nothing left to update it. What a player saw was a permanent silent
+        // entry describing a server that had stopped minutes ago — and, before
+        // the `text()` fix above, describing it as "Starting…".
+        //
+        // Explicit rather than relying on the platform: `stopForeground` with
+        // the default flags detaches the notification instead of removing it,
+        // which is the behaviour that produced the orphan.
+        runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
+            .onFailure { Log.w(TAG, "could not clear the hosting notification: ${it.message}") }
+        foreground = false
         scope.cancel()
         super.onDestroy()
     }
@@ -323,6 +337,17 @@ class HostingService : Service(), ServerHost.Listener {
             else -> getString(R.string.hosting_running_many, hosting.players)
         }
         hosting.state == ServerState.STOPPING -> getString(R.string.hosting_stopping)
+        // A run that has ended. This used to fall into the `else` below and
+        // read "Starting…", which is the opposite of what happened: stop from
+        // the notification, watch the server go down, and the notification it
+        // left behind announced a launch. It lingers, too — the service is torn
+        // down immediately afterwards, so nothing was ever going to correct it.
+        //
+        // [onDestroy] now takes the notification with it, so this text is only
+        // ever seen for the moment between the state arriving and the service
+        // standing down. It still has to be true for that moment.
+        hosting.state == ServerState.STOPPED ||
+            hosting.state == ServerState.CRASHED -> getString(R.string.hosting_stopped)
         // Everything else that got this service started is a launch in
         // progress, including the window before the backend has announced
         // anything — see `Hosting.starting`. A jar download is minutes long and
