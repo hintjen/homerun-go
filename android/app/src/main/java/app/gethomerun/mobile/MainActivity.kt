@@ -39,6 +39,8 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.util.Locale
@@ -941,7 +943,7 @@ class MainActivity : ComponentActivity() {
      */
     override fun onResume() {
         super.onResume()
-        router.capture("host:foregrounded", mapOf(Incidents.hosting(ServerHost.hostingSummary())))
+        router.capture("host:foregrounded", hostingProperty())
         router.resyncServerState()
         // A dismissed sign-in tab reports nothing, so being visible again with
         // one outstanding is the only evidence the user backed out.
@@ -963,13 +965,21 @@ class MainActivity : ComponentActivity() {
      * thing this platform actually does to people: backgrounding while hosting
      * is how a session ends on a phone, and nothing in the page can see it
      * happen. The page is still alive here, so this goes over the bridge
-     * rather than to disk — unlike the two failures in [Incidents], which kill
-     * their own reporter.
+     * over the bridge — unlike a render process dying, which takes its own
+     * reporter with it.
      */
     override fun onPause() {
         super.onPause()
-        router.capture("host:backgrounded", mapOf(Incidents.hosting(ServerHost.hostingSummary())))
+        router.capture("host:backgrounded", hostingProperty())
     }
+
+    /**
+     * What this device was doing, in the one word both hosts record, so a
+     * funnel does not care which phone it came from. [ServerHost.hostingSummary]
+     * is the lock-free reading that the crash handler already relies on.
+     */
+    private fun hostingProperty(): Map<String, JsonElement> =
+        mapOf("hosting" to JsonPrimitive(ServerHost.hostingSummary()))
 
     /**
      * Emit `push:opened` if this intent is a notification tap.
@@ -1096,23 +1106,17 @@ class MainActivity : ComponentActivity() {
          */
         override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
             Log.w(TAG, "render process gone (crashed=${detail.didCrash()}); rebuilding")
-            // To disk, not to the page: the page is what just died, and
-            // `onPageGone` is about to clear the queue anything emitted here
-            // would sit in. The replacement page reports it at its handshake.
+            // Handed to the router, not emitted: the page is what just died,
+            // and `onPageGone` below is about to clear the queue anything
+            // emitted here would sit in. The router outlives the page, so the
+            // replacement reports it at its handshake, seconds from now.
             //
             // `didCrash` was already being read for the log line above and
             // thrown away. It is the difference between the renderer falling
             // over and Android reclaiming it for memory, which is the whole
             // question when the memory pressure is a Minecraft server we
             // started.
-            Incidents.record(
-                this@MainActivity,
-                Incidents.RENDERER_DEATH,
-                mapOf(
-                    Incidents.didCrash(detail.didCrash()),
-                    Incidents.hosting(ServerHost.hostingSummary()),
-                )
-            )
+            router.onRendererDied(detail.didCrash(), ServerHost.hostingSummary())
             router.onPageGone()
             if (!isFinishing && !isDestroyed) installWebView()
             return true

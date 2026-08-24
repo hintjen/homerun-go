@@ -142,6 +142,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// > `didBecomeActiveNotification` fires and the link silently never comes
     /// > up — which reads exactly like a hook that was never wired.
     func applicationDidBecomeActive(_ application: UIApplication) {
+        // Fires on a cold launch as well as a resume, so this counts "became
+        // active" rather than "a session began". Pairs with the background
+        // event below to measure the thing this platform actually does to
+        // people: the server is a library call inside this process, so a
+        // locked phone is a stopped server, and nothing in the page can see
+        // that happen.
+        bridge?.capture("host:foregrounded", ["hosting": hostingLabel])
+
         DeviceWebsocket.shared.ensure()
 
         // The other half of "launch and resume", which `BundleUpdater` has
@@ -160,7 +168,18 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     /// app switcher and a phone call — none of which suspend anything. Tearing
     /// the link down for those would renegotiate it several times a minute.
     func applicationDidEnterBackground(_ application: UIApplication) {
+        // Here rather than `willResignActive` for the reason above it: a
+        // banner or the app switcher is not a session ending, and counting
+        // those would bury the case that matters.
+        bridge?.capture("host:backgrounded", ["hosting": hostingLabel])
+
         DeviceWebsocket.shared.stop()
+    }
+
+    /// What this device was doing, in the one word the Android host also
+    /// records, so a funnel does not care which phone it came from.
+    private var hostingLabel: String {
+        backend.runningServerIds.isEmpty ? "idle" : "hosting"
     }
 
     /// Auth returns through `homerun://` while the app is already running.

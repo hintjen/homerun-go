@@ -47,6 +47,22 @@ final class BridgeController: NSObject, BridgeEventSink {
     /// crash, which is the right way round for a diagnostic.
     static var launchedAtMs: Double = Date().timeIntervalSince1970 * 1000
 
+    /// What killed the last page, waiting for the next one to say so.
+    ///
+    /// The content process is jetsammed under memory pressure, which on this
+    /// device means "a Minecraft server is running" and so is ordinary
+    /// operation rather than an edge case (`PROTOCOL.md` §4.3). The page that
+    /// would report it is the one that just died, and `resetForNewPage` throws
+    /// away the queue anything emitted there would sit in.
+    ///
+    /// In memory rather than on disk, because it does not need to survive what
+    /// it describes: this controller outlives every page it serves, and the
+    /// replacement announces itself seconds later. A *process* death is a
+    /// different question with a better answer already in the tree —
+    /// `ExitDiagnostics` reads what MetricKit recorded, including the kills
+    /// no code of ours could observe.
+    private var pendingRendererDeath: [String: Any]?
+
     /// Events emitted before the page is listening are lost, so they queue
     /// until it announces itself and then flush in order (PROTOCOL.md §4.2).
     private enum Delivery {
@@ -307,8 +323,8 @@ final class BridgeController: NSObject, BridgeEventSink {
     ///
     /// Queued before the handshake like any other event. The exception is
     /// anything emitted while a page is *dying*: `resetForNewPage` throws that
-    /// queue away, which is why incidents go to `UserDefaults` instead. See
-    /// `Incidents`.
+    /// queue away, which is why `pendingRendererDeath` holds one in memory
+    /// instead of trying to emit it.
     func capture(_ event: String, _ properties: [String: Any] = [:]) {
         // Spelled out rather than a ternary: the two branches are `[String]`
         // and `[Any]`, and letting the compiler reconcile them is the kind of
@@ -491,7 +507,10 @@ extension BridgeController: WKScriptMessageHandler {
 
         // After the flush, so it lands in the order a reader expects and never
         // ahead of the page-ready event that dates it.
-        Incidents.drain { event, properties in capture(event, properties) }
+        if let death = pendingRendererDeath {
+            pendingRendererDeath = nil
+            capture("host:recovered_from_renderer_death", death)
+        }
     }
 
     /// `set-appearance`, from the router.
@@ -648,16 +667,17 @@ extension BridgeController: WKNavigationDelegate {
     /// part of normal operation, not a defensive extra (PROTOCOL.md §4.3).
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         HostLog.bridge.error("WebView content process died; reloading")
-        // To disk, not to the page: the page is what just died, and
-        // `resetForNewPage` below is about to throw away the queue anything
-        // emitted here would sit in. The replacement page reports it at its
-        // handshake, seconds from now.
+        // Held, not emitted: the page is what just died, and `resetForNewPage`
+        // below is about to throw away the queue anything emitted here would
+        // sit in. This controller outlives the page, so the replacement
+        // reports it at its handshake, seconds from now.
         //
         // No `did_crash` counterpart to Android's: WebKit does not say whether
         // this was a crash or a jetsam, and on this device the answer is
         // almost always the server we are running.
-        Incidents.record(
-            Incidents.contentProcessDeath, hosting: !backend.runningServerIds.isEmpty)
+        pendingRendererDeath = [
+            "hosting": backend.runningServerIds.isEmpty ? "idle" : "hosting"
+        ]
         resetForNewPage()
         // This one really does blank the view: what is on screen until the
         // reload paints is the launch blue, which wants a white clock.

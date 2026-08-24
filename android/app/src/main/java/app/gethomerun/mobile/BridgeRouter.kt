@@ -501,6 +501,33 @@ class BridgeRouter(
     }
 
     /**
+     * What killed the last page, waiting for the next one to say so.
+     *
+     * The render process is jetsammed under memory pressure, which on this
+     * device means "a Minecraft server is running" and so is ordinary
+     * operation rather than an edge case. The page that would report it is the
+     * one that just died, and [onPageGone] clears the queue anything emitted
+     * there would sit in.
+     *
+     * In memory rather than on disk, because it does not need to survive what
+     * it describes: this router outlives every page it serves, and the
+     * replacement announces itself seconds later. A *process* death is a
+     * different question and already has a better answer than anything this
+     * class could write down — [ExitReasons] reads what the kernel recorded,
+     * including the memory kill, which is exactly the case a hand-rolled
+     * handler cannot observe.
+     */
+    private var pendingRendererDeath: Map<String, JsonElement>? = null
+
+    /** Called by the activity when the render process goes away. */
+    fun onRendererDied(didCrash: Boolean, hosting: String) {
+        pendingRendererDeath = mapOf(
+            "did_crash" to JsonPrimitive(didCrash),
+            "hosting" to JsonPrimitive(hosting),
+        )
+    }
+
+    /**
      * Send one analytics event, through the page.
      *
      * This host carries no PostHog SDK and deliberately should not: the shared
@@ -515,11 +542,11 @@ class BridgeRouter(
      * already subscribes to gets named in the UI, where it merges with
      * identity naturally, which is why this list stays short.
      *
-     * Queued before the handshake like any other event, so a launch event
-     * emitted while the page is still parsing arrives once it is listening.
-     * The exception is anything emitted while a page is *dying*: that queue is
-     * cleared by [onPageGone], which is why incidents go to disk instead. See
-     * [Incidents].
+     * Queued before the handshake like any other event, so an event emitted
+     * while the page is still parsing arrives once it is listening. The
+     * exception is anything emitted while a page is *dying*: [onPageGone]
+     * clears that queue, which is why [pendingRendererDeath] holds one in
+     * memory instead of trying to emit it.
      */
     fun capture(event: String, properties: Map<String, JsonElement> = emptyMap()) {
         emit(
@@ -559,7 +586,10 @@ class BridgeRouter(
         )
         // After the flush, so it lands in the order a reader expects and never
         // ahead of the page-ready event that dates it.
-        Incidents.drain(context, ::capture)
+        pendingRendererDeath?.let {
+            pendingRendererDeath = null
+            capture("host:recovered_from_renderer_death", it)
+        }
         resyncServerState()
         // A page that has just announced itself with nothing outstanding is
         // idle, and this is the only transition into idle that no handler
