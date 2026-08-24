@@ -172,8 +172,10 @@ class MainActivity : ComponentActivity() {
      * back-to-home animation — the player holds the swipe and sees nothing move
      * behind the app. The `finish()` this used to call at the root of the
      * history skipped the exit transition for the same reason. Disabled, the
-     * dispatcher falls through to the platform and both come back. It is the
-     * default from targetSdk 36, which Play requires by 31 Aug 2026.
+     * dispatcher falls through to the platform and both come back. The app is
+     * on targetSdk 36, where this is the platform's default rather than
+     * something the manifest asks for, so there is no longer a version of this
+     * app in which getting it wrong would go unnoticed.
      *
      * Registered against the *activity*, not a WebView: the render process can
      * die and be rebuilt underneath this ([installWebView]), and the enabled

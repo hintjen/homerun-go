@@ -406,7 +406,7 @@ as an alarm and plays it regardless of the owner's haptics setting, which is a
 bug invisible to anyone who has never turned haptics off.
 
 `minSdk` is 26 and most of the useful constants arrived in 30 (one in 34), so
-every branch falls back. This is load-bearing: `compileSdk` is 35 so the newer
+every branch falls back. This is load-bearing: `compileSdk` is 36 so the newer
 symbols resolve at compile time, and `abortOnError = false` in the app's lint
 config means a missing `Build.VERSION.SDK_INT` guard is **not** a build
 failure — it is a `NoSuchFieldError` on a real API-30 phone.

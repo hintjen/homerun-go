@@ -127,9 +127,18 @@ analytics, and the player names and Mojang UUIDs that ride along with stats.
 
 | | |
 |---|---|
-| **targetSdk 36** for new apps and updates | **31 Aug 2026** — the repo is on 35 |
-| 16 KB page size for targetSdk 35+ | already in force (1 Nov 2025, extended to 31 May 2026) |
+| **targetSdk 36** for new apps and updates | 31 Aug 2026 — **met**, the repo is on 36 |
+| 16 KB page size for targetSdk 35+ | already in force (1 Nov 2025, extended to 31 May 2026); every shipped `.so` is 16 KB aligned |
 | Upload key validity past 22 Oct 2033 | satisfied to 2053 |
+
+Two things fall due at **targetSdk 37**, and they fall due together, so treat
+that bump as a piece of work rather than a number. `MainActivity`'s portrait
+lock is currently defended above sw600dp by
+`PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY`, which stops being honoured
+there — so the app has to actually work at tablet width by then. And local
+network access moves behind a new `ACCESS_LOCAL_NETWORK` runtime permission,
+which is aimed squarely at this app: a listening socket that other devices on
+the network connect to is exactly what it covers, inbound included.
 
 ## Costs
 

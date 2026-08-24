@@ -45,12 +45,12 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
-      enableOnBackInvokedCallback: the app opts in to predictive back now
-      rather than being opted in for it. It becomes the default at targetSdk 36,
-      which Play requires by 31 Aug 2026, so the choice is only whether the
-      change lands while it can still be tested or on the day the SDK is bumped.
-      Until then it also silences the "OnBackInvokedCallback is not enabled"
-      warning logcat prints on every launch.
+      enableOnBackInvokedCallback: redundant now, and kept. It is the default
+      at targetSdk 36, but it was declared while the app still targeted 35 so
+      that predictive back landed as its own change with its own testing rather
+      than arriving unannounced inside an SDK bump — which is why that bump had
+      nothing to fix here. Removing it now would only re-open the question of
+      whether the behaviour is deliberate.
 
       networkSecurityConfig: everything this app talks to over the network is
       HTTPS, and res/xml/network_security_config.xml states that so the platform
@@ -90,6 +90,28 @@
           resizing and a desktop-mode display all deliver those without any
           rotation, and handling them in place is what stops the WebView being
           torn down and the page reloaded mid-session.
+
+          From targetSdk 36 the lock is not enough on its own. Android 16 ignores
+          screenOrientation, resizableActivity, the aspect-ratio bounds and
+          setRequestedOrientation entirely on any display whose *smallest* width
+          is 600dp or more — tablets, unfolded foldables, ChromeOS and desktop
+          mode. Phones are untouched, because a phone's smallest width is around
+          360–430dp in either rotation, so nothing about handheld behaviour
+          changes. PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY below is the
+          documented opt-out and is what keeps the lock meaning something above
+          that threshold.
+
+          It has a shelf life. The property stops being honoured at targetSdk 37,
+          so the next SDK bump is also the deadline for screens that work at
+          tablet width — not a manifest change. Worth knowing that the shared UI
+          bundle already carries responsive breakpoints throughout, because it is
+          the same bundle the web dashboard runs; what is missing is not the CSS
+          but anyone having tested it at that size on this host.
+
+          Note what is deliberately NOT done: `android:appCategory="game"` exempts
+          an app from the ignore outright, and this app hosts a game server rather
+          than being one. Buying the exemption with a category that is not true is
+          not a thing to leave in a manifest for someone to find later.
         -->
         <activity
             android:name=".MainActivity"
@@ -99,6 +121,17 @@
             android:windowSoftInputMode="adjustResize"
             android:theme="@style/Theme.Homerun"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale">
+            <!--
+              Declared on the activity rather than the application: MainActivity
+              is the only activity there is, and the property is only meaningful
+              beside the screenOrientation it defends. A <property> in the wrong
+              element is dropped by the manifest merger without an error, so the
+              merged manifest is worth reading once after this changes.
+            -->
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

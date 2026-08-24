@@ -194,9 +194,9 @@ for (const platform of platforms) {
       emulator,
       "Emulator",
       emulator ? "installed" : "not installed",
-      'sdkmanager "emulator" "system-images;android-35;google_apis;x86_64"\n' +
-        "    then: avdmanager create avd -n homerun_api35 " +
-        '-k "system-images;android-35;google_apis;x86_64" -d pixel_7'
+      'sdkmanager "emulator" "system-images;android-36;google_apis;x86_64"\n' +
+        "    then: avdmanager create avd -n homerun_api36 " +
+        '-k "system-images;android-36;google_apis;x86_64" -d pixel_7'
     );
 
     const ndkVar = process.env.ANDROID_NDK_HOME || process.env.ANDROID_NDK_ROOT;

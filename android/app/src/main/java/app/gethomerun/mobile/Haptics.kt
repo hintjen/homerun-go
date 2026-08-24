@@ -41,7 +41,7 @@ private const val TAG = "HomerunHaptics"
  * ## minSdk 26
  *
  * Most of the constants worth having arrived in API 30 and one in 34, so every
- * branch below falls back. This matters more than it looks: `compileSdk` is 35
+ * branch below falls back. This matters more than it looks: `compileSdk` is 36
  * so the newer symbols resolve at compile time, and `abortOnError = false` in
  * the app's lint config means a missing guard is **not** a build failure — it
  * is a `NoSuchFieldError` on a real API-30 phone. The guards are hand-written

@@ -48,7 +48,7 @@
  * the data and the warning is what tells you when you need the other one.
  *
  *   HOMERUN_JAVA_HOME   a JDK to use, ahead of JAVA_HOME
- *   HOMERUN_AVD         which AVD `emulator` starts (default: homerun_api35)
+ *   HOMERUN_AVD         which AVD `emulator` starts (default: homerun_api36)
  *   ANDROID_SERIAL      which device adb targets, when several are attached
  *   HOMERUN_SKIP_NATIVE do not refresh jniLibs (Kotlin-only iteration)
  *   HOMERUN_API_URL     default for `--api`
@@ -65,7 +65,12 @@ const ANDROID_DIR = path.join(ROOT, "android");
 // can coexist on one device. The activity class name is not suffixed.
 const APPLICATION_ID = "app.gethomerun.mobile.debug";
 const LAUNCH_ACTIVITY = `${APPLICATION_ID}/app.gethomerun.mobile.MainActivity`;
-const DEFAULT_AVD = process.env.HOMERUN_AVD || "homerun_api35";
+// API 36, and it has to keep pace with `targetSdk` in app/build.gradle.kts.
+// Every behaviour change a target bump opts into is gated on the *device's*
+// version as well as the app's, so an API 35 emulator shows none of them --
+// the app looks correct here right up until it reaches a phone where it is
+// not. Anyone still holding the old homerun_api35 device can set HOMERUN_AVD.
+const DEFAULT_AVD = process.env.HOMERUN_AVD || "homerun_api36";
 
 const die = (message) => {
   console.error(`\n${message}\n`);
@@ -415,8 +420,8 @@ function startEmulator() {
     die(
       `No AVD named "${DEFAULT_AVD}".${avds.length ? ` Have: ${avds.join(", ")}` : ""}\n\n` +
         "Create one:\n" +
-        `  sdkmanager "system-images;android-35;google_apis;x86_64"\n` +
-        `  avdmanager create avd -n ${DEFAULT_AVD} -k "system-images;android-35;google_apis;x86_64" -d pixel_7`
+        `  sdkmanager "system-images;android-36;google_apis;x86_64"\n` +
+        `  avdmanager create avd -n ${DEFAULT_AVD} -k "system-images;android-36;google_apis;x86_64" -d pixel_7`
     );
   }
 
