@@ -195,6 +195,39 @@ Five things about that, each of which cost a round when it was worked out:
 - **Never pipe `xcodebuild` into `head`.** The SIGPIPE kills the build partway
   and the wrapper still exits 0, so a truncated log reads as a clean run.
   Redirect to a file and grep that.
+- **`npm run doctor` names two things the iOS Rust build needs** and nothing
+  else will tell you about until the link fails: `brew install cmake`
+  (`aws-lc-sys` compiles C for the device websocket's TLS) and
+  `git-fetch-with-cli = true` under `[net]` in `~/.cargo/config.toml` (the
+  Pumpkin and rustic forks are private). Run doctor first; neither needs sudo.
+- **`rust:ios-sim` is not a quick step.** It links Pumpkin into a ~1.4 GB
+  static library and takes tens of minutes from cold. Kick it off before
+  anything you could be doing in parallel, and do not assume a silent log means
+  it is stuck — watch the crate count with
+  `grep -c "^   Compiling" <log>`.
+
+### Driving the lifecycle on a simulator
+
+Enough to exercise foreground/background and renderer death without an account:
+
+```bash
+# background, then resume. The pid must NOT change — if it does you relaunched
+# instead of resuming, and every lifecycle conclusion from it is wrong.
+osascript -e 'tell application "Simulator" to activate' \
+          -e 'tell application "System Events" to keystroke "h" using {command down, shift down}'
+xcrun simctl launch booted app.gethomerun.ios
+
+# kill the WebContent process — the jetsam the host is written to survive
+kill -9 $(ps ax | grep '[W]ebKit.WebContent' | awk '{print $1}')
+```
+
+The WebContent process is a **host-side** process even for a simulator, so
+plain `ps`/`kill` reach it; `simctl spawn booted launchctl list` does not list
+it. Recovery looks like this, with the host pid unchanged throughout:
+
+```
+[app.gethomerun.ios:bridge] WebView content process died; reloading
+```
 
 ## Pointing it at a backend
 
@@ -276,6 +309,17 @@ npm run android:run -- --no-ota          # or: -PotaUpdates=off
 xcodebuild … HOMERUN_OTA_UPDATES=0       # iOS, same meaning
 ```
 
+iOS has the same precedence and the same trap: a **simulator** that has ever
+launched the app carries a downloaded bundle too, so a freshly built app served
+`bundle 2026-08-19.1` rather than the one just staged. One line tells you which:
+
+```bash
+xcrun simctl spawn booted log show --last 2m --info --debug --style compact \
+  --predicate 'process == "Homerun" AND subsystem BEGINSWITH "app.gethomerun"' | grep bundle
+#  serving the shipped bundle                    <- your change IS running
+#  serving bundle 2026-08-19.1                   <- it is NOT
+```
+
 Off means **ignore them entirely**, not merely "do not fetch": nothing is
 downloaded, and a bundle already sitting in `files/ui` is neither promoted nor
 served, so you do not have to delete anything. `HomerunBundle` says
@@ -306,6 +350,40 @@ added is simply absent. It reads exactly like a capability that failed to inject
 `HOMERUN_UI_DIR` is the fix; see *The loop*. This cost a full build-install-drive
 round trip on 2026-08-21, and the screenshot at the end of it looked like a
 working app.
+
+**A rebuilt npm dependency can be a cache hit.** `npm ci` runs a git
+dependency's `prepare` — that is where `homerun-app-ui` gets built and where
+anything inlined at build time, such as `NEXT_PUBLIC_POSTHOG_KEY`, has to be
+set. But npm packs each git commit into its cache **once**. On a warm cache
+`npm ci` extracts that tarball and never runs `prepare`, so exporting a
+variable in front of it changes nothing and nothing says so:
+
+```bash
+ls -a node_modules/homerun-app-ui/     # out, package.json, README.md — and nothing else
+```
+
+No `.next` and no nested `node_modules` means it was extracted, not built. So
+`NEXT_PUBLIC_POSTHOG_KEY=… npm ci` works in CI, where the cache is always cold,
+and silently does nothing on a machine that has installed that commit before —
+which is every machine that ran the build once already. Build the UI yourself
+and stage that instead:
+
+```bash
+cd ../homerun-app-ui && NEXT_PUBLIC_POSTHOG_KEY=… npm run build && cd -
+HOMERUN_UI_DIR=../homerun-app-ui/out npm run ui:ios       # or ui:android
+```
+
+Check the checkout is on the commit the lockfile pins before you do, or you
+have swapped the UI as well as the key:
+
+```bash
+node -e "console.log(require('./package-lock.json').packages['node_modules/homerun-app-ui'].resolved)"
+git -C ../homerun-app-ui rev-parse HEAD
+```
+
+`scripts/build-ui.js` warns when it stages a keyless bundle and its detection
+is right — it greps the chunks for a surviving `NEXT_PUBLIC_POSTHOG_KEY`. Only
+its suggested fix (`npm ci`) is wrong. Found 2026-08-24.
 
 **Gradle can decide there is nothing to do.** Compare the installed APK against
 the built one rather than trusting `BUILD SUCCESSFUL`:

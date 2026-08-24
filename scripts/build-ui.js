@@ -177,20 +177,34 @@ function warnIfUnkeyed(dir) {
   if (!unkeyed) return;
   console.warn(
     "\nWARNING: this bundle carries no PostHog key, so it will report nothing.\n" +
-      "         The key has to be set when the shared UI is BUILT, which is\n" +
-      "         during `npm ci` — homerun-app-ui is a git dependency and its\n" +
-      "         `prepare` script runs `next build`. Exporting it now and\n" +
-      "         re-running this script will not help; reinstall instead:\n" +
+      "         The key is inlined when the shared UI is BUILT, and exporting\n" +
+      "         it now and re-running this script will not help.\n" +
       "\n" +
-      "           NEXT_PUBLIC_POSTHOG_KEY=" +
+      "         `npm ci` is NOT a reliable way to get one either. npm packs a\n" +
+      "         git dependency once per commit and reuses the tarball, so on a\n" +
+      "         warm cache it extracts rather than running `prepare`, and the\n" +
+      "         variable you exported is never seen. The tell:\n" +
+      "\n" +
+      "           ls -a node_modules/homerun-app-ui/\n" +
+      "\n" +
+      "         no `.next` and no nested `node_modules` means nothing was built\n" +
+      "         there. Build the UI yourself and stage that instead:\n" +
+      "\n" +
+      "           cd ../homerun-app-ui \\\n" +
+      "             && NEXT_PUBLIC_POSTHOG_KEY=" +
       DEV_POSTHOG_KEY +
       " \\\n" +
-      "           NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com \\\n" +
-      "             npm ci && node scripts/build-ui.js\n" +
+      "                NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com \\\n" +
+      "                npm run build && cd -\n" +
+      "           HOMERUN_UI_DIR=../homerun-app-ui/out node scripts/build-ui.js\n" +
+      "\n" +
+      "         Check that checkout is on the commit package-lock.json pins,\n" +
+      "         or you have swapped the UI as well as the key.\n" +
       "\n" +
       "         That is the dev project. Android CI picks the right one per\n" +
-      "         backend in publish-android.yml; iOS has no CI at all, so a\n" +
-      "         release IPA needs the production key exported the same way.\n"
+      "         backend in publish-android.yml — and CI's cache is always cold\n" +
+      "         for a new commit, which is why `npm ci` works there. iOS has no\n" +
+      "         CI at all, so a release IPA needs the production key this way.\n"
   );
 }
 
