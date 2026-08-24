@@ -167,9 +167,19 @@ class HostingService : Service(), ServerHost.Listener {
      * performs — including the core's graceful-or-not verdict, because getting
      * that wrong here would terminate a JVM that had a world to save.
      * [ServerHost.stop] is that one implementation.
+     *
+     * And the same *record* of it. Stopping the process is only half of what
+     * the app's Stop button does: the page PATCHes `target_state` afterwards,
+     * which is what tells the API the player wants this server off. The
+     * notification has no page — it is the control that exists for when the
+     * app is not in front of anyone — so that half was simply missing, and
+     * `useNativeServerReconcile` did what it is supposed to do with a server
+     * that is meant to be running and is not: it started it again. Stop
+     * worked, and then the card said "Starting…".
      */
     private fun stopHosting() {
-        val serverId = ServerHost.hosting().serverId
+        val hosting = ServerHost.hosting()
+        val serverId = hosting.serverId
         if (serverId == null) {
             Log.w(TAG, "Stop was tapped with nothing hosting; standing down")
             ServerHost.syncHosting()
@@ -177,7 +187,37 @@ class HostingService : Service(), ServerHost.Listener {
         }
         Log.i(TAG, "Stop tapped in the notification for $serverId")
         scope.launch {
-            ServerHost.stop(serverId)?.let { Log.w(TAG, "notification stop refused: $it") }
+            val refusal = ServerHost.stop(serverId)
+            if (refusal != null) {
+                // Nothing was stopped, so nothing should be recorded — a
+                // `target_state` of stopped against a server that is still up
+                // would have the reconcile stop it out from under the player.
+                Log.w(TAG, "notification stop refused: $refusal")
+                return@launch
+            }
+            markStoppedRemotely(serverId, hosting.name)
+        }
+    }
+
+    /**
+     * Tell the API the player wants this server off, the way the page would.
+     *
+     * Deliberately after [ServerHost.stop] has returned rather than before it:
+     * a stopping server is still this device's, and the API reading `stopped`
+     * while the world is still saving is what the ordering comment on
+     * `ServerHost.stop` warns about from the other direction.
+     */
+    private suspend fun markStoppedRemotely(serverId: String, serverName: String?) {
+        val apiUrl = HostSession.apiUrl(this) ?: BuildConfig.API_URL
+        val token = HostSession.userToken(this)
+        if (token.isBlank()) {
+            // Signed out with a server running. The reconcile loop needs a
+            // session too, so nothing is going to restart it either.
+            Log.i(TAG, "no session; not recording the stop of $serverId")
+            return
+        }
+        if (!HomerunApi.markStopped(apiUrl, serverId, serverName, token)) {
+            Log.w(TAG, "the stop of $serverId was not recorded; reconcile may restart it")
         }
     }
 

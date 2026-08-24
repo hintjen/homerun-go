@@ -426,6 +426,51 @@ object HomerunApi {
     }
 
     /**
+     * Record that the player asked for this server to be **off**.
+     *
+     * Not a status report — this is the same PATCH the dashboard sends when
+     * someone presses Stop, signed with the **user** token, because it changes
+     * what the server is meant to be doing rather than describing what it is
+     * doing. [reportServerState] below is the other half and uses the device
+     * token; the two are not interchangeable.
+     *
+     * It exists because the notification's Stop action had no way to say this.
+     * Stopping from the app worked only because the page PATCHed afterwards
+     * (see the comment on `ServerHost.stop`), and the notification is the one
+     * control used when there is no page — so `target_state` stayed "running",
+     * `useNativeServerReconcile` saw a server that should be up and was not,
+     * and started it again. What the player saw was Stop working and then
+     * "Starting…" a few seconds later.
+     *
+     * Best-effort and quiet on failure, like every other call here: the server
+     * really has stopped by the time this runs, and a failed PATCH means the
+     * reconcile may restart it — bad, but not worth taking the service down
+     * over, and the next in-app Stop corrects it.
+     */
+    suspend fun markStopped(
+        apiUrl: String,
+        serverId: String,
+        serverName: String?,
+        userToken: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        if (userToken.isBlank()) {
+            Log.w(TAG, "no user token — cannot record the stop of $serverId")
+            return@withContext false
+        }
+        val body = buildJsonObject {
+            put("status", JsonPrimitive("stopped"))
+            // The dashboard sends the name alongside the status. A blank one is
+            // omitted rather than sent, which would rename the server to "".
+            serverName?.takeIf { it.isNotBlank() }?.let {
+                put("server_name", JsonPrimitive(it))
+            }
+        }
+        runCatching { patch(apiUrl, "/api/server/$serverId/", body, userToken) }
+            .onFailure { Log.w(TAG, "could not record the stop of $serverId: ${it.message}") }
+            .isSuccess
+    }
+
+    /**
      * Acknowledge a server's state, with the **device** token. This is the
      * report the API and the web dashboard wait on — the bridge event of the
      * same name only reaches the page in front of us.
