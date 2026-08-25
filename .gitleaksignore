@@ -1,0 +1,22 @@
+# Known findings in immutable history, each reviewed:
+#
+#   - a PostHog client key added and later moved to CI secrets. Client-side
+#     by design — the same value ships inside every APK — and accepted as
+#     history rather than rewritten; the fix if it ever matters is rotating
+#     the PostHog project.
+#   - WireGuard fixture keys in stoptest/ and coretest/ — generated for the
+#     tests, never configured on any real peer.
+#   - fake JWTs and sample strings in test fixtures (wsprobe, coretest,
+#     account.rs, core_dispatch.rs, app_error).
+#
+# A new secret lands with a new fingerprint and still fails the gate.
+5d9c96a8bf2b1b6ef0aedc73ab943bf963247430:scripts/build-ui.js:generic-api-key:40
+43986128b22654507f4f05d03f22ba40fe5b6cb5:rust/homerun-core/src/reporting/app_error/mod.rs:generic-api-key:952
+72a66557f0e44e834aae491a1b4d325ec6278c47:ios/wsprobe/main.swift:generic-api-key:82
+60a04e9e25957672c51c0997cd5ef041ca2b5e7e:rust/homerun-pumpkin-ffi/src/core_dispatch.rs:generic-api-key:2604
+60a04e9e25957672c51c0997cd5ef041ca2b5e7e:rust/homerun-core/src/minecraft/account.rs:generic-api-key:751
+941f2e504bb749b75ae86381a817710da03991e5:go/wireproxy-ios/stoptest/leak/main.go:generic-api-key:17
+941f2e504bb749b75ae86381a817710da03991e5:go/wireproxy-ios/stoptest/main.go:generic-api-key:30
+d7b55c63bf398a88313e932401a3be468a625ceb:ios/coretest/main.swift:generic-api-key:78
+d7b55c63bf398a88313e932401a3be468a625ceb:ios/coretest/main.swift:generic-api-key:92
+d7b55c63bf398a88313e932401a3be468a625ceb:ios/coretest/main.swift:generic-api-key:231
