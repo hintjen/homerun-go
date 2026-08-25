@@ -84,14 +84,14 @@ version would otherwise linger and get served.
 |---|---|
 | `HOMERUN_UI_DIR` | that directory |
 | `HOMERUN_UI_BUNDLE` | that published bundle, from the CDN |
-| `homerun-app-ui` in `package.json` | `npm install`, then its `out/` — **this repo** |
-| otherwise | the newest published bundle for the channel |
+| `homerun-app-ui` in `package.json` | `npm install`, then its `out/` — checkouts that add the private UI dependency |
+| otherwise | the newest published bundle for the channel — **this repo** |
 
-The last two are the split (`plans/repo-split.md` § 3a). This repo has the git
-dependency and builds the UI from source, exactly as before. A checkout without
-access to `hintjen/homerun-app-ui` builds against the *compiled* bundle
-instead: every published bundle is a public CloudFront object, and its manifest
+This repo carries no UI dependency: a checkout builds against the *compiled*
+bundle. Every published bundle is a public CloudFront object, and its manifest
 is signed, so a build can prove what it downloaded with no credential at all.
+The release pipeline adds the private `homerun-app-ui` dependency and builds
+the UI from source instead — the third row.
 
 Nothing from the CDN is trusted on its face. `scripts/ui-bundle.js` verifies
 the manifest's Ed25519 signature against `scripts/bundle-key.js`, refuses a
@@ -480,8 +480,7 @@ JSON after adding it, and the one file then covers both build types.
 
 The host side is [`PushMessaging.kt`] plus the three `push:*` handlers in the
 router (bridge host revision 9); the token→API registration lives in the
-shared UI (`lib/push.ts` in `homerun-app-ui`). See
-[`../plans/push-notifications.md`](../plans/push-notifications.md).
+shared UI (`lib/push.ts` in `homerun-app-ui`).
 
 ## Building a release
 
@@ -537,7 +536,7 @@ Signing comes from `android/keystore.properties` (gitignored). Without it the
 build still completes and the artifact is **unsigned** — deliberate, so CI
 smoke builds and local audit builds work without a copy of the key, but it
 means "unsigned" has to be caught somewhere. `verifyReleaseConfig` warns, and
-`publish-android.yml` runs `jarsigner -verify` before it uploads.
+the release pipeline runs `jarsigner -verify` before it uploads.
 
 Prove what you built before uploading it, rather than after Play rejects it:
 

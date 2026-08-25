@@ -1,8 +1,9 @@
-# Homerun mobile — working in this repo
+# Homerun Go — working in this repo
 
 iOS and Android hosts that run a Minecraft server on a phone. **No UI here** —
-every screen is the shared bundle from
-[`hintjen/homerun-app-ui`](https://github.com/hintjen/homerun-app-ui). This
+every screen is a compiled bundle that `npm run ui` fetches from the CDN and
+verifies against the key pinned in this tree. Its source
+(`hintjen/homerun-app-ui`) is private and shared with the desktop app. This
 repo is the platform half: WebView host, bridge implementation, server engines.
 
 Read `shared/conformance/PROTOCOL.md` before touching bridge code.
@@ -42,6 +43,10 @@ just made. Small, specific corrections beat rewrites.
 | Server lifecycle, engines, platform APIs | here |
 | WSL, the desktop installer, the client launcher | `homerun/homerun-ui` — and it is desktop-only, so mobile never implements it |
 
+`homerun-app-ui` and `homerun/homerun-ui` are private. A change that belongs
+there is one a maintainer has to carry over — say so in the issue or PR
+rather than working around it here.
+
 ## Decisions in Rust, effects in the host
 
 `rust/homerun-core` holds the decisions every Homerun app makes — what a
@@ -64,7 +69,7 @@ changing it needs a store release, while the UI bundle can ship over the air.
 The UI is shared across all three apps too, so "shared" does not settle it. A
 threshold someone will want to tune after launch may belong in the UI even
 when the core could hold it — decide that deliberately rather than by habit.
-See [`plans/ota-updates.md`](./plans/ota-updates.md).
+See `docs/ota-bundles.md`.
 
 `homerun-pumpkin-ffi` is the other half: the **supervisor**. It owns the
 running server — the state machine, the console buffer, the stop ladder, the
@@ -154,6 +159,11 @@ npm test        # core + FFI (with process-engine), then the ABI, host-revision
                 # and capability checks
 ```
 
+The FFI crate's `cargo test` resolves the still-private `hintjen/Pumpkin`
+git dependency (Cargo fetches optional deps even with their feature off), so
+`npm run test:rust` needs access to it until that fork opens. Everything
+else — `test:core` and all the gates — runs for anyone.
+
 Cross-compiling: Android targets work from any host with `cargo-ndk`; iOS
 targets require macOS.
 
@@ -221,23 +231,22 @@ Known gaps, so you do not rediscover them:
   payload — FFI, launcher, `libpumpkin.so` at 65 MB, restic, wireproxy, a JRE —
   is staged and extracted to `nativeLibraryDir` on a Pixel 9 Pro XL, and the
   host reports `engines: jvm=true pumpkin=true` there. What has not happened on
-  hardware is a launch: no world, no stop ladder, no metrics. Everything in
-  `plans/android.md` about verifying those was done on the x86_64 emulator.
+  hardware is a launch: no world, no stop ladder, no metrics. All of that was
+  verified on the x86_64 emulator only.
 
   Incremental builds still refresh only the ABI you are building; assume the
   other one is stale.
-- **iOS Swift changes have often been written without a compiler.**
-  `plans/ios-handoff.md` tracks which, and what to check first. The device
-  websocket is no longer one of them: it builds, runs on a simulator, and its
-  socket is proven by `ios/wsprobe/`. What it has not seen is an account, the
-  gateway, or a physical device — `plans/device-websocket.md`,
-  *What iOS still has to prove*.
+- **iOS Swift changes have often been written without a compiler.** Treat an
+  untested Swift path as unproven until it has met one. The device websocket
+  is no longer one of them: it builds, runs on a simulator, and its socket is
+  proven by `ios/wsprobe/`. What it has not seen is an account, the gateway,
+  or a physical device.
 - **The desktop has no `homerun-core` binding.** Every core module has exactly
   one consumer today, so "shared" is still aspirational in one direction.
 
-Platform plans: `plans/ios.md`, `plans/android.md`, and
-`plans/shared-milestones.md` (read that one first — it says who owns what).
-Overall phasing: `homerun/plans/mobile-apps.md`.
+Planning notes (`plans/…`) live in the private repository that also holds
+the release pipeline; docs here sometimes cite them by name for the history
+of a decision. The decision itself is always restated where it applies.
 
 ## Documentation
 
@@ -245,9 +254,6 @@ Overall phasing: `homerun/plans/mobile-apps.md`.
 `docs/`, indexed from `docs/README.md`, in the house style — `## Overview`,
 sections named after the file they document, `## File map`, `## Triage`.
 `docs/ffi.md` is the worked example.
-
-Which doc belongs to which milestone is in
-`plans/shared-milestones.md` ("Documentation is part of the milestone").
 
 Most of what matters here cannot be inferred from the source: which thread a
 callback arrives on, why a workaround exists, what the OS does under memory

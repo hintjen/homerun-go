@@ -343,16 +343,18 @@ underneath you mid-run. `docs/ota-bundles.md` § *Applying it: as soon as it
 arrives*.
 
 **The bundle can be the published one.** The most common of these, and the
-quietest: `npm run ui:android` stages the pinned npm dependency, not the UI repo
-checked out next door. The app installs, launches, serves a perfectly good UI —
+quietest: `npm run ui:android` stages the published CDN bundle — or, on a
+checkout that carries the private `homerun-app-ui` dependency, the pinned npm
+dependency — not the UI repo checked out next door. The app installs, launches, serves a perfectly good UI —
 the one from the last release — and every capability gate, tile and screen you
 added is simply absent. It reads exactly like a capability that failed to inject.
 `HOMERUN_UI_DIR` is the fix; see *The loop*. This cost a full build-install-drive
 round trip on 2026-08-21, and the screenshot at the end of it looked like a
 working app.
 
-**A rebuilt npm dependency can be a cache hit.** `npm ci` runs a git
-dependency's `prepare` — that is where `homerun-app-ui` gets built and where
+**A rebuilt npm dependency can be a cache hit.** (Only checkouts with the
+private `homerun-app-ui` dependency — the release pipeline's setup — have this
+one.) `npm ci` runs a git dependency's `prepare` — that is where `homerun-app-ui` gets built and where
 anything inlined at build time, such as `NEXT_PUBLIC_POSTHOG_KEY`, has to be
 set. But npm packs each git commit into its cache **once**. On a warm cache
 `npm ci` extracts that tarball and never runs `prepare`, so exporting a
@@ -367,7 +369,7 @@ No `.next` and no nested `node_modules` means it was extracted, not built. So
 installed that commit before — which is every machine that ran the build once
 already, **including the self-hosted runners**, whose workspaces persist. CI is
 not the cold-cache haven the earlier version of this note claimed;
-`publish-ios.yml` gates on the inlined key for exactly that reason. Build the UI
+the iOS release workflow gates on the inlined key for exactly that reason. Build the UI
 yourself and stage that instead:
 
 ```bash
@@ -387,8 +389,8 @@ git -C ../homerun-app-ui rev-parse HEAD
 is right — it greps the chunks for a surviving `NEXT_PUBLIC_POSTHOG_KEY`. It
 used to suggest `npm ci` as the fix, which is the trap above; corrected
 2026-08-25. **A keyless local build is now the expected state and needs no
-fix** — no key lives in this repo any more. The two are the `POSTHOG_KEY_PROD`
-and `POSTHOG_KEY_DEV` repository secrets, read only by the publish workflows.
+fix** — no key lives in this repo any more. The two live as secrets in the
+private release repository, read only by its publish workflows.
 Take one from there if you specifically need a build whose events you intend to
 read. Found 2026-08-24.
 

@@ -3,12 +3,10 @@
 ## Overview
 
 Technical documentation for the iOS and Android hosts. Each subsystem gets
-one file, written **as it is built** — see
-[`../plans/shared-milestones.md`](../plans/shared-milestones.md#documentation-is-part-of-the-milestone).
+one file, written **as it is built**.
 
-UI documentation lives in
-[`homerun-app-ui`](https://github.com/hintjen/homerun-app-ui); desktop
-main-process documentation lives in
+UI documentation lives with the UI's source (`homerun-app-ui`, private);
+desktop main-process documentation lives in
 [`homerun`](https://github.com/hintjen/homerun) under `homerun-ui/docs/`.
 
 ## Documentation Index
@@ -38,43 +36,6 @@ each platform's assets, and the Rust FFI compiled for its targets.
 
 **Read this for**: Setting up a machine, wiring CI, or decoding a toolchain
 error.
-
----
-
-### 📦 [Publishing to Play](./publishing-android.md)
-
-Getting a build in front of testers, and the parts of Play that are not
-discoverable from the Console.
-
-**Contains**:
-- The account, the upload key, and why an upload key is not the signing key
-- Publishing by hand, and why saving a release is not rolling one out
-- The CI workflow, its five secrets, and the two things still blocking it
-- What Play asks for: foreground-service review, account deletion, data safety
-- Play's deadlines, which are met, and what any of this actually costs
-
-**Read this for**: Shipping a build, setting up CI publishing, or answering a
-policy questionnaire.
-
----
-
-### 🛫 [Publishing to TestFlight](./publishing-ios.md)
-
-The iOS delivery half, written as the delta from Android: automatic signing,
-one API key instead of a keystore, and a workflow that runs on our own Mac.
-
-**Contains**:
-- Why there is no upload key: automatic signing, and the App Store Connect
-  API key that replaces both it and Play's service account
-- Publishing by hand, and why the committed `ExportOptions.plist` can never
-  accidentally ship
-- The CI workflow, its five secrets, and the three things still blocking it
-- The self-hosted Mac runner: what the machine must hold, the keychain
-  credential the private repos ride on, and why it needs a logged-in session
-- What Apple asks for at review, pointered to where each answer is argued
-
-**Read this for**: Shipping an iOS build, setting up the runner, or a signing
-failure in CI.
 
 ---
 
@@ -541,28 +502,6 @@ token the API keeps deleting. API half: `homerun/api/docs/push-notifications.md`
 
 ---
 
-### 🚫 [Can iOS host in the background?](../plans/ios-background-execution.md)
-
-Not a subsystem doc — the full sweep behind "no", so it does not get
-re-researched every time someone notices Android can and iOS cannot.
-
-**Contains**:
-- The two hard walls: a 50 MB cap on every process type that runs
-  indefinitely, and what the server actually needs
-- All fourteen background modes, each with a verdict
-- Why `BGContinuedProcessingTask` is not a duration problem, and the three
-  properties of a game server that do disqualify it
-- The one mode that works, the App Store app already doing it, and why we
-  still should not
-- Guided Access, which solves it outright and needs no code
-- The handoff escape hatch this repo already owns
-- What to build instead, and the specific triggers for revisiting
-
-**Read this for**: Being asked why iOS cannot do what Android does, or
-deciding how far to push it.
-
----
-
 ### 🧱 [Mods and plugins on Android](./android-mods.md)
 
 How a server gets the mods it is configured with — and the gap it closed:
@@ -610,131 +549,12 @@ between `MODRINTH_PROJECTS` and the UDP tunnel.
 
 ---
 
-### 🧩 [Mod loaders and mod resolution on Android](../plans/android-mod-loaders.md)
-
-How a phone comes to host Fabric, Quilt, NeoForge and modern Forge, and how the
-desktop's mod resolver stops being three implementations. **Built and run on
-hardware** — M0–M7.
-
-**Contains**:
-- What actually runs today, and the live bug it started from: **no mod
-  installation existed on Android at all**, so a Paper server started without
-  its plugins
-- Why the JNI launch path cannot expand `@argfiles`, and what replaces it
-- The measured cost of a second Java runtime (53 MB compressed), and why that
-  is affordable exactly once
-- Why the runtimes are 21 and 25, what that rules out, and why "lowest that
-  satisfies" is the selection rule rather than "newest we ship"
-- Why a pure core can still own an I/O-driven resolver — the step machine
-- The rules that must survive the port, and the two that must not be re-added
-- Shared fixtures as the anti-drift mechanism, and why that is the real prize
-- **M6: what a real device found** — including a bug that stops every Java
-  server on arm64, and a build guard that was never armed
-- **M7: Quilt**, and why the UI no longer offers loaders the host refuses
-
-**Read this for**: Adding a loader, or touching mod resolution anywhere.
-
----
-
-### 🌐 [The tunnel wrapper plan](../plans/tunnel-wrapper.md)
-
-Not a subsystem doc yet — the spec for sharing one wireproxy implementation
-between iOS and Android, and the fork patches it needs.
-
-**Contains**:
-- Why iOS forces the question (it cannot spawn a process at all)
-- The gomobile binding's exported surface, and why the config stays an INI
-- The three fork patches, all landed in `wireproxy-fork`
-- What linking costs: fault isolation, and nothing else that is not just work
-
-**Read this for**: Working on the tunnel on either platform.
-
----
-
-### 🔌 [The device websocket on mobile](../plans/device-websocket.md)
-
-Not a subsystem doc yet — the plan, and the record of building it. **Both
-phones serve one now**: Android through D5, iOS as far as a simulator can
-prove, with the host halves in `docs/android-host.md` and `docs/ios-host.md`.
-
-**Contains**:
-- The four layers desktop brings up, and the order it tears them down
-- The frame protocol, and why authentication and authorisation are separate
-  questions answered by different parties
-- The two liveness defences a tunnelled socket cannot do without
-- What terminating TLS on a phone actually commits us to
-- Why renewal, not issuance, is the risk — and why it gets its own milestone
-- Why "a plugin in `homerun-core`" is right, and the dependency constraint that
-  decides which half goes there
-- What each milestone actually proved, on which device — and, for iOS, what a
-  simulator could not settle
-
-**Read this for**: Working on it, or finishing the iOS half.
-
----
-
-### 📦 [Shipping updates without the stores](../plans/ota-updates.md)
-
-Not a subsystem doc yet — the plan for pushing the shared UI bundle over the
-air, and the version negotiation it cannot ship without.
-
-**Contains**:
-- Why both stores explicitly allow this for a WebView host, quoted
-- What can and cannot move, by layer and by size
-- The one resolver function per platform that is the whole mechanism
-- A walkthrough: the four directories, and what happens across the two launches
-  between a release and a user seeing it
-- Why applying an update needs no app restart — and could not have one on iOS
-- Why a WebView swap is safe for a *running* server and not for a *starting*
-  one
-- Why an OTA'd UI against an older host turns this protocol's worst failure
-  mode from impossible into likely, and the revision counter that prevents it
-- The probation rule, without which a bad bundle bricks the app in a way no
-  store update can fix
-- Why the Play sentence that authorises this is the same one that governs
-  downloading server jars
-- Why to build it rather than adopt a framework
-
-**Read this for**: Planning a release, or deciding whether something belongs in
-the core or in the UI.
-
----
-
-### 📲 [iOS handoff](../plans/ios-handoff.md)
-
-Where the iOS side stands, what was changed without a Swift compiler, and the
-open questions on backups.
-
-**Contains**:
-- Which Swift files changed and have never been compiled, ranked by risk
-- The app-killing tunnel bug: what it was, how it was fixed, how to re-verify it
-- The `go.work` setup that will bite you if the fork is not checked out beside
-  this repo
-- Backups: the decisions that exist, the API contract, and why the engine is
-  still open
-- The iOS background-execution question, which may shape the design more than
-  the engine choice does
-
-**Read this for**: Picking the iOS work back up.
-
----
-
-### 🔁 [iOS — the server lifecycle into the core](../plans/ios-core-lifecycle.md)
-
-The port that gives iOS the same answers Android already gets from
-`homerun-core::lifecycle` and `launch`: who owns a server, what an exit meant,
-and what order a launch runs in.
-
-**Contains**:
-- What iOS decides for itself today, mapped to the core call that replaces it
-- Five phases, each verifiable on its own, with Android's code as the reference
-- The two reorderings iOS is currently wrong about, and the regression that is
-  easiest to introduce — `stopForNetworkError` losing the stop intent
-- Two open decisions, and one thing this port deliberately does not fix
-
-**Read this for**: Doing that port, or deciding whether to.
-
----
+Some subsystems are documented only as planning notes in the private
+repository that holds the release pipeline (`plans/…`): iOS background
+execution, mod loaders, the tunnel wrapper, the device websocket, OTA
+publishing, and the iOS handoff. Docs here cite those notes by name; the
+decisions they settled are restated where they apply. Publishing to Play and
+TestFlight is documented there too, beside the workflows that do it.
 
 *Add an entry here whenever you add a doc. A doc nobody can find is not
 written.*

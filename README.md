@@ -1,25 +1,40 @@
-# homerun-mobile
+# Homerun Go
 
-The iOS and Android hosts for Homerun — run a Minecraft server on your phone.
+The iOS and Android hosts for [Homerun](https://gethomerun.app) — run a
+Minecraft server on your phone.
 
-This repo is the **source of truth for mobile**. It contains no UI: every
-screen comes from [`hintjen/homerun-app-ui`](https://github.com/hintjen/homerun-app-ui),
-the same bundle the desktop app embeds. What lives here is the platform half —
-the WebView host, the bridge implementation, and the server engines.
+This repo is the **platform half** of the mobile app: the WebView host, the
+bridge implementation, the Rust core and supervisor, and the server engines.
+It contains no UI. Every screen is a compiled web bundle, fetched at build
+time from Homerun's CDN and verified against a signing key pinned in this
+tree — see *The UI bundle* below.
+
+**Licence:** the code in this repository is [GPL-3.0-only](LICENSE). The UI
+bundle is a separate, proprietary work; the GPL covers the host, not the
+bundle it downloads. Contributions are accepted under the [CLA](CLA.md),
+which a bot will ask you to sign on your first pull request.
+
+**Releases** (App Store, Google Play, and over-the-air UI updates) are built
+from tags of this repository by a private release pipeline that holds the
+store credentials and signing keys. Nothing in this repo can publish
+anything. References to `plans/…` you may find in the docs point at internal
+planning notes that live alongside that pipeline, not here.
 
 ```
-homerun-mobile/
-├── ios/       Swift host — WKWebView, bridge, PumpkinBackend
-├── android/   Kotlin host — WebView, bridge, Pumpkin + JVM backends
-├── rust/      homerun-pumpkin-ffi — the C ABI both platforms link
+homerun-go/
+├── ios/       Swift host — WKWebView, bridge router, PumpkinBackend
+├── android/   Kotlin host — WebView, bridge router, Pumpkin + JVM backends
+├── rust/      homerun-core (decisions) + homerun-pumpkin-ffi (the supervisor)
+├── go/        wireproxy-ios — the tunnel, built as a library for iOS
 ├── shared/    the vendored bridge contract + conformance checker
-└── scripts/   contract sync
+├── scripts/   the build system — staging the UI, cross-compiling, the gates
+└── docs/      one file per subsystem, indexed from docs/README.md
 ```
 
 ## Architecture
 
 ```
-        homerun-app-ui  (static web bundle, embedded in the app)
+        UI bundle  (static web bundle, embedded in the app, OTA-updatable)
                 │
                 │  bridge/v1  — JSON over the platform's WebView channel
                 ▼
@@ -29,145 +44,96 @@ homerun-mobile/
    └───────────┬─────────────┘   └───────────┬─────────────┘
                │  ServerBackend              │  ServerBackend
                ▼                             ▼
-        PumpkinBackend              PumpkinBackend │ JavaServerBackend
-        (Rust, in-process)          (Rust, JNI)    │ (bundled JRE)
+        PumpkinBackend             PumpkinBackend │ JavaServerBackend
+        (Rust, linked in)          (child process) │ (bundled JRE)
 ```
 
 Two abstraction layers, and they do different jobs:
 
-- **`bridge/v1`** separates the UI from every host. Frozen and versioned;
-  spec in `shared/conformance/PROTOCOL.md`.
-- **`ServerBackend`** separates the host from the engine. Per-platform
-  (`ios/HomerunHost/ServerBackend.swift`,
-  `android/.../ServerBackend.kt`) so the `native-server-*` channels are wired
-  once no matter what is underneath.
+- **`bridge/v1`** separates the UI from every host. Frozen, versioned,
+  additive-only; spec in `shared/conformance/PROTOCOL.md` — read it before
+  touching bridge code.
+- **`ServerBackend`** separates the host from the engine
+  (`ios/HomerunHost/ServerBackend.swift`, `android/.../ServerBackend.kt`), so
+  the `native-server-*` channels are wired once no matter what runs
+  underneath. iOS links the Pumpkin engine in-process (it cannot spawn
+  processes); Android supervises Pumpkin and JVM servers as child processes
+  through the same Rust supervisor.
 
-## Platform constraints that shape everything
+`rust/homerun-core` holds the decisions every host makes — what a console
+line means, how much heap is safe, what an exit meant — with no sockets, no
+processes, no async runtime. Hosts supply the effects. `docs/shared-core.md`
+and `docs/ffi.md` are the references.
 
-These are not preferences; they decide the design.
+## The UI bundle
 
-| Constraint | Consequence |
-|---|---|
-| **iOS cannot spawn processes** | iOS is Pumpkin-only, in-process via FFI. No pids, no stdio pipes anywhere in the interfaces. |
-| **iOS forbids JIT** | wasmtime must run Pulley (AOT → interpreted bytecode). |
-| **iOS has no background mode for a server** | Backgrounding suspends the server. v1 keeps the screen awake and says so plainly; `backgroundExecution: false`. This is a product limitation, not a TODO. |
-| **Android API 29+ cannot exec from writable storage** | The bundled JRE ships in the APK as `jniLibs`. Server jars are data, so those may still download. |
-| **Android 14+ foreground service types** | Hosting runs in a declared foreground service. Validate the type with an early internal-track submission. |
-| **Phones jetsam** | The WebView content process can die while the server runs. The host must reload, re-queue events, and fail pending calls. |
+`npm run ui` fetches the current bundle's signed manifest from
+`cdn.gethomerun.app`, verifies its Ed25519 signature against the public key
+pinned in this tree, checks the archive's digest, and stages it into both
+hosts — the same verification a device applies to an over-the-air update.
+Pin a specific bundle with `HOMERUN_UI_BUNDLE=<id>`, or point at a local
+tree with `HOMERUN_UI_DIR`. `scripts/check-ui-bundle.js` proves every one of
+those guards still refuses a bad input; it runs in CI on every push.
 
-## The bridge contract
+The bundle's *source* is not in this repository and is not open source. The
+bridge contract it speaks is vendored in `shared/conformance/`, so the
+conformance gates run with no UI checkout at all.
 
-`shared/conformance/` vendors two files from the UI repo:
-
-- `PROTOCOL.md` — wire envelopes, transports, lifecycle, errors. **Read first.**
-- `bridge-v1.json` — the generated manifest: every channel, and which
-  profile requires it.
-
-161 manifest entries cover 160 channels (`open-storage-settings` is listed
-twice, as an invoke and as an event). **iOS must answer 56, Android 57** — of
-the 82 and 83 each profile requires, the balance are events a host emits rather
-than channels it answers. The rest are
-desktop-only (WSL, the Minecraft client launcher, the installer) and gated
-off by capability, so the UI never calls them.
+## Building and testing
 
 ```bash
-node scripts/sync-contract.js ../homerun-app-ui        # refresh the vendored copies
-node shared/conformance/check-coverage.js ios     ios/HomerunHost/BridgeRouter.swift
-node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
-```
-
-The checker reads each router's dispatch table (between
-`BRIDGE-CHANNELS-BEGIN`/`END` markers) and fails the build on any required
-channel without a handler — because an unanswered invoke hangs a UI promise
-forever.
-
-Wire both into CI. When the contract gains a channel, that is exactly how you
-want to find out.
-
-## Status
-
-The Android app boots and renders the shared UI. No server runs yet.
-
-| Piece | State |
-|---|---|
-| Bridge contract, vendored | done |
-| Conformance checker | done |
-| `ServerBackend` (Swift, Kotlin) | interfaces defined |
-| `homerun-pumpkin-ffi` | **implemented and tested** except the engine itself — see [docs/ffi.md](docs/ffi.md) |
-| Pumpkin engine | not wired (fork not yet pinned) — `StubEngine` stands in |
-| iOS host | not started |
-| Android host | **M0–M3 core done** — see [docs/android-host.md](docs/android-host.md) and [docs/android-server-backend.md](docs/android-server-backend.md) |
-
-Android runs on an emulator today: the WebView serves the shared bundle,
-capabilities are injected at document start, the bridge round-trips, the
-post-login handshake routes through to the dashboard, `homerun://` deep links
-arrive on both paths, and **a server actually starts** — the Rust engine runs
-in-process over JNI, streams console output, and stops cleanly.
-
-`npm run conformance:android` reports **36 of 46** required channels handled.
-The remaining 10 are storage figures, the SAF document pickers, region
-latency, and the Bedrock version lookup. That report is the work queue.
-
-The dashboard renders at desktop proportions on a phone. Making the shared UI
-responsive is the largest piece of remaining mobile work and belongs to
-[homerun-app-ui](https://github.com/hintjen/homerun-app-ui), not here.
-
-The FFI crate has 36 passing tests covering the state machine, console
-cursors, port pre-flight, crash capture, and the whole C surface — none of
-which need a device or Pumpkin. `Engine` is the seam; a `StubEngine` stands
-in so the failure paths are exercised now rather than discovered on a phone.
-
-The prototype this builds on lives in the `Pumpkin` fork under `ios/`. It
-already solved the hard embedding problems — FFI lifecycle, panic
-containment, log capture, no-JIT wasm, WebView-process recovery — and those
-lessons are folded into the interfaces here. What it lacks is the product:
-config, console, connectivity, backgrounding.
-
-## Implementation plans
-
-The two platform tracks are built in parallel by different developers.
-
-| Plan | For |
-|---|---|
-| [`plans/shared-milestones.md`](plans/shared-milestones.md) | **Read first.** Ownership, the shared M0–M5 milestones, cross-cutting rules |
-| [`plans/ios.md`](plans/ios.md) | Swift host, Pumpkin engine wiring |
-| [`plans/android.md`](plans/android.md) | Kotlin host, JVM backend, foreground service |
-| [`plans/android-mod-loaders.md`](plans/android-mod-loaders.md) | Fabric/NeoForge/Forge, and the desktop mod resolver ported into the core |
-
-## Getting started
-
-```bash
-npm install        # fetches and builds the shared UI bundle
+npm install        # no private dependencies; installs nothing of note
 npm run doctor     # what this machine can build, and how to fix the gaps
+npm test           # the Rust suites + the ABI, revision, capability and bundle gates
 ```
 
-Then, per platform:
+Both Rust crates build and test host-native on any OS, including Windows —
+hundreds of tests in seconds, no device needed. Two of the git dependencies
+are **private for now** while their forks are prepared for release:
+`hintjen/Pumpkin` (the server engine) and `hintjen/wireproxy-fork` (the
+tunnel). Until they open, `npm run test:rust` and full platform builds need
+access to them; `npm run test:core` and everything else runs for anyone.
+
+Per platform:
 
 ```bash
-npm run build:android      # stages the UI + builds the .so into jniLibs
+npm run build:android      # stages the UI + builds the native pieces into jniLibs
 npm run build:ios          # macOS only
-npm run test:rust          # 36 FFI tests, no device needed
-```
-
-To actually run the Android app:
-
-```bash
 npm run android:emulator   # start the AVD and wait for boot
 npm run android:run        # build, install, launch, follow logs
 ```
 
-Debug builds are inspectable from `chrome://inspect` on the host machine.
+Debug builds are inspectable from `chrome://inspect`. Full detail:
+[`docs/building.md`](docs/building.md) — including *Which backend a build
+talks to*, which is worth reading before concluding anything from a device.
 
-`npm run doctor` names every missing prerequisite and the exact command to
-install it. Full detail: [`docs/building.md`](docs/building.md).
+## Conformance is the gate
 
-**iOS builds require macOS.** Android builds from any host.
+```bash
+npm run conformance:ios
+npm run conformance:android
+```
 
-See `CLAUDE.md` for how the pieces fit and what to build next.
+The checker reads each router's dispatch table and fails on any required
+channel without a handler, because **an unanswered invoke hangs a UI promise
+forever** — on a phone that looks like a frozen screen with no error. Both
+hosts pass today: iOS answers 57 required channels (66 declared), Android 58
+of 58. Beside coverage, CI checks the host revision ledger, capability
+parity, the pinned bundle key, and the UI-bundle guards — see
+`.github/workflows/conformance.yml` for why each exists.
+
+## Status
+
+Both hosts exist and both pass conformance. Android runs a real JVM server
+end to end on hardware — world, tunnel, graceful stop, on-stop backup — and
+hosts Bedrock through PowerNukkitX; a Bedrock client has joined through the
+gateway. iOS links the Pumpkin engine and is drivable from a terminal on a
+Mac. `docs/README.md` indexes the write-ups, including the gaps.
 
 ## Related repositories
 
-- **[homerun-app-ui](https://github.com/hintjen/homerun-app-ui)** — the shared
-  UI and the bridge contract
 - **[homerun](https://github.com/hintjen/homerun)** — desktop app, API, services
-- **Pumpkin** (fork) — the Rust Minecraft server this embeds
+- **hintjen/Pumpkin** — the Rust Minecraft server this embeds (private for now)
+- **hintjen/wireproxy-fork** — the tunnel (private for now)
+
+See `CLAUDE.md` for how the pieces fit and the house rules for working here.

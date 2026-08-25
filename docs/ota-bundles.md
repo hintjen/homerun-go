@@ -443,97 +443,30 @@ Two things it does that matter here:
 
 ## Publishing
 
-`.github/workflows/publish-ui-bundle.yml`, manual dispatch only and gated on
-the `ui-bundle-publish` environment. It stages the UI with the same
-`build-ui.js` the APK and the IPA use, zips that tree, asks the API what serial
-to sign, signs, uploads, and registers the release — for one platform or for
-both, chosen with the `platforms` input.
+Bundles are published by a manually dispatched workflow in the **private
+release repository**, gated on an environment that holds the OTA signing key
+and the upload credential. It stages the UI with the same `build-ui.js` an
+APK or IPA build uses, zips the staged tree, asks the API what serial to
+sign, signs the manifest, uploads the archive, and registers the release —
+then points the CDN's `latest` and pin objects at what it published. The
+operational detail — the runner, its preflight, the caching traps — is
+documented beside that workflow.
 
-**One archive, two publishes.** `build-ui.js` stages a byte-identical tree into
-both hosts' asset directories — same source, same source-map filter, only the
-destination differs — so the zip is built once and the same bytes go up under a
-key per platform. What cannot be shared is the manifest: `platform`, `url` and
-`serial` are all signed fields, all three differ, and the core refuses a
-manifest built for the other platform outright (`declines_the_other_platforms_bundle`
-in `bundle.rs`). The workflow checks the two staged trees still match and fails
-if they ever diverge, because nothing downstream would notice iOS being handed
-Android's tree.
+Three of its properties matter from this side:
 
-`min-host` is one value for the whole run. `BRIDGE_HOST_REVISION` is a single
-shared ledger rather than a per-platform counter, and the hosts do not have to
-sit at the same revision — they happen to both be at 12 today — so a `min-host`
-above the lower of the two quietly excludes that platform instead of failing at
-publish time. Check both before raising it; do not trust this number.
-
-### What this runner does not have
-
-The job runs on `[self-hosted, Linux, X64, simrig]`, the org's Debian 12 box,
-sharing it with the Pumpkin runner and a production restic stack. It moved
-there off `ubuntu-latest` so that shipping a UI does not depend on hosted-runner
-billing. A persistent box is not a fresh image:
-
-| Absent | What the workflow does instead |
-|---|---|
-| `zip`, `unzip` | Builds the archive with `zipfile` in an inline `python3`. `publish-android.yml` already unpacks the same way, for the same reason. |
-| `aws` | A root-free AWS CLI v2 in `~/opt/aws-cli`, entry point `~/.local/bin/aws`. The runner service does not source a login shell, so the job adds that directory to `$GITHUB_PATH` itself. |
-| `pip`, `ensurepip` | Nothing needs them — and `python3 -m venv` fails outright here, which is why the CLI is the vendored installer rather than a pip install. |
-
-`node` and `npm` are missing from the login shell too, and that one is
-harmless: `actions/setup-node@v4` puts them in the runner's tool cache.
-
-A preflight step checks every one of these and fails at the top of the job with
-the list, instead of several minutes in. **If the box is ever rebuilt, that
-step is what will tell you.** Reinstall the CLI with:
-
-```bash
-curl -sSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o aws.zip
-python3 -c 'import zipfile,os;z=zipfile.ZipFile("aws.zip");[os.chmod(z.extract(m,"."),m.external_attr>>16) for m in z.infolist() if m.external_attr>>16]'
-./aws/install --install-dir ~/opt/aws-cli --bin-dir ~/.local/bin --update
-```
-
-**The home directory persists and is shared**, so no secret may be written to
-`~/.ssh`. The deploy key goes to `$RUNNER_TEMP/ssh`, which is the job's alone
-and cleared between runs, with `GIT_SSH_COMMAND` pointing git at it — the same
-mechanism and the same reasoning as `publish-android.yml`. A key left in
-`~/.ssh` would outlive the job that needed it and be readable by the other
-runner's jobs.
-
-Four things about it worth not undoing:
-
-- **It pins to `package-lock.json`** (`HOMERUN_UI_NO_UPDATE=1`) rather than
-  re-resolving the UI branch. This publishes an interface to every phone and
-  the lockfile is the only record of which commit that was.
-- **Upload happens before the API is told.** The reverse order leaves a window
-  where devices fetch a URL that 403s.
-- **It refuses to overwrite an existing archive**, checked through the CDN
-  because the upload credential is `PutObject`-only and cannot list the bucket.
-  Note the check can say "already published" about an object that has since
-  been **deleted from S3**: archives are served `immutable` with a one-year
-  TTL, so CloudFront keeps answering from the edge long after the origin is
-  empty. That fails in the safe direction — it blocks rather than overwrites —
-  but if it ever fires for a key you believe is gone, the fix is a CloudFront
-  invalidation, not another upload.
-
-That caching behaviour matters beyond the guard: **deleting a bad archive from
-S3 does not stop devices fetching it.** The edge will serve it for a year. The
-only thing that actually stops a release is the manifest — set its `rollout` to
-0 so it is no longer offered, and publish a replacement at a higher serial for
-the devices already on it.
-
-Stage publishes under `ui/stage/`, prod under `ui/`. There is one bucket and one
-CloudFront, but stage and prod are separate databases with independent serials —
-so both count from 1 and would otherwise want the same key on the same day. The
-prefix is what stops one target overwriting bytes the other's signed manifest
-already names.
-
-Platforms collide the same way and for the same reason, so each takes a segment
-of its own beneath that: `ui/ios/`, `ui/stage/ios/`. Android keeps the bare path
-because its archives are already published under it and a signed manifest names
-the URL — a published key cannot move.
-
-It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
-`sign-manifest.js keygen`), the AWS upload credential as repository secrets
-*here*, and the API branch deployed.
+- **One archive, two publishes.** `build-ui.js` stages a byte-identical tree
+  for both hosts, so the same bytes go up under a key per platform. The
+  manifests differ: `platform`, `url` and `serial` are all signed fields, and
+  the core refuses a manifest built for the other platform outright
+  (`declines_the_other_platforms_bundle` in `bundle.rs`).
+- **The layout.** Stage publishes under `ui/stage/`, prod under `ui/`; every
+  platform but Android takes a segment of its own (`ui/ios/`). Android keeps
+  the bare path because its archives are already published there and a signed
+  manifest names the URL — a published key cannot move.
+- **Deleting a bad archive from S3 does not stop devices fetching it.** The
+  edge serves it `immutable` for a year. The only thing that stops a release
+  is the manifest: set its `rollout` to 0 so it is no longer offered, and
+  publish a replacement at a higher serial for the devices already on it.
 
 ## Building against a published bundle
 
