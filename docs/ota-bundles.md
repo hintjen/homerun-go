@@ -460,9 +460,43 @@ if they ever diverge, because nothing downstream would notice iOS being handed
 Android's tree.
 
 `min-host` is one value for the whole run. `BRIDGE_HOST_REVISION` is a single
-shared ledger rather than a per-platform counter, but the hosts do not sit at
-the same revision — iOS 11, Android 10 today — so a `min-host` above the lower
-of the two quietly excludes that platform instead of failing at publish time.
+shared ledger rather than a per-platform counter, and the hosts do not have to
+sit at the same revision — they happen to both be at 12 today — so a `min-host`
+above the lower of the two quietly excludes that platform instead of failing at
+publish time. Check both before raising it; do not trust this number.
+
+### What this runner does not have
+
+The job runs on `[self-hosted, Linux, X64, simrig]`, the org's Debian 12 box,
+sharing it with the Pumpkin runner and a production restic stack. It moved
+there off `ubuntu-latest` so that shipping a UI does not depend on hosted-runner
+billing. A persistent box is not a fresh image:
+
+| Absent | What the workflow does instead |
+|---|---|
+| `zip`, `unzip` | Builds the archive with `zipfile` in an inline `python3`. `publish-android.yml` already unpacks the same way, for the same reason. |
+| `aws` | A root-free AWS CLI v2 in `~/opt/aws-cli`, entry point `~/.local/bin/aws`. The runner service does not source a login shell, so the job adds that directory to `$GITHUB_PATH` itself. |
+| `pip`, `ensurepip` | Nothing needs them — and `python3 -m venv` fails outright here, which is why the CLI is the vendored installer rather than a pip install. |
+
+`node` and `npm` are missing from the login shell too, and that one is
+harmless: `actions/setup-node@v4` puts them in the runner's tool cache.
+
+A preflight step checks every one of these and fails at the top of the job with
+the list, instead of several minutes in. **If the box is ever rebuilt, that
+step is what will tell you.** Reinstall the CLI with:
+
+```bash
+curl -sSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o aws.zip
+python3 -c 'import zipfile,os;z=zipfile.ZipFile("aws.zip");[os.chmod(z.extract(m,"."),m.external_attr>>16) for m in z.infolist() if m.external_attr>>16]'
+./aws/install --install-dir ~/opt/aws-cli --bin-dir ~/.local/bin --update
+```
+
+**The home directory persists and is shared**, so no secret may be written to
+`~/.ssh`. The deploy key goes to `$RUNNER_TEMP/ssh`, which is the job's alone
+and cleared between runs, with `GIT_SSH_COMMAND` pointing git at it — the same
+mechanism and the same reasoning as `publish-android.yml`. A key left in
+`~/.ssh` would outlive the job that needed it and be readable by the other
+runner's jobs.
 
 Four things about it worth not undoing:
 
