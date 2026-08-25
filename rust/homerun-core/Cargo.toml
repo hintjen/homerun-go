@@ -2,6 +2,7 @@
 name = "homerun-core"
 version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-only"
 publish = false
 description = "The host logic shared by the desktop, iOS and Android apps: what to download, how to reach the gateway, and what state a server is in"
 

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Build tooling for the Homerun iOS and Android hosts. The apps are built by Xcode and Gradle; this orchestrates the shared UI bundle and the Rust FFI they both need.",
-  "license": "UNLICENSED",
+  "license": "GPL-3.0-only",
   "scripts": {
     "doctor": "node scripts/doctor.js",
     "ui": "node scripts/build-ui.js",
