@@ -56,11 +56,12 @@ jobs:
       - name: UI bundle guards
         run: node scripts/check-ui-bundle.js
 
-  # The FFI tests (`npm run test:rust`) are not here: `pumpkin` is a git
-  # dependency on the still-private hintjen/Pumpkin, and Cargo resolves
-  # optional dependencies whether or not their feature is enabled, so even a
-  # default-feature `cargo test` has to clone it. They run in the release
-  # repo's CI until that fork goes public; run them locally with access.
+  # The FFI tests (`npm run test:rust`) are not here. They used to be
+  # impossible on a public runner — the Pumpkin fork was private — and that
+  # reason is gone (it is public as hintjen/Pumpkin-homerun). What remains
+  # is cost: a cold hosted runner compiles the Pumpkin dependency tree for
+  # the better part of an hour. They run on the release repo's warm runner
+  # on a schedule instead; run them locally with `npm run test:rust`.
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest

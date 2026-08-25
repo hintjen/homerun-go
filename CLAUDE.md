@@ -159,11 +159,6 @@ npm test        # core + FFI (with process-engine), then the ABI, host-revision
                 # and capability checks
 ```
 
-The FFI crate's `cargo test` resolves the still-private `hintjen/Pumpkin`
-git dependency (Cargo fetches optional deps even with their feature off), so
-`npm run test:rust` needs access to it until that fork opens. Everything
-else — `test:core` and all the gates — runs for anyone.
-
 Cross-compiling: Android targets work from any host with `cargo-ndk`; iOS
 targets require macOS.
 
