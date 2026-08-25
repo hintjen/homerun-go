@@ -185,7 +185,7 @@ join on a build with no target in its format.
 
 > **The fork still prints those strings**, which is what a player typing
 > `/list` sees today. Fixing `to_pretty_console` and `get_translation` in
-> `hintjen/Pumpkin` is a follow-up; it needs a pin bump and a full static-lib
+> `hintjen/Pumpkin-homerun` is a follow-up; it needs a pin bump and a full static-lib
 > rebuild, and reporting no longer depends on it.
 
 ## `loader` is always `vanilla`

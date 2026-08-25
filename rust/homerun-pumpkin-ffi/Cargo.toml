@@ -63,7 +63,9 @@ device-ws = [
 # this crate means upstream's Cargo.toml needs no crate-type change, which is
 # one less thing carried in the fork.
 #
-# hintjen/Pumpkin carries the library-mode patches, on branch `ios-port`:
+# hintjen/Pumpkin-homerun carries the library-mode patches on `main`. It is a
+# public repository -- no deploy key, no URL rewrite, no credential of any kind
+# is needed to fetch it:
 #   - PumpkinServer::new returns Result rather than calling process::exit
 #     (an exit kills the host app with no report)
 #   - reset_server_state() so restart-in-process works
@@ -73,9 +75,9 @@ device-ws = [
 #
 # Pinned to an exact rev on purpose: upstream tracks Minecraft protocol
 # releases, and that churn must not land in an app build uninvited.
-pumpkin = { git = "https://github.com/hintjen/Pumpkin", rev = "09f1d4dfbe524292b3996f1242157b23b90177e4", optional = true }
-pumpkin-config = { git = "https://github.com/hintjen/Pumpkin", rev = "09f1d4dfbe524292b3996f1242157b23b90177e4", optional = true }
-pumpkin-util = { git = "https://github.com/hintjen/Pumpkin", rev = "09f1d4dfbe524292b3996f1242157b23b90177e4", optional = true }
+pumpkin = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "6282dcf716cab559c5c3188b8e1fc5a8d5de64ab", optional = true }
+pumpkin-config = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "6282dcf716cab559c5c3188b8e1fc5a8d5de64ab", optional = true }
+pumpkin-util = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "6282dcf716cab559c5c3188b8e1fc5a8d5de64ab", optional = true }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "time",
