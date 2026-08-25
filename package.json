@@ -49,8 +49,5 @@
     "sync-contract": "node scripts/sync-contract.js",
     "conformance:ios": "node shared/conformance/check-coverage.js ios ios/HomerunHost/BridgeRouter.swift",
     "conformance:android": "node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt"
-  },
-  "dependencies": {
-    "homerun-app-ui": "github:hintjen/homerun-app-ui#main"
   }
 }
