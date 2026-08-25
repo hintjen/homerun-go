@@ -535,6 +535,70 @@ It cannot run until three things exist: `HOMERUN_BUNDLE_KEY` (generate with
 `sign-manifest.js keygen`), the AWS upload credential as repository secrets
 *here*, and the API branch deployed.
 
+## Building against a published bundle
+
+A device learns which bundle is current by asking
+`GET /api/mobile/bundle/`, and that takes a **device** bearer token. A build
+script has no device — so the publish workflow also leaves the answer on the
+CDN, as *Point the CDN at what was just published*:
+
+| Object | Cache | What it is |
+|---|---|---|
+| `<archive key>.json` (`ui/2026-08-25.7.json`, `ui/ios/2026-08-25.3.json`) | `immutable` | The signed manifest, for pinning by id |
+| `ui/latest-<platform>-<channel>.json` | `max-age=300` | The pointer that moves |
+
+What goes up is **the signed manifest, verbatim** — not a summary of it. That
+is what makes a pointer on a public CDN safe: a tampered pointer fails
+signature verification exactly the way a tampered API reply would, so the CDN
+gains no trust it did not already have. The IAM policy stays `PutObject`-only.
+
+Three rules in that step, all of which have a reason:
+
+- **Prod only.** The stage prefix carries the id-collision workaround, and a
+  public build has no business embedding a staging UI.
+- **The pin object sits beside its own archive**, not at `ui/<id>.json`.
+  Android and iOS serials are independent and can both be at 7 on the same day
+  — the same collision the archive prefix already works around.
+- **`latest` moves only at `rollout: 100`.** It defaults to 10, so most
+  publishes are partial, and a partial one is a bundle the release is still
+  deciding about. Moving the pointer would make it the default for every source
+  build that has no dependency to fall back on, which is the opposite of what a
+  staged rollout is for. Re-run at 100 to promote. Pins are written either way,
+  so `HOMERUN_UI_BUNDLE` can name anything that was ever published.
+
+`latest` is written **last**, so a failed publish cannot leave a pointer at a
+manifest the API never registered. The step then reads one pin object back
+through CloudFront — the pin and not `latest`, because a pin is a new key with
+no cached copy to serve stale, whereas `latest` has just been overwritten and
+its edge copy has five minutes to live.
+
+### The consumer
+
+`scripts/build-ui.js`, via `scripts/ui-bundle.js`, when the checkout has no
+`homerun-app-ui` dependency or when `HOMERUN_UI_BUNDLE` names an id
+(`plans/repo-split.md` § 3a, `docs/building.md` § *The shared UI*). It applies
+the device's own judgement at build time:
+
+| Check | Same as |
+|---|---|
+| Ed25519 over `Manifest::signing_payload` | `bundle.rs`, via `sign-manifest.js`'s exported `signingPayload` |
+| `minHost` not above this checkout's host revision | `bundle.rs`; the revision is read by `scripts/host-revision.js` |
+| `sha256` of the archive | `BundleUpdater` |
+| Entry, size and Zip Slip ceilings on the unpack | `BundleUpdater.unpack`, same numbers |
+
+The `minHost` check is the one that is easy to think optional. It is not: a
+build that embeds a UI calling a channel its host cannot answer does not fail
+loudly — the invoke never resolves and the screen sits there.
+
+`npm run test:ui-bundle` puts each of those guards against an input that should
+trip it, with a throwaway signing key. That test exists because every check
+here fails *open* if it is wrong, and a happy-path test would pass with all
+four deleted.
+
+**`scripts/bundle-key.js` is the one copy of the public key** the verifier
+uses. The hosts still carry their own literals — Gradle and Swift cannot read a
+JS module — and `npm run test:capabilities` fails if the three ever disagree.
+
 ## Still to build
 
 The update prompt and the iOS half were the two items here. The iOS half is

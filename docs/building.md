@@ -71,10 +71,41 @@ with the commit that was resolved, so a release is still traceable — commit
 | Env | Effect |
 |---|---|
 | `HOMERUN_UI_DIR=<path to out/>` | Stage that build; no refresh. Working against a local UI checkout. |
+| `HOMERUN_UI_BUNDLE=<id>` | Stage that published bundle from the CDN. |
+| `HOMERUN_UI_CHANNEL=<channel>` | Which channel's newest to take. `stable`. |
 | `HOMERUN_UI_NO_UPDATE=1` | Keep the pinned commit. Offline, or reproducing an old build. |
 
 The destination is **replaced, not merged** — a stale file from an older UI
 version would otherwise linger and get served.
+
+### Four sources, first match wins
+
+| Set | Source |
+|---|---|
+| `HOMERUN_UI_DIR` | that directory |
+| `HOMERUN_UI_BUNDLE` | that published bundle, from the CDN |
+| `homerun-app-ui` in `package.json` | `npm install`, then its `out/` — **this repo** |
+| otherwise | the newest published bundle for the channel |
+
+The last two are the split (`plans/repo-split.md` § 3a). This repo has the git
+dependency and builds the UI from source, exactly as before. A checkout without
+access to `hintjen/homerun-app-ui` builds against the *compiled* bundle
+instead: every published bundle is a public CloudFront object, and its manifest
+is signed, so a build can prove what it downloaded with no credential at all.
+
+Nothing from the CDN is trusted on its face. `scripts/ui-bundle.js` verifies
+the manifest's Ed25519 signature against `scripts/bundle-key.js`, refuses a
+`minHost` above this checkout's own host revision, checks the archive against
+the manifest's `sha256`, and unpacks with the same ceilings and Zip Slip guard
+`BundleUpdater` applies on a device. `npm run test:ui-bundle` exercises each of
+those against an input that should trip it. `docs/ota-bundles.md`
+§ *Building against a published bundle*.
+
+**A CDN build stages someone else's analytics.** A stable bundle has the
+production PostHog key compiled into it at `next build`, so a build pointed at
+staging still reports to the production project. Cosmetic, and it cannot be
+fixed from this side — the key is inside the compiled artefact. See *Which
+backend a build talks to* below for the rest of that story.
 
 > Editing this script? `npm update` does **not** refetch a git branch
 > dependency; npm treats it as already satisfied. Re-installing the spec is

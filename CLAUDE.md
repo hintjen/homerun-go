@@ -105,10 +105,14 @@ today: iOS requires 57 handlers (66 declared), Android 58 of 58. The checker
 reads the router's own dispatch table between `BRIDGE-CHANNELS-BEGIN`/`END`
 markers — keep those markers around the real table, not a duplicate list.
 
-Two more gates run beside them, all four in `.github/workflows/conformance.yml`:
-`npm run test:host-revision` (a channel answered without a ledger entry is one
-an over-the-air bundle can hang on) and `npm run test:capabilities` (Android
-transcribes its capability record by hand and had already drifted).
+Three more gates run beside them, all five in
+`.github/workflows/conformance.yml`: `npm run test:host-revision` (a channel
+answered without a ledger entry is one an over-the-air bundle can hang on),
+`npm run test:capabilities` (Android transcribes its capability record by hand
+and had already drifted, and it now also checks the bundle public key both
+hosts transcribe), and `npm run test:ui-bundle` (`scripts/ui-bundle.js` decides
+whether to trust a manifest off the CDN, and every check in it fails *open* if
+it is wrong).
 
 If a channel is missing, the fix is a handler, not an exclusion. **An
 unanswered invoke hangs a UI promise forever** — that is the worst failure

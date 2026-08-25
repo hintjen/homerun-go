@@ -40,8 +40,21 @@ jobs:
       # And this one proves the host tells the truth about what it supports.
       # Not covered by either of the above: capabilities are injected, not
       # dispatched, so nothing that reads the router can see them drift.
+      #
+      # It also checks the bundle public key: both hosts transcribe it by hand
+      # and `scripts/bundle-key.js` is the third copy, the one that verifies a
+      # manifest fetched from the CDN.
       - name: Capability parity
         run: node scripts/check-capabilities.js
+
+      # `ui-bundle.js` is the only JavaScript here that decides whether to
+      # TRUST something, and every one of its checks fails open if it is
+      # wrong — a signature check that always returns true looks exactly like
+      # a working build. So each guard is put against an input that should
+      # trip it. Belongs on this job for the same reason as the rest: node
+      # builtins only, no `npm ci`, no secrets.
+      - name: UI bundle guards
+        run: node scripts/check-ui-bundle.js
 
   rust:
     name: FFI tests

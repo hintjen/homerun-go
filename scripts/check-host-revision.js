@@ -55,24 +55,10 @@ const path = require("path");
 
 const { ROOT } = require("./targets");
 
-/** Each host's router, how it names its revision, and what it is called. */
-const HOSTS = [
-  {
-    profile: "android",
-    label: "Android (BridgeRouter.kt)",
-    file: path.join(
-      ROOT, "android", "app", "src", "main", "java", "app", "gethomerun",
-      "mobile", "BridgeRouter.kt"
-    ),
-    pattern: /HOST_REVISION\s*=\s*(\d+)/,
-  },
-  {
-    profile: "ios",
-    label: "iOS (BridgeRouter.swift)",
-    file: path.join(ROOT, "ios", "HomerunHost", "BridgeRouter.swift"),
-    pattern: /hostRevision\s*=\s*(\d+)/,
-  },
-];
+// Shared with `build-ui.js`, which refuses a bundle whose `minHost` is above
+// the revision of the checkout it is staging into. One definition, because two
+// readers of the same constant is how they end up disagreeing about it.
+const { HOSTS } = require("./host-revision");
 
 const LEDGER = path.join(ROOT, "shared", "conformance", "host-revisions.json");
 

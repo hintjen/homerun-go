@@ -13,20 +13,55 @@
  * shipped.
  *
  *   HOMERUN_UI_DIR=<path to out/>  stage that build instead; no refresh
+ *   HOMERUN_UI_BUNDLE=<id>         stage that published bundle from the CDN
+ *   HOMERUN_UI_CHANNEL=<channel>   which channel's newest to take (stable)
  *   HOMERUN_UI_NO_UPDATE=1         keep the pinned commit (offline, or
  *                                  reproducing an old build)
  *
  * `npm update` is deliberately not used: it treats a git branch dependency
  * as already satisfied and will not refetch. Re-installing the spec is what
  * re-resolves the ref.
+ *
+ * # Where the UI comes from
+ *
+ * Four sources, first match wins:
+ *
+ *   HOMERUN_UI_DIR        that directory
+ *   HOMERUN_UI_BUNDLE     that published bundle, from the CDN
+ *   homerun-app-ui in package.json    npm install, then its out/
+ *   otherwise             the newest published bundle for the channel
+ *
+ * The last two are the split (`plans/repo-split.md` § 3a): this repo keeps the
+ * git dependency and builds the UI from source, and a public checkout without
+ * access to it builds against the *compiled* bundle instead — a public object
+ * whose manifest is signed, so a build can prove what it downloaded with no
+ * credential at all.
+ *
+ * `plans/repo-split.md` orders HOMERUN_UI_BUNDLE *below* the dependency. It is
+ * above it here: an explicitly-set variable that silently does nothing is the
+ * kind of thing this repo has been bitten by before (`CLAUDE.md`: never
+ * conclude which backend is in play from the build log). Asking for a bundle
+ * by id and getting a source build instead is that same failure. Nothing else
+ * changes — with neither variable set, a checkout that has the dependency
+ * still builds from source.
  */
 const { execFileSync } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const { ROOT, UI_DESTINATIONS } = require("./targets");
 
 const PACKAGE_DIR = path.join(ROOT, "node_modules", "homerun-app-ui", "out");
+
+/** Whether this checkout can build the UI from source at all. */
+const hasUiDependency = () => {
+  try {
+    return Boolean(require(path.join(ROOT, "package.json")).dependencies?.["homerun-app-ui"]);
+  } catch {
+    return false;
+  }
+};
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const platforms = requested.length ? requested : Object.keys(UI_DESTINATIONS);
@@ -198,11 +233,8 @@ function warnIfUnkeyed(dir) {
   );
 }
 
-refresh();
-const src = sourceDir();
-warnIfUnkeyed(src);
-
-for (const platform of platforms) {
+/** Copy one prepared tree into a platform's asset directory. */
+function stage(platform, src) {
   const dest = UI_DESTINATIONS[platform];
   // Replace rather than merge: a stale file from a previous UI version
   // would otherwise linger and get served.
@@ -210,6 +242,66 @@ for (const platform of platforms) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.cpSync(src, dest, { recursive: true, filter: shipped });
   console.log(`${platform.padEnd(8)} <- ${dest}`);
+  return dest;
 }
 
-console.log(`\nStaged from ${src}`);
+/**
+ * Stage from the CDN, one platform at a time.
+ *
+ * Per platform because the manifests are: `serial`, `url` and `platform` are
+ * all signed fields and all three differ, so android and ios are two bundles
+ * even when the bytes inside them are identical. The download is memoised on
+ * the digest, so the common case — identical bytes published to both — fetches
+ * once and unpacks twice.
+ */
+async function stageFromCdn() {
+  const { fetchBundle } = require("./ui-bundle");
+  const id = process.env.HOMERUN_UI_BUNDLE || undefined;
+  const channel = process.env.HOMERUN_UI_CHANNEL || "stable";
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "homerun-ui-"));
+
+  try {
+    for (const platform of platforms) {
+      const into = path.join(work, platform);
+      const manifest = await fetchBundle({ platform, id, channel, into });
+      const dest = stage(platform, into);
+
+      // From the MANIFEST, not from inside the archive. The archive carries a
+      // `bundle.json` of its own — it is covered by the signed digest, so it is
+      // not untrusted exactly, but it is a second copy of facts that already
+      // have an authority, and two copies of a fact eventually disagree.
+      // `BundleStore.stage` makes the same call on a device, in the same words.
+      fs.writeFileSync(
+        path.join(dest, "bundle.json"),
+        `${JSON.stringify({ id: manifest.bundle, minHost: manifest.minHost, serial: manifest.serial }, null, 2)}\n`
+      );
+    }
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+  console.log("\nStaged from the CDN. This build ships a published bundle, not a source build.");
+}
+
+/** Stage from a directory — HOMERUN_UI_DIR, or the npm dependency's out/. */
+function stageFromSource() {
+  refresh();
+  const src = sourceDir();
+  warnIfUnkeyed(src);
+  for (const platform of platforms) stage(platform, src);
+  console.log(`\nStaged from ${src}`);
+}
+
+// HOMERUN_UI_DIR is handled inside sourceDir(), so it takes the source path
+// even though it is the highest-precedence option — the directory it names is
+// already a built tree and needs none of the CDN machinery.
+const fromCdn =
+  !process.env.HOMERUN_UI_DIR &&
+  (process.env.HOMERUN_UI_BUNDLE || !hasUiDependency());
+
+(async () => {
+  if (fromCdn) await stageFromCdn();
+  else stageFromSource();
+})().catch((err) => {
+  console.error(`\n${err.message}\n`);
+  process.exit(1);
+});

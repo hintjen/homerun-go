@@ -140,13 +140,28 @@ function sign(args) {
 
 // --- entry -----------------------------------------------------------------
 
-const [command, ...rest] = process.argv.slice(2);
-const args = {};
-for (let i = 0; i < rest.length; i += 1) {
-  if (!rest[i].startsWith("--")) continue;
-  args[rest[i].slice(2)] = rest[i + 1]?.startsWith("--") ? true : rest[++i];
-}
+/**
+ * `signingPayload` is exported so `build-ui.js` can VERIFY a manifest it
+ * fetched from the CDN without becoming a third implementation of the format
+ * (`plans/repo-split.md` § 3a). The header above argues that two
+ * implementations is what makes this a format rather than a habit — two is the
+ * number that keeps the signer and the verifier honest about each other. A
+ * third, in the same language as one of them, would just be a copy that
+ * eventually disagrees, and a disagreement here looks like an attack.
+ */
+module.exports = { PAYLOAD_VERSION, signingPayload };
 
-if (command === "keygen") keygen();
-else if (command === "sign") sign(args);
-else die("Usage: sign-manifest.js keygen | sign --archive <zip> --bundle <id> --url <https> --serial <n>");
+// Only when run, never when required — the `die()` in the else branch would
+// otherwise take down anything that imported this for `signingPayload`.
+if (require.main === module) {
+  const [command, ...rest] = process.argv.slice(2);
+  const args = {};
+  for (let i = 0; i < rest.length; i += 1) {
+    if (!rest[i].startsWith("--")) continue;
+    args[rest[i].slice(2)] = rest[i + 1]?.startsWith("--") ? true : rest[++i];
+  }
+
+  if (command === "keygen") keygen();
+  else if (command === "sign") sign(args);
+  else die("Usage: sign-manifest.js keygen | sign --archive <zip> --bundle <id> --url <https> --serial <n>");
+}

@@ -154,3 +154,32 @@ if (failed) {
   process.exit(1);
 }
 console.log("\nPASS — every host injects the capabilities the contract declares.");
+
+// ---------------------------------------------------------------------------
+// The bundle public key
+// ---------------------------------------------------------------------------
+
+/**
+ * Not a capability, and it rides here for one reason: this is already the gate
+ * that catches a constant both hosts transcribe by hand, and it already runs in
+ * `npm test` on a box with node and nothing else.
+ *
+ * The key gained a third copy when `build-ui.js` learned to verify a manifest
+ * it fetched from the CDN (`plans/repo-split.md` § 3a). A wrong copy in a host
+ * does not error — it rejects every manifest for ever, which reads exactly like
+ * "nothing has been published". Nothing else would notice.
+ */
+const { BUNDLE_PUBLIC_KEY, hostDisagreements } = require("./bundle-key");
+
+const keyProblems = hostDisagreements();
+if (keyProblems.length) {
+  console.error(
+    `\nThe bundle public key has drifted from scripts/bundle-key.js:\n\n  ` +
+      keyProblems.join("\n  ") +
+      "\n\n  A host with the wrong key rejects every over-the-air manifest\n" +
+      "  silently. Change all three together, and remember the private half\n" +
+      "  in HOMERUN_BUNDLE_KEY has to match.\n"
+  );
+  process.exit(1);
+}
+console.log(`PASS — both hosts carry bundle public key ${BUNDLE_PUBLIC_KEY.slice(0, 12)}…`);
