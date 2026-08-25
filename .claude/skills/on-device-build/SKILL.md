@@ -135,6 +135,10 @@ next to the real checkout instead:
 HOMERUN_WIREPROXY_SRC=/path/to/wireproxy-fork npm run wireproxy:android
 ```
 
+That checkout must be at the revision in `scripts/wireproxy.rev` — the build
+refuses any other, because the fork's `main` moves on its own schedule. If you
+are iterating on the fork itself, `HOMERUN_WIREPROXY_ALLOW_UNPINNED=1`.
+
 The failure is legible ("clone it next to this repo"), but it arrives after the
 other artefacts are already built and reads like a missing dependency rather
 than a path problem. `restic` and the JRE download rather than build, so they

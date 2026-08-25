@@ -101,6 +101,50 @@ const installedTargets = (
   capture("rustup", ["target", "list", "--installed"]) || ""
 ).split(/\r?\n/);
 
+// --- the tunnel, both platforms --------------------------------------------
+//
+// Without it a hosted server is reachable only on the phone's own Wi-Fi — on
+// cellular, CGNAT means nobody can join at all. Android execs the binary,
+// iOS links a gomobile framework; both are built from the same fork checkout.
+
+const go = capture("go", ["version"]);
+add(
+  Boolean(go),
+  "Go",
+  go || "not found",
+  "brew install go / winget install GoLang.Go   (the wireproxy fork needs Go 1.26+)"
+);
+const wireproxySrc = process.env.HOMERUN_WIREPROXY_SRC
+  ? path.resolve(ROOT, process.env.HOMERUN_WIREPROXY_SRC)
+  : path.join(path.dirname(ROOT), "wireproxy-fork");
+const wireproxyPresent = fs.existsSync(path.join(wireproxySrc, "go.mod"));
+add(
+  wireproxyPresent,
+  "wireproxy fork",
+  wireproxyPresent ? wireproxySrc : "not found",
+  "git clone git@github.com:hintjen/wireproxy-fork.git   (as a sibling of this repo,\n" +
+    "    or set HOMERUN_WIREPROXY_SRC)"
+);
+// The build refuses a checkout that is not at the pinned revision, so say so
+// here rather than at the end of a Gradle run.
+const wireproxyPinFile = path.join(ROOT, "scripts", "wireproxy.rev");
+const wireproxyPinned = fs.existsSync(wireproxyPinFile)
+  ? fs.readFileSync(wireproxyPinFile, "utf8").trim()
+  : "";
+// `git -C` rather than a cwd option: capture() has none, and passing one
+// silently reported this repository's HEAD as the fork's.
+const wireproxyActual = wireproxyPresent
+  ? capture("git", ["-C", `"${wireproxySrc}"`, "rev-parse", "HEAD"])
+  : null;
+add(
+  Boolean(wireproxyActual) && wireproxyActual === wireproxyPinned,
+  "wireproxy fork revision",
+  wireproxyActual
+    ? `${wireproxyActual.slice(0, 12)}${wireproxyActual === wireproxyPinned ? "" : ` (pinned: ${wireproxyPinned.slice(0, 12)})`}`
+    : "unknown",
+  `git -C "${wireproxySrc}" fetch origin && git -C "${wireproxySrc}" checkout --detach ${wireproxyPinned || "<scripts/wireproxy.rev>"}`
+);
+
 // --- per platform ---------------------------------------------------------
 
 for (const platform of platforms) {
@@ -136,15 +180,9 @@ for (const platform of platforms) {
       "brew install xcodegen   (the .xcodeproj is generated, not committed)"
     );
 
-    // The tunnel. Without it a hosted server is reachable only on the phone's
-    // own Wi-Fi — on cellular, CGNAT means nobody can join at all.
-    const go = capture("go", ["version"]);
-    add(
-      Boolean(go),
-      "Go",
-      go || "not found",
-      "brew install go   (the wireproxy fork needs Go 1.26+)"
-    );
+    // iOS gets the tunnel as a gomobile framework, because it cannot spawn
+    // the binary. Go itself and the fork checkout are checked for both
+    // platforms above.
     const gomobile = capture("gomobile", ["version"]);
     add(
       Boolean(gomobile),
@@ -152,16 +190,6 @@ for (const platform of platforms) {
       gomobile ? "installed" : "not found",
       "go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init\n" +
         "    It lands in $(go env GOPATH)/bin — put that on PATH."
-    );
-    const wireproxySrc = process.env.HOMERUN_WIREPROXY_SRC
-      ? path.resolve(ROOT, process.env.HOMERUN_WIREPROXY_SRC)
-      : path.join(path.dirname(ROOT), "wireproxy-fork");
-    add(
-      fs.existsSync(path.join(wireproxySrc, "wireproxy", "go.mod")),
-      "wireproxy fork",
-      fs.existsSync(path.join(wireproxySrc, "wireproxy", "go.mod")) ? wireproxySrc : "not found",
-      "git clone git@github.com:hintjen/wireproxy-fork.git   (as a sibling of this repo,\n" +
-        "    or set HOMERUN_WIREPROXY_SRC)"
     );
   }
 

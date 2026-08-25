@@ -41,7 +41,7 @@ mentioned, and a missing NDK as one about `cc`.
 | XcodeGen | iOS | `brew install xcodegen` |
 | Go 1.26+ | both | `brew install go` (the wireproxy fork needs it) |
 | gomobile | iOS | `go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init` |
-| `wireproxy-fork` checkout | both | clone as a sibling, or `HOMERUN_WIREPROXY_SRC` |
+| `wireproxy-fork` checkout | both | clone as a sibling, or `HOMERUN_WIREPROXY_SRC`; must be at the revision in `scripts/wireproxy.rev` (`npm run doctor` says which) |
 | Android NDK + `ANDROID_NDK_HOME` | Android | Android Studio → SDK Manager → NDK |
 | `cargo-ndk` | Android | `cargo install cargo-ndk` |
 | Rust targets | both | `rustup target add <triple>` |
@@ -181,13 +181,21 @@ framework.
 
 The Go binding lives in `go/wireproxy-ios/` and reaches the fork through a
 `go.work` the script regenerates each build. That workspace is generated
-rather than committed because the fork's location is configurable, and it
-pins gvisor: the fork's wireguard-go is on a 2023 upstream commit whose
-netstack does not compile against anything newer.
+rather than committed because the fork's location is configurable. wireguard-go
+and gvisor come from the module proxy at whichever version is highest between
+the fork's `go.mod` and the binding's — the fork stopped vendoring wireguard-go
+when it became a real fork of upstream (its `FORK.md` has the history).
 
 > Do not run `go work sync` there. It writes the resolved versions back into
-> the fork's own `go.mod` files — a change to a different repository, and
-> precisely the gvisor upgrade that breaks the build.
+> the fork's own `go.mod` — a change to a different repository.
+
+**The fork checkout must be at the revision in `scripts/wireproxy.rev`**, on
+both platforms. The fork's `main` merges upstream on a schedule, so it moves
+without any commit here; the pin is what keeps a store build from shipping
+whatever landed overnight. `build-wireproxy.js` refuses any other revision
+(`HOMERUN_WIREPROXY_ALLOW_UNPINNED=1` for iterating on the fork itself), and
+bumping it is a reviewed commit here, the same as the Pumpkin rev — with a
+run on a phone if wireguard-go or gvisor moved.
 
 ## Two rules the Go and JRE binaries have to obey
 

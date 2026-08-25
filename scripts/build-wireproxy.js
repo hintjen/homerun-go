@@ -10,10 +10,18 @@
  * cellular sits behind CGNAT, so there is no port-forwarding fallback the
  * way there is on desktop — without the tunnel nobody can join.
  *
- * Source is the private fork `hintjen/wireproxy-fork`, which adds the
- * `[UDPServerTunnel]` section upstream does not have. Bedrock, crossplay and
- * voice chat all need it. Checked out as a sibling of this repo, or pointed
+ * Source is the fork `hintjen/wireproxy-fork` — upstream wireproxy made safe
+ * to link into an application, plus the `[UDPServerTunnel]` section upstream
+ * does not have, which Bedrock, crossplay and voice chat all need. Its
+ * FORK.md is the account. Checked out as a sibling of this repo, or pointed
  * at with HOMERUN_WIREPROXY_SRC.
+ *
+ * **The checkout must be at the revision in `scripts/wireproxy.rev`.** The
+ * fork merges upstream on a schedule, so its `main` moves without any commit
+ * here; the pin is what keeps a store build from shipping whatever landed
+ * overnight. Bumping it is a reviewed commit, the same as the Pumpkin rev.
+ * HOMERUN_WIREPROXY_ALLOW_UNPINNED=1 skips the check for local iteration on
+ * the fork itself.
  */
 const { execFileSync } = require("child_process");
 const fs = require("fs");
@@ -95,14 +103,47 @@ function sourceDir() {
     ? path.resolve(ROOT, override)
     : path.join(path.dirname(ROOT), "wireproxy-fork");
 
-  if (!fs.existsSync(path.join(candidate, "wireproxy", "go.mod"))) {
+  if (!fs.existsSync(path.join(candidate, "go.mod"))) {
     fail(
       `No wireproxy-fork checkout at ${candidate}.\n\n` +
         "  git clone git@github.com:hintjen/wireproxy-fork.git\n\n" +
-        "next to this repo, or set HOMERUN_WIREPROXY_SRC to where it is."
+        "next to this repo, or set HOMERUN_WIREPROXY_SRC to where it is.\n" +
+        "(A checkout with a wireproxy/ subdirectory is the old monorepo layout;\n" +
+        "pull main.)"
     );
   }
+
+  const pinned = pinnedRev();
+  const actual = capture("git", ["rev-parse", "HEAD"], { cwd: candidate });
+  if (actual !== pinned) {
+    if (process.env.HOMERUN_WIREPROXY_ALLOW_UNPINNED) {
+      console.warn(
+        `\nwireproxy checkout is at ${(actual || "?").slice(0, 12)}, not the pinned ` +
+          `${pinned.slice(0, 12)} — HOMERUN_WIREPROXY_ALLOW_UNPINNED is set, building anyway.\n`
+      );
+    } else {
+      fail(
+        `The wireproxy checkout at ${candidate} is at\n` +
+          `  ${actual || "(not a git checkout)"}\n` +
+          `but scripts/wireproxy.rev pins\n  ${pinned}\n\n` +
+          `  git -C "${candidate}" fetch origin && git -C "${candidate}" checkout --detach ${pinned}\n\n` +
+          "or, to bump the pin, put the new revision in scripts/wireproxy.rev and\n" +
+          "commit it. HOMERUN_WIREPROXY_ALLOW_UNPINNED=1 builds from whatever is\n" +
+          "checked out, for iterating on the fork."
+      );
+    }
+  }
   return candidate;
+}
+
+/** The revision this repository builds the tunnel from. One line, a full SHA. */
+function pinnedRev() {
+  const file = path.join(ROOT, "scripts", "wireproxy.rev");
+  const rev = fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : "";
+  if (!/^[0-9a-f]{40}$/.test(rev)) {
+    fail(`scripts/wireproxy.rev must hold one full commit SHA; found ${JSON.stringify(rev)}.`);
+  }
+  return rev;
 }
 
 function fail(message) {
@@ -207,19 +248,14 @@ function buildXCFramework(source, go) {
       "",
       "use (",
       "\t.",
-      `\t${relative(path.join(source, "wireproxy"))}`,
-      `\t${relative(path.join(source, "wireguard-go"))}`,
+      `\t${relative(source)}`,
       ")",
       "",
-      "// The fork's wireguard-go sits on a 2023 upstream commit whose netstack",
-      "// does not compile against a newer gvisor (`pkt.IsNil undefined`). Both",
-      "// fork modules already ask for this version; pinning it here stops a",
-      "// stray `go mod tidy` in the binding from raising the workspace maximum.",
+      "// wireguard-go and gvisor come from the module proxy at the highest",
+      "// version either module asks for — the fork no longer vendors them.",
       "//",
       "// Never `go work sync` here: it writes resolved versions back into the",
-      "// fork's own go.mod files — a change to another repository, and exactly",
-      "// the upgrade that breaks the build.",
-      "replace gvisor.dev/gvisor => gvisor.dev/gvisor v0.0.0-20230927004350-cbd86285d259",
+      "// fork's own go.mod — a change to another repository.",
       "",
     ].join("\n")
   );
@@ -287,7 +323,7 @@ if (target.kind === "gomobile") {
   process.exit(0);
 }
 
-const moduleDir = path.join(source, "wireproxy");
+const moduleDir = source;
 
 // jniLibs is the only place API 29+ will exec from, and the packager only
 // takes `lib*.so` into it. This is an executable regardless of the name.
