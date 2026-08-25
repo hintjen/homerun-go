@@ -28,17 +28,6 @@ const { ROOT, UI_DESTINATIONS } = require("./targets");
 
 const PACKAGE_DIR = path.join(ROOT, "node_modules", "homerun-app-ui", "out");
 
-/**
- * The dev PostHog project, quoted in the warning below so the fix is a
- * copy-paste rather than a hunt.
- *
- * Safe to write down: a PostHog *project* key is a write-only client
- * credential that `next build` inlines into the bundle, so it already sits
- * unencrypted inside every APK and IPA. The production key lives in
- * `.github/workflows/publish-android.yml` for the same reason.
- */
-const DEV_POSTHOG_KEY = "phc_rAEnP6ZV9S92jIbibRRUgJjiF4tRGEUYcd9Ws2o73ET";
-
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
 const platforms = requested.length ? requested : Object.keys(UI_DESTINATIONS);
 
@@ -159,9 +148,10 @@ function shipped(source) {
  * perfectly without a key.
  *
  * The tell is the variable name surviving into a chunk, which is what an
- * un-inlined lookup leaves behind. A warning rather than an error: a local
- * debug build has no business needing analytics, and failing here would stop
- * anyone without the secret from building the app.
+ * un-inlined lookup leaves behind. A warning rather than an error, and the
+ * expected state locally: a local build has no business needing analytics and
+ * no key to reach for, because both keys are repository secrets that only the
+ * publish workflows read. What this guards is a release built by hand.
  */
 function warnIfUnkeyed(dir) {
   const chunks = path.join(dir, "_next", "static", "chunks");
@@ -177,34 +167,34 @@ function warnIfUnkeyed(dir) {
   if (!unkeyed) return;
   console.warn(
     "\nWARNING: this bundle carries no PostHog key, so it will report nothing.\n" +
-      "         The key is inlined when the shared UI is BUILT, and exporting\n" +
-      "         it now and re-running this script will not help.\n" +
+      "         Expected locally, and nothing to fix: both keys are repository\n" +
+      "         secrets that only the publish workflows read. Exporting one now\n" +
+      "         and re-running this script would not help either — the value is\n" +
+      "         inlined when the shared UI is BUILT, which already happened.\n" +
       "\n" +
-      "         `npm ci` is NOT a reliable way to get one either. npm packs a\n" +
-      "         git dependency once per commit and reuses the tarball, so on a\n" +
-      "         warm cache it extracts rather than running `prepare`, and the\n" +
-      "         variable you exported is never seen. The tell:\n" +
-      "\n" +
-      "           ls -a node_modules/homerun-app-ui/\n" +
-      "\n" +
-      "         no `.next` and no nested `node_modules` means nothing was built\n" +
-      "         there. Build the UI yourself and stage that instead:\n" +
+      "         For a release built by hand, or a build whose events you intend\n" +
+      "         to look at, take the key for the backend you are pointing at\n" +
+      "         from the POSTHOG_KEY_PROD or POSTHOG_KEY_DEV repository secret\n" +
+      "         and build the shared UI yourself:\n" +
       "\n" +
       "           cd ../homerun-app-ui \\\n" +
-      "             && NEXT_PUBLIC_POSTHOG_KEY=" +
-      DEV_POSTHOG_KEY +
-      " \\\n" +
+      "             && NEXT_PUBLIC_POSTHOG_KEY=<key> \\\n" +
       "                NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com \\\n" +
       "                npm run build && cd -\n" +
       "           HOMERUN_UI_DIR=../homerun-app-ui/out node scripts/build-ui.js\n" +
       "\n" +
-      "         Check that checkout is on the commit package-lock.json pins,\n" +
-      "         or you have swapped the UI as well as the key.\n" +
+      "         `npm ci` is NOT a way to get one. npm packs a git dependency\n" +
+      "         once per commit and reuses the tarball, so on a warm cache it\n" +
+      "         extracts rather than running `prepare` and never sees the\n" +
+      "         variable. The tell:\n" +
       "\n" +
-      "         That is the dev project. Android CI picks the right one per\n" +
-      "         backend in publish-android.yml — and CI's cache is always cold\n" +
-      "         for a new commit, which is why `npm ci` works there. iOS has no\n" +
-      "         CI at all, so a release IPA needs the production key this way.\n"
+      "           ls -a node_modules/homerun-app-ui/\n" +
+      "\n" +
+      "         no `.next` and no nested `node_modules` means nothing was built\n" +
+      "         there.\n" +
+      "\n" +
+      "         Check that checkout is on the commit package-lock.json pins,\n" +
+      "         or you have swapped the UI as well as the key.\n"
   );
 }
 

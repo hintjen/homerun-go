@@ -363,10 +363,12 @@ ls -a node_modules/homerun-app-ui/     # out, package.json, README.md — and no
 ```
 
 No `.next` and no nested `node_modules` means it was extracted, not built. So
-`NEXT_PUBLIC_POSTHOG_KEY=… npm ci` works in CI, where the cache is always cold,
-and silently does nothing on a machine that has installed that commit before —
-which is every machine that ran the build once already. Build the UI yourself
-and stage that instead:
+`NEXT_PUBLIC_POSTHOG_KEY=… npm ci` silently does nothing on a machine that has
+installed that commit before — which is every machine that ran the build once
+already, **including the self-hosted runners**, whose workspaces persist. CI is
+not the cold-cache haven the earlier version of this note claimed;
+`publish-ios.yml` gates on the inlined key for exactly that reason. Build the UI
+yourself and stage that instead:
 
 ```bash
 cd ../homerun-app-ui && NEXT_PUBLIC_POSTHOG_KEY=… npm run build && cd -
@@ -382,8 +384,13 @@ git -C ../homerun-app-ui rev-parse HEAD
 ```
 
 `scripts/build-ui.js` warns when it stages a keyless bundle and its detection
-is right — it greps the chunks for a surviving `NEXT_PUBLIC_POSTHOG_KEY`. Only
-its suggested fix (`npm ci`) is wrong. Found 2026-08-24.
+is right — it greps the chunks for a surviving `NEXT_PUBLIC_POSTHOG_KEY`. It
+used to suggest `npm ci` as the fix, which is the trap above; corrected
+2026-08-25. **A keyless local build is now the expected state and needs no
+fix** — no key lives in this repo any more. The two are the `POSTHOG_KEY_PROD`
+and `POSTHOG_KEY_DEV` repository secrets, read only by the publish workflows.
+Take one from there if you specifically need a build whose events you intend to
+read. Found 2026-08-24.
 
 **Gradle can decide there is nothing to do.** Compare the installed APK against
 the built one rather than trusting `BUILD SUCCESSFUL`:
