@@ -10,7 +10,7 @@
  * cellular sits behind CGNAT, so there is no port-forwarding fallback the
  * way there is on desktop — without the tunnel nobody can join.
  *
- * Source is the fork `hintjen/wireproxy-fork` — upstream wireproxy made safe
+ * Source is the fork `hintjen/wireproxy-homerun` — upstream wireproxy made safe
  * to link into an application, plus the `[UDPServerTunnel]` section upstream
  * does not have, which Bedrock, crossplay and voice chat all need. Its
  * FORK.md is the account. Checked out as a sibling of this repo, or pointed
@@ -101,12 +101,12 @@ function sourceDir() {
   const override = process.env.HOMERUN_WIREPROXY_SRC;
   const candidate = override
     ? path.resolve(ROOT, override)
-    : path.join(path.dirname(ROOT), "wireproxy-fork");
+    : path.join(path.dirname(ROOT), "wireproxy-homerun");
 
   if (!fs.existsSync(path.join(candidate, "go.mod"))) {
     fail(
-      `No wireproxy-fork checkout at ${candidate}.\n\n` +
-        "  git clone git@github.com:hintjen/wireproxy-fork.git\n\n" +
+      `No wireproxy-homerun checkout at ${candidate}.\n\n` +
+        "  git clone git@github.com:hintjen/wireproxy-homerun.git\n\n" +
         "next to this repo, or set HOMERUN_WIREPROXY_SRC to where it is.\n" +
         "(A checkout with a wireproxy/ subdirectory is the old monorepo layout;\n" +
         "pull main.)"

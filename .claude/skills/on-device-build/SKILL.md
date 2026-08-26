@@ -132,7 +132,7 @@ which in a worktree is the worktree — so they look for a sibling clone that is
 next to the real checkout instead:
 
 ```bash
-HOMERUN_WIREPROXY_SRC=/path/to/wireproxy-fork npm run wireproxy:android
+HOMERUN_WIREPROXY_SRC=/path/to/wireproxy-homerun npm run wireproxy:android
 ```
 
 That checkout must be at the revision in `scripts/wireproxy.rev` — the build

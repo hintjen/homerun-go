@@ -93,13 +93,13 @@ add(
 );
 const wireproxySrc = process.env.HOMERUN_WIREPROXY_SRC
   ? path.resolve(ROOT, process.env.HOMERUN_WIREPROXY_SRC)
-  : path.join(path.dirname(ROOT), "wireproxy-fork");
+  : path.join(path.dirname(ROOT), "wireproxy-homerun");
 const wireproxyPresent = fs.existsSync(path.join(wireproxySrc, "go.mod"));
 add(
   wireproxyPresent,
   "wireproxy fork",
   wireproxyPresent ? wireproxySrc : "not found",
-  "git clone git@github.com:hintjen/wireproxy-fork.git   (as a sibling of this repo,\n" +
+  "git clone git@github.com:hintjen/wireproxy-homerun.git   (as a sibling of this repo,\n" +
     "    or set HOMERUN_WIREPROXY_SRC)"
 );
 // The build refuses a checkout that is not at the pinned revision, so say so

@@ -269,7 +269,7 @@ player → <region>.gethomerun.app:<externalPort>   (link.forward_ports)
 iOS cannot spawn the wireproxy binary that desktop and Android run, so the Go
 code is bound with gomobile and runs in-process. `go/wireproxy-ios/` is a thin
 wrapper — `Start`, `LastHandshakeUnix`, `Stop` — over the same
-`hintjen/wireproxy-fork` Android builds from. It spawns the routines the
+`hintjen/wireproxy-homerun` Android builds from. It spawns the routines the
 *config* declares rather than reimplementing forwarding, which is what keeps
 the two ends of the gateway contract from drifting.
 

@@ -91,7 +91,7 @@ Both Rust crates build and test host-native on any OS, including Windows —
 hundreds of tests in seconds, no device needed. The server engine is the
 public [`hintjen/Pumpkin-homerun`](https://github.com/hintjen/Pumpkin-homerun)
 fork, fetched by Cargo with no credentials. One git dependency is **private
-for now** while its fork is prepared for release: `hintjen/wireproxy-fork`
+for now** while its fork is prepared for release: `hintjen/wireproxy-homerun`
 (the tunnel). Until it opens, building the tunnel needs access to it;
 `npm test` and everything else runs for anyone.
 
@@ -136,6 +136,6 @@ Mac. `docs/README.md` indexes the write-ups, including the gaps.
 - **[homerun](https://github.com/hintjen/homerun)** — desktop app, API, services
 - **[hintjen/Pumpkin-homerun](https://github.com/hintjen/Pumpkin-homerun)** —
   the Rust Minecraft server this embeds, carrying the library-mode patches
-- **hintjen/wireproxy-fork** — the tunnel (private for now)
+- **hintjen/wireproxy-homerun** — the tunnel (private for now)
 
 See `CLAUDE.md` for how the pieces fit and the house rules for working here.

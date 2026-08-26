@@ -41,7 +41,7 @@ mentioned, and a missing NDK as one about `cc`.
 | XcodeGen | iOS | `brew install xcodegen` |
 | Go 1.26+ | both | `brew install go` (the wireproxy fork needs it) |
 | gomobile | iOS | `go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init` |
-| `wireproxy-fork` checkout | both | clone as a sibling, or `HOMERUN_WIREPROXY_SRC`; must be at the revision in `scripts/wireproxy.rev` (`npm run doctor` says which) |
+| `wireproxy-homerun` checkout | both | clone as a sibling, or `HOMERUN_WIREPROXY_SRC`; must be at the revision in `scripts/wireproxy.rev` (`npm run doctor` says which) |
 | Android NDK + `ANDROID_NDK_HOME` | Android | Android Studio → SDK Manager → NDK |
 | `cargo-ndk` | Android | `cargo install cargo-ndk` |
 | Rust targets | both | `rustup target add <triple>` |

@@ -235,7 +235,7 @@ Target = 127.0.0.1:<the port PowerNukkitX actually bound>
 
 `ListenPort` is **19132 always** — the gateway DNATs player traffic there on the
 WireGuard interface, and only `Target` follows the local port. `[UDPServerTunnel]`
-exists only in `hintjen/wireproxy-fork`; upstream has no inbound UDP tunnel at
+exists only in `hintjen/wireproxy-homerun`; upstream has no inbound UDP tunnel at
 all. No voice forward: PowerNukkitX loads no Java mod, so `LISTEN_VOICE` has
 nothing behind it.
 
