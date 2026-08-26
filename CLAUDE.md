@@ -43,7 +43,8 @@ just made. Small, specific corrections beat rewrites.
 | Change | Repo |
 |---|---|
 | A screen, component, style, anything visual | the shared UI repo |
-| A new bridge channel's **contract** | the shared UI repo (`lib/bridge/`) |
+| A new bridge channel's **types** | the shared UI repo (`lib/bridge/`), then re-sync the manifest here |
+| The bridge **spec** — envelopes, transports, host lifecycle | here (`shared/conformance/PROTOCOL.md`) |
 | A bridge channel's **iOS/Android implementation** | here |
 | Server lifecycle, engines, platform APIs | here |
 | WSL, the desktop installer, the client launcher | Homerun Desktop — and it is desktop-only, so mobile never implements it |
@@ -87,8 +88,17 @@ Hosts wire it up; they do not reimplement it. `docs/shared-core.md` and
 ## The two interfaces
 
 **`bridge/v1`** — UI ↔ host. Frozen, versioned, additive-only. The contract
-lives in the UI repo; `shared/conformance/` vendors the generated manifest and
-the spec so mobile CI needs no checkout of it.
+is split by who changes it: `shared/conformance/PROTOCOL.md` is the spec and
+is **canonical here**, because host transports and lifecycle are what move it;
+`shared/conformance/bridge-v1.json` is the channel manifest, generated in the
+UI repo and vendored by `scripts/sync-contract.js`. Mobile CI needs no
+checkout of the UI repo either way.
+
+The spec used to be vendored too, and it rotted unnoticed — no gate reads the
+prose, so a copy claiming the WebView hosts were still "next" survived both of
+them shipping. **Carry-over owed upstream:** `lib/bridge/PROTOCOL.md` in the
+UI repo should be deleted and replaced with a link to this file, or there are
+two copies with no sync and no gate, which is worse than one stale one.
 
 **`ServerBackend`** — host ↔ engine. `ios/HomerunHost/ServerBackend.swift`,
 `android/.../ServerBackend.kt`. Implement the `native-server-*` channels

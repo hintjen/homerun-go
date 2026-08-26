@@ -109,7 +109,7 @@ bundle is embedded and served, and how the device's capabilities reach the UI.
 - Linking the Rust static library, including the link flags nothing references
 - Why the bundle is served over `homerun-app://` and never `file://`
 - Path resolution, the traversal guard, and why a missing asset 404s
-- Capability injection at document start, read from the vendored contract
+- Capability injection at document start, read from the vendored manifest
 - Why the shell is UIKit rather than SwiftUI
 
 **Read this for**: Setting up the Xcode build, or debugging a blank screen.

@@ -1,9 +1,10 @@
 # Host bridge — `bridge/v1`
 
-> **Vendored.** The canonical copy is `lib/bridge/PROTOCOL.md` in the private
-> UI repository; `scripts/sync-contract.js` copies it here so the conformance
-> gates run without that checkout. Edit it there, not here — a local edit is
-> reverted by the next sync.
+> **This file is canonical. Edit it here.** It is not synced from anywhere;
+> `scripts/sync-contract.js` vendors only `bridge-v1.json`, which is generated
+> from the UI's `channels.ts` and `requirements.ts` and so can only flow that
+> way. The prose lives here because its change-drivers do — §3.2 and §3.3 are
+> this repo's iOS and Android transports, and §4 is host lifecycle.
 
 The contract between the **shared UI bundle** (a static web bundle) and
 whatever **host** embeds it: Homerun Desktop's Electron main process, and
