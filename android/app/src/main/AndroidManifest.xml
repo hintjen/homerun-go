@@ -211,7 +211,7 @@
 
         <!-- The same channel the local push-notification bridge channel posts
              on ("homerun", created at process start in HomerunApplication),
-             so the user has one mute switch for Homerun alerts — and the
+             so the user has one mute switch for Homerun Go alerts — and the
              monochrome icon, because the tray draws a small icon from its
              alpha channel and the launcher icon would render as a blank
              square. -->

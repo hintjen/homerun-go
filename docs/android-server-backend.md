@@ -340,7 +340,7 @@ hardware detail in crash reports.
 ### Starting a JVM at all — `JavaProcess`
 
 A server is not the only JVM this app runs. Every mod loader in
-[`plans/android-mod-loaders.md`](../plans/android-mod-loaders.md) installs by
+`plans/android-mod-loaders.md` installs by
 *running an installer jar*, so the knowledge of how a JVM starts on Android
 lives in `JavaProcess` rather than inside the server backend, where only a
 server could reach it.
@@ -701,7 +701,7 @@ delete the installer it was about to run.
 
 **Mods.** A Fabric server starts with no mods on it, and a Paper server starts
 with no plugins, because nothing on this host installs either yet. That is M4
-of [`plans/android-mod-loaders.md`](../plans/android-mod-loaders.md) and it is
+of `plans/android-mod-loaders.md` and it is
 the milestone that makes `moddedServers: true` true in practice rather than in
 principle.
 
@@ -716,7 +716,7 @@ forward a port on and no UPnP to negotiate with, so unlike desktop **there is
 no fallback**: without the tunnel a server runs perfectly and nobody in the
 world can join it.
 
-`wireproxy` dials the Homerun gateway as a WireGuard peer. Players connect to
+`wireproxy` dials the hosting gateway as a WireGuard peer. Players connect to
 the gateway, the gateway DNATs to a fixed port on the WireGuard interface,
 wireproxy accepts there and forwards to loopback. Same gateway, same config
 format and the same binary lineage as desktop — `wireproxyConfig.ts` is the
@@ -885,12 +885,12 @@ unconditionally would create a file called `""`. See
 [`android-bedrock.md`](./android-bedrock.md).
 
 Worth being explicit about what that means: Mojang's EULA binds the person
-operating the server, and no Homerun client — desktop, web or mobile — shows
-it or asks. The product's own ToS says only that users "must adhere to any
-applicable third-party terms of service", without naming Minecraft. That gap
-is already logged as **T-6 / P1-18** in
-`docs/privacy-tos-audit-2026-08-03.md` in the `homerun` repo, where it is
-filed as a document-wording item rather than an engineering one.
+operating the server, and no client of ours — Homerun Go, Homerun Desktop or
+the web app — shows it or asks. The product's own ToS says only that users
+"must adhere to any applicable third-party terms of service", without naming
+Minecraft. That gap is already logged as **T-6 / P1-18** in the private
+backend repo's `docs/privacy-tos-audit-2026-08-03.md`, where it is filed as a
+document-wording item rather than an engineering one.
 
 This also retired a failure mode the earlier build had: a server stopping at
 the EULA gate was reported as "the server stopped unexpectedly while
@@ -972,10 +972,10 @@ distinguishes worlds by process CWD, so a second concurrent run would quietly
 share the first one's world. Attempting it raises `AnotherServerRunning`,
 whose message is written for players because they are the ones who see it.
 
-### The console is the supervisor's, including Homerun's own lines
+### The console is the supervisor's, including the host's own lines
 
 `JavaServerBackend` used to keep a ring buffer of its own — a reimplementation
-of `log_buffer.rs` — for one reason: Homerun writes lines *before* there is a
+of `log_buffer.rs` — for one reason: the host writes lines *before* there is a
 run to have a console. The jar, the runtime, the world coming back from a
 backup, the tunnel. It now writes those through `nativeNote`, so there is one
 buffer and one ordering.
@@ -984,7 +984,7 @@ Three things about this that are easy to get wrong, all of which were:
 
 - **The pump is the only emitter.** `note` writes and does not emit. Doing
   both sends every line twice — visibly, as a doubled
-  `[Homerun] Connecting to the Homerun gateway…`.
+  `[Homerun] Connecting to the hosting gateway…`.
 - **The pump starts at `announceStarting`, not at the spawn.** It is what turns
   console lines into events, and the minutes before the spawn are exactly the
   ones worth watching. Starting it later delivered them in one burst at the end
@@ -1151,7 +1151,7 @@ binary was built without cgo; see
 
 This cannot reproduce on the emulator, which is why it shipped.
 
-**"Homerun cannot host <loader> servers…".** Working as intended — vanilla,
+**"This app cannot host <loader> servers…".** Working as intended — vanilla,
 Paper and Fabric resolve, and everything else is refused **by name** with its
 own reason. The server's `TYPE` comes from the API, so this is what a Forge or
 Spigot server created on desktop does when someone tries to start it on a
@@ -1164,7 +1164,7 @@ expansion, and Quilt is out on audience size rather than capability.
 digest does not match what the endpoint now publishes. For Paper that is
 expected after an upstream build: a new build is a new file.
 
-**"needs Java N, and this version of Homerun ships Java M".** The bundled
+**"needs Java N, and this version of the app ships Java M".** The bundled
 runtime is older than the Minecraft version asks for. Restage with
 `npm run jre:android -- --java <N>` and rebuild.
 

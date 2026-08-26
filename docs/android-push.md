@@ -17,14 +17,14 @@ Delivery is mostly not our code either. A message to a *backgrounded* app is
 drawn by the system tray from the message's `notification` block — the
 process may not even be running — on the `homerun` channel, the same one the
 local `push-notification` bridge channel posts on, so the user has exactly
-one mute switch for Homerun alerts. A *foregrounded* app receives the message
+one mute switch for Homerun Go alerts. A *foregrounded* app receives the message
 in code and **shows nothing, deliberately**: the app being open is the
 notification surface — the bell and the server card already say it — and a
 system banner over a page saying the same thing is noise. "Foreground" means
 our activity is actually visible; a minimized app takes the tray path.
 
 The API half is `homerun/docs/push-notifications.md`; the plan and milestones
-are [`../plans/push-notifications.md`](../plans/push-notifications.md).
+are `plans/push-notifications.md`.
 
 ## `PushMessaging.kt`
 

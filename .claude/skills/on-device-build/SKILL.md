@@ -1,6 +1,6 @@
 ---
 name: on-device-build
-description: Get a Homerun build onto a real phone — Android or iOS — with the right UI bundle, the right native libraries, and pointed at the right backend. Use when putting a change on hardware, switching a device between production and staging, or working out why a freshly installed build behaves like an old one.
+description: Get a Homerun Go build onto a real phone — Android or iOS — with the right UI bundle, the right native libraries, and pointed at the right backend. Use when putting a change on hardware, switching a device between production and staging, or working out why a freshly installed build behaves like an old one.
 ---
 
 # Getting a build onto a phone

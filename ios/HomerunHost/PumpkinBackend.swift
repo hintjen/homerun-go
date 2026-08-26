@@ -509,12 +509,12 @@ final class PumpkinBackend: ServerBackend {
         self.tunnelTask = nil
 
         HostLog.tunnel.info("awaiting credentials")
-        note(serverId, "[Homerun] Connecting to the Homerun gateway...")
+        note(serverId, "[Homerun] Connecting to the hosting gateway...")
 
         guard let link = await tunnelTask.value else {
             try failTunnel(
                 serverId: serverId, kind: .provisioning,
-                message: "Could not connect to the Homerun gateway: it did not provide a connection.")
+                message: "Could not connect to the hosting gateway: it did not provide a connection.")
             return
         }
 
@@ -533,7 +533,7 @@ final class PumpkinBackend: ServerBackend {
         }
 
         HostLog.tunnel.info("interface up")
-        note(serverId, "[Homerun] Connected to the Homerun gateway.")
+        note(serverId, "[Homerun] Connected to the hosting gateway.")
     }
 
     /// Report, stop, and throw — so `native-server-start` answers with the

@@ -18,7 +18,7 @@ differently and most users only ever meet the first:
 
 | | Where the uuid comes from | Needs |
 |---|---|---|
-| **The link** | The API, from an account already linked on the desktop app | A Homerun login, nothing else |
+| **The link** | The API, from an account already linked on the desktop app | A Homerun Go login, nothing else |
 | **The sign-in** | A Microsoft OAuth flow on the phone | `minecraftAccount` capability |
 
 ## 1. The link — no sign-in at all
@@ -133,7 +133,7 @@ credential for the desktop app and both phone platforms.
 
 | Field | Value | Why |
 |---|---|---|
-| Name | `Homerun` | Users read this on the consent screen. It is the string that replaces "Minecraft Launcher". |
+| Name | `Homerun Go` | Users read this on the consent screen. It is the string that replaces "Minecraft Launcher". |
 | Supported account types | **Personal Microsoft accounts only** | Players sign in with personal accounts. An organisational option fails later with errors that never mention this screen — the Xbox Live scope must be requested against the consumers tenant, and a tenant id or the `common` endpoint simply errors. |
 | Redirect URI | leave blank | Added below, where the platform type can be set. |
 
@@ -168,12 +168,12 @@ No loopback URI is needed.
 ### The review
 
 The form is <https://aka.ms/mce-reviewappid>. Framing that matters for Homerun
-specifically:
+Go specifically:
 
 - **Lead with the desktop launcher.** It genuinely starts Minecraft on the
   user's machine — the conventional case reviewers are used to approving. The
   phone's use is identity only, which alone is a thinner story.
-- **Say it is commercial, up front.** Homerun sells hosting. Reviewers care, and
+- **Say it is commercial, up front.** Homerun Go sells hosting. Reviewers care, and
   discovering it themselves goes worse than being told.
 - **Be specific about scope.** Sign-in identifies the player and launches the
   game; tokens stay in platform keystores on the device.

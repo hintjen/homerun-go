@@ -1,9 +1,9 @@
 # The shared core
 
-`rust/homerun-core` holds the host logic all three Homerun apps need: which
-server jar to run, how the tunnel config is laid out, when a tunnel counts as
-failed, what state a server is in, and how the gateway's credentials are judged
-fresh or stale.
+`rust/homerun-core` holds the host logic every Homerun Go and Homerun Desktop
+host needs: which server jar to run, how the tunnel config is laid out, when a
+tunnel counts as failed, what state a server is in, and how the gateway's
+credentials are judged fresh or stale.
 
 ```
 npm run test:core        # the suite

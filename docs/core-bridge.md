@@ -72,8 +72,8 @@ Arguments are a JSON object. Replies are always one of:
 `Core.call` throws `Core.CoreException` on the failure arm, carrying the
 `error` text unchanged.
 
-**Errors are verdicts, not diagnostics.** "Homerun cannot host forge servers on
-this device yet", "Minecraft 26.2 needs Java 25, and this version of Homerun
+**Errors are verdicts, not diagnostics.** "This app cannot host forge servers on
+this device yet", "Minecraft 26.2 needs Java 25, and this version of the app
 ships Java 21" — these are written to be shown to a player. When one reaches a
 `ServerBackendException.Engine`, its wording survives to the console and the
 UI. Do not reword them at the call site; fix them in the core so every platform
@@ -158,7 +158,7 @@ flat from `POST`/`GET /api/device/<id>/link_up/` rather than nested under
 first seconds, and not a failure to report. Omitting `httpTarget` drops the ACME
 challenge forward, which is what a device serving without a certificate does.
 `DeviceLink` also answers `can_serve_tls` and `expects_proxy_protocol`; see
-[`plans/device-websocket.md`](../plans/device-websocket.md).
+`plans/device-websocket.md`.
 
 `tunnel.render` has two forms. Pass `forwards` — `[{ protocol, listen_port,
 target_port }]` — and it renders exactly those, knowing nothing about any game.

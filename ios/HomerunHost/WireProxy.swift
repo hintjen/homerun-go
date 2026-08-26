@@ -7,7 +7,7 @@ import WireproxyIOS
 /// fallback the way there is on desktop: without this, a server runs and
 /// nobody outside the local Wi-Fi can join.
 ///
-/// Traffic is *ingress* — the Homerun gateway is the client, the phone is the
+/// Traffic is *ingress* — the hosting gateway is the client, the phone is the
 /// server:
 ///
 ///     player → gateway → WireGuard → <phone wg IP>:25565
@@ -123,7 +123,7 @@ final class WireProxy {
         var error: NSError?
         guard let started = WireproxyiosStart(config, &error) else {
             throw ServerBackendError.engine(
-                "The connection to the Homerun gateway could not be opened"
+                "The connection to the hosting gateway could not be opened"
                     + (error.map { ": \($0.localizedDescription)" } ?? "."))
         }
 

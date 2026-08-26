@@ -188,7 +188,7 @@ pub extern "system" fn Java_app_gethomerun_mobile_NativeServer_nativeConsoleBegi
     to_jstring(&env, json)
 }
 
-/// A line from Homerun rather than from the server. See
+/// A line from the host rather than from the server. See
 /// [`crate::homerun_server_note`] — this appends; `nativeConsoleBegin` is what
 /// clears.
 #[no_mangle]

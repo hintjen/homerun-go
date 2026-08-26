@@ -1,13 +1,14 @@
 # Homerun Go
 
-The iOS and Android hosts for [Homerun](https://gethomerun.app) — run a
-Minecraft server on your phone.
+**Homerun Go** is the iOS and Android host that runs a Minecraft server on
+your phone. It is one of two apps in the family; the other is **Homerun
+Desktop**. Product site: <https://gethomerun.app>.
 
 This repo is the **platform half** of the mobile app: the WebView host, the
 bridge implementation, the Rust core and supervisor, and the server engines.
 It contains no UI. Every screen is a compiled web bundle, fetched at build
-time from Homerun's CDN and verified against a signing key pinned in this
-tree — see *The UI bundle* below.
+time from `cdn.gethomerun.app` and verified against a signing key pinned in
+this tree — see *The UI bundle* below.
 
 **Licence:** the code in this repository is [GPL-3.0-only](LICENSE). The UI
 bundle is a separate, proprietary work; the GPL covers the host, not the
@@ -91,9 +92,9 @@ Both Rust crates build and test host-native on any OS, including Windows —
 hundreds of tests in seconds, no device needed. The server engine is the
 public [`hintjen/Pumpkin-homerun`](https://github.com/hintjen/Pumpkin-homerun)
 fork, fetched by Cargo with no credentials. One git dependency is **private
-for now** while its fork is prepared for release: `hintjen/wireproxy-fork`
-(the tunnel). Until it opens, building the tunnel needs access to it;
-`npm test` and everything else runs for anyone.
+for now** while its fork is prepared for release — the WireGuard tunnel.
+Until it opens, building the tunnel needs access to it; `npm test` and
+everything else runs for anyone.
 
 Per platform:
 
@@ -133,9 +134,13 @@ Mac. `docs/README.md` indexes the write-ups, including the gaps.
 
 ## Related repositories
 
-- **[homerun](https://github.com/hintjen/homerun)** — desktop app, API, services
 - **[hintjen/Pumpkin-homerun](https://github.com/hintjen/Pumpkin-homerun)** —
   the Rust Minecraft server this embeds, carrying the library-mode patches
-- **hintjen/wireproxy-fork** — the tunnel (private for now)
+
+The UI bundle, Homerun Desktop, the backend API and the release pipeline are
+developed in private repositories. Where the docs here name one, it is to say
+which side of a boundary a change falls on — not to point you at a repository
+you can open. A change that belongs on the other side is one a maintainer has
+to carry over.
 
 See `CLAUDE.md` for how the pieces fit and the house rules for working here.

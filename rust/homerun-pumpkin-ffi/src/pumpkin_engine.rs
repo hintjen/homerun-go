@@ -82,7 +82,7 @@ impl Engine for PumpkinEngine {
         // The engine selects a world by process working directory. This is
         // also why only one server runs at a time.
         if let Err(e) = std::env::set_current_dir(&request.data_dir) {
-            let message = format!("Homerun could not open this server's files ({e}).");
+            let message = format!("This app could not open this server's files ({e}).");
             on_line(message.clone());
             return RunOutcome::Crashed(message);
         }
@@ -104,7 +104,7 @@ impl Engine for PumpkinEngine {
                 Ok(dir) => dir,
                 Err(e) => {
                     return RunOutcome::Crashed(format!(
-                        "Homerun could not open this server's files ({e})."
+                        "This app could not open this server's files ({e})."
                     ));
                 }
             };
@@ -260,7 +260,7 @@ fn describe_bind_failure(error: &std::io::Error, port: u16) -> String {
              Stop that and try again."
         ),
         std::io::ErrorKind::PermissionDenied => {
-            format!("This device would not let Homerun use port {port}.")
+            format!("This device would not let the app use port {port}.")
         }
         _ => format!("The server could not start on port {port}."),
     }

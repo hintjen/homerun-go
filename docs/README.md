@@ -1,13 +1,14 @@
-# Homerun Mobile Documentation
+# Homerun Go Documentation
 
 ## Overview
 
-Technical documentation for the iOS and Android hosts. Each subsystem gets
-one file, written **as it is built**.
+Technical documentation for the Homerun Go iOS and Android hosts. Each
+subsystem gets one file, written **as it is built**.
 
-UI documentation lives with the UI's source (`homerun-app-ui`, private);
-desktop main-process documentation lives in
-[`homerun`](https://github.com/hintjen/homerun) under `homerun-ui/docs/`.
+UI documentation lives with the UI's source, and Homerun Desktop's
+main-process documentation lives with the desktop app. Both repositories are
+private; where a file here names one, it is to say which side of a boundary a
+change falls on.
 
 ## Documentation Index
 
@@ -60,8 +61,8 @@ in, or debugging a server that will not start.
 
 ### 🧩 [The shared core](./shared-core.md)
 
-`homerun-core` — the decisions every Homerun app makes, in one tested place
-instead of once per platform.
+`homerun-core` — the decisions both Homerun Go hosts and Homerun Desktop make,
+in one tested place instead of once per platform.
 
 **Contains**:
 - The two divergences that prompted it, both live before it existed
@@ -597,4 +598,4 @@ Symptom → cause → fix.
 
 ---
 
-**Maintained by**: Homerun Development Team
+**Maintained by**: the Homerun Go team at Hintjen

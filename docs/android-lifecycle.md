@@ -74,8 +74,8 @@ both ends are explicit. A timeout would end a session mid-game.
 
 ### Swiping the app away does not stop the server
 
-`stopWithTask` is left at its default of false. A player who swipes Homerun out
-of Recents has not asked their friends to be disconnected, and the
+`stopWithTask` is left at its default of false. A player who swipes Homerun Go
+out of Recents has not asked their friends to be disconnected, and the
 notification's Stop is right there when they do want that. Hosting outliving the
 task is the same bargain a music player makes. `onTaskRemoved` logs and does
 nothing.
@@ -214,7 +214,7 @@ The fallback is `dataSync`, and its cost is real but smaller than it first
 looks. Android 15 permits `dataSync` six hours per 24, then calls
 `Service.onTimeout()` — after which there are seconds to `stopSelf()` or the
 system throws `RemoteServiceException`. **Bringing the app to the foreground
-resets the timer**, so a player who opens Homerun during a session rarely hits
+resets the timer**, so a player who opens Homerun Go during a session rarely hits
 it; a phone hosting untouched in a pocket all evening does.
 
 So a refusal degrades the product rather than blocking it — which is worth

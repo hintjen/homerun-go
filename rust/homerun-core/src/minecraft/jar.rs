@@ -60,12 +60,12 @@ impl Loader {
             Some("neoforge") => Ok(Loader::NeoForge),
             Some("forge") => Ok(Loader::Forge),
             Some(other @ ("spigot" | "bukkit")) => Err(Error::Unsupported(format!(
-                "Homerun cannot host {other} servers on a phone: they are compiled on the \
+                "This app cannot host {other} servers on a phone: they are compiled on the \
                  device by BuildTools, which needs a full JDK. Paper runs {other} plugins \
                  and works here."
             ))),
             Some(other) => Err(Error::Unsupported(format!(
-                "Homerun cannot host {other} servers on this device. Vanilla, Paper, Fabric, \
+                "This app cannot host {other} servers on this device. Vanilla, Paper, Fabric, \
                  Quilt, NeoForge and Forge all work, and Paper runs Bukkit and Spigot plugins."
             ))),
         }
@@ -447,13 +447,13 @@ pub fn select_runtime_for(
             // build with no runtime staged is a build that should not exist,
             // and `verifyJavaRuntime` in `app/build.gradle.kts` is what stops
             // one shipping.
-            "This version of Homerun ships no Java runtime, so it cannot host a \
+            "This version of the app ships no Java runtime, so it cannot host a \
              Java server. Reinstall the app."
                 .to_string()
         } else {
             match policy {
                 JavaPolicy::AtLeast => format!(
-                    "{what} needs Java {required_java}, and this version of Homerun ships {}. \
+                    "{what} needs Java {required_java}, and this version of the app ships {}. \
                      Update the app, or choose an older Minecraft version.",
                     describe_runtimes(bundled),
                 ),
@@ -462,7 +462,7 @@ pub fn select_runtime_for(
                 // that newer is not better here.
                 JavaPolicy::Exact => format!(
                     "{what} needs Java {required_java} exactly — mod loaders do not run on a \
-                     newer one — and this version of Homerun ships {}. Choose a Minecraft \
+                     newer one — and this version of the app ships {}. Choose a Minecraft \
                      version that uses Java {}.",
                     describe_runtimes(bundled),
                     describe_runtimes(bundled),

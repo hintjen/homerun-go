@@ -1,8 +1,13 @@
-# Homerun host bridge — `bridge/v1`
+# Host bridge — `bridge/v1`
 
-The contract between the **shared Homerun UI** (a static web bundle) and
-whatever **host** embeds it: the Electron main process today, the iOS and
-Android WebView hosts next.
+> **Vendored.** The canonical copy is `lib/bridge/PROTOCOL.md` in the private
+> UI repository; `scripts/sync-contract.js` copies it here so the conformance
+> gates run without that checkout. Edit it there, not here — a local edit is
+> reverted by the next sync.
+
+The contract between the **shared UI bundle** (a static web bundle) and
+whatever **host** embeds it: Homerun Desktop's Electron main process, and
+Homerun Go's iOS and Android WebView hosts.
 
 Normative sources, in precedence order:
 

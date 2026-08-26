@@ -914,7 +914,7 @@ class JavaServerBackend(
      * A cursor rather than a stream: the process belongs to
      * `homerun-pumpkin-ffi` now, and its console is read the same way the
      * Pumpkin backend reads its own. Kept locally as well because this buffer
-     * also holds Homerun's own notes — the jar download, the runtime unpack —
+     * also holds the host's own notes — the jar download, the runtime unpack —
      * which happen minutes before there is a server to have a console.
      */
     private fun startLogPump(serverId: String) {
@@ -1063,7 +1063,7 @@ class JavaServerBackend(
     }
 
     /**
-     * A line from Homerun rather than from the server — jar downloads, runtime
+     * A line from the host rather than from the server — jar downloads, runtime
      * unpacking, the world coming back from a backup.
      *
      * Into the supervisor's console, which is the same one the server writes
@@ -1096,7 +1096,7 @@ class JavaServerBackend(
     /**
      * The console, paged by cursor — the supervisor's, not a copy of it.
      *
-     * Same buffer the pump drains and the same one Homerun's own notes go
+     * Same buffer the pump drains and the same one the host's own notes go
      * into, so the launch narrative and the server's output are one sequence
      * in the order they actually happened.
      */

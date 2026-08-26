@@ -133,7 +133,7 @@ fn note_cert_failure(
     }
 }
 
-/// The `azp` claim every Homerun token carries.
+/// The `azp` claim every token of ours carries.
 ///
 /// Checked because a token minted for another client of the same realm is a
 /// valid signature over the wrong audience — it proves who, for something else.

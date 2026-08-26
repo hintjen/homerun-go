@@ -1,6 +1,6 @@
 import Foundation
 
-/// The bits of the Homerun backend this host has to talk to itself.
+/// The bits of the backend this host has to talk to itself.
 ///
 /// The UI owns almost all backend traffic. This exists for the one thing it
 /// cannot do: registering *this device*. The UI only ever reads `/api/device/`

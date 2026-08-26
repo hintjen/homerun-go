@@ -5,7 +5,7 @@
 // `device-ws` is off, so it can say nothing about the socket. This runs the
 // real listener out of the simulator staticlib and talks to it: bind, upgrade,
 // refuse an unauthenticated peer, stop. That is D2's auth contract, and it is
-// the part that needs neither a Homerun account nor the gateway.
+// the part that needs neither an account nor the gateway.
 //
 // # Running it
 //

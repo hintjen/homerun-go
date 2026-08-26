@@ -1,6 +1,6 @@
-# Homerun Individual Contributor License Agreement
+# Hintjen Individual Contributor License Agreement
 
-Thank you for contributing to Homerun. This agreement clarifies the terms
+Thank you for contributing to Homerun Go. This agreement clarifies the terms
 under which you contribute, so that we can accept your work and keep shipping
 the app everywhere it ships today — including app stores whose terms are not
 compatible with the GPL on their own.

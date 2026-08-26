@@ -210,7 +210,7 @@ as `invalid_grant`, with nothing before that point hinting at it.
 
 The hosts assume realm state they cannot check. All of it is on the `homerun`
 client or the provider, and all of it is recorded with its verification in
-[`../plans/social-login.md`](../plans/social-login.md):
+`plans/social-login.md`:
 
 | Setting | Value | Why |
 |---|---|---|

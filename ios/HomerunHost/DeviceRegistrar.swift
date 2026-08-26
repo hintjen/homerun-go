@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-/// Makes this phone a device the Homerun backend knows about.
+/// Makes this phone a device the backend knows about.
 ///
 /// The UI asks the host for a device id and sends it as the `device` field
 /// when creating a server. If the backend has never heard of that id, creation

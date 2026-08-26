@@ -1,4 +1,4 @@
-//! The host logic every Homerun app needs, in one place.
+//! The host logic every Homerun Go and Homerun Desktop host needs, in one place.
 //!
 //! # Why this crate exists
 //!

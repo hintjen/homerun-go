@@ -213,7 +213,7 @@ follow-up.
 | `ios/HomerunHost/Reporting.swift` | The listener, the cadence timer, the ops chain |
 | `ios/HomerunHost/FFI/Core.swift` (§Reporting) | Wrappers over the core's decisions, including `Core.Request` and its `auth` |
 | `ios/HomerunHost/HomerunAPI.swift` | `perform`, `serverBody`, `fetchPublicIPAddress`, and the PATCH verb |
-| `ios/HomerunHost/PumpkinBackend.swift` | `note(serverId:line:)` — Homerun's own lines, badged once |
+| `ios/HomerunHost/PumpkinBackend.swift` | `note(serverId:line:)` — the host's own lines, badged once |
 | `ios/coretest/main.swift` | Every wrapper above, against the real core, with no simulator |
 | `rust/homerun-core/src/reporting/` | The payloads, the cadence, the parsers |
 | `rust/homerun-pumpkin-ffi/src/host_dispatch.rs` | The poll and the ping — the two calls with effects |

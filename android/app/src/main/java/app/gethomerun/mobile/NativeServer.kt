@@ -115,7 +115,7 @@ object NativeServer {
     external fun nativeCommand(command: String): String
 
     /**
-     * A line from Homerun rather than from the server — a jar downloading, a
+     * A line from the host rather than from the server — a jar downloading, a
      * world restoring, the tunnel coming up.
      *
      * Goes into the same console the server writes to, which is why a host

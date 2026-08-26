@@ -9,7 +9,7 @@ on the JVM this host already stages, supervised by the same `ProcessEngine` that
 runs a Paper server.
 
 The plan and the reasoning behind each decision are in
-[`plans/android-bedrock.md`](../plans/android-bedrock.md). This file is what the
+`plans/android-bedrock.md`. This file is what the
 code does.
 
 ### Why this exists at all

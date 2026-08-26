@@ -571,7 +571,7 @@ object Core {
     // is wired in [Reporting].
     // -----------------------------------------------------------------------
 
-    /** One Homerun-hosted plugin jar: where to get it, what to call it. */
+    /** One plugin jar we host ourselves: where to get it, what to call it. */
     data class CustomPlugin(val url: String, val filename: String)
 
     /**
@@ -1614,7 +1614,7 @@ object Core {
     /**
      * The wording for something this host could not do.
      *
-     * One sentence per refusal, shared with every other Homerun app. Do not
+     * One sentence per refusal, shared with every other host. Do not
      * reword at the call site — change it in `jvm::Refusal`.
      */
     fun refusal(kind: String): String =

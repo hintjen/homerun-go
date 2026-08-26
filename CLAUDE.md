@@ -1,10 +1,15 @@
 # Homerun Go — working in this repo
 
-iOS and Android hosts that run a Minecraft server on a phone. **No UI here** —
-every screen is a compiled bundle that `npm run ui` fetches from the CDN and
-verifies against the key pinned in this tree. Its source
-(`hintjen/homerun-app-ui`) is private and shared with the desktop app. This
-repo is the platform half: WebView host, bridge implementation, server engines.
+The iOS and Android hosts that run a Minecraft server on a phone. **No UI
+here** — every screen is a compiled bundle that `npm run ui` fetches from the
+CDN and verifies against the key pinned in this tree. Its source lives in a
+private repository, shared with Homerun Desktop. This repo is the platform
+half: WebView host, bridge implementation, server engines.
+
+**The product is "Homerun Go" on a phone and "Homerun Desktop" on a
+computer — never the bare word on its own.** That applies to docs, comments
+and anything a player reads. Identifiers keep the short form (`homerun-core`,
+`app.gethomerun.mobile`, the `[Homerun]` console badge); prose does not.
 
 Read `shared/conformance/PROTOCOL.md` before touching bridge code.
 
@@ -37,21 +42,23 @@ just made. Small, specific corrections beat rewrites.
 
 | Change | Repo |
 |---|---|
-| A screen, component, style, anything visual | `homerun-app-ui` |
-| A new bridge channel's **contract** | `homerun-app-ui` (`lib/bridge/`) |
+| A screen, component, style, anything visual | the shared UI repo |
+| A new bridge channel's **contract** | the shared UI repo (`lib/bridge/`) |
 | A bridge channel's **iOS/Android implementation** | here |
 | Server lifecycle, engines, platform APIs | here |
-| WSL, the desktop installer, the client launcher | `homerun/homerun-ui` — and it is desktop-only, so mobile never implements it |
+| WSL, the desktop installer, the client launcher | Homerun Desktop — and it is desktop-only, so mobile never implements it |
 
-`homerun-app-ui` and `homerun/homerun-ui` are private. A change that belongs
-there is one a maintainer has to carry over — say so in the issue or PR
-rather than working around it here.
+The shared UI and Homerun Desktop are both private repositories; the paths and
+package names for them that appear in build commands here only resolve for a
+maintainer who has a checkout. A change that belongs there is one a maintainer
+has to carry over — say so in the issue or PR rather than working around it
+here.
 
 ## Decisions in Rust, effects in the host
 
-`rust/homerun-core` holds the decisions every Homerun app makes — what a
-console line means, how much heap is safe, what order a launch runs in, what
-an exit meant. It has no sockets, no processes, no async runtime; its
+`rust/homerun-core` holds the decisions both Homerun Go hosts and Homerun
+Desktop make — what a console line means, how much heap is safe, what order a
+launch runs in, what an exit meant. It has no sockets, no processes, no async runtime; its
 dependencies are `serde`, `serde_json` and `ed25519-dalek` — the last one
 argued at length in `bundle.rs`, because an OTA manifest's signature is the one
 place a hand-rolled implementation still accepts every honest input while
@@ -66,7 +73,7 @@ get it right.
 
 There is a second axis, and it points the other way: the core is native, so
 changing it needs a store release, while the UI bundle can ship over the air.
-The UI is shared across all three apps too, so "shared" does not settle it. A
+The UI is shared across every app too, so "shared" does not settle it. A
 threshold someone will want to tune after launch may belong in the UI even
 when the core could hold it — decide that deliberately rather than by habit.
 See `docs/ota-bundles.md`.
@@ -100,7 +107,7 @@ the strings.
 ## Conformance is the gate
 
 ```bash
-node scripts/sync-contract.js ../homerun-app-ui
+node scripts/sync-contract.js ../<ui-repo>   # maintainers only; needs the private checkout
 node shared/conformance/check-coverage.js ios     ios/HomerunHost/BridgeRouter.swift
 node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt
 ```

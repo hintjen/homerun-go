@@ -2,7 +2,7 @@
 <!--
   No cleartext leaves this device.
 
-  Every host the app itself dials is HTTPS — the Homerun API, the Mojang and
+  Every host the app itself dials is HTTPS — our own API, the Mojang and
   PaperMC metadata, the OTA bundle CDN, the Keycloak certificate endpoint — so
   this is an assertion rather than a change in behaviour. It is worth making
   because the alternative is a property of the source that holds only until

@@ -96,7 +96,7 @@ mod backup_engine {
             "ok": false,
             // Written for a player, like every other error crossing this
             // boundary — a host could reach it through a mis-built app.
-            "error": "This copy of Homerun cannot back up worlds.",
+            "error": "This copy of the app cannot back up worlds.",
             "message": "built without the backup-engine feature",
             "cancelled": false,
         })
@@ -189,7 +189,7 @@ pub extern "C" fn homerun_abi_version() -> u32 {
 /// [`homerun_free_string`], shaped `{"ok":true,"value":…}` or
 /// `{"ok":false,"error":"…"}`.
 ///
-/// Errors are verdicts written for players — "Homerun cannot host forge servers
+/// Errors are verdicts written for players — "This app cannot host forge servers
 /// on this device yet" — so a host should surface the text rather than reword
 /// it. Fix the wording in the core, where every platform shares it.
 ///
@@ -493,7 +493,7 @@ pub extern "C" fn homerun_server_logs_since(cursor: u64) -> *mut c_char {
     })
 }
 
-/// Write a line from Homerun itself into the console.
+/// Write a line from the host itself into the console.
 ///
 /// For what a host does *around* a run — downloading a jar, restoring a world,
 /// bringing the tunnel up — most of which happens before there is a run at

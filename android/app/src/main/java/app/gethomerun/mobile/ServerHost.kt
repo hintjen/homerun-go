@@ -272,7 +272,7 @@ object ServerHost {
     }
 
     /**
-     * Put a line of Homerun's own into a server's console.
+     * Put a line of the host's own into a server's console.
      *
      * For what this app worked out and the server did not say — why a crash
      * happened, that an operator change was saved. It reaches the UI on the
@@ -288,7 +288,7 @@ object ServerHost {
         forEach { it.onLog(serverId, prefixed) }
     }
 
-    /** How Homerun's own lines are marked in a server's console. */
+    /** How the host's own lines are marked in a server's console. */
     private const val BADGE = "[Homerun] "
 
     /** Copy before dispatch: a listener may unregister while being called. */
@@ -434,7 +434,7 @@ object ServerHost {
         hostingName = name
         hostingStarting = true
         // A new run gets its own console, and its own chance to be told that
-        // something inside Homerun went wrong during it.
+        // something inside the app went wrong during it.
         failureNoted = false
         serviceRefused = false
         syncHosting()
@@ -536,7 +536,7 @@ object ServerHost {
         serviceRefused = true
         note(
             serverId,
-            "Android would not let Homerun run this server in the background. It is " +
+            "Android would not let Homerun Go run this server in the background. It is " +
                 "running now, but it may be shut down if you leave the app. Stopping " +
                 "this server and starting it again from the app should fix it.",
         )
@@ -642,7 +642,7 @@ object ServerHost {
         }
 
     /**
-     * Tell the player, once per run, that Homerun itself stumbled.
+     * Tell the player, once per run, that the app itself stumbled.
      *
      * The console is the only surface this host has for a failure that is not a
      * server's own: `Core.crashReport` reads a server's output and would file a
@@ -661,7 +661,7 @@ object ServerHost {
         } ?: return
         note(
             serverId,
-            "Homerun hit an unexpected problem in the background " +
+            "Homerun Go hit an unexpected problem in the background " +
                 "(${err.javaClass.simpleName}) and has carried on. If this server " +
                 "misbehaves from here, stopping it and starting it again is the fix.",
         )

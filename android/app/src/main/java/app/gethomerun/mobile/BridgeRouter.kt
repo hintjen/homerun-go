@@ -1149,7 +1149,7 @@ class BridgeRouter(
             withContext(Dispatchers.Main) {
                 val clipboard =
                     context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                clipboard.setPrimaryClip(ClipData.newPlainText("Homerun", text))
+                clipboard.setPrimaryClip(ClipData.newPlainText("Homerun Go", text))
             }
             null
         },
@@ -2019,7 +2019,7 @@ class BridgeRouter(
                 NotificationChannel(
                     NOTIFICATION_CHANNEL,
                     // A channel name is a category *within* the app, so naming
-                    // it after the app read as "Homerun / Homerun" in system
+                    // it after the app read as "Homerun Go / Homerun Go" in system
                     // settings — and gave the user nothing to distinguish it
                     // from the hosting channel when deciding what to mute.
                     context.getString(R.string.alerts_channel_name),
@@ -2118,7 +2118,7 @@ class BridgeRouter(
          * a sentence and not a stack trace.
          */
         const val API_URL_REFUSED =
-            "That backend address was refused. Homerun only talks to an https address " +
+            "That backend address was refused. This app only talks to an https address " +
                 "with a host name, like https://api.gethomerun.app."
 
         private const val PREFS = "homerun-host"

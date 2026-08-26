@@ -3,7 +3,7 @@
 How a server gets the mods it is configured with. Read
 [`android-server-backend.md`](./android-server-backend.md) first for how a
 server starts at all, and
-[`plans/android-mod-loaders.md`](../plans/android-mod-loaders.md) for where
+`plans/android-mod-loaders.md` for where
 this sits in the loader work.
 
 > **The spec is `native-mod-support.md`** in the `homerun` repo. It documents
@@ -156,7 +156,7 @@ files that no longer exist once the loader has been torn down.
 ## The sweep, and the one rule it must not break
 
 Stale jars are deleted, and the scope is narrow on purpose: **only files a
-previous Homerun run installed are candidates.** A jar the player dropped into
+previous Homerun Go run installed are candidates.** A jar the player dropped into
 `mods/` by hand has no record naming it and no modpack claiming it, so it is
 not managed and is never touched.
 

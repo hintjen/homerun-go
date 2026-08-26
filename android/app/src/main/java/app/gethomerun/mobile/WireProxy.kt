@@ -24,7 +24,7 @@ import java.io.File
  * no fallback: without the tunnel, a server runs perfectly and nobody in the
  * world can join it.
  *
- * wireproxy dials the Homerun gateway as a WireGuard peer and relays whatever
+ * wireproxy dials the hosting gateway as a WireGuard peer and relays whatever
  * the gateway sends to the local server. Players connect to the gateway; the
  * gateway DNATs to a fixed port on the WireGuard interface; wireproxy accepts
  * there and forwards to loopback.
@@ -248,12 +248,12 @@ class WireProxy(
                         if (verdict.giveUp) {
                             Log.w(TAG, "$label: the gateway stopped answering")
                             onLog(
-                                "[Homerun] The connection to the Homerun gateway could " +
+                                "[Homerun] The connection to the hosting gateway could " +
                                     "not be established, so players cannot reach this server."
                             )
                             runCatching { onHandshakeFailed() }
                         } else if (verdict.recovered) {
-                            onLog("[Homerun] Connection to the Homerun gateway restored.")
+                            onLog("[Homerun] Connection to the hosting gateway restored.")
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 {
   "name": "hand-added-jars-survive-the-sweep",
-  "why": "Stale-jar cleanup is scoped to files Homerun installed on a previous run — mod records plus modpack files — so a jar the player added by hand is never deleted. Getting this wrong deletes somebody's mods, which is the worst thing this pipeline can do.",
+  "why": "Stale-jar cleanup is scoped to files the app installed on a previous run — mod records plus modpack files — so a jar the player added by hand is never deleted. Getting this wrong deletes somebody's mods, which is the worst thing this pipeline can do.",
   "inputs": {
     "loader": "fabric",
     "gameVersion": "1.21.4",

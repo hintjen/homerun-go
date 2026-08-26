@@ -434,7 +434,7 @@ object ServerJar {
     private fun offlineRuntime(onDisk: JarMeta, bundled: List<Int>): Int {
         val newest = bundled.maxOrNull()
             ?: throw ServerBackendException.Engine(
-                "This version of Homerun ships no Java runtime, so it cannot host a " +
+                "This version of the app ships no Java runtime, so it cannot host a " +
                     "Java server. Reinstall the app."
             )
         val required = onDisk.requiredJava ?: return newest

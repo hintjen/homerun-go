@@ -206,7 +206,7 @@ impl ServerHost {
         answer
     }
 
-    /// A line from Homerun rather than from the server.
+    /// A line from the host rather than from the server.
     ///
     /// Jar downloads, runtime unpacking, world restores, the tunnel — the
     /// things a host does *around* a run, most of them before there is a run

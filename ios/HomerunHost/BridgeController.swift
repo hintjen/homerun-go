@@ -447,7 +447,7 @@ extension BridgeController: WKScriptMessageHandler {
             // with no error. Answer even when there is nothing to say.
             reply(
                 to: incoming.id,
-                message: "Homerun for iOS cannot do that yet (\(incoming.method)).",
+                message: "Homerun Go for iOS cannot do that yet (\(incoming.method)).",
                 code: "UNKNOWN_METHOD")
             return
         }

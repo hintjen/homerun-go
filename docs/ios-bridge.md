@@ -131,7 +131,7 @@ Two rules follow, and both are about keeping the gate honest:
 An unknown method still gets an answer — an error, never silence:
 
 ```
-{ "v":1, "id":"42", "error": { "message":"Homerun for iOS cannot do that yet (…).",
+{ "v":1, "id":"42", "error": { "message":"Homerun Go for iOS cannot do that yet (…).",
                                "code":"UNKNOWN_METHOD" } }
 ```
 

@@ -579,7 +579,7 @@ class PumpkinBackend(
     }
 
     /**
-     * A line of Homerun's own narrative, into the server's console.
+     * A line of the host's own narrative, into the server's console.
      *
      * Written to the supervisor's buffer rather than emitted directly, which
      * is what keeps it in sequence with the engine's own output — and what

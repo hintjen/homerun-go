@@ -240,7 +240,7 @@ be forwarding at it by then, so the number has to exist before either runs.
 This is the one real difference from Android, and it is the platform's rather
 than this code's: iOS suspends the process, and a suspended process serves
 nothing. There is no foreground service to hold it —
-[`plans/ios-background-execution.md`](../plans/ios-background-execution.md)
+`plans/ios-background-execution.md`
 sweeps every persistent-process option and finds none that can hold a socket.
 
 So `applicationDidBecomeActive` brings the link up and

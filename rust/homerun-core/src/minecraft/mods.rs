@@ -243,7 +243,7 @@ pub struct Session {
 /// Everything the host knows before any request is made.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Inputs {
-    /// The server's `TYPE`, as Homerun spells it.
+    /// The server's `TYPE`, as this project spells it.
     pub loader: String,
     /// The resolved Minecraft version.
     #[serde(rename = "gameVersion")]
@@ -319,7 +319,7 @@ pub fn begin(inputs: Inputs) -> Progress {
         .filter(|(slug, _)| !slug.is_empty() && !excluded.contains(slug))
         .collect();
 
-    // Scoped to what Homerun installed before, and that scoping is the whole
+    // Scoped to what the app installed before, and that scoping is the whole
     // safety of the sweep: a jar the player added by hand has no record and no
     // modpack claim, so it is never a candidate for deletion.
     let managed_before: BTreeSet<String> = inputs
@@ -727,7 +727,7 @@ impl Session {
             ModRecord {
                 version_id: picked.version_id.clone(),
                 mc_version: self.game_version.clone(),
-                // The Homerun loader, not the Modrinth facet: this records
+                // Our own loader name, not the Modrinth facet: this records
                 // what the server is, not where the file came from.
                 loader: self.loader.clone(),
                 file_path: format!("{}/{}", self.sub_dir, picked.filename),
@@ -773,7 +773,7 @@ impl Session {
 /// Which jars in the mod directory should go.
 ///
 /// Four conditions, and the third is the one that matters: **only files
-/// Homerun installed before are candidates**. A jar the player dropped in by
+/// the app installed before are candidates**. A jar the player dropped in by
 /// hand has no record naming it and no modpack claiming it, so it is not
 /// managed and is never touched. Getting this wrong deletes somebody's mods.
 pub fn sweep(

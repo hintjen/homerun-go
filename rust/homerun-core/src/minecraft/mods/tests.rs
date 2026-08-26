@@ -192,7 +192,7 @@ fn a_listed_mod_is_resolved_downloaded_and_recorded() {
     );
 }
 
-/// The record stores the Homerun loader, not the Modrinth facet a Spigot
+/// The record stores our own loader name, not the Modrinth facet a Spigot
 /// server resolved against — it describes the server, not the download.
 #[test]
 fn the_record_names_the_servers_loader_not_the_facet() {
@@ -592,7 +592,7 @@ fn a_recorded_jar_at_the_wrong_version_is_re_downloaded() {
     assert_eq!(
         outcome.remove,
         vec!["lithium-old.jar"],
-        "the old one is Homerun's to sweep"
+        "the old one is ours to sweep"
     );
 }
 
@@ -637,7 +637,7 @@ fn the_sweep_ignores_anything_that_is_not_a_jar() {
 }
 
 /// A mod skipped as client-only this run, but installed by a previous one, is
-/// left behind unless it is swept — and it is Homerun's to sweep.
+/// left behind unless it is swept — and it is ours to sweep.
 #[test]
 fn a_mod_that_became_client_only_is_cleaned_up() {
     let mut host = Host::answering(vec![

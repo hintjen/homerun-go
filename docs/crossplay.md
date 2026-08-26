@@ -375,5 +375,5 @@ in the UI.
 - [`core-bridge.md`](./core-bridge.md#minecraft) — the method signatures.
 - [`android-server-backend.md`](./android-server-backend.md) — where these steps
   sit in a launch.
-- [`../plans/android-crossplay.md`](../plans/android-crossplay.md) — the plan,
+- `plans/android-crossplay.md` — the plan,
   including what was dropped and why.

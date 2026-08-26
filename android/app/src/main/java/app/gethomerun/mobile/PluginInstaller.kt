@@ -10,7 +10,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Putting Homerun's own plugin jars onto the device.
+ * Putting our own plugin jars onto the device.
  *
  * # What this is, and what [ModInstaller] is
  *
@@ -59,7 +59,7 @@ object PluginInstaller {
     private const val PLUGINS = "plugins"
 
     /**
-     * Fetch this server's Homerun-hosted plugins into `plugins/`.
+     * Fetch the plugins we host for this server into `plugins/`.
      *
      * A no-op for a server with none configured, and for any loader that would
      * not read the directory — so this is safe to call on every launch, which

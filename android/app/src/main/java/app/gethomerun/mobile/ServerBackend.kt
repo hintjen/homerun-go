@@ -312,7 +312,7 @@ sealed class ServerBackendException(message: String) : Exception(message) {
      * — it came from the page, and this is read by a player.
      */
     class InvalidId : ServerBackendException(
-        "Homerun cannot open that server — its id is not one this app recognises."
+        "This app cannot open that server — its id is not one it recognises."
     )
 
     class Engine(message: String) : ServerBackendException(message)

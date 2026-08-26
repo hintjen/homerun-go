@@ -3,7 +3,7 @@
 //!
 //! # Why this exists
 //!
-//! Everything a Homerun host does around a server is the same whatever the
+//! Everything a host does around a server is the same whatever the
 //! server is: fetch a thing to run, write config before starting it, spawn it,
 //! read its output to know when it is ready and who joined, expose ports
 //! through the gateway, and decide whether an exit was a crash. Only the
@@ -161,7 +161,7 @@ impl BuildContext {
     }
 }
 
-/// A game a Homerun host can run.
+/// A game a host can run.
 ///
 /// # This signature is frozen — `game/v1`
 ///

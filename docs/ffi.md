@@ -454,7 +454,7 @@ blocked for four minutes would eventually be called the same way. A separate
 symbol with a loud doc comment is the only guard available.
 
 A build without the feature still exports all five; they answer "this copy of
-Homerun cannot back up worlds". Without that stub, host and Android builds
+the app cannot back up worlds". Without that stub, host and Android builds
 would fail to link against a header that declares them.
 
 ### Two things a linked engine does differently

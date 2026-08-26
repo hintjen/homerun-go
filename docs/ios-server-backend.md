@@ -248,7 +248,7 @@ desktop: without the tunnel, a server runs and nobody outside can join.
 
 ## The tunnel — `WireProxy.swift`, `go/wireproxy-ios/`
 
-Traffic is **ingress**. The Homerun gateway is the client and the phone is the
+Traffic is **ingress**. The hosting gateway is the client and the phone is the
 server, which is the opposite of what "proxy" usually suggests:
 
 ```
@@ -383,7 +383,7 @@ a build mismatch is exactly when you least want to launch blind.
 | `ios/HomerunHost/FFI/HomerunFFI.swift` | Typed FFI access; the one place strings are freed |
 | `ios/HomerunHost/FFI/HomerunFFI.h` | Hand-written C declarations |
 | `ios/HomerunHost/FFI/StartRequest.swift` | The start request's wire form. A leaf, so `ios/coretest` can check it against the real parser |
-| `ios/HomerunHost/MojangDirectory.swift` | Name → UUID. The only outbound call here that is not to Homerun's API |
+| `ios/HomerunHost/MojangDirectory.swift` | Name → UUID. The only outbound call here that is not to our own API |
 | `rust/homerun-core/src/minecraft/hosting.rs` | Which servers this host may run at all. Shared with Android, so neither app refuses alone |
 | `rust/homerun-pumpkin-ffi/src/engine_settings.rs` | What a setting *means* to an engine. No Pumpkin, so it is in the fast test suite |
 | `rust/homerun-pumpkin-ffi/src/pumpkin_settings.rs` | Assignment onto Pumpkin's own types |

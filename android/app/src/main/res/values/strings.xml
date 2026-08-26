@@ -28,5 +28,5 @@
     <string name="hosting_running_empty">Online · nobody playing yet</string>
     <string name="hosting_running_one">Online · 1 player</string>
     <string name="hosting_running_many">Online · %1$d players</string>
-    <string name="hosting_backing_up">Backing up your world — don\'t close Homerun</string>
+    <string name="hosting_backing_up">Backing up your world — don\'t close Homerun Go</string>
 </resources>

@@ -7,7 +7,7 @@
 //! mobile host could perform, so a phone's Minigames Hub was structurally stuck
 //! at zero stats. The API can now report an account linked from the desktop
 //! (`GET /api/minecraft-account/`), which covers the common case without any of
-//! this; what follows is for the person whose only Homerun device is a phone.
+//! this; what follows is for the person whose only device is a phone.
 //!
 //! # The chain, and why it is in the core
 //!
@@ -32,7 +32,7 @@
 //! # Step 1 is deliberately replaceable
 //!
 //! The other five are fixed by Microsoft. How you get the *first* token is not,
-//! and Homerun has two options with different trade-offs:
+//! and we have two options with different trade-offs:
 //!
 //! - **Device code** ([`device_code_request`], [`poll_request`]) — what ships.
 //!   It works with the public Xbox client below, needs no app registration, no
@@ -60,7 +60,7 @@ use crate::{Error, Result};
 
 /// The Xbox app's own client id. Public, secretless, and already approved for
 /// the Minecraft API — which is the property that matters and the reason the
-/// desktop uses it rather than a Homerun registration.
+/// desktop uses it rather than a registration of our own.
 pub const CLIENT_ID: &str = "00000000402b5328";
 
 /// Consumer sign-in, not the AAD endpoint. `login.microsoftonline.com` looks

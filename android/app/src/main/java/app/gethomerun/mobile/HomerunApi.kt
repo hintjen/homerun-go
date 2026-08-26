@@ -21,7 +21,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * The bits of the Homerun backend this host has to read for itself.
+ * The bits of the backend this host has to read for itself.
  *
  * The UI passes only a name and a memory ceiling down `native-server-start`;
  * everything else about a server — which Minecraft version, which loader —

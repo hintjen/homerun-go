@@ -94,7 +94,7 @@ class TunnelSession(
      */
     suspend fun open(serverId: String, dir: File, port: Int, exposure: String = "java") {
         val pending = job ?: return
-        note(serverId, "[Homerun] Connecting to the Homerun gateway...")
+        note(serverId, "[Homerun] Connecting to the hosting gateway...")
 
         val link = runCatching { pending.await() }.getOrNull()
         job = null
@@ -138,7 +138,7 @@ class TunnelSession(
             )
         }
 
-        note(serverId, "[Homerun] Connected to the Homerun gateway.")
+        note(serverId, "[Homerun] Connected to the hosting gateway.")
     }
 
     private suspend fun fail(serverId: String, kind: String, message: String): Nothing {
@@ -159,7 +159,7 @@ class TunnelSession(
         onNetworkError()?.invoke(serverId, kind)
 
         // Through the core, exactly as a stop from the bridge would be. This
-        // is a stop somebody asked for — Homerun did, on the player's behalf —
+        // is a stop somebody asked for — the host did, on the player's behalf —
         // and recording the intent is what keeps the exit from being reported
         // as a crash, which would also skip the on-stop backup.
         val verdict = lifecycle.stopRequested(serverId)
