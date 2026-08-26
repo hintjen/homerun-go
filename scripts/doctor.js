@@ -99,7 +99,7 @@ add(
   wireproxyPresent,
   "wireproxy fork",
   wireproxyPresent ? wireproxySrc : "not found",
-  "git clone git@github.com:hintjen/wireproxy-homerun.git   (as a sibling of this repo,\n" +
+  "git clone https://github.com/hintjen/wireproxy-homerun.git   (as a sibling of this repo,\n" +
     "    or set HOMERUN_WIREPROXY_SRC)"
 );
 // The build refuses a checkout that is not at the pinned revision, so say so

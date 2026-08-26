@@ -90,10 +90,10 @@ npm test           # the Rust suites + the ABI, revision, capability and bundle 
 Both Rust crates build and test host-native on any OS, including Windows —
 hundreds of tests in seconds, no device needed. The server engine is the
 public [`hintjen/Pumpkin-homerun`](https://github.com/hintjen/Pumpkin-homerun)
-fork, fetched by Cargo with no credentials. One git dependency is **private
-for now** while its fork is prepared for release: `hintjen/wireproxy-homerun`
-(the tunnel). Until it opens, building the tunnel needs access to it;
-`npm test` and everything else runs for anyone.
+fork, fetched by Cargo with no credentials. The tunnel is the public
+[`hintjen/wireproxy-homerun`](https://github.com/hintjen/wireproxy-homerun)
+fork, checked out beside this repo at the revision in `scripts/wireproxy.rev`.
+Everything builds for anyone.
 
 Per platform:
 
@@ -136,6 +136,8 @@ Mac. `docs/README.md` indexes the write-ups, including the gaps.
 - **[homerun](https://github.com/hintjen/homerun)** — desktop app, API, services
 - **[hintjen/Pumpkin-homerun](https://github.com/hintjen/Pumpkin-homerun)** —
   the Rust Minecraft server this embeds, carrying the library-mode patches
-- **hintjen/wireproxy-homerun** — the tunnel (private for now)
+- **[hintjen/wireproxy-homerun](https://github.com/hintjen/wireproxy-homerun)** —
+  the WireGuard tunnel, carrying the run-inside-an-app patches and the
+  inbound UDP tunnel
 
 See `CLAUDE.md` for how the pieces fit and the house rules for working here.

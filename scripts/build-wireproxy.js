@@ -106,7 +106,7 @@ function sourceDir() {
   if (!fs.existsSync(path.join(candidate, "go.mod"))) {
     fail(
       `No wireproxy-homerun checkout at ${candidate}.\n\n` +
-        "  git clone git@github.com:hintjen/wireproxy-homerun.git\n\n" +
+        "  git clone https://github.com/hintjen/wireproxy-homerun.git\n\n" +
         "next to this repo, or set HOMERUN_WIREPROXY_SRC to where it is.\n" +
         "(A checkout with a wireproxy/ subdirectory is the old monorepo layout;\n" +
         "pull main.)"

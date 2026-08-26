@@ -728,7 +728,7 @@ the design. wireproxy terminates WireGuard in its own userspace netstack: the
 Android. So no TUN device, no `VpnService`, no permission prompt, and none of
 the Play policy surface a real VPN carries.
 
-Built by `npm run wireproxy:android` from the private fork
+Built by `npm run wireproxy:android` from the fork
 `hintjen/wireproxy-homerun`, checked out beside this repo or pointed at with
 `HOMERUN_WIREPROXY_SRC`. The fork is required, not a preference: it adds
 `[UDPServerTunnel]`, which upstream lacks and which Bedrock, crossplay and
