@@ -465,10 +465,18 @@ baseline and is supposed to.
 `node scripts/build-wireproxy.js ios` before `xcodegen generate`; the project
 references the staged xcframework, and new Swift files need a regenerate.
 
-**`pkt.IsNil undefined` building the Go module.** gvisor was upgraded past the
-fork's 2023 wireguard-go. The generated `go.work` pins it — and note that
-`go work sync` *causes* this by writing resolved versions back into the fork's
-own `go.mod`, which also dirties another repository.
+**`pkt.IsNil undefined` building the Go module.** gvisor and wireguard-go are
+out of step: netstack is compiled against a gvisor newer than the wireguard-go
+it ships with. Both now come from the module proxy at the highest version the
+fork and the binding ask for, so this should only recur if one of the two
+`go.mod`s bumps one without the other — `go work sync` is one way to do that
+by accident, and it also dirties another repository.
+
+**`build-wireproxy.js` refuses the checkout: "is at … but scripts/wireproxy.rev
+pins …".** The fork moved (its `main` merges upstream on a schedule) and this
+repository has not been repinned, or the checkout is behind the pin. The
+message has the `checkout --detach` to run; bump the pin only as a reviewed
+commit.
 
 **A modded server starts fine and the world is vanilla.** The refusal above did
 not fire. Either the settings could not be read at all — nil settings are

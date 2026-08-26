@@ -12,7 +12,7 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const { ROOT, PLATFORM_TARGETS, TARGETS } = require("./targets");
+const { ROOT, PLATFORM_TARGETS, TARGETS, UI_DESTINATIONS } = require("./targets");
 const { JDK_MIN, JDK_MAX, findJdk, INSTALL_HINT } = require("./jdk");
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
@@ -58,48 +58,69 @@ add(
   "brew install cmake   (aws-lc-sys builds C for the device websocket's TLS)"
 );
 
-// Two of this crate's dependencies are private forks. Cargo's built-in git
-// client cannot authenticate to them and fails with "failed to authenticate
-// when downloading repository", naming no repository you recognise; the
-// system git can, because gh or ssh already holds the credentials.
-const fetchWithCli =
-  process.env.CARGO_NET_GIT_FETCH_WITH_CLI === "true" ||
-  // Cargo accepts both spellings — `net.git-fetch-with-cli = true` and a
-  // `[net]` section with `git-fetch-with-cli = true`. The fix text below
-  // recommends the section form, so the check must accept it too.
-  /git-fetch-with-cli\s*=\s*true/.test(
-    (() => {
-      try {
-        return fs.readFileSync(
-          path.join(require("os").homedir(), ".cargo", "config.toml"),
-          "utf8"
-        );
-      } catch {
-        return "";
-      }
-    })()
+// The UI is a published bundle fetched from the CDN by `npm run ui:<platform>`,
+// not a dependency of this repo. Gradle and Xcode package whatever sits in the
+// destination — or refuse to, after every other artefact has already built —
+// so say up front whether one is staged.
+for (const platform of platforms) {
+  const dest = UI_DESTINATIONS[platform];
+  if (!dest) continue;
+  const staged = fs.existsSync(path.join(dest, "index.html"));
+  add(
+    staged,
+    `Shared UI staged (${platform})`,
+    staged ? path.relative(ROOT, dest) : "not staged",
+    `npm run ui:${platform}   (fetches and verifies the published bundle from the CDN)`
   );
-add(
-  fetchWithCli,
-  "Cargo git over the system git",
-  fetchWithCli ? "enabled" : "not enabled",
-  "The Pumpkin and rustic forks are private. Add to ~/.cargo/config.toml:\n" +
-    "      [net]\n      git-fetch-with-cli = true"
-);
-
-const uiInstalled = fs.existsSync(
-  path.join(ROOT, "node_modules", "homerun-app-ui", "out", "index.html")
-);
-add(
-  uiInstalled,
-  "Shared UI bundle",
-  uiInstalled ? "installed" : "not installed",
-  "npm install   (fetches and builds homerun-app-ui; a few minutes)"
-);
+}
 
 const installedTargets = (
   capture("rustup", ["target", "list", "--installed"]) || ""
 ).split(/\r?\n/);
+
+// --- the tunnel, both platforms --------------------------------------------
+//
+// Without it a hosted server is reachable only on the phone's own Wi-Fi — on
+// cellular, CGNAT means nobody can join at all. Android execs the binary,
+// iOS links a gomobile framework; both are built from the same fork checkout.
+
+const go = capture("go", ["version"]);
+add(
+  Boolean(go),
+  "Go",
+  go || "not found",
+  "brew install go / winget install GoLang.Go   (the wireproxy fork needs Go 1.26+)"
+);
+const wireproxySrc = process.env.HOMERUN_WIREPROXY_SRC
+  ? path.resolve(ROOT, process.env.HOMERUN_WIREPROXY_SRC)
+  : path.join(path.dirname(ROOT), "wireproxy-fork");
+const wireproxyPresent = fs.existsSync(path.join(wireproxySrc, "go.mod"));
+add(
+  wireproxyPresent,
+  "wireproxy fork",
+  wireproxyPresent ? wireproxySrc : "not found",
+  "git clone git@github.com:hintjen/wireproxy-fork.git   (as a sibling of this repo,\n" +
+    "    or set HOMERUN_WIREPROXY_SRC)"
+);
+// The build refuses a checkout that is not at the pinned revision, so say so
+// here rather than at the end of a Gradle run.
+const wireproxyPinFile = path.join(ROOT, "scripts", "wireproxy.rev");
+const wireproxyPinned = fs.existsSync(wireproxyPinFile)
+  ? fs.readFileSync(wireproxyPinFile, "utf8").trim()
+  : "";
+// `git -C` rather than a cwd option: capture() has none, and passing one
+// silently reported this repository's HEAD as the fork's.
+const wireproxyActual = wireproxyPresent
+  ? capture("git", ["-C", `"${wireproxySrc}"`, "rev-parse", "HEAD"])
+  : null;
+add(
+  Boolean(wireproxyActual) && wireproxyActual === wireproxyPinned,
+  "wireproxy fork revision",
+  wireproxyActual
+    ? `${wireproxyActual.slice(0, 12)}${wireproxyActual === wireproxyPinned ? "" : ` (pinned: ${wireproxyPinned.slice(0, 12)})`}`
+    : "unknown",
+  `git -C "${wireproxySrc}" fetch origin && git -C "${wireproxySrc}" checkout --detach ${wireproxyPinned || "<scripts/wireproxy.rev>"}`
+);
 
 // --- per platform ---------------------------------------------------------
 
@@ -136,15 +157,9 @@ for (const platform of platforms) {
       "brew install xcodegen   (the .xcodeproj is generated, not committed)"
     );
 
-    // The tunnel. Without it a hosted server is reachable only on the phone's
-    // own Wi-Fi — on cellular, CGNAT means nobody can join at all.
-    const go = capture("go", ["version"]);
-    add(
-      Boolean(go),
-      "Go",
-      go || "not found",
-      "brew install go   (the wireproxy fork needs Go 1.26+)"
-    );
+    // iOS gets the tunnel as a gomobile framework, because it cannot spawn
+    // the binary. Go itself and the fork checkout are checked for both
+    // platforms above.
     const gomobile = capture("gomobile", ["version"]);
     add(
       Boolean(gomobile),
@@ -152,16 +167,6 @@ for (const platform of platforms) {
       gomobile ? "installed" : "not found",
       "go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init\n" +
         "    It lands in $(go env GOPATH)/bin — put that on PATH."
-    );
-    const wireproxySrc = process.env.HOMERUN_WIREPROXY_SRC
-      ? path.resolve(ROOT, process.env.HOMERUN_WIREPROXY_SRC)
-      : path.join(path.dirname(ROOT), "wireproxy-fork");
-    add(
-      fs.existsSync(path.join(wireproxySrc, "wireproxy", "go.mod")),
-      "wireproxy fork",
-      fs.existsSync(path.join(wireproxySrc, "wireproxy", "go.mod")) ? wireproxySrc : "not found",
-      "git clone git@github.com:hintjen/wireproxy-fork.git   (as a sibling of this repo,\n" +
-        "    or set HOMERUN_WIREPROXY_SRC)"
     );
   }
 

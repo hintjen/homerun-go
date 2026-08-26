@@ -167,8 +167,8 @@ libc = { version = "0.2", optional = true }
 # `opendal` is deliberately off: the default feature set pulls
 # opendal-service-ftp and suppaftp, and the API only ever hands out `rest:`
 # repositories.
-rustic_core = { version = "0.12", default-features = false, optional = true }
-rustic_backend = { version = "0.6", default-features = false, features = [
+rustic_core = { version = "0.13", default-features = false, optional = true }
+rustic_backend = { version = "0.7", default-features = false, features = [
     "rest",
 ], optional = true }
 # rustic re-exports this; used for the `forget` cutoff, which needs a clock the
@@ -185,40 +185,34 @@ homerun-core = { path = "../homerun-core" }
 jni = "0.21"
 android_logger = "0.14"
 
-# rustic_core 0.12.0 does not compile for aarch64-apple-ios: the dev_t cfg
-# gates in backend/local_destination.rs list macos and openbsd but not ios, so
-# `device` stays u64 where nix::mknod wants i32. Five lines, on branch
-# `fix/ios-dev-t-cfg` in hintjen/rustic-fork.
+# rustic_core as published does not compile for aarch64-apple-ios: the dev_t
+# cfg gates in backend/local_destination.rs list macos and openbsd but not
+# ios, so `device` stays u64 where nix::mknod wants i32. Five lines, carried
+# in hintjen/rustic-fork — the fork is upstream plus exactly that
+# commit, so `main` there is also the branch an upstream PR opens from.
 #
 # Carried, not upstreamed — the same call `plans/ios.md` makes for the Pumpkin
-# fork. Rebasing five lines onto a new release is cheaper than depending on
-# someone else's review queue, and this repository already keeps two forks on
-# that footing.
+# fork, and the fork is public now, so both can happen.
 #
-# **Cut from the 0.12.0 release commit, not from the fork's main.** That is the
-# difference between shipping a published version plus a known patch and
-# shipping whatever main happened to be that day — which for a subsystem that
-# writes and restores worlds is not a distinction to leave to chance. `main`
-# was eight commits past the release with 22 files changed under crates/core.
+# That repository's `main` is upstream's `main` with the patch rebased on top,
+# so it reads as exactly one commit ahead. Which means a rev pinned here may
+# be an *unreleased* core — and `rustic_backend` from crates.io is compiled
+# against the core it was released with. That pairing broke once before
+# (`write_bytes` changed shape after 0.12.0 and backend 0.6.2 stopped
+# building). So a repin is not just a rev bump: build `backup-engine` against
+# the new rev before committing it, and if the backend no longer compiles,
+# either wait for upstream's next release pair or pin a rev at the tag.
 #
-# It is also why only the core is patched. Against main, `rustic_backend` 0.6.2
-# from crates.io failed to compile — `write_bytes` had changed shape after the
-# release — which forced patching both crates. From the release base the
-# published backend matches, so it comes straight from crates.io and the fork
-# covers one crate instead of two.
-#
-# **`hintjen/rustic-fork`'s own `main` is a clean mirror of upstream, on
-# purpose. Do not merge the patch branch into it.** The branch is cut from the
-# release, and upstream's main has moved past it — merging would give that fork
-# a main that is neither upstream nor what we ship, and would put the drift
-# above back into the thing next year's reader takes for the source of truth.
-# Picking up a future release is: fetch upstream, cut a new branch from the new
-# release tag, re-apply five lines, repin the rev here.
+# Cargo only applies a `[patch]` whose version satisfies the requirement.
+# When upstream cuts a release the crate version moves, and a 0.14 tree
+# against the "0.13" above is dropped with nothing louder than
+# `patch ... was not used` — bump `rustic_core` and `rustic_backend` above
+# together with the rev.
 #
 # `[patch]` is not feature-gated, so an Android or host build resolves this too
 # and warns that the patch went unused. That is expected, not a problem.
 [patch.crates-io]
-rustic_core = { git = "https://github.com/hintjen/rustic-fork", rev = "6473fab1bc1add99ebb55b1b65caf9378d6142bd" }
+rustic_core = { git = "https://github.com/hintjen/rustic-fork", rev = "2c77cde6270db06b1f73d550dbef403f343ae9d6" }
 
 [profile.release]
 # The debug build of the server is ~1.8 GB, which is impractical on device.
