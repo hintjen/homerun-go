@@ -591,18 +591,12 @@ Build Android locally and leave iOS to a Mac or CI.
 `rustup target add` line.
 
 **`failed to authenticate when downloading repository`, naming no repository
-you recognise** — the Pumpkin and rustic forks are private, and cargo's
-built-in git client cannot use the credentials `gh` or ssh already hold. The
-system git can:
-
-```toml
-# ~/.cargo/config.toml
-[net]
-git-fetch-with-cli = true
-```
-
-`node scripts/doctor.js` checks for this. It bites every fresh machine and
-nothing about the message says which repository it means.
+you recognise** — cargo's built-in git client could not reach a git
+dependency. Every one of them is public now (the Pumpkin, rustic and wireproxy
+forks all went public for the repo split), so this should not happen on a
+fresh machine any more; if it does, `[net] git-fetch-with-cli = true` in
+`~/.cargo/config.toml` hands the fetch to the system git and whatever
+credentials it holds.
 
 **`Undefined symbols … ___chkstk_darwin` linking for iOS** — the deployment
 target is unset, so rustc linked against iOS 10 while the SDK compiled

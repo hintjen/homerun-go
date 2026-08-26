@@ -12,7 +12,7 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const { ROOT, PLATFORM_TARGETS, TARGETS } = require("./targets");
+const { ROOT, PLATFORM_TARGETS, TARGETS, UI_DESTINATIONS } = require("./targets");
 const { JDK_MIN, JDK_MAX, findJdk, INSTALL_HINT } = require("./jdk");
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith("-"));
@@ -58,44 +58,21 @@ add(
   "brew install cmake   (aws-lc-sys builds C for the device websocket's TLS)"
 );
 
-// Two of this crate's dependencies are private forks. Cargo's built-in git
-// client cannot authenticate to them and fails with "failed to authenticate
-// when downloading repository", naming no repository you recognise; the
-// system git can, because gh or ssh already holds the credentials.
-const fetchWithCli =
-  process.env.CARGO_NET_GIT_FETCH_WITH_CLI === "true" ||
-  // Cargo accepts both spellings — `net.git-fetch-with-cli = true` and a
-  // `[net]` section with `git-fetch-with-cli = true`. The fix text below
-  // recommends the section form, so the check must accept it too.
-  /git-fetch-with-cli\s*=\s*true/.test(
-    (() => {
-      try {
-        return fs.readFileSync(
-          path.join(require("os").homedir(), ".cargo", "config.toml"),
-          "utf8"
-        );
-      } catch {
-        return "";
-      }
-    })()
+// The UI is a published bundle fetched from the CDN by `npm run ui:<platform>`,
+// not a dependency of this repo. Gradle and Xcode package whatever sits in the
+// destination — or refuse to, after every other artefact has already built —
+// so say up front whether one is staged.
+for (const platform of platforms) {
+  const dest = UI_DESTINATIONS[platform];
+  if (!dest) continue;
+  const staged = fs.existsSync(path.join(dest, "index.html"));
+  add(
+    staged,
+    `Shared UI staged (${platform})`,
+    staged ? path.relative(ROOT, dest) : "not staged",
+    `npm run ui:${platform}   (fetches and verifies the published bundle from the CDN)`
   );
-add(
-  fetchWithCli,
-  "Cargo git over the system git",
-  fetchWithCli ? "enabled" : "not enabled",
-  "The Pumpkin and rustic forks are private. Add to ~/.cargo/config.toml:\n" +
-    "      [net]\n      git-fetch-with-cli = true"
-);
-
-const uiInstalled = fs.existsSync(
-  path.join(ROOT, "node_modules", "homerun-app-ui", "out", "index.html")
-);
-add(
-  uiInstalled,
-  "Shared UI bundle",
-  uiInstalled ? "installed" : "not installed",
-  "npm install   (fetches and builds homerun-app-ui; a few minutes)"
-);
+}
 
 const installedTargets = (
   capture("rustup", ["target", "list", "--installed"]) || ""

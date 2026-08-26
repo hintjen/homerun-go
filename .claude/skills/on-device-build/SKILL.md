@@ -199,11 +199,10 @@ Five things about that, each of which cost a round when it was worked out:
 - **Never pipe `xcodebuild` into `head`.** The SIGPIPE kills the build partway
   and the wrapper still exits 0, so a truncated log reads as a clean run.
   Redirect to a file and grep that.
-- **`npm run doctor` names two things the iOS Rust build needs** and nothing
-  else will tell you about until the link fails: `brew install cmake`
-  (`aws-lc-sys` compiles C for the device websocket's TLS) and
-  `git-fetch-with-cli = true` under `[net]` in `~/.cargo/config.toml` (the
-  Pumpkin and rustic forks are private). Run doctor first; neither needs sudo.
+- **`npm run doctor` names what the iOS Rust build needs** and nothing else
+  will tell you about until the link fails — `brew install cmake`
+  (`aws-lc-sys` compiles C for the device websocket's TLS) above all. Run
+  doctor first; nothing it asks for needs sudo.
 - **`rust:ios-sim` is not a quick step.** It links Pumpkin into a ~1.4 GB
   static library and takes tens of minutes from cold. Kick it off before
   anything you could be doing in parallel, and do not assume a silent log means
