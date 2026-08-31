@@ -111,6 +111,16 @@ object JavaRuntime {
      */
     private const val DOWNLOAD_SHARE = 0.6f
 
+    /**
+     * Request code for Play's download confirmation.
+     *
+     * Nothing reads the result. The session reports what the player chose
+     * through the same state listener the download uses, so the answer arrives
+     * as DOWNLOADING or CANCELED rather than as an activity result — this only
+     * has to not collide with anything else the activity starts.
+     */
+    private const val CONFIRM_REQUEST = 8021
+
     /** Where the staged dependency libraries land, apart from the JRE's own. */
     const val DEPS_DIR = "termux-lib"
 
@@ -275,6 +285,11 @@ object JavaRuntime {
      * is only known once `startInstall` succeeds, and an install served from
      * cache can reach INSTALLED before that — filtering on the id would drop
      * the event that ends the wait and hang the launch for good.
+     *
+     * The wait itself is unbounded, deliberately: a runtime is ~54 MB and a
+     * player on a slow connection is still making progress. What ends it is
+     * always a terminal state from Play — including the one for a confirmation
+     * the player never answered, which Play expires on its own.
      */
     private fun fetchModule(context: Context, major: Int, onProgress: (Float) -> Unit) {
         val name = module(major)
@@ -314,16 +329,34 @@ object JavaRuntime {
                     )
                     done.countDown()
                 }
-                // Play asks before a large download on mobile data, and only an
-                // Activity can raise that prompt. This runs on an IO thread
-                // during a launch and has none, so it says what to do instead
-                // of waiting for a confirmation that can never arrive.
+                // Play asks before downloading over a metered connection, and
+                // the prompt has to be raised on an activity.
+                //
+                // Showing it settles nothing here. Play carries the session on
+                // afterwards, so this same listener sees DOWNLOADING and then
+                // INSTALLED, or CANCELED if the player declined — the wait ends
+                // on one of those, not on an activity result.
                 SplitInstallSessionStatus.REQUIRES_USER_CONFIRMATION -> {
-                    failure.set(
-                        "Downloading the Java $major runtime needs your confirmation. " +
-                            "Connect to Wi-Fi and start the server again."
-                    )
-                    done.countDown()
+                    val activity = ForegroundActivity.get()
+                    val asked = activity != null && runCatching {
+                        manager.startConfirmationDialogForResult(state, activity, CONFIRM_REQUEST)
+                    }.getOrElse {
+                        Log.w(TAG, "could not raise Play's confirmation: ${it.message}")
+                        false
+                    }
+                    if (!asked) {
+                        // The app is in the background, which a launch is
+                        // entitled to be — the foreground service exists so a
+                        // server can start without a screen. There is nothing
+                        // to ask on, so say what would let it through instead
+                        // of waiting for an answer nobody was asked for.
+                        Log.w(TAG, "Java $major needs confirmation and there is no activity to ask on")
+                        failure.set(
+                            "Downloading the Java $major runtime needs your confirmation. " +
+                                "Open Homerun Go, or connect to Wi-Fi, and start the server again."
+                        )
+                        done.countDown()
+                    }
                 }
                 else -> Unit
             }

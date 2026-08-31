@@ -33,6 +33,11 @@ class HomerunApplication : Application() {
         AppErrors.init(this)
         logCrashesBeforeDying()
 
+        // Before anything can start a server. A launch may have to ask Play
+        // for a Java runtime, and Play's download confirmation has to be
+        // raised on an activity that only this knows about.
+        ForegroundActivity.track(this)
+
         // Process-scoped, because a running server must survive the activity
         // and the WebView being torn down and rebuilt.
         ServerHost.init(this)
