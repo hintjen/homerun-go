@@ -421,10 +421,15 @@ object JavaRuntime {
      * `docs/android-server-backend.md` for what was ruled out getting there.
      */
     private fun refusal(major: Int, code: Int): String = when (code) {
+        // Deliberately does not assert *why*. The obvious cause is an install
+        // from outside Play, but a legitimate Play install of an app whose
+        // listing is still unreviewed returns this too — so a message that
+        // told those players to reinstall from Play would be sending them
+        // round a loop they are already inside.
         SplitInstallErrorCode.APP_NOT_OWNED ->
-            "This copy of Homerun Go did not come from Google Play, so Play will not " +
-                "send it the Java $major runtime. Install Homerun Go from the Play " +
-                "Store to host a Java server."
+            "Google Play would not send the Java $major runtime to this copy of " +
+                "Homerun Go. If you installed it from somewhere other than the Play " +
+                "Store, reinstalling from Play should fix it."
 
         SplitInstallErrorCode.INSUFFICIENT_STORAGE ->
             "There is not enough room on this phone for the Java $major runtime, " +
