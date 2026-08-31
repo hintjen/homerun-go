@@ -197,6 +197,59 @@ Three things follow from it that are easy to get wrong:
   `INSTALLED` before that. Filtering on the id drops the event that ends the
   wait, and the launch hangs for good.
 
+#### Which runtimes this will carry, and which one is packaged
+
+**Java 25 is packaged with the app and stays that way.** It runs Minecraft 26.x,
+the current release line, so it is the runtime almost every launch selects — and
+a runtime the common case waits on is the wrong one to defer. It is `:jre25`
+either way; the difference is only that its delivery stays `install-time` when
+the others move to `on-demand`, so it costs its ~59 MB once at install and never
+blocks a start.
+
+Every *other* runtime is an on-demand module: fetched the first time a server
+selects it, and never downloaded by a device whose servers never do. That is
+the shape the whole feature-module split exists for, and it scales — a fourth
+runtime is a new module and two constants, not a bigger APK.
+
+##### What the desktop app supports, and why we cannot simply match it
+
+Homerun Desktop takes a different route, and the difference is a platform
+constraint rather than a decision:
+
+| | Desktop | Android |
+|---|---|---|
+| Packaged | Eclipse Temurin JRE 25 (`resources/java/`) | Termux OpenJDK 25 (`:jre25`) |
+| Others | **Downloaded on demand from Azul Zulu** | **Feature modules from Play** |
+| Which majors | any Zulu publishes — the major is a query parameter | whatever Termux publishes |
+| Source | `api.azul.com/metadata/v1/zulu/packages` | `packages.termux.dev`, at build time |
+| Cache | `{installPath}/runtime/java-{major}/` | `filesDir/runtime-{major}` |
+
+Desktop asks Azul for `java_version: <major>`, `java_package_type: jre`, for the
+running `os`/`arch`, and caches the result — see
+`src/electron/system/minecraft-launcher/util/java.ts`. It therefore supports
+*any* major, resolved at runtime from `versionInfo.javaVersion.majorVersion`,
+with no build change. There is a `downloadZuluJdk` beside it for the loader
+installers that need a full JDK.
+
+**Android cannot do that**, and it is the same rule that put the runtimes in
+the app to begin with: Play's Device and Network Abuse policy forbids
+downloading executable code from a source other than Play, and `libjvm.so` is
+executable code. Azul is not Play. So on Android every runtime we support has to
+be built into a module and delivered by Play, which means the set is fixed at
+build time rather than resolved per server.
+
+The set is also bounded by supply. Termux is the only source publishing current
+OpenJDK for Android on both architectures, and it publishes **17, 21 and 25** —
+already the keys of `JDK_VERSIONS` in `scripts/stage-jre.py`. Desktop can reach
+majors we cannot get at all, so parity is a target and not a promise; where a
+version needs a runtime Android has no source for, `select_runtime` refuses in a
+sentence rather than failing inside a JVM.
+
+**17 is the next one to add**, and the only one currently possible: it unlocks
+Forge 1.20.1, which `Loader::java_policy` treats as `Exact` and therefore cannot
+run on 21 or 25. It costs nothing at install once on-demand is back on — the
+reason it is not here yet is `plans/android-mod-loaders.md`, not packaging.
+
 #### Staging it
 
 ```bash
