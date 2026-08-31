@@ -36,6 +36,7 @@
       on a modded server, so it names what they are waiting for rather than
       the module.
     -->
+    <string name="jre17_module_title">Java 17 runtime</string>
     <string name="jre21_module_title">Java 21 runtime</string>
     <string name="jre25_module_title">Java 25 runtime</string>
 </resources>

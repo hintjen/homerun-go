@@ -23,10 +23,12 @@ it was built against. One runtime cannot serve both, so this stages a directory
 per major and `homerun-core` picks which one a given server launches on. See
 `plans/android-mod-loaders.md`.
 
-They do not stage into the app. Both runtimes are delivered on demand by Play
-and stage into a feature module each (`android/jre21/`, `android/jre25/`),
-because carrying both in the APK put the install within ~33 MB of Play's 200 MB
-ceiling. See [ON_DEMAND_JAVA] and `docs/android-server-backend.md`.
+They do not stage into the app. Every runtime is a Play feature module and
+stages into its own (`android/jre17/`, `android/jre21/`, `android/jre25/`),
+because carrying them all in the APK would put the install past Play's 200 MB
+ceiling. Which of them is *downloaded* rather than packaged is a per-module
+decision and not this file's business — see [MODULE_JAVA] and
+`docs/android-server-backend.md`.
 
 Each directory is **self-contained**: its own `termux-lib/`, its own
 `java-major`, its own `release`. The duplicated dependency libraries cost about
@@ -58,21 +60,24 @@ CACHE = os.path.join(ROOT, ".jre-cache")
 JDK_VERSIONS = {17: "17.0.20", 21: "21.0.12", 25: "25.0.4"}
 
 # What a release ships, and what `verifyJavaRuntime` in app/build.gradle.kts
-# insists on. 25 runs the current Minecraft release; 21 is what the mod loaders
-# want, and running them on 25 is not an upgrade but a failure. 17 would unlock
-# Forge 1.20.1 and is deliberately not here — see `plans/android-mod-loaders.md`
-# for what that costs and why the answer is still two.
-DEFAULT_JAVA = [21, 25]
+# insists on. 25 runs the current Minecraft release; 21 is what most mod loaders
+# want, and running them on 25 is not an upgrade but a failure; 17 is Forge
+# 1.20.1, which `Loader::java_policy` treats as Exact and which therefore cannot
+# run on either of the others.
+DEFAULT_JAVA = [17, 21, 25]
 
-# Of those, the majors Play delivers on demand. They stage into
-# `android/jre<major>/src/main/assets/` rather than the base APK's assets, and
-# the app asks Play for the module the first time a server selects one.
+# The majors that live in a feature module. They stage into
+# `android/jre<major>/src/main/assets/` rather than the base APK's assets.
 #
-# Kept in step with `onDemandJavaRuntimes` in app/build.gradle.kts. The two
+# All of them, which is not the same as all of them being downloaded: each
+# module's manifest decides whether it arrives at install time or on demand,
+# and they differ. This list is only about where the files are staged.
+#
+# Kept in step with `moduleJavaRuntimes` in app/build.gradle.kts. The two
 # disagreeing stages a runtime where the build does not look for it, which
 # `verifyReleaseRuntimes` turns into a failed release build rather than a
-# release that silently refuses every modded server.
-ON_DEMAND_JAVA = [21, 25]
+# release that silently refuses every server needing it.
+MODULE_JAVA = [17, 21, 25]
 
 # One staged runtime lives in `assets/jre-<major>/`. The host lists the asset
 # root to discover them, so the prefix is load-bearing on both sides.
@@ -330,7 +335,7 @@ def asset_root(java: int) -> str:
     once SplitCompat has merged an installed split in, so only the staging path
     differs.
     """
-    if java in ON_DEMAND_JAVA:
+    if java in MODULE_JAVA:
         return os.path.join(ROOT, "android", f"jre{java}", "src", "main", "assets")
     return ASSET_ROOT
 

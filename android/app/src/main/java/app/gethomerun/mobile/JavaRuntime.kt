@@ -45,10 +45,17 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * What that costs this file is one thing: a runtime can be *promised* and not
  * yet *present*. [available] reports what the build can provide, because the
- * core chooses from that list and a jar needing 21 has to be able to ask for
+ * core chooses from that list and a jar needing 17 has to be able to ask for
  * it; [ensure] is where the module is actually fetched. Everything after the
  * fetch is unchanged — SplitCompat merges the split into the same
  * `AssetManager`, so the unpack below cannot tell the two apart.
+ *
+ * **Being a module is not the same as being downloaded.** All three majors live
+ * in modules; their manifests choose when each arrives. 25 is packaged with the
+ * app, 17 never is, and 21 is install-time until the listing clears review.
+ * This file does not need to know which: it fetches when the assets are not
+ * there and does nothing when they are, so an install-time module takes the
+ * same path as one already downloaded.
  *
  * # Why there is more than one
  *
@@ -138,9 +145,9 @@ object JavaRuntime {
      * which every debug build is free to do — describes itself honestly
      * instead of promising a runtime it does not carry.
      *
-     * A runtime delivered on demand counts as available before it is on the
-     * device: [Core.selectRuntime] picks from this list, so omitting 21 until
-     * it downloads would mean nothing ever selects it and it never downloads.
+     * A runtime that has not been downloaded yet still counts as available:
+     * [Core.selectRuntime] picks from this list, so omitting 17 until it
+     * downloads would mean nothing ever selects it and it never downloads.
      * [ensure] fetches it at the point of use.
      */
     fun available(context: Context): List<Int> = runCatching {
@@ -160,13 +167,18 @@ object JavaRuntime {
      * nothing further to send. Claiming 21 there would promise a runtime that
      * can never arrive, which is exactly what this function exists to avoid.
      */
-    private fun deliverable(context: Context): List<Int> = onDemand().filter { major ->
+    private fun deliverable(context: Context): List<Int> = modules().filter { major ->
         majorOf(context, "$ASSET_PREFIX$major") != null || !isModuleInstalled(context, major)
     }
 
-    /** The majors the build wired as feature modules. Empty is a valid answer. */
-    private fun onDemand(): List<Int> =
-        BuildConfig.ON_DEMAND_JAVA.split(",").mapNotNull { it.trim().toIntOrNull() }
+    /**
+     * The majors the build wired as feature modules. Empty is a valid answer.
+     *
+     * Says nothing about *when* each arrives — an install-time module is in
+     * here too, and simply has its assets present already.
+     */
+    private fun modules(): List<Int> =
+        BuildConfig.MODULE_JAVA.split(",").mapNotNull { it.trim().toIntOrNull() }
 
     private fun isModuleInstalled(context: Context, major: Int): Boolean = runCatching {
         SplitInstallManagerFactory.create(context).installedModules.contains(module(major))
@@ -207,18 +219,19 @@ object JavaRuntime {
         // module. Blocking is correct here: the caller is already on an IO
         // thread inside a launch that deliberately has no call timeout.
         var floor = 0f
-        if (major in onDemand() && majorOf(context, assetDir) == null) {
+        if (major in modules() && majorOf(context, assetDir) == null) {
             fetchModule(context, major) { onProgress(it * DOWNLOAD_SHARE) }
             floor = DOWNLOAD_SHARE
         }
 
         if (majorOf(context, assetDir) == null) {
             throw IllegalStateException(
-                if (major in onDemand()) {
+                if (major in modules()) {
                     // The module is installed and carries nothing, which Play
                     // cannot fix by sending it again: a debug build staged a
                     // subset. [available] filters this case out, so reaching
-                    // here means something asked for a major it was not offered.
+                    // here means something asked for a major it was not
+                    // offered. `npm run jre:android` stages all three.
                     "The Java $major module carries no runtime. Stage it with " +
                         "`npm run jre:android` and rebuild."
                 } else {

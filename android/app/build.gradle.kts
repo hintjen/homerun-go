@@ -72,29 +72,31 @@ val jreForAbi = mapOf(
  *
  * Kept in step with `DEFAULT_JAVA` in `scripts/stage-jre.py`.
  */
-val releaseJavaRuntimes = listOf(21, 25)
+val releaseJavaRuntimes = listOf(17, 21, 25)
 
 /**
- * Of those, the ones Play delivers on demand instead of packaging in the base
- * APK — one feature module per major, `:jre<major>`.
+ * The majors that live in a feature module rather than in the base APK's own
+ * assets — one module per major, `:jre<major>`.
  *
- * Both of them. Two runtimes at ~54 and ~59 MB compressed put the install at
- * ~167 MB of Play's 200 MB ceiling; deferring both drops it to ~54 MB. Neither
- * is wanted at all by a device that only hosts Pumpkin, which needs no JVM, and
- * a device that does host Java pays for the runtime its servers actually
- * select rather than for both.
+ * All of them, and that is not the same as all of them being *downloaded*.
+ * **Delivery is declared per module, in its own manifest**, because the three
+ * differ: 25 is packaged with the app and stays that way (it runs the current
+ * Minecraft line, so the common case must not wait on a download), 17 is never
+ * packaged (only Forge 1.20.1 selects it), and 21 sits between the two —
+ * install-time until the Play listing clears review, on-demand after.
  *
- * The cost is that no Java server can start until Play has delivered one, so a
- * delivery that fails is a launch that fails. [JavaRuntime.fetchModule] is
- * where that surfaces, in a player's words rather than a log's.
+ * What this list controls is *where a runtime is staged and packaged*, not when
+ * it arrives. Everything downstream reads it: the modules Gradle attaches, the
+ * roots the build checks search, and [JavaRuntime]'s own idea of which majors
+ * it cannot discover by listing the APK's assets.
  *
- * This list is the *promise*, not the delivery. [JavaRuntime.available] reports
- * these majors as available before the module is on the device, because the
- * core chooses a runtime from that list and a jar needing 21 must still be able
- * to ask for it — the download happens inside `ensure`. Ship a build that
- * omits a major here and the core simply never picks it.
+ * It is also the *promise*, not the delivery. [JavaRuntime.available] reports
+ * these majors before their module is on the device, because the core chooses a
+ * runtime from that list and a jar needing 17 must be able to ask for it — the
+ * download happens inside `ensure`. Ship a build that omits a major here and
+ * the core simply never picks it.
  */
-val onDemandJavaRuntimes = listOf(21, 25)
+val moduleJavaRuntimes = listOf(17, 21, 25)
 
 /**
  * Every place a staged runtime can live, in the order they are searched.
@@ -105,7 +107,7 @@ val onDemandJavaRuntimes = listOf(21, 25)
  */
 val javaRuntimeAssetRoots: List<File> = listOf(
     layout.projectDirectory.dir("src/main/assets").asFile,
-) + onDemandJavaRuntimes.map { rootProject.file("jre$it/src/main/assets") }
+) + moduleJavaRuntimes.map { rootProject.file("jre$it/src/main/assets") }
 
 android {
     namespace = "app.gethomerun.mobile"
@@ -175,13 +177,13 @@ android {
         // the switch; the key stays a key.
         buildConfigField("boolean", "OTA_UPDATES", otaUpdates.toString())
 
-        // Which majors arrive as feature modules rather than in the APK.
-        // [JavaRuntime] cannot discover these by listing assets — that is the
-        // whole point of them — so the build states it.
+        // Which majors live in a feature module rather than the APK's own
+        // assets. [JavaRuntime] cannot discover an uninstalled one by listing
+        // assets — that is the whole point of them — so the build states it.
         buildConfigField(
             "String",
-            "ON_DEMAND_JAVA",
-            "\"${onDemandJavaRuntimes.joinToString(",")}\"",
+            "MODULE_JAVA",
+            "\"${moduleJavaRuntimes.joinToString(",")}\"",
         )
 
         // The staged Java runtime is architecture-specific and ~165 MB, so a
@@ -200,9 +202,10 @@ android {
         buildConfig = true
     }
 
-    // One module per on-demand runtime. Their assets are staged by
-    // `npm run jre:android` exactly as the base APK's are.
-    dynamicFeatures += onDemandJavaRuntimes.map { ":jre$it" }.toSet()
+    // One module per runtime. Their assets are staged by `npm run jre:android`
+    // exactly as the base APK's own would be; each module's manifest decides
+    // whether it arrives at install time or on demand.
+    dynamicFeatures += moduleJavaRuntimes.map { ":jre$it" }.toSet()
 
     // Release signing. The keystore and its passwords live in
     // `android/keystore.properties` — gitignored, supplied by CI from a secret,

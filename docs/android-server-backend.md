@@ -199,17 +199,24 @@ Three things follow from it that are easy to get wrong:
 
 #### Which runtimes this will carry, and which one is packaged
 
-**Java 25 is packaged with the app and stays that way.** It runs Minecraft 26.x,
-the current release line, so it is the runtime almost every launch selects — and
-a runtime the common case waits on is the wrong one to defer. It is `:jre25`
-either way; the difference is only that its delivery stays `install-time` when
-the others move to `on-demand`, so it costs its ~59 MB once at install and never
-blocks a start.
+Every runtime is a feature module. **Which of them is downloaded rather than
+packaged is decided per module, in its own manifest**, and the three differ:
 
-Every *other* runtime is an on-demand module: fetched the first time a server
-selects it, and never downloaded by a device whose servers never do. That is
-the shape the whole feature-module split exists for, and it scales — a fourth
-runtime is a new module and two constants, not a bigger APK.
+| Runtime | Delivery | Why |
+|---|---|---|
+| **25** | `install-time`, permanently | Runs the current 26.x line, so it is what almost every launch selects. A runtime the common case waits on is the wrong one to defer. |
+| **21** | `install-time` for now | Serves 1.21.x and most mod loaders. Goes `on-demand` once the listing clears review — see *Testing it against Play*. |
+| **17** | `on-demand`, always | Only Forge 1.20.1 selects it. Never packaged. |
+
+That asymmetry is the point of declaring delivery per module rather than once
+for all of them, and it is what makes this scale: a fourth runtime is a new
+module and two constants, not a bigger APK.
+
+`moduleJavaRuntimes` in `app/build.gradle.kts` and `MODULE_JAVA` in
+`stage-jre.py` name which majors live in modules — **not** which are downloaded.
+`JavaRuntime` does not need to know the difference: it fetches when a module's
+assets are not visible and does nothing when they are, so an install-time module
+takes the same path as one already downloaded.
 
 ##### What the desktop app supports, and why we cannot simply match it
 
@@ -245,10 +252,18 @@ majors we cannot get at all, so parity is a target and not a promise; where a
 version needs a runtime Android has no source for, `select_runtime` refuses in a
 sentence rather than failing inside a JVM.
 
-**17 is the next one to add**, and the only one currently possible: it unlocks
-Forge 1.20.1, which `Loader::java_policy` treats as `Exact` and therefore cannot
-run on 21 or 25. It costs nothing at install once on-demand is back on — the
-reason it is not here yet is `plans/android-mod-loaders.md`, not packaging.
+**17 is here now, and it is the only addition currently possible.** Termux
+publishes nothing else we do not already carry. It unlocks Forge 1.20.1, which
+`Loader::java_policy` treats as `Exact` and which therefore cannot run on 21 or
+25 — modlauncher reaches into `java.base` internals a newer JDK has moved.
+
+It costs nothing at install, because it is the one runtime that is never
+packaged. It does inherit the current Play blocker: until the listing clears
+review, `startInstall` is refused and a Forge 1.20.1 server fails at the
+download rather than being turned away at selection. Before 17 was staged the
+core refused it in a sentence; now it gets further and fails later. That is the
+right trade only because it becomes correct the moment on-demand works — but it
+is a real regression for that one server type in the meantime.
 
 #### Staging it
 
