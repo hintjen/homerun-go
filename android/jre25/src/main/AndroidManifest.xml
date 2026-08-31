@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  On-demand: nothing fetches this at install time. `JavaRuntime.ensure` asks
+  for it the first time a server actually selects Java 25 — which is most
+  Java servers, but never a device that only hosts Pumpkin.
+
+  `dist:title` is shown by Play in its own download confirmation, so it is
+  written for a player rather than a log — the same rule the bridge's error
+  messages follow.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:dist="http://schemas.android.com/apk/distribution">
+
+    <dist:module
+        dist:instant="false"
+        dist:title="@string/jre25_module_title">
+        <dist:delivery>
+            <dist:on-demand />
+        </dist:delivery>
+        <dist:fusing dist:include="true" />
+    </dist:module>
+
+    <!--
+      The module is a directory of assets and nothing else. Without this,
+      `packageReleaseBundle` fails: "Module 'jre25' has no dex files but the
+      attribute 'hasCode' is not set to false".
+    -->
+    <application android:hasCode="false" />
+</manifest>

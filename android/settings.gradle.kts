@@ -22,5 +22,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Homerun"
 include(":app")
-// Java 21, delivered on demand by Play. See jre21/build.gradle.kts.
+// Both Java runtimes are delivered on demand by Play, one module each.
+// See jre21/build.gradle.kts and docs/android-server-backend.md.
 include(":jre21")
+include(":jre25")

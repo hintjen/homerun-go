@@ -23,10 +23,10 @@ it was built against. One runtime cannot serve both, so this stages a directory
 per major and `homerun-core` picks which one a given server launches on. See
 `plans/android-mod-loaders.md`.
 
-They do not all stage to the same place. Java 25 goes in the base APK; Java 21
-is delivered on demand by Play and stages into its feature module instead
-(`android/jre21/`), because carrying both put the install within ~33 MB of
-Play's 200 MB ceiling. See [ON_DEMAND_JAVA] and `docs/android-server-backend.md`.
+They do not stage into the app. Both runtimes are delivered on demand by Play
+and stage into a feature module each (`android/jre21/`, `android/jre25/`),
+because carrying both in the APK put the install within ~33 MB of Play's 200 MB
+ceiling. See [ON_DEMAND_JAVA] and `docs/android-server-backend.md`.
 
 Each directory is **self-contained**: its own `termux-lib/`, its own
 `java-major`, its own `release`. The duplicated dependency libraries cost about
@@ -72,7 +72,7 @@ DEFAULT_JAVA = [21, 25]
 # disagreeing stages a runtime where the build does not look for it, which
 # `verifyReleaseRuntimes` turns into a failed release build rather than a
 # release that silently refuses every modded server.
-ON_DEMAND_JAVA = [21]
+ON_DEMAND_JAVA = [21, 25]
 
 # One staged runtime lives in `assets/jre-<major>/`. The host lists the asset
 # root to discover them, so the prefix is load-bearing on both sides.

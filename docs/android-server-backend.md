@@ -130,18 +130,31 @@ downloaded. [Anvil-MC](https://anvil-mc.com/), which hosts Java servers on Play
 today with 100k+ downloads, draws the same line — a 154 MB arm64-only download
 with the runtime inside it, fetching server software at runtime.
 
-#### Java 21 comes from Play, on demand
+#### Both runtimes come from Play, on demand
 
 "Inside the app" stopped meaning "inside the APK" once there were two runtimes.
 Both in the base APK put the install at **~167 MB** against Play's **200 MB**
 compressed-download ceiling, with `libpumpkin.so` and restic still growing
 underneath it.
 
-So Java 21 is a **Play Feature Delivery** module — `android/jre21/`, delivery
-`on-demand`. An on-demand module is not counted against the 200 MB ceiling, and
-the base install drops to ~113 MB. Java 25 stays in the APK: it runs the current
-Minecraft release, so it is what almost every launch needs, and a runtime the
-common case waits on is the wrong one to defer.
+So each is a **Play Feature Delivery** module — `android/jre21/` and
+`android/jre25/`, delivery `on-demand`. An on-demand module is not counted
+against that ceiling, and the base install drops to **~54 MB**.
+
+Deferring *both* rather than one is what the selection rule below makes
+sensible. A device that only ever hosts Pumpkin needs no JVM and now carries
+none. A device that hosts Java fetches the runtime its servers actually select
+and usually not the other. 25 is the more commonly fetched of the two — it runs
+the current 26.x line, where 21 serves 1.21.x and the mod loaders — but "more
+common" is not "always", and it was still 59 MB that every Pumpkin-only install
+paid for.
+
+The cost is real and belongs here rather than in a commit message: **no Java
+server can start until Play has delivered a runtime.** Where the JVM used to be
+simply present, a delivery that fails is now a launch that fails, and a
+confirmation Play raises on a metered connection is one this host cannot show —
+`fetchModule` runs on an IO thread with no Activity, so it refuses with a
+sentence naming Wi-Fi. Pumpkin hosting is unaffected either way.
 
 The policy above is untouched by this. The rule is about downloading executable
 code *from a source other than Google Play*, and a feature module is Google Play
@@ -197,15 +210,16 @@ input), `demo/`, `man/`, `include/`, `lib/ct.sym`. `legal/` stays: these are
 GPLv2+CE builds and the notices ship with them.
 
 Result: **162 MB staged for Java 21 and 167 MB for 25** — 54 MB and 59 MB
-compressed. Only 25 is in the base install; 21 costs its 54 MB the first time a
-server selects it, and nothing before that.
+compressed. Neither is in the base install: each costs its download the first
+time a server selects it, and nothing before that.
 
-Java 21 stages into `android/jre21/src/main/assets/` rather than the app's, which
-`asset_root()` decides from `ON_DEMAND_JAVA`. That list is kept in step with
+Both stage into their own feature module — `android/jre21/src/main/assets/`,
+`android/jre25/src/main/assets/` — rather than the app's, which `asset_root()`
+decides from `ON_DEMAND_JAVA`. That list is kept in step with
 `onDemandJavaRuntimes` in `app/build.gradle.kts`; the two disagreeing stages a
 runtime where the build does not look for it, which `verifyReleaseRuntimes`
 turns into a failed release build rather than a release that silently refuses
-every modded server.
+every server needing it.
 
 #### Why there are two, and which one runs
 
@@ -240,6 +254,13 @@ internals.
 Fabric server on Minecraft 26.2 selected Java 25 and a Quilt server on 1.21.11
 selected Java 21 — and only the runtime each needed was unpacked, which is the
 lazy-unpack claim below holding in practice rather than in principle.
+
+Delivery as a feature module is confirmed on the same device: a vanilla 1.21.1
+server selected Java 21, unpacked it out of `split_jre21.apk` in 772 ms, and
+reached `RUNNING`, with `runtime-25` never appearing in `filesDir`. What that
+run did *not* exercise is Play itself — a sideloaded split short-circuits at
+`installedModules`, so `SplitInstallManager` and every failure branch in
+`fetchModule` need **internal app sharing** to reach.
 
 Three things follow from staging more than one:
 

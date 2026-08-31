@@ -37,4 +37,5 @@
       the module.
     -->
     <string name="jre21_module_title">Java 21 runtime</string>
+    <string name="jre25_module_title">Java 25 runtime</string>
 </resources>

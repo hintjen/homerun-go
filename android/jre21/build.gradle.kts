@@ -1,24 +1,16 @@
 /*
  * Java 21, delivered on demand by Google Play.
  *
- * The runtime is ~54 MB compressed and most players never need it: 21 exists
- * for the mod loaders, which break on a JDK newer than they were built
- * against, while everything else runs on the 25 that ships in the base APK.
- * Carrying both put the install at ~167 MB of Play's 200 MB ceiling, and an
- * on-demand feature module is not counted against it at all.
+ * The runtime is ~54 MB compressed and serves Minecraft 1.21.x and the mod
+ * loaders, which break on a JDK newer than they were built against. Minecraft
+ * 26.x needs 25 instead, so a device downloads whichever its servers select
+ * and usually only one of the two.
  *
- * It is a *feature* module and not an asset pack, which is the whole reason
- * this module has a build script rather than an `assetPack {}` block: asset
- * packs are "composed of assets ... but no executable code", and a JRE is
- * `libjvm.so` and friends. Play Feature Delivery is the sanctioned way to
- * deliver code, and it still comes from Play — so the Device and Network
- * Abuse rule that keeps the runtime out of a plain download is satisfied too.
- * See `docs/android-server-backend.md` § *Getting a JVM onto the device*.
- *
- * The module carries no code of its own. Its whole payload is
- * `src/main/assets/jre-21/`, staged by `npm run jre:android` exactly as the
- * base APK's runtime is, so `JavaRuntime` reads it through the same
- * `AssetManager` once SplitCompat has merged the split in.
+ * How this is wired, and why it is a feature module rather than an asset pack,
+ * is in `docs/android-server-backend.md` § *Getting a JVM onto the device* —
+ * along with what "promised but not present" costs the host. This module
+ * carries no code of its own; its whole payload is
+ * `src/main/assets/jre-21/`, staged by `npm run jre:android`.
  */
 plugins {
     alias(libs.plugins.android.dynamic.feature)

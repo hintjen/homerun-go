@@ -78,10 +78,15 @@ val releaseJavaRuntimes = listOf(21, 25)
  * Of those, the ones Play delivers on demand instead of packaging in the base
  * APK — one feature module per major, `:jre<major>`.
  *
- * Two runtimes at ~54 and ~58 MB compressed put the install at ~167 MB of
- * Play's 200 MB ceiling. An on-demand module is not counted against it, and 21
- * is the one to move: it exists for the mod loaders, so most players never
- * select it and never pay for it.
+ * Both of them. Two runtimes at ~54 and ~59 MB compressed put the install at
+ * ~167 MB of Play's 200 MB ceiling; deferring both drops it to ~54 MB. Neither
+ * is wanted at all by a device that only hosts Pumpkin, which needs no JVM, and
+ * a device that does host Java pays for the runtime its servers actually
+ * select rather than for both.
+ *
+ * The cost is that no Java server can start until Play has delivered one, so a
+ * delivery that fails is a launch that fails. [JavaRuntime.fetchModule] is
+ * where that surfaces, in a player's words rather than a log's.
  *
  * This list is the *promise*, not the delivery. [JavaRuntime.available] reports
  * these majors as available before the module is on the device, because the
@@ -89,7 +94,7 @@ val releaseJavaRuntimes = listOf(21, 25)
  * to ask for it — the download happens inside `ensure`. Ship a build that
  * omits a major here and the core simply never picks it.
  */
-val onDemandJavaRuntimes = listOf(21)
+val onDemandJavaRuntimes = listOf(21, 25)
 
 /**
  * Every place a staged runtime can live, in the order they are searched.
