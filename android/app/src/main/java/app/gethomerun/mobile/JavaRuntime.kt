@@ -2,7 +2,14 @@ package app.gethomerun.mobile
 
 import android.content.Context
 import android.util.Log
+import com.google.android.play.core.splitcompat.SplitCompat
+import com.google.android.play.core.splitinstall.SplitInstallManagerFactory
+import com.google.android.play.core.splitinstall.SplitInstallRequest
+import com.google.android.play.core.splitinstall.SplitInstallStateUpdatedListener
+import com.google.android.play.core.splitinstall.model.SplitInstallSessionStatus
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * The bundled Java runtimes.
@@ -20,6 +27,26 @@ import java.io.File
  *
  * Server *jars* are a different matter: they are data the JVM reads, and they
  * are still downloaded.
+ *
+ * # Why one of them arrives later anyway
+ *
+ * Both runtimes in the APK put the install at ~167 MB of Play's 200 MB
+ * ceiling. Java 21 is therefore delivered by **Play Feature Delivery** — an
+ * on-demand feature module, `:jre21` — which is not counted against that
+ * ceiling and is still Play doing the delivering, so the policy above is
+ * satisfied exactly as it is for the runtime in the APK.
+ *
+ * It is a feature module and not an *asset pack* for the same policy reason
+ * read the other way: asset packs are documented as carrying "no executable
+ * code", and a JRE is `libjvm.so`. Feature Delivery is the sanctioned route
+ * for code.
+ *
+ * What that costs this file is one thing: a runtime can be *promised* and not
+ * yet *present*. [available] reports what the build can provide, because the
+ * core chooses from that list and a jar needing 21 has to be able to ask for
+ * it; [ensure] is where the module is actually fetched. Everything after the
+ * fetch is unchanged — SplitCompat merges the split into the same
+ * `AssetManager`, so the unpack below cannot tell the two apart.
  *
  * # Why there is more than one
  *
@@ -71,6 +98,19 @@ object JavaRuntime {
     /** Written after a successful unpack, so it happens once and not per launch. */
     private const val STAMP = ".complete"
 
+    /** A feature module is named for the major it carries: `jre21`. */
+    private const val MODULE_PREFIX = "jre"
+
+    /**
+     * How much of [ensure]'s progress the module download is worth.
+     *
+     * A first run that has to fetch does two slow things in a row, and a bar
+     * that reached the end and restarted would read as a stall. The download
+     * gets the larger share because it usually is: ~54 MB over a phone's
+     * network against an unpack from local storage.
+     */
+    private const val DOWNLOAD_SHARE = 0.6f
+
     /** Where the staged dependency libraries land, apart from the JRE's own. */
     const val DEPS_DIR = "termux-lib"
 
@@ -85,13 +125,42 @@ object JavaRuntime {
      * only one runtime — which `npm run jre:android --java 25` will do, and
      * which every debug build is free to do — describes itself honestly
      * instead of promising a runtime it does not carry.
+     *
+     * A runtime delivered on demand counts as available before it is on the
+     * device: [Core.selectRuntime] picks from this list, so omitting 21 until
+     * it downloads would mean nothing ever selects it and it never downloads.
+     * [ensure] fetches it at the point of use.
      */
     fun available(context: Context): List<Int> = runCatching {
-        (context.assets.list("") ?: emptyArray())
+        val staged = (context.assets.list("") ?: emptyArray())
             .filter { it.startsWith(ASSET_PREFIX) }
             .mapNotNull { dir -> majorOf(context, dir) }
-            .sorted()
+        (staged + deliverable(context)).distinct().sorted()
     }.getOrDefault(emptyList())
+
+    /**
+     * The on-demand majors this build can still honestly promise.
+     *
+     * Present in the split already, or not installed at all — in which case
+     * Play can deliver it on request. The case this excludes is the debug
+     * build that installed an empty module because `npm run jre:android-25`
+     * staged only 25: the module is there, carries no runtime, and Play has
+     * nothing further to send. Claiming 21 there would promise a runtime that
+     * can never arrive, which is exactly what this function exists to avoid.
+     */
+    private fun deliverable(context: Context): List<Int> = onDemand().filter { major ->
+        majorOf(context, "$ASSET_PREFIX$major") != null || !isModuleInstalled(context, major)
+    }
+
+    /** The majors the build wired as feature modules. Empty is a valid answer. */
+    private fun onDemand(): List<Int> =
+        BuildConfig.ON_DEMAND_JAVA.split(",").mapNotNull { it.trim().toIntOrNull() }
+
+    private fun isModuleInstalled(context: Context, major: Int): Boolean = runCatching {
+        SplitInstallManagerFactory.create(context).installedModules.contains(module(major))
+    }.getOrDefault(false)
+
+    private fun module(major: Int) = "$MODULE_PREFIX$major"
 
     /** True when this build has a launcher and at least one staged runtime. */
     fun isAvailable(context: Context): Boolean =
@@ -121,10 +190,29 @@ object JavaRuntime {
         if (isInstalled(context, major)) return target
 
         val assetDir = "$ASSET_PREFIX$major"
+
+        // A delivered runtime is not in the APK until Play has sent the
+        // module. Blocking is correct here: the caller is already on an IO
+        // thread inside a launch that deliberately has no call timeout.
+        var floor = 0f
+        if (major in onDemand() && majorOf(context, assetDir) == null) {
+            fetchModule(context, major) { onProgress(it * DOWNLOAD_SHARE) }
+            floor = DOWNLOAD_SHARE
+        }
+
         if (majorOf(context, assetDir) == null) {
             throw IllegalStateException(
-                "This build ships no Java $major runtime. Stage one with " +
-                    "`npm run jre:android` and rebuild."
+                if (major in onDemand()) {
+                    // The module is installed and carries nothing, which Play
+                    // cannot fix by sending it again: a debug build staged a
+                    // subset. [available] filters this case out, so reaching
+                    // here means something asked for a major it was not offered.
+                    "The Java $major module carries no runtime. Stage it with " +
+                        "`npm run jre:android` and rebuild."
+                } else {
+                    "This build ships no Java $major runtime. Stage one with " +
+                        "`npm run jre:android` and rebuild."
+                }
             )
         }
 
@@ -137,7 +225,7 @@ object JavaRuntime {
             val files = list(context, assetDir)
             files.forEachIndexed { index, path ->
                 copy(context, path, File(target, path.removePrefix("$assetDir/")))
-                onProgress((index + 1).toFloat() / files.size)
+                onProgress(floor + (1f - floor) * (index + 1).toFloat() / files.size)
             }
         } catch (err: Exception) {
             target.deleteRecursively()
@@ -172,6 +260,97 @@ object JavaRuntime {
             Log.i(TAG, "dropping unpacked ${dir.name}; this build no longer ships it")
             dir.deleteRecursively()
         }
+    }
+
+    /**
+     * Ask Play for one on-demand runtime, and block until it is here.
+     *
+     * Returns immediately for a sideloaded debug build: Gradle installs
+     * feature modules as splits beside the app, so `installedModules` already
+     * names it and no Play Store is involved. That is what keeps
+     * `npm run android:run` working on a device that has never seen this
+     * build on Play.
+     *
+     * States are matched on the module name rather than the session id. The id
+     * is only known once `startInstall` succeeds, and an install served from
+     * cache can reach INSTALLED before that — filtering on the id would drop
+     * the event that ends the wait and hang the launch for good.
+     */
+    private fun fetchModule(context: Context, major: Int, onProgress: (Float) -> Unit) {
+        val name = module(major)
+        val manager = SplitInstallManagerFactory.create(context)
+
+        if (name in manager.installedModules) {
+            // Installed, but this process may not have been told. SplitCompat
+            // is what makes the split's assets visible to the AssetManager.
+            SplitCompat.install(context)
+            return
+        }
+
+        Log.i(TAG, "asking Play for the Java $major runtime module")
+        val done = CountDownLatch(1)
+        val failure = AtomicReference<String?>(null)
+
+        val listener = SplitInstallStateUpdatedListener { state ->
+            if (!state.moduleNames().contains(name)) return@SplitInstallStateUpdatedListener
+            when (state.status()) {
+                SplitInstallSessionStatus.DOWNLOADING -> {
+                    val total = state.totalBytesToDownload()
+                    if (total > 0) onProgress(state.bytesDownloaded().toFloat() / total)
+                }
+                SplitInstallSessionStatus.INSTALLED -> done.countDown()
+                SplitInstallSessionStatus.FAILED -> {
+                    failure.set(
+                        "Your phone could not download the Java $major runtime " +
+                            "(error ${state.errorCode()}). Check your connection and " +
+                            "start the server again."
+                    )
+                    done.countDown()
+                }
+                SplitInstallSessionStatus.CANCELED -> {
+                    failure.set(
+                        "The Java $major runtime download was cancelled. Start the " +
+                            "server again to retry."
+                    )
+                    done.countDown()
+                }
+                // Play asks before a large download on mobile data, and only an
+                // Activity can raise that prompt. This runs on an IO thread
+                // during a launch and has none, so it says what to do instead
+                // of waiting for a confirmation that can never arrive.
+                SplitInstallSessionStatus.REQUIRES_USER_CONFIRMATION -> {
+                    failure.set(
+                        "Downloading the Java $major runtime needs your confirmation. " +
+                            "Connect to Wi-Fi and start the server again."
+                    )
+                    done.countDown()
+                }
+                else -> Unit
+            }
+        }
+
+        manager.registerListener(listener)
+        try {
+            val request = SplitInstallRequest.newBuilder().addModule(name).build()
+            manager.startInstall(request).addOnFailureListener { err ->
+                // No Play Store, no network, or a build Play has never seen.
+                failure.set(
+                    "This phone cannot fetch the Java $major runtime right now " +
+                        "(${err.message}). Check your connection and start the " +
+                        "server again."
+                )
+                done.countDown()
+            }
+            done.await()
+        } finally {
+            manager.unregisterListener(listener)
+        }
+
+        failure.get()?.let { throw IllegalStateException(it) }
+
+        // Only now are the split's assets readable in this process.
+        SplitCompat.install(context)
+        Log.i(TAG, "Play delivered the Java $major runtime module")
     }
 
     /** The major a staged asset directory declares, or null if it is not one. */

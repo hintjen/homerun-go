@@ -130,6 +130,52 @@ downloaded. [Anvil-MC](https://anvil-mc.com/), which hosts Java servers on Play
 today with 100k+ downloads, draws the same line — a 154 MB arm64-only download
 with the runtime inside it, fetching server software at runtime.
 
+#### Java 21 comes from Play, on demand
+
+"Inside the app" stopped meaning "inside the APK" once there were two runtimes.
+Both in the base APK put the install at **~167 MB** against Play's **200 MB**
+compressed-download ceiling, with `libpumpkin.so` and restic still growing
+underneath it.
+
+So Java 21 is a **Play Feature Delivery** module — `android/jre21/`, delivery
+`on-demand`. An on-demand module is not counted against the 200 MB ceiling, and
+the base install drops to ~113 MB. Java 25 stays in the APK: it runs the current
+Minecraft release, so it is what almost every launch needs, and a runtime the
+common case waits on is the wrong one to defer.
+
+The policy above is untouched by this. The rule is about downloading executable
+code *from a source other than Google Play*, and a feature module is Google Play
+delivering it — the same channel as the APK, with the same review.
+
+**It is a feature module and not an asset pack**, and that distinction is the
+whole reason `jre21/` has a `build.gradle.kts` rather than an `assetPack {}`
+block. Asset packs are documented as carrying assets "but no executable code",
+and a JRE is `libjvm.so` and about a dozen more `.so` files. Play Feature
+Delivery is the sanctioned route for code. An asset pack would have been simpler
+and is the wrong tool.
+
+What it costs the host is one new state: a runtime can be **promised but not
+present**. `JavaRuntime.available` reports 21 as available before the module is
+on the device, because `jar::select_runtime` chooses from that list and a jar
+needing 21 must be able to ask for it — omitting it until it downloads would
+mean nothing ever selects it and it never downloads. `JavaRuntime.ensure` is
+where the module is actually fetched, blocking, on the launch path that already
+has no call timeout. After that, SplitCompat merges the split into the same
+`AssetManager` and the unpack cannot tell the two runtimes apart.
+
+Three things follow from it that are easy to get wrong:
+
+- **`SplitCompat.install` runs in `HomerunApplication.attachBaseContext`.**
+  A module delivered last week is on disk and invisible to this process without
+  it, so the app would decide it never had Java 21 and re-ask Play every launch.
+- **A sideloaded debug build needs no Play Store.** Gradle installs feature
+  modules as splits beside the app, so `installedModules` already names it and
+  `fetchModule` returns immediately. `npm run android:run` is unaffected.
+- **Install states are matched on module name, not session id.** The id is only
+  known once `startInstall` succeeds, and an install served from cache can reach
+  `INSTALLED` before that. Filtering on the id drops the event that ends the
+  wait, and the launch hangs for good.
+
 #### Staging it
 
 ```bash
@@ -150,8 +196,16 @@ It prunes ~85 MB per runtime that is never used on a phone — `jmods/` (jlink
 input), `demo/`, `man/`, `include/`, `lib/ct.sym`. `legal/` stays: these are
 GPLv2+CE builds and the notices ship with them.
 
-Result: **162 MB staged for Java 21 and 167 MB for 25** — 53 MB and 58 MB
-compressed, which is what they cost in the download.
+Result: **162 MB staged for Java 21 and 167 MB for 25** — 54 MB and 59 MB
+compressed. Only 25 is in the base install; 21 costs its 54 MB the first time a
+server selects it, and nothing before that.
+
+Java 21 stages into `android/jre21/src/main/assets/` rather than the app's, which
+`asset_root()` decides from `ON_DEMAND_JAVA`. That list is kept in step with
+`onDemandJavaRuntimes` in `app/build.gradle.kts`; the two disagreeing stages a
+runtime where the build does not look for it, which `verifyReleaseRuntimes`
+turns into a failed release build rather than a release that silently refuses
+every modded server.
 
 #### Why there are two, and which one runs
 
@@ -237,6 +291,12 @@ Two packaging traps, both of which fail silently:
 
 Ship one ABI per build (`-Pabi=arm64-v8a`); the runtime is architecture-
 specific and packaging both doubles the download for no one's benefit.
+
+3. **Both build checks search every staging root.** `verifyJavaRuntime` and
+   `verifyReleaseRuntimes` looked only in `app/src/main/assets` before Java 21
+   moved; left that way they call a correctly staged 21 missing on every
+   release, and — worse — stop checking its architecture, which is the one
+   failure that reaches a device silently.
 
 #### Termux's prefix, and the dependency closure
 

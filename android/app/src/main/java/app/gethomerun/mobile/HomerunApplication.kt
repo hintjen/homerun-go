@@ -8,8 +8,23 @@ import android.content.IntentFilter
 import android.os.Build
 import android.util.Log
 import android.webkit.WebView
+import com.google.android.play.core.splitcompat.SplitCompat
 
 class HomerunApplication : Application() {
+    /**
+     * SplitCompat, before anything in this process can read an asset.
+     *
+     * A feature module Play delivered in an earlier session is on disk but
+     * invisible to this process until SplitCompat merges it into the
+     * AssetManager, and [JavaRuntime] discovers runtimes by listing assets.
+     * Without this, a phone that downloaded Java 21 last week would decide
+     * it never had it and ask Play for it again on every launch.
+     */
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        SplitCompat.install(this)
+    }
+
     override fun onCreate() {
         super.onCreate()
 

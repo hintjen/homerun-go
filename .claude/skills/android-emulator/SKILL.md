@@ -82,9 +82,12 @@ checkout before the first build:
 - `*-google-services.json` — **configuration** fails, not the build:
   "Property '$1' specifies file … which doesn't exist".
 - `android/app/src/main/assets/web` — the UI bundle.
-- `android/app/src/main/assets/jre-*` — without it `JavaRuntime.isAvailable`
-  is false and the host reports one fewer engine than the build actually has,
-  which reads as a routing bug rather than a missing file.
+- `android/app/src/main/assets/jre-25` **and**
+  `android/jre21/src/main/assets/jre-21` — Java 21 is an on-demand feature
+  module, so it stages outside the app. `npm run jre:android` writes both;
+  without either, `JavaRuntime.isAvailable` is false and the host reports one
+  fewer engine than the build actually has, which reads as a routing bug rather
+  than a missing file.
 - `android/app/src/main/jniLibs/<abi>/*.so` — for anything you are not
   rebuilding yourself.
 

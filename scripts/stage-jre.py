@@ -20,8 +20,13 @@ in jniLibs, because it is the one thing that gets `exec`'d.
 Minecraft needs a Java at least as new as the version it names; mod loaders
 need one that is *exactly* right, because modlauncher breaks on JDKs newer than
 it was built against. One runtime cannot serve both, so this stages a directory
-per major — `assets/jre-21/`, `assets/jre-25/` — and `homerun-core` picks which
-one a given server launches on. See `plans/android-mod-loaders.md`.
+per major and `homerun-core` picks which one a given server launches on. See
+`plans/android-mod-loaders.md`.
+
+They do not all stage to the same place. Java 25 goes in the base APK; Java 21
+is delivered on demand by Play and stages into its feature module instead
+(`android/jre21/`), because carrying both put the install within ~33 MB of
+Play's 200 MB ceiling. See [ON_DEMAND_JAVA] and `docs/android-server-backend.md`.
 
 Each directory is **self-contained**: its own `termux-lib/`, its own
 `java-major`, its own `release`. The duplicated dependency libraries cost about
@@ -58,6 +63,16 @@ JDK_VERSIONS = {17: "17.0.20", 21: "21.0.12", 25: "25.0.4"}
 # Forge 1.20.1 and is deliberately not here — see `plans/android-mod-loaders.md`
 # for what that costs and why the answer is still two.
 DEFAULT_JAVA = [21, 25]
+
+# Of those, the majors Play delivers on demand. They stage into
+# `android/jre<major>/src/main/assets/` rather than the base APK's assets, and
+# the app asks Play for the module the first time a server selects one.
+#
+# Kept in step with `onDemandJavaRuntimes` in app/build.gradle.kts. The two
+# disagreeing stages a runtime where the build does not look for it, which
+# `verifyReleaseRuntimes` turns into a failed release build rather than a
+# release that silently refuses every modded server.
+ON_DEMAND_JAVA = [21]
 
 # One staged runtime lives in `assets/jre-<major>/`. The host lists the asset
 # root to discover them, so the prefix is load-bearing on both sides.
@@ -307,13 +322,27 @@ def build_android_spawn(abi: str, dest: str) -> None:
     print(f"  build   libandroid-spawn.so ({os.path.getsize(out) / 1024:.0f} KB, 16 KB aligned)")
 
 
+def asset_root(java: int) -> str:
+    """The assets directory this major stages into.
+
+    An on-demand major belongs to its own feature module; everything else goes
+    in the base APK. Both are read through the same `AssetManager` at runtime,
+    once SplitCompat has merged an installed split in, so only the staging path
+    differs.
+    """
+    if java in ON_DEMAND_JAVA:
+        return os.path.join(ROOT, "android", f"jre{java}", "src", "main", "assets")
+    return ASSET_ROOT
+
+
 def stage_one(abi: str, java: int) -> tuple[int, int]:
     """Stage one runtime into its own asset directory. Returns (files, bytes)."""
     termux_abi = {"arm64-v8a": "aarch64", "x86_64": "x86_64"}[abi]
     version = JDK_VERSIONS[java]
-    assets = os.path.join(ASSET_ROOT, f"{ASSET_PREFIX}{java}")
+    assets = os.path.join(asset_root(java), f"{ASSET_PREFIX}{java}")
+    where = os.path.relpath(assets, ROOT).replace(os.sep, "/")
 
-    print(f"\nStaging OpenJDK {version} ({abi}) into assets/{ASSET_PREFIX}{java}\n")
+    print(f"\nStaging OpenJDK {version} ({abi}) into {where}\n")
 
     if os.path.isdir(assets):
         shutil.rmtree(assets)
