@@ -277,17 +277,46 @@ splits=[base, config.arm64_v8a, config.en, config.xxhdpi]
 No `jre21`, no `jre25` — which is the whole claim, that the runtimes are not
 delivered at install time and so are not counted against the 200 MB ceiling.
 
-**Internal *app sharing* is not good enough for this test.** Its installs are
-not *owned* in the sense Play means, so `startInstall` fails immediately with
-`APP_NOT_OWNED` (-15) and no Java server can start. Nothing on the device
-distinguishes it either — `installerPackageName` reads `com.android.vending`
-for both, and the only tell is the listing itself, which titles the page with
-the package name and "(unreviewed)". Use the internal **testing track** and its
-opt-in link from the Testers tab; that produces an owned install.
+**Play refuses the modules until the app has been reviewed.** On an internal
+testing track install of 0.1.0-1011 — tester opted in, installed from the phone
+under the tester account — `startInstall` failed immediately with
+`APP_NOT_OWNED` (-15), and with no JVM in the base APK that means no Java server
+can start at all.
 
-`refusal()` maps that code and the others to something a player can act on,
-because the failure is otherwise indistinguishable from a bad connection and
-the advice for the two is opposite.
+Ruled out by testing, in order: **ownership propagation** (retried ten minutes
+later, same code), **internal app sharing** (this was the track — "(unreviewed)"
+is the temporary app name Play shows for an app whose setup is not finished, not
+an app-sharing tell), and **the wrong Google account** (three accounts on the
+device; reinstalled from the phone under the tester account, same code). What
+remains is the state the Console names on the Internal testing page: app setup
+incomplete and not yet reviewed, so Play has no acquisition record to check
+ownership against. That is inference from elimination rather than a documented
+rule — treat it as the leading explanation, not a certainty.
+
+Nothing about the bundle is at fault, and the Console says so: *App bundle
+explorer → Delivery* lists `jre21` and `jre25` as **On demand**, deliverable to
+all supported devices, with **size for new installs 57.8 MB**. That is Play's own
+figure against its 200 MB ceiling.
+
+**The client code is proven; only Play's front door is not.** `bundletool
+--local-testing` runs the real `SplitInstallManager` against module APKs staged
+on the device, which bypasses the ownership check and exercises everything else:
+
+```bash
+bundletool build-apks --bundle=app-release.aab --output=out.apks --local-testing
+bundletool install-apks --apks=out.apks
+```
+
+A 26.2 server on that install logged `asking Play` → `Play delivered` in 3.2 s,
+unpacked in 581 ms and reached `RUNNING`, with SplitCompat reporting
+`addAssetPath completed with 22` (from 13) — the merge the unpack depends on.
+Two caveats: it resolves from local storage, so download progress jumps rather
+than streams, and no network failure branch is reached.
+
+`refusal()` maps `APP_NOT_OWNED` and the rest to something a player can act on.
+This matters more than it looks: the failure is indistinguishable from a bad
+connection at the call site, and the advice for the two is opposite — telling
+someone to retry on Wi-Fi when Play will never serve them is a loop with no exit.
 
 Three things follow from staging more than one:
 

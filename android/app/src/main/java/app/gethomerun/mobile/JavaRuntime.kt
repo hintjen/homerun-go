@@ -399,11 +399,13 @@ object JavaRuntime {
      * round a loop that cannot terminate.
      *
      * [SplitInstallErrorCode.APP_NOT_OWNED] is the one to recognise while
-     * testing. It means the install did not come from Play in a way Play
-     * records — an internal *app sharing* build is the usual cause, and it is
-     * indistinguishable from a Play install by `installerPackageName`, which
-     * says `com.android.vending` either way. The internal *testing track* is
-     * what produces an owned install. See `docs/android-server-backend.md`.
+     * testing, and it is not what it sounds like. A legitimate internal
+     * testing track install returns it too, while the app's Play listing is
+     * unreviewed and its setup unfinished — Play has no acquisition record to
+     * check against, so it refuses every module and no Java server can start.
+     * Nothing on the device distinguishes that from a sideload either;
+     * `installerPackageName` says `com.android.vending` regardless. See
+     * `docs/android-server-backend.md` for what was ruled out getting there.
      */
     private fun refusal(major: Int, code: Int): String = when (code) {
         SplitInstallErrorCode.APP_NOT_OWNED ->
