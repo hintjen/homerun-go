@@ -257,10 +257,37 @@ lazy-unpack claim below holding in practice rather than in principle.
 
 Delivery as a feature module is confirmed on the same device: a vanilla 1.21.1
 server selected Java 21, unpacked it out of `split_jre21.apk` in 772 ms, and
-reached `RUNNING`, with `runtime-25` never appearing in `filesDir`. What that
-run did *not* exercise is Play itself — a sideloaded split short-circuits at
-`installedModules`, so `SplitInstallManager` and every failure branch in
-`fetchModule` need **internal app sharing** to reach.
+reached `RUNNING`, with `runtime-25` never appearing in `filesDir`.
+
+##### Testing it against Play, and the trap in doing so
+
+A sideloaded build never reaches Play at all: Gradle installs feature modules as
+splits beside the app, so `installedModules` already names them and
+`fetchModule` returns before it asks. That is deliberate — it is what keeps
+`npm run android:run` working — but it means **no local build exercises
+`SplitInstallManager`, the progress callback, or any failure branch.**
+
+Installing from Play is what proves the shape. A track install shows only the
+configuration splits:
+
+```
+splits=[base, config.arm64_v8a, config.en, config.xxhdpi]
+```
+
+No `jre21`, no `jre25` — which is the whole claim, that the runtimes are not
+delivered at install time and so are not counted against the 200 MB ceiling.
+
+**Internal *app sharing* is not good enough for this test.** Its installs are
+not *owned* in the sense Play means, so `startInstall` fails immediately with
+`APP_NOT_OWNED` (-15) and no Java server can start. Nothing on the device
+distinguishes it either — `installerPackageName` reads `com.android.vending`
+for both, and the only tell is the listing itself, which titles the page with
+the package name and "(unreviewed)". Use the internal **testing track** and its
+opt-in link from the Testers tab; that produces an owned install.
+
+`refusal()` maps that code and the others to something a player can act on,
+because the failure is otherwise indistinguishable from a bad connection and
+the advice for the two is opposite.
 
 Three things follow from staging more than one:
 

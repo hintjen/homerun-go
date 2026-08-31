@@ -3,9 +3,11 @@ package app.gethomerun.mobile
 import android.content.Context
 import android.util.Log
 import com.google.android.play.core.splitcompat.SplitCompat
+import com.google.android.play.core.splitinstall.SplitInstallException
 import com.google.android.play.core.splitinstall.SplitInstallManagerFactory
 import com.google.android.play.core.splitinstall.SplitInstallRequest
 import com.google.android.play.core.splitinstall.SplitInstallStateUpdatedListener
+import com.google.android.play.core.splitinstall.model.SplitInstallErrorCode
 import com.google.android.play.core.splitinstall.model.SplitInstallSessionStatus
 import java.io.File
 import java.util.concurrent.CountDownLatch
@@ -315,11 +317,7 @@ object JavaRuntime {
                 }
                 SplitInstallSessionStatus.INSTALLED -> done.countDown()
                 SplitInstallSessionStatus.FAILED -> {
-                    failure.set(
-                        "Your phone could not download the Java $major runtime " +
-                            "(error ${state.errorCode()}). Check your connection and " +
-                            "start the server again."
-                    )
+                    failure.set(refusal(major, state.errorCode()))
                     done.countDown()
                 }
                 SplitInstallSessionStatus.CANCELED -> {
@@ -366,11 +364,16 @@ object JavaRuntime {
         try {
             val request = SplitInstallRequest.newBuilder().addModule(name).build()
             manager.startInstall(request).addOnFailureListener { err ->
-                // No Play Store, no network, or a build Play has never seen.
+                val code = (err as? SplitInstallException)?.errorCode
+                Log.w(TAG, "Play refused the Java $major module: ${code ?: err.message}")
                 failure.set(
-                    "This phone cannot fetch the Java $major runtime right now " +
-                        "(${err.message}). Check your connection and start the " +
-                        "server again."
+                    if (code != null) {
+                        refusal(major, code)
+                    } else {
+                        "Google Play could not send the Java $major runtime " +
+                            "(${err.message}). Start the server again, and check your " +
+                            "connection if it keeps failing."
+                    }
                 )
                 done.countDown()
             }
@@ -384,6 +387,53 @@ object JavaRuntime {
         // Only now are the split's assets readable in this process.
         SplitCompat.install(context)
         Log.i(TAG, "Play delivered the Java $major runtime module")
+    }
+
+    /**
+     * What to tell a player when Play refuses to send a runtime.
+     *
+     * These codes differ in what the player can actually do, and the single
+     * "check your connection" that used to cover all of them is wrong for most:
+     * an app Play does not consider owned, and a phone with no room on it, are
+     * not network problems. Advising a retry on Wi-Fi for either sends someone
+     * round a loop that cannot terminate.
+     *
+     * [SplitInstallErrorCode.APP_NOT_OWNED] is the one to recognise while
+     * testing. It means the install did not come from Play in a way Play
+     * records — an internal *app sharing* build is the usual cause, and it is
+     * indistinguishable from a Play install by `installerPackageName`, which
+     * says `com.android.vending` either way. The internal *testing track* is
+     * what produces an owned install. See `docs/android-server-backend.md`.
+     */
+    private fun refusal(major: Int, code: Int): String = when (code) {
+        SplitInstallErrorCode.APP_NOT_OWNED ->
+            "This copy of Homerun Go did not come from Google Play, so Play will not " +
+                "send it the Java $major runtime. Install Homerun Go from the Play " +
+                "Store to host a Java server."
+
+        SplitInstallErrorCode.INSUFFICIENT_STORAGE ->
+            "There is not enough room on this phone for the Java $major runtime, " +
+                "which needs about 170 MB. Free some space and start the server again."
+
+        SplitInstallErrorCode.NETWORK_ERROR ->
+            "The Java $major runtime could not be downloaded. Check your connection " +
+                "and start the server again."
+
+        SplitInstallErrorCode.MODULE_UNAVAILABLE ->
+            "This version of Homerun Go cannot get the Java $major runtime from " +
+                "Google Play. Update the app, then start the server again."
+
+        SplitInstallErrorCode.PLAY_STORE_NOT_FOUND, SplitInstallErrorCode.API_NOT_AVAILABLE ->
+            "Google Play on this phone cannot send the Java $major runtime, and " +
+                "Homerun Go needs it to host a Java server."
+
+        SplitInstallErrorCode.ACCESS_DENIED ->
+            "Android would not let Homerun Go download in the background. Open " +
+                "Homerun Go and start the server again."
+
+        else ->
+            "Google Play could not send the Java $major runtime (error $code). Start " +
+                "the server again, and check your connection if it keeps failing."
     }
 
     /** The major a staged asset directory declares, or null if it is not one. */
