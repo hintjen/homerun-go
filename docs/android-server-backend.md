@@ -130,7 +130,7 @@ downloaded. [Anvil-MC](https://anvil-mc.com/), which hosts Java servers on Play
 today with 100k+ downloads, draws the same line — a 154 MB arm64-only download
 with the runtime inside it, fetching server software at runtime.
 
-#### Both runtimes come from Play, on demand
+#### Both runtimes come from Play, as feature modules
 
 "Inside the app" stopped meaning "inside the APK" once there were two runtimes.
 Both in the base APK put the install at **~167 MB** against Play's **200 MB**
@@ -138,22 +138,30 @@ compressed-download ceiling, with `libpumpkin.so` and restic still growing
 underneath it.
 
 So each is a **Play Feature Delivery** module — `android/jre21/` and
-`android/jre25/`, delivery `on-demand`. An on-demand module is not counted
-against that ceiling, and the base install drops to **~54 MB**.
+`android/jre25/`. Delivered `on-demand` they are not counted against that
+ceiling and the base install is **~54 MB**; Play's own App bundle explorer
+measured 57.8 MB for the first such build.
+
+> **They ship `install-time` today.** On-demand is refused for this app until
+> its Play listing clears review — see *Testing it against Play* below. The flip
+> is one element in each module's manifest, and nothing else changes: the
+> modules, the staging, SplitCompat and the fetch are all already built for it.
+> Until then the install is back to ~167 MB, which still fits.
 
 Deferring *both* rather than one is what the selection rule below makes
-sensible. A device that only ever hosts Pumpkin needs no JVM and now carries
+sensible. A device that only ever hosts Pumpkin needs no JVM and need carry
 none. A device that hosts Java fetches the runtime its servers actually select
 and usually not the other. 25 is the more commonly fetched of the two — it runs
 the current 26.x line, where 21 serves 1.21.x and the mod loaders — but "more
-common" is not "always", and it was still 59 MB that every Pumpkin-only install
-paid for.
+common" is not "always", and it is still 59 MB that every Pumpkin-only install
+pays for.
 
-The cost is real and belongs here rather than in a commit message: **no Java
-server can start until Play has delivered a runtime.** Where the JVM used to be
-simply present, a delivery that fails is now a launch that fails, and a
-confirmation Play raises on a metered connection is one this host cannot show —
-`fetchModule` runs on an IO thread with no Activity, so it refuses with a
+The cost of on-demand is real and belongs here rather than in a commit message:
+**no Java server can start until Play has delivered a runtime.** Where the JVM
+is simply present today, a delivery that fails becomes a launch that fails. A
+confirmation Play raises on a metered connection is handled — `fetchModule`
+borrows the resumed activity from [ForegroundActivity] to show it — but with the
+app in the background there is nothing to show it on, and it refuses with a
 sentence naming Wi-Fi. Pumpkin hosting is unaffected either way.
 
 The policy above is untouched by this. The rule is about downloading executable
@@ -277,21 +285,41 @@ splits=[base, config.arm64_v8a, config.en, config.xxhdpi]
 No `jre21`, no `jre25` — which is the whole claim, that the runtimes are not
 delivered at install time and so are not counted against the 200 MB ceiling.
 
-**Play refuses the modules until the app has been reviewed.** On an internal
-testing track install of 0.1.0-1011 — tester opted in, installed from the phone
-under the tester account — `startInstall` failed immediately with
-`APP_NOT_OWNED` (-15), and with no JVM in the base APK that means no Java server
-can start at all.
+**Play refuses on-demand modules until the app's listing clears review.** On an
+internal testing track install of 0.1.0-1011 — tester opted in, installed from
+the phone under the tester account — `startInstall` failed immediately with
+`APP_NOT_OWNED` (-15). With no JVM in the base APK that is not a degraded
+experience; it is no Java server starting at all.
 
-Ruled out by testing, in order: **ownership propagation** (retried ten minutes
-later, same code), **internal app sharing** (this was the track — "(unreviewed)"
-is the temporary app name Play shows for an app whose setup is not finished, not
-an app-sharing tell), and **the wrong Google account** (three accounts on the
-device; reinstalled from the phone under the tester account, same code). What
-remains is the state the Console names on the Internal testing page: app setup
-incomplete and not yet reviewed, so Play has no acquisition record to check
-ownership against. That is inference from elimination rather than a documented
-rule — treat it as the leading explanation, not a certainty.
+The documented behaviour says this should not happen. [Configure on demand
+delivery](https://developer.android.com/guide/playcore/feature-delivery/on-demand)
+states APP_NOT_OWNED "can only occur for deferred installs", and directs you to
+`startInstall()`, "which can obtain the necessary user confirmation". The [Play
+Core release notes](https://developer.android.com/reference/com/google/android/play/core/release-notes)
+date that change to **1.9.0**, December 2020:
+
+> Play Feature Delivery now provides a new user confirmation that enables
+> feature delivery for users who installed your app from a different source than
+> the Play Store. Previously this would result in an `APP_NOT_OWNED` error. Now,
+> `startInstall()` returns a `REQUIRES_USER_CONFIRMATION` status.
+
+That confirmation asks the user to **acquire the app on Play** — which requires
+a listing they can acquire it from. An unreviewed app has none: the Console
+still calls it `app.gethomerun.mobile (unreviewed)` and says its setup is
+unfinished. With nothing to acquire, Play cannot run the 1.9.0 path and falls
+back to the pre-1.9.0 error. That also explains the part that reads as a
+contradiction on the device: the app *was* installed by Play
+(`installerPackageName=com.android.vending`, configuration splits present) and
+is still not *owned*, because internal-testing distribution puts the APK on the
+device without creating the entitlement ownership is read from.
+
+Ruled out by testing before landing there: **ownership propagation** (retried
+ten minutes later, same code), **internal app sharing** ("(unreviewed)" is the
+temporary app name for an unfinished listing, not an app-sharing tell), **the
+wrong Google account** (three on the device; reinstalled from the phone under
+the tester account), and **the bundle** (see below). Confidence is good rather
+than certain — it is the documented contract plus the Console's own state, and
+no report of this exact combination was found.
 
 Nothing about the bundle is at fault, and the Console says so: *App bundle
 explorer → Delivery* lists `jre21` and `jre25` as **On demand**, deliverable to

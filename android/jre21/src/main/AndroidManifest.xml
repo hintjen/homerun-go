@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  On-demand: nothing fetches this at install time. `JavaRuntime.ensure` asks
-  for it the first time a server actually selects Java 21, which for most
-  players is never.
+  Currently install-time, so it arrives with the app; see the delivery
+  element below for why, and what it costs. Built for on-demand, where
+  `JavaRuntime.ensure` asks for it the first time a server selects Java 21.
 
   `dist:title` is shown by Play in its own download confirmation, so it is
   written for a player rather than a log — the same rule the bridge's error
@@ -15,7 +15,21 @@
         dist:instant="false"
         dist:title="@string/jre21_module_title">
         <dist:delivery>
-            <dist:on-demand />
+            <!--
+              install-time, not on-demand, until the Play listing clears review.
+
+              An unreviewed app has no listing a user can be sent to acquire it
+              from, so Play cannot run the confirmation that on-demand delivery
+              falls back on for an unowned app, and refuses every module with
+              APP_NOT_OWNED (-15) instead. With no JVM in the base APK that is
+              not a degraded experience, it is no Java server starting at all.
+
+              Flipping back is this one element. Everything else — the module,
+              the staging, SplitCompat, the fetch — is already built for it, and
+              the base install drops from ~167 MB to ~54 MB when it goes back.
+              See docs/android-server-backend.md.
+            -->
+            <dist:install-time />
         </dist:delivery>
         <dist:fusing dist:include="true" />
     </dist:module>
