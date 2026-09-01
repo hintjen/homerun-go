@@ -1,0 +1,32 @@
+[package]
+name = "homerun-core-node"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "Node-API surface on homerun-core, so Homerun Desktop stops keeping its own copy of these answers"
+
+[lib]
+# cdylib only. Node loads the addon as a shared library and nothing in this
+# repo links it — unlike homerun-pumpkin-ffi, which iOS also links statically.
+crate-type = ["cdylib"]
+
+[dependencies]
+homerun-core = { path = "../homerun-core" }
+
+# The binding lives in its own crate rather than behind a feature on
+# homerun-core, because the core's dependency list is a stated rule in
+# CLAUDE.md — serde, serde_json, ed25519-dalek — and napi is not on it. Same
+# separation homerun-pumpkin-ffi has for the C ABI.
+napi = { version = "2", default-features = false }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+# Matches the other shipped crates: this is a leaf artifact, so there is
+# nothing downstream that a thinner build would speed up.
+opt-level = 3
+lto = true
+strip = true

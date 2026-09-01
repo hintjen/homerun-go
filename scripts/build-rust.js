@@ -72,6 +72,14 @@ if (!capture("cargo", ["--version"])) {
   );
 }
 
+if (target.requiresWindows && process.platform !== "win32") {
+  fail(
+    `${target.label} can only be built on Windows (it links against the MSVC\n` +
+      `  runtime the desktop app loads it into).\n` +
+      `  You are on ${process.platform}.`
+  );
+}
+
 if (target.requiresMacOS && process.platform !== "darwin") {
   fail(
     `${target.label} can only be built on macOS (it needs Xcode's linker and SDKs).\n` +

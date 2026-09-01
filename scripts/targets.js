@@ -26,6 +26,19 @@ const LAUNCHER_CRATE = path.join(ROOT, "rust", "homerun-java-launcher");
 const PUMPKIN_CRATE = path.join(ROOT, "rust", "homerun-pumpkin-bin");
 
 /**
+ * `homerun-core` over Node-API, for Homerun Desktop.
+ *
+ * The odd one out in this table: it is not part of either app here, and
+ * nothing in this repo loads it. It is built here because this is where the
+ * core lives, and shipped to the desktop as a downloaded artifact — the same
+ * arrangement restic and wireproxy already have there — so that adopting the
+ * core costs that build a *file* rather than a Rust toolchain.
+ * `docs/shared-core.md` names the cost being avoided: "Adding Rust to the
+ * desktop build is real CI work and a new way for a release to fail."
+ */
+const CORE_NODE_CRATE = path.join(ROOT, "rust", "homerun-core-node");
+
+/**
  * The Android API level the native code is linked against. The iOS
  * equivalent is `deploymentTarget` on the two targets below; this one is
  * shared, because every Android target ships in the same app and that app
@@ -158,6 +171,21 @@ const TARGETS = {
     outDir: path.join(
       ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
     ),
+  },
+  // Windows x64 only, because that is the only architecture Homerun Desktop
+  // ships. A `.node` is a plain shared library with a renamed extension;
+  // Node-API is ABI-stable across Node *and* Electron versions, so this needs
+  // no rebuild when either moves — which is the whole reason it is Node-API
+  // and not a raw V8 addon.
+  "core-node": {
+    label: "homerun-core for Homerun Desktop (Node addon, Windows x64)",
+    kind: "cargo",
+    crate: CORE_NODE_CRATE,
+    triple: "x86_64-pc-windows-msvc",
+    artifact: "homerun_core_node.dll",
+    outName: "homerun_core.node",
+    outDir: path.join(ROOT, "dist", "desktop"),
+    requiresWindows: true,
   },
   host: {
     label: "this machine (tests only)",
