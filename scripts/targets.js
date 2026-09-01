@@ -172,6 +172,25 @@ const TARGETS = {
       ROOT, "android", "app", "src", "main", "jniLibs", "x86_64"
     ),
   },
+  // Pumpkin for Homerun Desktop. Not staged into an app here -- like
+  // `core-node` below it is built in this repo, where the fork rev is pinned,
+  // and shipped to the desktop as a downloaded artifact.
+  //
+  // The desktop spawns it exactly as Android does, for the same reason: an
+  // engine fault must not take the app down with it. What it must *not* do is
+  // run upstream's own binary, whose `main` registers signal handlers
+  // sequentially and so leaves SIGTERM unhandled -- a stop that skips saving
+  // the world, indistinguishable from a kill. See the crate's module docs.
+  "pumpkin-bin-windows": {
+    label: "Pumpkin server, Homerun Desktop (Windows x64)",
+    kind: "cargo",
+    crate: PUMPKIN_CRATE,
+    triple: "x86_64-pc-windows-msvc",
+    artifact: "homerun-pumpkin.exe",
+    outName: "homerun-desktop-minecraft-pumpkin.exe",
+    outDir: path.join(ROOT, "dist", "desktop"),
+    requiresWindows: true,
+  },
   // Windows x64 only, because that is the only architecture Homerun Desktop
   // ships. A `.node` is a plain shared library with a renamed extension;
   // Node-API is ABI-stable across Node *and* Electron versions, so this needs

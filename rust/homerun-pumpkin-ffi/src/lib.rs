@@ -49,7 +49,19 @@ pub mod preflight;
 /// Supervising a server that runs as a child process. Not iOS, which cannot.
 #[cfg(feature = "process-engine")]
 pub mod process_engine;
-#[cfg(feature = "pumpkin-engine")]
+/// The engine linked into the app rather than spawned beside it.
+///
+/// Unix as well as the feature, because it is Unix by construction: Pumpkin
+/// writes its console to fd 1 with no hook to redirect it, so `capture`
+/// replaces the file descriptors and reads the other end — `from_raw_fd` and
+/// nothing like it on Windows.
+///
+/// Nothing is lost by that. This module exists because **iOS cannot spawn a
+/// process**; every host that can spawn one does, Android through
+/// `process_engine` and Homerun Desktop through its own supervisor. A Windows
+/// build of this crate is `homerun-pumpkin-bin` reaching for `pumpkin_settings`
+/// and `engine_settings`, and it wants no linked engine at all.
+#[cfg(all(feature = "pumpkin-engine", unix))]
 pub mod pumpkin_engine;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_settings;

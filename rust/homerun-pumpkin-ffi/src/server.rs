@@ -12,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::crash;
 // `test` as well as the ungated build: every test here drives the stub, so
 // without it a `--features pumpkin-engine` test run does not compile.
-#[cfg(any(test, not(feature = "pumpkin-engine")))]
+// Kept in step with `host()` below by hand: the stub is imported exactly when
+// something selects it, and a mismatch is a compile error rather than a
+// surprise, which is the only reason it is safe to write twice.
+#[cfg(any(test, not(all(feature = "pumpkin-engine", unix))))]
 use crate::engine::StubEngine;
 use crate::engine::{Engine, Roster, RunOutcome, RunRequest, StopSignal};
 use crate::log_buffer::{LogBuffer, LogSlice};
@@ -99,13 +102,19 @@ static HOST: OnceLock<ServerHost> = OnceLock::new();
 /// Runs the real server when the `pumpkin-engine` feature is on — the app
 /// builds enable it. Without it the stub stands in, which is what keeps the
 /// test suite fast and device-free.
+///
+/// The `unix` half of the condition is not a second thought: `pumpkin_engine`
+/// is gated the same way and for the reason given there. A Windows build turns
+/// the feature on and still gets the stub, because on that platform this crate
+/// is a settings resolver for `homerun-pumpkin-bin` and the engine is the
+/// separate process the host spawns.
 pub fn host() -> &'static ServerHost {
     HOST.get_or_init(|| {
-        #[cfg(feature = "pumpkin-engine")]
+        #[cfg(all(feature = "pumpkin-engine", unix))]
         {
             ServerHost::new(Box::new(crate::pumpkin_engine::PumpkinEngine::new()))
         }
-        #[cfg(not(feature = "pumpkin-engine"))]
+        #[cfg(not(all(feature = "pumpkin-engine", unix)))]
         {
             ServerHost::new(Box::new(StubEngine::healthy()))
         }
