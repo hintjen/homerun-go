@@ -138,7 +138,17 @@ object ServerHost {
         // and "which engine is this app" has no answer for it.
         if (JavaRuntime.isAvailable(appContext)) java = JavaServerBackend(appContext, scope)
         if (PumpkinBackend.isAvailable(appContext)) pumpkin = PumpkinBackend(appContext, scope)
-        Log.i(TAG, "engines: jvm=${java != null} pumpkin=${pumpkin != null}")
+        // The runtimes by name, not just `jvm=true`. Java 21 is delivered on
+        // demand, so "this build can host on 21" and "21 is on this phone"
+        // are different states now, and a launch that picks 21 behaves very
+        // differently from one that picks 25. Without the list, a build that
+        // staged one runtime and a build that staged both log the same line.
+        val runtimes = JavaRuntime.available(appContext)
+        Log.i(
+            TAG,
+            "engines: jvm=${java != null} pumpkin=${pumpkin != null} " +
+                "java=${runtimes.joinToString(",").ifEmpty { "none" }}",
+        )
 
         listOfNotNull(java, pumpkin).forEach { it.wire() }
     }

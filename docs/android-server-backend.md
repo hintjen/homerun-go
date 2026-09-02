@@ -130,6 +130,141 @@ downloaded. [Anvil-MC](https://anvil-mc.com/), which hosts Java servers on Play
 today with 100k+ downloads, draws the same line — a 154 MB arm64-only download
 with the runtime inside it, fetching server software at runtime.
 
+#### Both runtimes come from Play, as feature modules
+
+"Inside the app" stopped meaning "inside the APK" once there were two runtimes.
+Both in the base APK put the install at **~167 MB** against Play's **200 MB**
+compressed-download ceiling, with `libpumpkin.so` and restic still growing
+underneath it.
+
+So each is a **Play Feature Delivery** module — `android/jre21/` and
+`android/jre25/`. Delivered `on-demand` they are not counted against that
+ceiling and the base install is **~54 MB**; Play's own App bundle explorer
+measured 57.8 MB for the first such build.
+
+> **They ship `install-time` today.** On-demand is refused for this app until
+> its Play listing clears review — see *Testing it against Play* below. The flip
+> is one element in each module's manifest, and nothing else changes: the
+> modules, the staging, SplitCompat and the fetch are all already built for it.
+> Until then the install is back to ~167 MB, which still fits.
+
+Deferring *both* rather than one is what the selection rule below makes
+sensible. A device that only ever hosts Pumpkin needs no JVM and need carry
+none. A device that hosts Java fetches the runtime its servers actually select
+and usually not the other. 25 is the more commonly fetched of the two — it runs
+the current 26.x line, where 21 serves 1.21.x and the mod loaders — but "more
+common" is not "always", and it is still 59 MB that every Pumpkin-only install
+pays for.
+
+The cost of on-demand is real and belongs here rather than in a commit message:
+**no Java server can start until Play has delivered a runtime.** Where the JVM
+is simply present today, a delivery that fails becomes a launch that fails. A
+confirmation Play raises on a metered connection is handled — `fetchModule`
+borrows the resumed activity from [ForegroundActivity] to show it — but with the
+app in the background there is nothing to show it on, and it refuses with a
+sentence naming Wi-Fi. Pumpkin hosting is unaffected either way.
+
+The policy above is untouched by this. The rule is about downloading executable
+code *from a source other than Google Play*, and a feature module is Google Play
+delivering it — the same channel as the APK, with the same review.
+
+**It is a feature module and not an asset pack**, and that distinction is the
+whole reason `jre21/` has a `build.gradle.kts` rather than an `assetPack {}`
+block. Asset packs are documented as carrying assets "but no executable code",
+and a JRE is `libjvm.so` and about a dozen more `.so` files. Play Feature
+Delivery is the sanctioned route for code. An asset pack would have been simpler
+and is the wrong tool.
+
+What it costs the host is one new state: a runtime can be **promised but not
+present**. `JavaRuntime.available` reports 21 as available before the module is
+on the device, because `jar::select_runtime` chooses from that list and a jar
+needing 21 must be able to ask for it — omitting it until it downloads would
+mean nothing ever selects it and it never downloads. `JavaRuntime.ensure` is
+where the module is actually fetched, blocking, on the launch path that already
+has no call timeout. After that, SplitCompat merges the split into the same
+`AssetManager` and the unpack cannot tell the two runtimes apart.
+
+Three things follow from it that are easy to get wrong:
+
+- **`SplitCompat.install` runs in `HomerunApplication.attachBaseContext`.**
+  A module delivered last week is on disk and invisible to this process without
+  it, so the app would decide it never had Java 21 and re-ask Play every launch.
+- **A sideloaded debug build needs no Play Store.** Gradle installs feature
+  modules as splits beside the app, so `installedModules` already names it and
+  `fetchModule` returns immediately. `npm run android:run` is unaffected.
+- **Install states are matched on module name, not session id.** The id is only
+  known once `startInstall` succeeds, and an install served from cache can reach
+  `INSTALLED` before that. Filtering on the id drops the event that ends the
+  wait, and the launch hangs for good.
+
+#### Which runtimes this will carry, and which one is packaged
+
+Every runtime is a feature module. **Which of them is downloaded rather than
+packaged is decided per module, in its own manifest**, and the three differ:
+
+| Runtime | Delivery | Why |
+|---|---|---|
+| **25** | `install-time`, permanently | Runs the current 26.x line, so it is what almost every launch selects. A runtime the common case waits on is the wrong one to defer. |
+| **21** | `install-time` for now | Serves 1.21.x and most mod loaders. Goes `on-demand` once the listing clears review — see *Testing it against Play*. |
+| **17** | `on-demand`, always | Only Forge 1.20.1 selects it. Never packaged. |
+
+That asymmetry is the point of declaring delivery per module rather than once
+for all of them, and it is what makes this scale: a fourth runtime is a new
+module and two constants, not a bigger APK.
+
+`moduleJavaRuntimes` in `app/build.gradle.kts` and `MODULE_JAVA` in
+`stage-jre.py` name which majors live in modules — **not** which are downloaded.
+`JavaRuntime` does not need to know the difference: it fetches when a module's
+assets are not visible and does nothing when they are, so an install-time module
+takes the same path as one already downloaded.
+
+##### What the desktop app supports, and why we cannot simply match it
+
+Homerun Desktop takes a different route, and the difference is a platform
+constraint rather than a decision:
+
+| | Desktop | Android |
+|---|---|---|
+| Packaged | Eclipse Temurin JRE 25 (`resources/java/`) | Termux OpenJDK 25 (`:jre25`) |
+| Others | **Downloaded on demand from Azul Zulu** | **Feature modules from Play** |
+| Which majors | any Zulu publishes — the major is a query parameter | whatever Termux publishes |
+| Source | `api.azul.com/metadata/v1/zulu/packages` | `packages.termux.dev`, at build time |
+| Cache | `{installPath}/runtime/java-{major}/` | `filesDir/runtime-{major}` |
+
+Desktop asks Azul for `java_version: <major>`, `java_package_type: jre`, for the
+running `os`/`arch`, and caches the result — see
+`src/electron/system/minecraft-launcher/util/java.ts`. It therefore supports
+*any* major, resolved at runtime from `versionInfo.javaVersion.majorVersion`,
+with no build change. There is a `downloadZuluJdk` beside it for the loader
+installers that need a full JDK.
+
+**Android cannot do that**, and it is the same rule that put the runtimes in
+the app to begin with: Play's Device and Network Abuse policy forbids
+downloading executable code from a source other than Play, and `libjvm.so` is
+executable code. Azul is not Play. So on Android every runtime we support has to
+be built into a module and delivered by Play, which means the set is fixed at
+build time rather than resolved per server.
+
+The set is also bounded by supply. Termux is the only source publishing current
+OpenJDK for Android on both architectures, and it publishes **17, 21 and 25** —
+already the keys of `JDK_VERSIONS` in `scripts/stage-jre.py`. Desktop can reach
+majors we cannot get at all, so parity is a target and not a promise; where a
+version needs a runtime Android has no source for, `select_runtime` refuses in a
+sentence rather than failing inside a JVM.
+
+**17 is here now, and it is the only addition currently possible.** Termux
+publishes nothing else we do not already carry. It unlocks Forge 1.20.1, which
+`Loader::java_policy` treats as `Exact` and which therefore cannot run on 21 or
+25 — modlauncher reaches into `java.base` internals a newer JDK has moved.
+
+It costs nothing at install, because it is the one runtime that is never
+packaged. It does inherit the current Play blocker: until the listing clears
+review, `startInstall` is refused and a Forge 1.20.1 server fails at the
+download rather than being turned away at selection. Before 17 was staged the
+core refused it in a sentence; now it gets further and fails later. That is the
+right trade only because it becomes correct the moment on-demand works — but it
+is a real regression for that one server type in the meantime.
+
 #### Staging it
 
 ```bash
@@ -150,8 +285,17 @@ It prunes ~85 MB per runtime that is never used on a phone — `jmods/` (jlink
 input), `demo/`, `man/`, `include/`, `lib/ct.sym`. `legal/` stays: these are
 GPLv2+CE builds and the notices ship with them.
 
-Result: **162 MB staged for Java 21 and 167 MB for 25** — 53 MB and 58 MB
-compressed, which is what they cost in the download.
+Result: **162 MB staged for Java 21 and 167 MB for 25** — 54 MB and 59 MB
+compressed. Neither is in the base install: each costs its download the first
+time a server selects it, and nothing before that.
+
+Both stage into their own feature module — `android/jre21/src/main/assets/`,
+`android/jre25/src/main/assets/` — rather than the app's, which `asset_root()`
+decides from `ON_DEMAND_JAVA`. That list is kept in step with
+`onDemandJavaRuntimes` in `app/build.gradle.kts`; the two disagreeing stages a
+runtime where the build does not look for it, which `verifyReleaseRuntimes`
+turns into a failed release build rather than a release that silently refuses
+every server needing it.
 
 #### Why there are two, and which one runs
 
@@ -186,6 +330,89 @@ internals.
 Fabric server on Minecraft 26.2 selected Java 25 and a Quilt server on 1.21.11
 selected Java 21 — and only the runtime each needed was unpacked, which is the
 lazy-unpack claim below holding in practice rather than in principle.
+
+Delivery as a feature module is confirmed on the same device: a vanilla 1.21.1
+server selected Java 21, unpacked it out of `split_jre21.apk` in 772 ms, and
+reached `RUNNING`, with `runtime-25` never appearing in `filesDir`.
+
+##### Testing it against Play, and the trap in doing so
+
+A sideloaded build never reaches Play at all: Gradle installs feature modules as
+splits beside the app, so `installedModules` already names them and
+`fetchModule` returns before it asks. That is deliberate — it is what keeps
+`npm run android:run` working — but it means **no local build exercises
+`SplitInstallManager`, the progress callback, or any failure branch.**
+
+Installing from Play is what proves the shape. A track install shows only the
+configuration splits:
+
+```
+splits=[base, config.arm64_v8a, config.en, config.xxhdpi]
+```
+
+No `jre21`, no `jre25` — which is the whole claim, that the runtimes are not
+delivered at install time and so are not counted against the 200 MB ceiling.
+
+**Play refuses on-demand modules until the app's listing clears review.** On an
+internal testing track install of 0.1.0-1011 — tester opted in, installed from
+the phone under the tester account — `startInstall` failed immediately with
+`APP_NOT_OWNED` (-15). With no JVM in the base APK that is not a degraded
+experience; it is no Java server starting at all.
+
+The documented behaviour says this should not happen. [Configure on demand
+delivery](https://developer.android.com/guide/playcore/feature-delivery/on-demand)
+states APP_NOT_OWNED "can only occur for deferred installs", and directs you to
+`startInstall()`, "which can obtain the necessary user confirmation". The [Play
+Core release notes](https://developer.android.com/reference/com/google/android/play/core/release-notes)
+date that change to **1.9.0**, December 2020:
+
+> Play Feature Delivery now provides a new user confirmation that enables
+> feature delivery for users who installed your app from a different source than
+> the Play Store. Previously this would result in an `APP_NOT_OWNED` error. Now,
+> `startInstall()` returns a `REQUIRES_USER_CONFIRMATION` status.
+
+That confirmation asks the user to **acquire the app on Play** — which requires
+a listing they can acquire it from. An unreviewed app has none: the Console
+still calls it `app.gethomerun.mobile (unreviewed)` and says its setup is
+unfinished. With nothing to acquire, Play cannot run the 1.9.0 path and falls
+back to the pre-1.9.0 error. That also explains the part that reads as a
+contradiction on the device: the app *was* installed by Play
+(`installerPackageName=com.android.vending`, configuration splits present) and
+is still not *owned*, because internal-testing distribution puts the APK on the
+device without creating the entitlement ownership is read from.
+
+Ruled out by testing before landing there: **ownership propagation** (retried
+ten minutes later, same code), **internal app sharing** ("(unreviewed)" is the
+temporary app name for an unfinished listing, not an app-sharing tell), **the
+wrong Google account** (three on the device; reinstalled from the phone under
+the tester account), and **the bundle** (see below). Confidence is good rather
+than certain — it is the documented contract plus the Console's own state, and
+no report of this exact combination was found.
+
+Nothing about the bundle is at fault, and the Console says so: *App bundle
+explorer → Delivery* lists `jre21` and `jre25` as **On demand**, deliverable to
+all supported devices, with **size for new installs 57.8 MB**. That is Play's own
+figure against its 200 MB ceiling.
+
+**The client code is proven; only Play's front door is not.** `bundletool
+--local-testing` runs the real `SplitInstallManager` against module APKs staged
+on the device, which bypasses the ownership check and exercises everything else:
+
+```bash
+bundletool build-apks --bundle=app-release.aab --output=out.apks --local-testing
+bundletool install-apks --apks=out.apks
+```
+
+A 26.2 server on that install logged `asking Play` → `Play delivered` in 3.2 s,
+unpacked in 581 ms and reached `RUNNING`, with SplitCompat reporting
+`addAssetPath completed with 22` (from 13) — the merge the unpack depends on.
+Two caveats: it resolves from local storage, so download progress jumps rather
+than streams, and no network failure branch is reached.
+
+`refusal()` maps `APP_NOT_OWNED` and the rest to something a player can act on.
+This matters more than it looks: the failure is indistinguishable from a bad
+connection at the call site, and the advice for the two is opposite — telling
+someone to retry on Wi-Fi when Play will never serve them is a loop with no exit.
 
 Three things follow from staging more than one:
 
@@ -237,6 +464,12 @@ Two packaging traps, both of which fail silently:
 
 Ship one ABI per build (`-Pabi=arm64-v8a`); the runtime is architecture-
 specific and packaging both doubles the download for no one's benefit.
+
+3. **Both build checks search every staging root.** `verifyJavaRuntime` and
+   `verifyReleaseRuntimes` looked only in `app/src/main/assets` before Java 21
+   moved; left that way they call a correctly staged 21 missing on every
+   release, and — worse — stop checking its architecture, which is the one
+   failure that reaches a device silently.
 
 #### Termux's prefix, and the dependency closure
 

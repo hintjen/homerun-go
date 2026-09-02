@@ -72,7 +72,42 @@ val jreForAbi = mapOf(
  *
  * Kept in step with `DEFAULT_JAVA` in `scripts/stage-jre.py`.
  */
-val releaseJavaRuntimes = listOf(21, 25)
+val releaseJavaRuntimes = listOf(17, 21, 25)
+
+/**
+ * The majors that live in a feature module rather than in the base APK's own
+ * assets — one module per major, `:jre<major>`.
+ *
+ * All of them, and that is not the same as all of them being *downloaded*.
+ * **Delivery is declared per module, in its own manifest**, because the three
+ * differ: 25 is packaged with the app and stays that way (it runs the current
+ * Minecraft line, so the common case must not wait on a download), 17 is never
+ * packaged (only Forge 1.20.1 selects it), and 21 sits between the two —
+ * install-time until the Play listing clears review, on-demand after.
+ *
+ * What this list controls is *where a runtime is staged and packaged*, not when
+ * it arrives. Everything downstream reads it: the modules Gradle attaches, the
+ * roots the build checks search, and [JavaRuntime]'s own idea of which majors
+ * it cannot discover by listing the APK's assets.
+ *
+ * It is also the *promise*, not the delivery. [JavaRuntime.available] reports
+ * these majors before their module is on the device, because the core chooses a
+ * runtime from that list and a jar needing 17 must be able to ask for it — the
+ * download happens inside `ensure`. Ship a build that omits a major here and
+ * the core simply never picks it.
+ */
+val moduleJavaRuntimes = listOf(17, 21, 25)
+
+/**
+ * Every place a staged runtime can live, in the order they are searched.
+ *
+ * The build checks below predate the feature module and looked only in
+ * `app/src/main/assets`; left that way they would call Java 21 missing on
+ * every release that correctly staged it.
+ */
+val javaRuntimeAssetRoots: List<File> = listOf(
+    layout.projectDirectory.dir("src/main/assets").asFile,
+) + moduleJavaRuntimes.map { rootProject.file("jre$it/src/main/assets") }
 
 android {
     namespace = "app.gethomerun.mobile"
@@ -142,6 +177,15 @@ android {
         // the switch; the key stays a key.
         buildConfigField("boolean", "OTA_UPDATES", otaUpdates.toString())
 
+        // Which majors live in a feature module rather than the APK's own
+        // assets. [JavaRuntime] cannot discover an uninstalled one by listing
+        // assets — that is the whole point of them — so the build states it.
+        buildConfigField(
+            "String",
+            "MODULE_JAVA",
+            "\"${moduleJavaRuntimes.joinToString(",")}\"",
+        )
+
         // The staged Java runtime is architecture-specific and ~165 MB, so a
         // build ships exactly one ABI — the same choice Anvil-MC makes. Pass
         // the ABI that `npm run jre:*` staged:
@@ -157,6 +201,11 @@ android {
     buildFeatures {
         buildConfig = true
     }
+
+    // One module per runtime. Their assets are staged by `npm run jre:android`
+    // exactly as the base APK's own would be; each module's manifest decides
+    // whether it arrives at install time or on demand.
+    dynamicFeatures += moduleJavaRuntimes.map { ":jre$it" }.toSet()
 
     // Release signing. The keystore and its passwords live in
     // `android/keystore.properties` — gitignored, supplied by CI from a secret,
@@ -269,6 +318,7 @@ dependencies {
     implementation(libs.commons.compress)
     implementation(libs.tukaani.xz)
     implementation(libs.firebase.messaging)
+    implementation(libs.play.feature.delivery)
 }
 
 /**
@@ -339,22 +389,23 @@ val verifyUiBundle by tasks.registering {
  * refuse the build when the two disagree.
  */
 val verifyJavaRuntime by tasks.registering {
-    val assets = layout.projectDirectory.dir("src/main/assets")
-    inputs.dir(assets).optional(true)
+    inputs.files(javaRuntimeAssetRoots)
     // Captured here, not read in the action: the action must not reach back
     // into the project while it runs.
     val abi = requestedAbi
     val expected = abi?.let { jreForAbi[it] }
-    val assetsDir = assets.asFile
+    val roots = javaRuntimeAssetRoots
+    val rootDir = rootProject.projectDir
     doFirst {
-        val staged = (assetsDir.listFiles { f: File -> f.isDirectory } ?: emptyArray())
+        val staged = roots
+            .flatMap { (it.listFiles { f: File -> f.isDirectory } ?: emptyArray()).toList() }
             .filter { it.name.startsWith("jre-") && File(it, "java-major").isFile }
             .sortedBy { it.name }
 
         if (staged.isEmpty()) {
             logger.warn(
                 """
-                WARNING: no Java runtime staged in app/src/main/assets/jre-*/.
+                WARNING: no Java runtime staged in any of jre-*/.
                          This build cannot host a Java server. Stage them with:
                            npm run jre:android         (arm64, what ships)
                            npm run jre:android-x86_64  (emulator)
@@ -381,7 +432,7 @@ val verifyJavaRuntime by tasks.registering {
                 Regex("""^OS_ARCH="?([^"\n]+)"?$""", RegexOption.MULTILINE).find(it)
             }?.groupValues?.get(1)
                 ?: throw GradleException(
-                    "The staged Java runtime in assets/${runtime.name} does not say what " +
+                    "The staged Java runtime in ${runtime.relativeTo(rootDir)} does not say what " +
                         "architecture it is for (no OS_ARCH in its `release` file).\n" +
                         "Restage it:  $stageCommand",
                 )
@@ -389,7 +440,7 @@ val verifyJavaRuntime by tasks.registering {
             if (arch != wantedArch) {
                 throw GradleException(
                     "A staged Java runtime is for the wrong architecture.\n" +
-                        "  staged:    $arch  (app/src/main/assets/${runtime.name}/release)\n" +
+                        "  staged:    $arch  (${runtime.relativeTo(rootDir)}/release)\n" +
                         "  requested: $wantedArch  (-Pabi=$abi)\n" +
                         "This would build an APK that installs and can never host a " +
                         "server on that runtime: the JRE lives in assets/, so nothing " +
@@ -410,12 +461,13 @@ val verifyJavaRuntime by tasks.registering {
  * whose Minecraft version selects the runtime that never shipped.
  */
 val verifyReleaseRuntimes by tasks.registering {
-    val assets = layout.projectDirectory.dir("src/main/assets")
-    inputs.dir(assets).optional(true)
+    inputs.files(javaRuntimeAssetRoots)
     val wanted = releaseJavaRuntimes
-    val assetsDir = assets.asFile
+    val roots = javaRuntimeAssetRoots
     doFirst {
-        val missing = wanted.filter { !File(assetsDir, "jre-$it/java-major").isFile }
+        val missing = wanted.filter { major ->
+            roots.none { File(it, "jre-$major/java-major").isFile }
+        }
         if (missing.isNotEmpty()) {
             throw GradleException(
                 "This release is missing the Java ${missing.joinToString(" and ")} " +
