@@ -962,11 +962,21 @@ enum Core {
             recovery: reply["recovery"] as? String ?? "report")
     }
 
-    static func crashReport(serverId: String, deviceId: String, lines: [String]) -> Request? {
-        Request.from(
-            try? call(
-                "reporting.crash.report",
-                ["serverId": serverId, "deviceId": deviceId, "lines": lines]))
+    /// Build the crash report.
+    ///
+    /// `context` is what this app knows about itself — `AppErrors.context()`
+    /// plus the device — and it is what turns a console that explains nothing
+    /// into a report that does. The core adds the ABI version, the engines it
+    /// was compiled with and the tail of this process's log (through the
+    /// provider `DeviceWebsocket` registers), and sends all of it as the API's
+    /// `device_logs`. Nil sends the console alone, which is what every report
+    /// was before.
+    static func crashReport(
+        serverId: String, deviceId: String, lines: [String], context: [String: Any]? = nil
+    ) -> Request? {
+        var args: [String: Any] = ["serverId": serverId, "deviceId": deviceId, "lines": lines]
+        if let context { args["context"] = context }
+        return Request.from(try? call("reporting.crash.report", args))
     }
 
     /// Build a stats report. The core's argument is `serviceId`, not

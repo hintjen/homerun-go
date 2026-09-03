@@ -104,6 +104,61 @@ after announcing the state — so a crash listener that reacts to `CRASHED` and
 desktop's `SESSION_LOG_LIMIT`; the core caps what it actually sends, by lines
 **and** by bytes.
 
+### What travels with a crash
+
+Two fields. `output` is the console tail above, scrubbed by the core. The
+second, `device_logs`, is the **app's** account rather than the server's, and
+it exists because of one report.
+
+An Android build shipped whose Rust core had been compiled without
+`process-engine`. Every launch was refused by the FFI before a server
+existed, and the crash report that reached support was the console: twenty
+`[Homerun] Downloading Minecraft 26.2…` lines, `[Backup] World restored.`,
+and nothing else. The sentence that explained it — *This build cannot run a
+server as a separate process* — was in the `error` field of the supervisor's
+reply, which `serverExited` did not read.
+
+Three things changed, and each would have made that report legible on its
+own:
+
+- **The FFI writes its refusals into the console.** `refused_start` in
+  `lib.rs` pushes `[Homerun] The server could not start: …` before returning
+  the error. The supervisor already did this for its own refusals (a taken
+  port); the one made *before* the supervisor ran did not.
+- **The host reads the reply.** `serverExited` logs `error` to logcat. It
+  still decides nothing from it — the core rules on the exit — but the
+  reason is now somewhere a person will look.
+- **The report carries a host context.** `Reporting.reportCrash` passes
+  `AppErrors.context()` plus the device model and OS. The FFI's
+  `crash_host_context` adds the three facts a host must not be asked for —
+  `FFI_ABI_VERSION`, the engines the library was compiled with, and the tail
+  of this process's logcat (the same `app_logs::collect` that answers
+  `get-app-logs`) — and the core renders it as a badged header followed by
+  the redacted, 64 KiB-capped log:
+
+  ```
+  [Homerun Go] android 0.4.2 · bundle 2026-08-14.3 · host revision 12 · ffi abi 8
+  [Homerun Go] engines: process, pumpkin
+  [Homerun Go] device: Google Pixel 9 Pro XL · Android 15 (API 35)
+
+  09-03 10:00:02.000 W HomerunNative: …
+  ```
+
+`device_logs` is the API's existing column for a desktop's Docker daemon
+output, already accepted from a native device and already attached to the
+Discord thread as `device_logs.log`. Reusing it meant no schema change and no
+three-repository lockstep for a report to say one more thing. The API's
+mobile embed shows the header; the Discord half is in
+`homerun/api/docs/service-error-reporting.md`.
+
+The engines line is the FFI's, **not** `ServerHost.engines()`: the host's
+answer is whether the binaries are staged, and a host describing its core's
+abilities describes the ones it assumed it had. The build that prompted this
+would have said `jvm=true`.
+
+The logcat read is one `logcat -d --pid` and returns in milliseconds. It runs
+on the exit path's coroutine, never on the main thread.
+
 ### The cadence
 
 `homerun_core::reporting::stats::Schedule` decides when. This file holds the
@@ -296,6 +351,9 @@ The desktop is still exposed to both. See `plans/android-parity.md`.
 | `Core.kt` (§Reporting) | wrappers over the core's decisions |
 | `HomerunApi.kt` | `perform`, `serverBody`, `publicIpAddress`, PATCH |
 | `homerun-core/src/reporting/` | crash, stats, minigame — payloads and cadence |
+| `homerun-core/src/reporting/crash.rs` | `HostContext` — the app's half of a crash report, and how it becomes `device_logs` |
+| `homerun-pumpkin-ffi/src/core_dispatch.rs` | `crash_host_context` — the ABI version, the compiled engines, the logcat tail |
+| `homerun-pumpkin-ffi/src/lib.rs` | `refused_start` — a launch refused before the supervisor ran, written to the console |
 | `homerun-core/src/minecraft/ops.rs` | op/deop/ban/pardon, the list merge |
 | `homerun-core/src/minecraft/slp.rs` | the ping codec |
 | `homerun-pumpkin-ffi/src/host_dispatch.rs` | the ping socket, the deadline, `server.statsPoll` |
@@ -326,6 +384,13 @@ method, the path and the API's own error text.
 **A crash produced no report.** The tail is empty only if the run printed
 nothing, which is itself worth investigating — look for
 `crashed with an empty console`.
+
+**A crash report whose console is only `[Homerun]` download and restore
+lines.** The launch was refused before a server existed. Read the report's
+`device_logs`: the header's `engines:` line says what the library can run,
+and the console should now end with `[Homerun] The server could not start:`
+and the reason. No `device_logs` at all means the report came from a build
+older than the host context — the console is all it ever sent.
 
 **The phone shows up as a desktop, or as "Native + WSL".** It registered before
 `device_type` was sent, or it re-registered against an API that had not yet

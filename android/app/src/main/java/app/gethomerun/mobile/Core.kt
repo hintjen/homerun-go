@@ -1899,11 +1899,27 @@ object Core {
         )
     }
 
-    fun crashReport(serverId: String, deviceId: String, lines: List<String>): Request? =
+    /**
+     * Build the crash report.
+     *
+     * `context` is what this app knows about itself — the same object
+     * [AppErrors.context] builds, plus the device — and it is what turns a
+     * console that explains nothing into a report that does. The core adds
+     * the ABI version, the engines it was compiled with and the tail of this
+     * process's logcat, and sends all of it as the API's `device_logs`.
+     * Null sends the console alone, which is what every report was before.
+     */
+    fun crashReport(
+        serverId: String,
+        deviceId: String,
+        lines: List<String>,
+        context: JsonObject? = null,
+    ): Request? =
         Request.from(call("reporting.crash.report", buildJsonObject {
             put("serverId", serverId)
             put("deviceId", deviceId)
             put("lines", buildJsonArray { lines.forEach { add(it) } })
+            context?.let { put("context", it) }
         }))
 
     fun statsReport(serviceId: String, deviceId: String, stats: JsonObject): Request? =

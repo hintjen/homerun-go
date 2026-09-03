@@ -69,6 +69,26 @@ on the way out to catch the dying words; and the buffer is cleared by
 `backend.logs(serverId:since: 0)` and gets the same 2000 bounded lines a
 duplicate tail would have held.
 
+### What travels with a crash — the same two fields
+
+The crash report is the console and a host context, exactly as on Android
+(`android-reporting.md` § *What travels with a crash*). The delta is where the
+log comes from: the FFI reads Android's logcat itself, and everywhere else it
+asks the provider the host registered — here, the `OSLogStore` reader
+`DeviceWebsocket.swift` installs for `get-app-logs`. A device that never
+registered one sends the section as *This device has no logs to send.*, which
+is what the reader should see rather than an empty log that reads as "nothing
+happened".
+
+`hostContext()` here names the hardware from `utsname` rather than
+`UIDevice.model`, which only says "iPhone", and adds nothing UIKit. The armed
+server id (`armedId`, set in `starting` and cleared with the cadence loop) is
+also what `AppErrors.context()` reports as `serverId`, so an app error during
+a launch and the crash report that follows can be joined on the API.
+
+**Uncompiled**, like the rest of this file's Swift; the wrappers are on the
+`coretest` target's list.
+
 ### The cadence is a timer, and suspension is the loop's teardown
 
 `reporting.stats.schedule` owns every number — the 120 s interval, the 1 s
@@ -214,6 +234,7 @@ follow-up.
 | `ios/HomerunHost/FFI/Core.swift` (§Reporting) | Wrappers over the core's decisions, including `Core.Request` and its `auth` |
 | `ios/HomerunHost/HomerunAPI.swift` | `perform`, `serverBody`, `fetchPublicIPAddress`, and the PATCH verb |
 | `ios/HomerunHost/PumpkinBackend.swift` | `note(serverId:line:)` — the host's own lines, badged once |
+| `ios/HomerunHost/AppErrors.swift` | `context()` — shared between app errors and the crash report's host context |
 | `ios/coretest/main.swift` | Every wrapper above, against the real core, with no simulator |
 | `rust/homerun-core/src/reporting/` | The payloads, the cadence, the parsers |
 | `rust/homerun-pumpkin-ffi/src/host_dispatch.rs` | The poll and the ping — the two calls with effects |

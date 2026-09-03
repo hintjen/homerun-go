@@ -137,6 +137,17 @@ configuration, which for Pumpkin includes `online_mode = true`. That is what a
 host which has not been taught to send settings does — Android's Pumpkin
 backend today — so the console says so rather than leaving it silent.
 
+A refusal made **in this call, before the supervisor runs** — an invocation
+the library cannot honour, a request it cannot parse — is written into the
+console as `[Homerun] The server could not start: …` as well as returned. The
+reply is the one place nobody looks: Android reads `ok` from it and moves to
+the exit path, and the crash report that follows is built from the console.
+A build compiled without `process-engine` refused every launch this way and
+reported nothing but its own download progress until this existed. The
+supervisor's own refusals (a taken port) already wrote their line;
+`ServerHost::start`'s "already running" deliberately does not, because it
+would land in the console of the server that *is* running.
+
 `homerun_server_settings_preview` takes the same request and reports what would
 be applied, without starting anything:
 
@@ -274,7 +285,10 @@ Two more things worth knowing:
 
 ### Reporting a crash off the device — `errors.rs`
 
-Four arms carry app errors, beside `reporting.crash.report`:
+`reporting.crash.report` takes an optional `context` — the host's description
+of itself — and completes it with what only this crate knows: the ABI version,
+the engines compiled in, and the app's own log through `app_logs::collect`.
+See `crash_host_context`. Four arms carry app errors beside it:
 
 | Arm | Does |
 |---|---|

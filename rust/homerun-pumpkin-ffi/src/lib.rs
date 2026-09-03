@@ -366,7 +366,7 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
     guarded(move || {
         let request = match request.as_deref().map(parse_start_request) {
             Some(Ok(request)) => request,
-            Some(Err(message)) => return err(message),
+            Some(Err(message)) => return refused_start(message),
             None => return err("the start request must be a valid UTF-8 string"),
         };
 
@@ -376,7 +376,7 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
         };
         let engine = match engine {
             Ok(engine) => engine,
-            Err(message) => return err(message),
+            Err(message) => return refused_start(message),
         };
 
         match server::host().start(
@@ -390,6 +390,25 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
             Err(message) => err(message),
         }
     })
+}
+
+/// A launch refused here, before the supervisor ran.
+///
+/// The refusal goes into the console as well as into the reply, because the
+/// reply is the one place nobody looks. Android reads only `ok` from it and
+/// moves on to the exit path; the crash report that follows is built from the
+/// console; and a player looking at a server that "stopped" sees the console
+/// too. Every refusal the supervisor makes for itself — a taken port, a second
+/// server — already writes a line for the same reason. This one did not, and
+/// a build that could not spawn a process shipped and reported nothing but
+/// its own download progress for every launch it refused.
+///
+/// Only for refusals made *here*. `ServerHost::start`'s own errors include
+/// "already running", and writing that into the console of the server that is
+/// running would confuse the one person reading it.
+fn refused_start(message: String) -> String {
+    server::host().push_log(format!("[Homerun] The server could not start: {message}"));
+    err(message)
 }
 
 /// Build a child-process engine from a host's invocation.
@@ -1072,5 +1091,23 @@ mod tests {
                 "player-facing error leaked {jargon:?}: {message}"
             );
         }
+    }
+
+    /// A refusal made before the supervisor runs is written into the console,
+    /// because the reply it also goes into is read by nobody: Android checks
+    /// `ok` and moves on, and the crash report is built from the console.
+    #[test]
+    fn a_launch_refused_here_explains_itself_in_the_console() {
+        let reason = "This build cannot run a server as a separate process (test).";
+        let reply: Value = serde_json::from_str(&refused_start(reason.to_string())).unwrap();
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], reason);
+
+        let console = server::host().logs_since(0).lines.join("
+");
+        assert!(
+            console.contains(&format!("[Homerun] The server could not start: {reason}")),
+            "{console}"
+        );
     }
 }
