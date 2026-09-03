@@ -599,3 +599,5 @@ Symptom → cause → fix.
 ---
 
 **Maintained by**: the Homerun Go team at Hintjen
+
+<!-- CLA probe: throwaway PR, closed unmerged. -->
