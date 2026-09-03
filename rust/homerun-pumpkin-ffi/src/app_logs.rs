@@ -25,6 +25,11 @@
 //! Reference: `AppLogsProvider` in `deviceWebsocket/handlers.ts`, and the API's
 //! `fetch_client_logs` task that calls it.
 //!
+//! What this module returns is raw. The frame that carries it is built by
+//! `homerun_core::device_ws::protocol::outgoing::app_logs`, which redacts it
+//! with the error-report scanner — a decision the core makes once, so a host
+//! cannot ship a bearer token by wiring this up without the extra step.
+//!
 //! # No permission is needed on either platform, and that is not an accident
 //!
 //! `READ_LOGS` is an Android signature permission and we do not hold it. What

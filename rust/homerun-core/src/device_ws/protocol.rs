@@ -232,6 +232,7 @@ impl Request {
 /// centralising is that the shape is written once.
 pub mod outgoing {
     use super::*;
+    use crate::reporting::{app_error::redact, scrub};
 
     pub fn auth_ok() -> Value {
         json!({ "type": "auth-ok" })
@@ -263,16 +264,34 @@ pub mod outgoing {
     }
 
     /// `timestamp` is the caller's: this crate has no clock, on purpose.
+    ///
+    /// The line is scrubbed *here*, as the frame is built, and not by whoever
+    /// drains the console. A join line carries a player's address and a chat
+    /// line whatever they typed, and this frame is on its way through the
+    /// tunnel to a browser. The rule is the crash report's — addresses and
+    /// chat go, names stay — made in [`crate::reporting::scrub`] and applied
+    /// in the one place every driver has to pass through, so none of them can
+    /// send a raw line by forgetting a step.
     pub fn log(server_id: &str, line: &str, timestamp: &str) -> Value {
-        json!({ "type": "log", "serverId": server_id, "line": line, "timestamp": timestamp })
+        json!({
+            "type": "log",
+            "serverId": server_id,
+            "line": scrub::console_line(line),
+            "timestamp": timestamp,
+        })
     }
 
-    /// Everything the console holds, sent once on subscribe.
+    /// Everything the console holds, sent once on subscribe. Scrubbed line by
+    /// line for the reason [`log`] gives.
     ///
     /// Without it a dashboard opened mid-session shows an empty console for a
     /// server that has been talking for an hour.
     pub fn log_history(server_id: &str, lines: &[String]) -> Value {
-        json!({ "type": "log-history", "serverId": server_id, "lines": lines })
+        json!({
+            "type": "log-history",
+            "serverId": server_id,
+            "lines": scrub::console_lines(lines),
+        })
     }
 
     pub fn rcon_response(server_id: &str, response: &str, success: bool) -> Value {
@@ -288,8 +307,21 @@ pub mod outgoing {
         json!({ "type": "server-status", "serverId": server_id, "online": online })
     }
 
+    /// This device's own log, for a support request.
+    ///
+    /// Redacted as it is built, with the same scanner an error report uses:
+    /// the app's log quotes URLs, and through them OAuth codes; request
+    /// headers, and through them bearer tokens; and whatever the page
+    /// printed, which has included an email address. The crash report already
+    /// runs this over the very same logcat text before uploading it
+    /// ([`crate::reporting::crash`]); a support request reads the same text
+    /// and used to get it raw. Names and UUIDs survive, as everywhere else.
     pub fn app_logs(main_log: &str, renderer_log: &str) -> Value {
-        json!({ "type": "app-logs", "mainLog": main_log, "rendererLog": renderer_log })
+        json!({
+            "type": "app-logs",
+            "mainLog": redact::text(main_log),
+            "rendererLog": redact::text(renderer_log),
+        })
     }
 }
 
@@ -426,6 +458,51 @@ mod tests {
     fn garbage_is_not_json() {
         assert_eq!(authed().read("not json at all"), Err(Refusal::NotJson));
         assert_eq!(Session::new().read("{"), Err(Refusal::NotJson));
+    }
+
+    /// The three frames that carry text off the device are scrubbed as they
+    /// are built. A join line carries a player's address and a chat line
+    /// whatever they typed; the rule is the crash report's, and it is made
+    /// here so no driver can send a raw line by forgetting a step.
+    #[test]
+    fn console_frames_leave_without_addresses_or_chat() {
+        let join = "[12:00:00] [Server thread/INFO]: Steve[/203.0.113.4:52341] logged in with entity id 42";
+        let chat = "[12:00:00] [Server thread/INFO]: <Steve> my address is 10.0.0.7 come over";
+
+        let frame = outgoing::log("s1", join, "t");
+        let line = frame["line"].as_str().unwrap();
+        assert!(!line.contains("203.0.113.4"), "{line}");
+        assert!(line.contains("Steve"), "names survive by decision: {line}");
+
+        let history = outgoing::log_history("s1", &[join.to_string(), chat.to_string()]);
+        let lines = history["lines"].as_array().unwrap();
+        assert!(!lines[0].as_str().unwrap().contains("203.0.113.4"));
+        let chat_line = lines[1].as_str().unwrap();
+        assert!(!chat_line.contains("come over"), "{chat_line}");
+        assert!(!chat_line.contains("10.0.0.7"), "{chat_line}");
+    }
+
+    /// The app's own log is what support reads, and it quotes URLs, headers
+    /// and whatever a page printed. Same redactor as an error report.
+    #[test]
+    fn app_logs_leave_without_tokens_addresses_or_emails() {
+        let main = "08-12 14:13:37 1 2 D HomerunApi: GET /api/user/ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhYmMifQ.abcdefghijklmnopqrstuvwxyz\n\
+                    08-12 14:13:38 1 2 D HomerunTunnel: peer 198.51.100.7:51820 handshake\n";
+        let renderer = "08-12 14:13:39 1 2 I HomerunWeb: signed in as someone@example.com\n";
+
+        let frame = outgoing::app_logs(main, renderer);
+        let main_log = frame["mainLog"].as_str().unwrap();
+        let renderer_log = frame["rendererLog"].as_str().unwrap();
+        assert!(!main_log.contains("eyJhbGci"), "{main_log}");
+        assert!(!main_log.contains("198.51.100.7"), "{main_log}");
+        assert!(
+            main_log.contains("handshake"),
+            "the line itself survives: {main_log}"
+        );
+        assert!(
+            !renderer_log.contains("someone@example.com"),
+            "{renderer_log}"
+        );
     }
 
     /// The dashboard already parses these. A field renamed here is a console

@@ -274,7 +274,12 @@ port already paid for once.
 answers a support request with. Android reads its own logcat; iOS reads
 `OSLogStore(scope: .currentProcessIdentifier)`, which can see this process and
 no other — the same line logd draws for `logcat --pid`, and the reason neither
-platform needs a permission for it.
+platform needs a permission for it. What leaves is redacted — tokens, query
+strings, email addresses, home directories, IP literals — by the same scanner
+an error report goes through, applied in the core as the frame is built rather
+than by either host, so neither can forget it. The live console a dashboard
+subscribes to is scrubbed the same way a crash report is: addresses and chat
+go, player names stay.
 
 ### What has actually been run
 
