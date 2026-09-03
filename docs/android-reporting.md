@@ -385,6 +385,14 @@ method, the path and the API's own error text.
 nothing, which is itself worth investigating — look for
 `crashed with an empty console`.
 
+**A crash happened and logcat says nothing about a report.** That is a report
+that went. `Reporting.send` logs only refusals (`no credential`), `reportCrash`
+only an empty console, and `HomerunApi.perform` only a failure — so check the
+API or the Discord channel, not logcat. To force one on a device, hold the
+port: `adb reverse tcp:25565 tcp:9` fails the next launch in preflight.
+Killing the JVM does **not** produce one; the core judges a signal death as a
+termination, deliberately, because that is what a low-memory kill looks like.
+
 **A crash report whose console is only `[Homerun]` download and restore
 lines.** The launch was refused before a server existed. Read the report's
 `device_logs`: the header's `engines:` line says what the library can run,

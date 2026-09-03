@@ -486,6 +486,24 @@ state and hides every bug about carrying state over: what a second launch
 clears, what it wrongly keeps, what it replays. Most of the interesting
 defects only appear on run two.
 
+### Forcing a server crash report on a real phone
+
+Two things learned on a Pixel while proving crash reporting (2026-09-03):
+
+- **`kill -9` on the JVM is not a crash.** `run-as <appId> kill -9 <pid of
+  libjavabin.so>` ends the run, but the core judges a signal death as *the
+  server was terminated* and lands on `STOPPED` — the same verdict as a
+  low-memory kill, on purpose — so no crash report goes out.
+- **Hold the server's port from adb instead.** `adb reverse tcp:25565 tcp:9`
+  makes adbd listen on 25565 on the device; the next start fails in the
+  supervisor's preflight, which is a genuine `CRASHED` with a console line
+  to report. `adb reverse --remove tcp:25565` afterwards.
+
+And the silence that follows is success: `Reporting` logs nothing when a crash
+report is sent, only when it is not (`no credential`, `crashed with an empty
+console`, or `HomerunApi`'s `did not go through`). Prove delivery on the API
+or in Discord, not in logcat.
+
 ## Diagnosing: probe, don't theorise
 
 When device behaviour contradicts what the code says should happen, the
