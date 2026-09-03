@@ -13,7 +13,9 @@ this tree — see *The UI bundle* below.
 **Licence:** the code in this repository is [GPL-3.0-only](LICENSE). The UI
 bundle is a separate, proprietary work; the GPL covers the host, not the
 bundle it downloads. Contributions are accepted under the [CLA](CLA.md),
-which a bot will ask you to sign on your first pull request.
+which a bot will ask you to sign on your first pull request. Commit with an
+email address linked to your GitHub account, or the bot cannot tell who to
+ask.
 
 **Releases** (App Store, Google Play, and over-the-air UI updates) are built
 from tags of this repository by a private release pipeline that holds the

@@ -1,7 +1,26 @@
 # First-time contributors sign the CLA (CLA.md) by posting the comment the
-# bot asks for on their PR. Signatures are recorded on the `cla-signatures`
-# branch of this repository. Maintainers who committed before the repo went
+# bot asks for on their PR. Maintainers who committed before the repo went
 # public are allowlisted.
+#
+# Signatures are appended to signatures/cla.json on the orphan
+# `cla-signatures` branch. The action can create that file but not the
+# branch, and when the branch was missing every PR failed this check before
+# anyone was asked to sign — the branch is seeded, and it must never be
+# protected, because the action writes to it with the repository token.
+#
+# How the check goes green: the `opened` run fails while a signature is
+# outstanding; the signing comment triggers an `issue_comment` run that
+# records the signature and re-runs the failed `pull_request_target` run
+# (that is what `actions: write` is for). Commenting `recheck` does the same.
+#
+# The action checks each commit's *author*, resolved to a GitHub account —
+# not committers, not Co-Authored-By trailers. A contributor whose commit
+# email is not linked to their account is reported as "not a GitHub user"
+# and cannot sign until they link it.
+#
+# This runs on pull_request_target with write permissions, which is safe
+# only because nothing here checks out or executes the PR's code. Keep it
+# that way, and keep the action pinned to a commit.
 name: CLA
 
 on:
@@ -14,13 +33,14 @@ permissions:
   actions: write
   contents: write
   pull-requests: write
-  statuses: write
 
 jobs:
   cla:
     runs-on: ubuntu-latest
     steps:
-      - uses: contributor-assistant/github-action@v2.6.1
+      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        # The two comment bodies are the action's defaults; do not set
+        # custom-pr-sign-comment without changing this condition to match.
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
