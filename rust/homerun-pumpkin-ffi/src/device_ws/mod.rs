@@ -780,6 +780,7 @@ impl Connection {
                 // [`app_logs`]. Read on the caller's task rather than
                 // spawned: it is one `logcat -d` that returns in milliseconds,
                 // and a support request is not a hot path.
+                // Redaction happens in the frame constructor, in the core.
                 let (main_log, renderer_log) = crate::app_logs::collect();
                 self.send(outgoing::app_logs(&main_log, &renderer_log));
                 true
