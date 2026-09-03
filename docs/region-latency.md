@@ -172,7 +172,7 @@ They are grey-clouded deliberately, and the API docs say why:
 > record silently falls into the proxied apex wildcard, and proxying breaks
 > raw TCP.
 >
-> — `homerun/api/docs/server-share-page.md`
+> — the API's own notes on the share page
 
 Verified, and the probe works:
 

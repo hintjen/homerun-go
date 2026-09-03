@@ -148,8 +148,8 @@ own:
 output, already accepted from a native device and already attached to the
 Discord thread as `device_logs.log`. Reusing it meant no schema change and no
 three-repository lockstep for a report to say one more thing. The API's
-mobile embed shows the header; the Discord half is in
-`homerun/api/docs/service-error-reporting.md`.
+mobile embed shows the header; the Discord half is the API's, and is
+documented there.
 
 The engines line is the FFI's, **not** `ServerHost.engines()`: the host's
 answer is whether the binaries are staged, and a host describing its core's

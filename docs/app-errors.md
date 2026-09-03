@@ -235,8 +235,8 @@ be a state change stale, which is the right trade.
 It is the join key. A Rust panic or a Kotlin exception during a launch used to
 be a row in one table and the server's crash report a row in another, with
 nothing but a timestamp in common. With `server` set, the API can put the two
-beside each other; what it does with that is in
-`homerun/api/docs/service-error-reporting.md`. The crash report itself
+beside each other; what it does with that is the API's to document. The
+crash report itself
 carries the app's log too — see [`android-reporting.md`](./android-reporting.md)
 § *What travels with a crash* — so the two reports describe the same minutes
 from both sides.
@@ -358,7 +358,7 @@ feature has five truncation sites.
 | Deliberate failures, for verifying | `HomerunApplication.kt` + `MainActivity.kt` (broadcasts), `DebugTriggers.swift` (env var) |
 
 The page half lives in `homerun-app-ui` — see `docs/error-reporting.md` there.
-The endpoint lives in `hintjen/homerun` — see `api/docs/app-errors.md`.
+The endpoint lives with the API, which documents its own half.
 
 ## Verifying it
 
