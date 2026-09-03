@@ -49,6 +49,12 @@ enum Reporting {
     /// The server the cadence loop is reporting on, or nil when nothing runs.
     private static var runningId: String?
 
+    /// The server a launch was armed for, from ``starting(serverId:settings:)``
+    /// until the run ends. Wider than ``runningId`` on purpose: an app error
+    /// during the minutes *before* running is the one most worth tying to
+    /// the server it happened to.
+    private static var armedId: String?
+
     /// Opaque cadence state from `reporting.stats.schedule`. Never inspected —
     /// the core owns the interval, the debounce, and the rule that a presence
     /// report resets the periodic clock.
@@ -81,6 +87,7 @@ enum Reporting {
     /// crashes on its way up is exactly the one worth explaining, and it needs
     /// a context that already exists when it fails.
     static func starting(serverId: String, settings: HomerunAPI.ServerSettings?) {
+        armedId = serverId
         let loader = "vanilla"  // Pumpkin-only host; see Core.statsPoll.
         context = RunContext(
             loader: loader,
@@ -175,8 +182,16 @@ enum Reporting {
         timer?.invalidate()
         timer = nil
         runningId = nil
+        armedId = nil
         schedule = nil
     }
+
+    /// The server this device is hosting or bringing up, or nil when idle.
+    ///
+    /// Read by `AppErrors` for every report's context, so an app error can be
+    /// joined on the API to the crash report of the server it happened
+    /// during. Cheap and lock-free: it is also read from a crash handler.
+    static func hostedServerId() -> String? { armedId }
 
     /// Ask the core when to report next, and set one timer to do it.
     ///
@@ -314,11 +329,30 @@ enum Reporting {
             backend.note(serverId: serverId, line: diagnosis.message)
         }
 
+        // The console is the server's account of what happened. This is the
+        // app's: which build, which bundle, what the core can do, and its own
+        // log — for the crash the console cannot explain. The core fills in
+        // its half and the API already has a column for it.
         guard
             let request = Core.crashReport(
-                serverId: serverId, deviceId: deviceId, lines: lines)
+                serverId: serverId, deviceId: deviceId, lines: lines, context: hostContext())
         else { return }
         Task { await perform(request, apiURL: apiURL) }
+    }
+
+    /// What this app is, for a crash report. Foundation only — this file does
+    /// not import UIKit, and `utsname` names the hardware more precisely than
+    /// `UIDevice.model` ("iPhone") would anyway.
+    private static func hostContext() -> [String: Any] {
+        var context = AppErrors.context()
+        var system = utsname()
+        uname(&system)
+        let machine = withUnsafePointer(to: &system.machine) {
+            $0.withMemoryRebound(to: CChar.self, capacity: 1) { String(cString: $0) }
+        }
+        context["device"] = machine
+        context["os"] = "iOS \(ProcessInfo.processInfo.operatingSystemVersionString)"
+        return context
     }
 
     // MARK: - Operator changes

@@ -53,7 +53,7 @@ use super::scrub;
 use super::truncate;
 use super::Request;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 /// How many times a host may relaunch after a corrupt jar before it must give
 /// up and say so. The desktop's `corruptRestarts < 1`.
@@ -82,6 +82,15 @@ pub const MAX_REPORTED_LINES: usize = 2000;
 /// the device websocket's `get-app-logs`: keep the tail, cut on a line
 /// boundary, because half a line reads as a different message.
 pub const MAX_REPORTED_BYTES: usize = 128 * 1024;
+
+/// The most of the *app's* log that rides along with the console.
+///
+/// Half the console's allowance, because it is the second thing in the same
+/// request and the console is the half a KnownError pattern matches on. The
+/// app log is there for the case the console cannot explain — a launch the
+/// core refused before a server ever spoke — and the end of it is where that
+/// refusal is.
+pub const MAX_APP_LOG_BYTES: usize = 64 * 1024;
 
 /// What the log says went wrong.
 ///
@@ -268,6 +277,89 @@ pub fn diagnose<S: AsRef<str>>(lines: &[S], retries_used: u32) -> Option<Diagnos
     })
 }
 
+/// What the host and the build were, when the server died.
+///
+/// # Why this exists
+///
+/// A crash report used to be the console and nothing else. Then an Android
+/// build shipped with its Rust core unable to spawn a process: every launch
+/// was refused before a server existed, the console held only the host's own
+/// download and restore lines, and the report that reached support said
+/// exactly that and nothing more. The sentence that explained it — *this
+/// build cannot run a server as a separate process* — was in an error string
+/// nobody read.
+///
+/// So a report now carries the things that are true of the *app* rather than
+/// of the server: which build, which UI bundle, what the FFI can do, and the
+/// tail of the app's own log. The API stores it in `device_logs`, the field
+/// the desktop fills with its Docker daemon's output — a phone has no daemon,
+/// and its own log is the closest thing to one.
+///
+/// Every field is optional and the header prints what it has. The host that
+/// knows least is the one whose report matters most.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HostContext {
+    pub platform: Option<String>,
+    pub app_version: Option<String>,
+    /// The over-the-air UI bundle, or `shipped`.
+    pub bundle: Option<String>,
+    pub host_revision: Option<u32>,
+    /// The device model, as the host names it.
+    pub device: Option<String>,
+    /// The OS and its version.
+    pub os: Option<String>,
+    /// `FFI_ABI_VERSION` of the library that built this report. Filled in by
+    /// the FFI crate, never by a host — it is the one fact a host cannot get
+    /// wrong if it is not asked for it.
+    pub abi_version: Option<u32>,
+    /// The engines this build was compiled with: `process`, `pumpkin`. Also
+    /// the FFI crate's to fill, for the same reason — and it is the field
+    /// that would have named the failure above on the first report.
+    pub engines: Vec<String>,
+    /// The tail of the app's own log — logcat on Android, the unified log on
+    /// iOS. Redacted and cut here; a host hands over what it has.
+    pub app_log: Option<String>,
+}
+
+/// The `device_logs` field: a header a reader can take in at a glance, then
+/// the app's log.
+///
+/// The header lines carry the `[Homerun Go]` badge so they cannot be mistaken
+/// for the log they precede, and so a KnownError pattern written against the
+/// log cannot accidentally match the header.
+fn device_logs(host: &HostContext) -> String {
+    let field = |value: &Option<String>| value.as_deref().unwrap_or("?").to_string();
+    let number = |value: Option<u32>| value.map_or_else(|| "?".to_string(), |n| n.to_string());
+    let engines = if host.engines.is_empty() {
+        "none".to_string()
+    } else {
+        host.engines.join(", ")
+    };
+    let mut text = format!(
+        "[Homerun Go] {} {} · bundle {} · host revision {} · ffi abi {}\n\
+         [Homerun Go] engines: {engines}\n\
+         [Homerun Go] device: {} · {}\n",
+        field(&host.platform),
+        field(&host.app_version),
+        field(&host.bundle),
+        number(host.host_revision),
+        number(host.abi_version),
+        field(&host.device),
+        field(&host.os),
+    );
+    if let Some(log) = host.app_log.as_deref().filter(|l| !l.trim().is_empty()) {
+        // Redacted *before* the cut: a token split in half is still half a
+        // token, and the redactor knows the shapes. Same scanner as an app
+        // error report, because this is the same kind of text — our own log,
+        // which quotes URLs, and through them whatever was on them.
+        let redacted = super::app_error::redact::text(log);
+        text.push('\n');
+        text.push_str(&truncate::tail_lines(redacted, MAX_APP_LOG_BYTES));
+    }
+    text
+}
+
 /// The crash report. Device-signed: a crash is a fact about a machine.
 ///
 /// The API answers with a serialised ServiceErrorReport carrying its own
@@ -285,19 +377,30 @@ pub fn diagnose<S: AsRef<str>>(lines: &[S], retries_used: u32) -> Option<Diagnos
 /// Doing it here rather than in each host is the whole reason it is here: a
 /// redaction one platform forgot is the same leak, and the leak is silent. If
 /// this request ever gains another field carrying console text, scrub that too.
-pub fn report<S: AsRef<str>>(server_id: &str, device_id: &str, lines: &[S]) -> Request {
+///
+/// `host` is what the app knows about itself — see [`HostContext`] for why a
+/// report carries it. `None` sends the console alone, which is what every
+/// report was before it existed.
+pub fn report<S: AsRef<str>>(
+    server_id: &str,
+    device_id: &str,
+    lines: &[S],
+    host: Option<&HostContext>,
+) -> Request {
     let from = lines.len().saturating_sub(MAX_REPORTED_LINES);
     let output = scrub::console_lines(&lines[from..]).join("\n");
     let output = tail_bytes(output);
 
-    Request::post(
-        "/api/service-error/",
-        json!({
-            "service": server_id,
-            "device": device_id,
-            "output": output,
-        }),
-    )
+    let mut body = json!({
+        "service": server_id,
+        "device": device_id,
+        "output": output,
+    });
+    if let Some(host) = host {
+        body["device_logs"] = Value::String(device_logs(host));
+    }
+
+    Request::post("/api/service-error/", body)
 }
 
 /// The last [`MAX_REPORTED_BYTES`], cut on a line boundary.
@@ -501,7 +604,7 @@ mod tests {
 
     #[test]
     fn the_crash_report_is_device_signed_and_carries_the_console() {
-        let request = report("srv-1", "dev-9", &["first line", "second line"]);
+        let request = report("srv-1", "dev-9", &["first line", "second line"], None);
 
         assert_eq!(request.method, Method::Post);
         assert_eq!(
@@ -533,7 +636,7 @@ mod tests {
             "[12:00:01] [Server thread/INFO]: <Steve> my address is 10.0.0.7",
             "[12:00:02] [Server thread/ERROR]: java.lang.OutOfMemoryError: Java heap space",
         ];
-        let request = report("srv-1", "dev-9", &console);
+        let request = report("srv-1", "dev-9", &console, None);
         let output = request.body["output"].as_str().expect("output is a string");
 
         assert!(
@@ -567,7 +670,7 @@ mod tests {
         let lines: Vec<String> = (0..MAX_REPORTED_LINES + 500)
             .map(|i| format!("line {i}"))
             .collect();
-        let request = report("srv-1", "dev-9", &lines);
+        let request = report("srv-1", "dev-9", &lines, None);
         let output = request.body["output"].as_str().unwrap();
 
         assert_eq!(output.lines().count(), MAX_REPORTED_LINES);
@@ -634,7 +737,7 @@ mod tests {
         let lines: Vec<String> = (0..40)
             .map(|n| format!("[12:00:00] [Server thread/INFO]: {n} {}", "x".repeat(8_000)))
             .collect();
-        let request = report("srv", "dev", &lines);
+        let request = report("srv", "dev", &lines, None);
         let output = request.body["output"].as_str().unwrap();
 
         assert!(
@@ -661,11 +764,146 @@ mod tests {
         for pad in 0..4 {
             let line = format!("[12:00:00] §a{}§r joined\n", "é".repeat(4_000 + pad));
             let lines: Vec<String> = std::iter::repeat_n(line.clone(), 20).collect();
-            let output = report("srv", "dev", &lines).body["output"]
+            let output = report("srv", "dev", &lines, None).body["output"]
                 .as_str()
                 .unwrap()
                 .to_string();
             assert!(output.len() <= MAX_REPORTED_BYTES + 64);
         }
+    }
+
+    // --- what the app says about itself ------------------------------------
+
+    fn pixel() -> HostContext {
+        HostContext {
+            platform: Some("android".into()),
+            app_version: Some("0.4.2".into()),
+            bundle: Some("2026-08-14.3".into()),
+            host_revision: Some(12),
+            device: Some("Pixel 9 Pro XL".into()),
+            os: Some("Android 15".into()),
+            abi_version: Some(8),
+            engines: vec!["process".into(), "pumpkin".into()],
+            app_log: Some(
+                "09-03 10:00:01.000 I HomerunHost: launching srv-1\n\
+                 09-03 10:00:02.000 W HomerunNative: This build cannot run a server as a separate process.\n"
+                    .into(),
+            ),
+        }
+    }
+
+    /// The field is `device_logs` because the API already has it, already
+    /// accepts it from a native device, and already attaches it to the
+    /// Discord thread. A new field would have needed three repositories to
+    /// move together for a report to say one more thing.
+    #[test]
+    fn a_host_context_travels_as_device_logs_with_a_header_first() {
+        let request = report("srv-1", "dev-9", CLEAN_SHUTDOWN, Some(&pixel()));
+        let logs = request.body["device_logs"].as_str().unwrap();
+
+        let mut lines = logs.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "[Homerun Go] android 0.4.2 · bundle 2026-08-14.3 · host revision 12 · ffi abi 8"
+        );
+        assert_eq!(lines.next().unwrap(), "[Homerun Go] engines: process, pumpkin");
+        assert_eq!(lines.next().unwrap(), "[Homerun Go] device: Pixel 9 Pro XL · Android 15");
+        assert_eq!(lines.next().unwrap(), "", "the log is set off from the header");
+        assert!(
+            logs.ends_with("cannot run a server as a separate process.\n"),
+            "the refusal at the end of the log is the point:\n{logs}"
+        );
+        // The console is untouched by any of this.
+        assert!(request.body["output"].as_str().unwrap().contains("Done (3.244s)"));
+    }
+
+    /// Every report before this existed was the console alone, and the two
+    /// hosts that send one are updated separately from the crate.
+    #[test]
+    fn without_a_host_context_the_body_is_what_it_always_was() {
+        let body = report("srv-1", "dev-9", CLEAN_SHUTDOWN, None).body;
+        assert!(body.get("device_logs").is_none(), "{body}");
+        assert_eq!(body.as_object().unwrap().len(), 3);
+    }
+
+    /// The failure this was built for: a build compiled with no way to run a
+    /// server. It has to be legible from the header alone, and a host that
+    /// knows nothing else still gets a header.
+    #[test]
+    fn a_build_with_no_engines_says_so_even_when_nothing_else_is_known() {
+        let host = HostContext {
+            abi_version: Some(8),
+            ..Default::default()
+        };
+        let body = report("srv-1", "dev-9", CLEAN_SHUTDOWN, Some(&host)).body;
+        let logs = body["device_logs"].as_str().unwrap();
+
+        assert!(logs.contains("[Homerun Go] engines: none\n"), "{logs}");
+        assert!(logs.starts_with("[Homerun Go] ? ? · bundle ? · host revision ? · ffi abi 8\n"));
+        assert!(
+            !logs.contains("\n\n"),
+            "no log means no empty section after the header:\n{logs}"
+        );
+    }
+
+    /// Our own log quotes the API's URLs and whatever was on them. Same rule
+    /// as an app error report, and the same scanner, so the two cannot drift.
+    #[test]
+    fn the_app_log_is_redacted_before_it_leaves() {
+        let token = format!("eyJ{}", "a".repeat(60));
+        let host = HostContext {
+            app_log: Some(format!(
+                "I HomerunApi: GET https://api.gethomerun.app/api/me/?code=s3cr3t\n\
+                 I HomerunApi: Authorization: Bearer {token}\n\
+                 I HomerunApi: claimed by owner@example.com from 203.0.113.4\n"
+            )),
+            ..Default::default()
+        };
+        let body = report("srv-1", "dev-9", CLEAN_SHUTDOWN, Some(&host)).body;
+        let logs = body["device_logs"].as_str().unwrap();
+
+        assert!(!logs.contains(&token), "a token was uploaded:\n{logs}");
+        assert!(!logs.contains("s3cr3t"), "a query string was uploaded:\n{logs}");
+        assert!(!logs.contains("owner@example.com"), "an email was uploaded:\n{logs}");
+        assert!(!logs.contains("203.0.113.4"), "an address was uploaded:\n{logs}");
+        assert!(logs.contains("api.gethomerun.app"), "the host is kept — it says which deployment");
+    }
+
+    /// The end of the log is where the refusal is. Cut by bytes, on a line,
+    /// and after redaction — a token split in half is still half a token.
+    #[test]
+    fn a_long_app_log_keeps_its_end() {
+        let log: String = (0..4_000)
+            .map(|n| format!("I HomerunHost: line {n} {}\n", "x".repeat(40)))
+            .collect();
+        let host = HostContext {
+            app_log: Some(log),
+            ..Default::default()
+        };
+        let body = report("srv-1", "dev-9", CLEAN_SHUTDOWN, Some(&host)).body;
+        let logs = body["device_logs"].as_str().unwrap();
+
+        assert!(logs.len() <= MAX_APP_LOG_BYTES + 256, "not capped: {} bytes", logs.len());
+        assert!(logs.contains("[earlier lines dropped]\n"));
+        assert!(logs.trim_end().ends_with("line 3999 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"));
+        assert!(!logs.contains("line 0 "), "the beginning survived instead of the end");
+    }
+
+    /// The wire shape hosts build. Every field optional, unknown keys
+    /// tolerated — a host that sends more than this crate knows must not
+    /// lose the report over it.
+    #[test]
+    fn a_host_context_reads_from_the_wire_with_anything_missing() {
+        let host: HostContext = serde_json::from_value(serde_json::json!({
+            "platform": "ios",
+            "appVersion": "1.2.0",
+            "hostRevision": 12,
+            "somethingNewer": true,
+        }))
+        .unwrap();
+        assert_eq!(host.platform.as_deref(), Some("ios"));
+        assert_eq!(host.host_revision, Some(12));
+        assert!(host.engines.is_empty());
+        assert!(host.app_log.is_none());
     }
 }

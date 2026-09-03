@@ -223,6 +223,24 @@ It is **session-scoped and never persisted**. A persisted ledger silences a
 first-launch crash loop on the second launch — precisely when the report
 matters most — and would mean file I/O on a path a panic can reach.
 
+## An error during a launch names its server
+
+`Context.server_id` had existed since the wire format was designed and
+neither host filled it. Both do now: Android from `ServerHost.hostedServerId()`,
+iOS from `Reporting.hostedServerId()`. Each is a lock-free read of state the
+host already keeps — `AppErrors.context()` is called from a crash handler,
+and taking a monitor there can turn a crash into a hang — so the answer may
+be a state change stale, which is the right trade.
+
+It is the join key. A Rust panic or a Kotlin exception during a launch used to
+be a row in one table and the server's crash report a row in another, with
+nothing but a timestamp in common. With `server` set, the API can put the two
+beside each other; what it does with that is the API's to document. The
+crash report itself
+carries the app's log too — see [`android-reporting.md`](./android-reporting.md)
+§ *What travels with a crash* — so the two reports describe the same minutes
+from both sides.
+
 ## FFI surface
 
 Four arms on the existing `core_dispatch::call`, beside `reporting.crash.report`:
@@ -340,7 +358,7 @@ feature has five truncation sites.
 | Deliberate failures, for verifying | `HomerunApplication.kt` + `MainActivity.kt` (broadcasts), `DebugTriggers.swift` (env var) |
 
 The page half lives in `homerun-app-ui` — see `docs/error-reporting.md` there.
-The endpoint lives in `hintjen/homerun` — see `api/docs/app-errors.md`.
+The endpoint lives with the API, which documents its own half.
 
 ## Verifying it
 

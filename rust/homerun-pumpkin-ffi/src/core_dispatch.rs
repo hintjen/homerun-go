@@ -97,6 +97,46 @@ fn context_arg(value: &Value, method: &str) -> Result<app_error::Context, String
         .map_err(|e| format!("\"{method}\" got a context it could not read: {e}"))
 }
 
+/// The host's half of a crash report's context, completed with the half only
+/// this crate can answer.
+///
+/// A host sends what it knows — its version, its bundle, the device — and
+/// this fills in the ABI version, which engines were compiled in, and the
+/// app's own log. Those three are deliberately not asked of the host: the
+/// report that prompted this was about a build whose *core* could not spawn a
+/// process, and a host that had to describe its core's abilities would have
+/// described the ones it assumed it had.
+///
+/// The log read is one `logcat -d` on Android, or the provider the host
+/// registered — milliseconds, on the thread the host reports from, which is
+/// never the main one. Absent `context`, nothing is read and the report is
+/// the console alone.
+fn crash_host_context(args: &Value, method: &str) -> Result<Option<crash::HostContext>, String> {
+    let Some(value) = args.get("context") else {
+        return Ok(None);
+    };
+    let mut host: crash::HostContext = serde_json::from_value(value.clone())
+        .map_err(|e| format!("\"{method}\" got a context it could not read: {e}"))?;
+    host.abi_version = Some(crate::FFI_ABI_VERSION);
+    host.engines = compiled_engines();
+    if host.app_log.is_none() {
+        host.app_log = Some(crate::app_logs::collect().0);
+    }
+    Ok(Some(host))
+}
+
+/// What this library can run, as its features say — not as a host believes.
+fn compiled_engines() -> Vec<String> {
+    let mut engines = Vec::new();
+    if cfg!(feature = "process-engine") {
+        engines.push("process".to_string());
+    }
+    if cfg!(feature = "pumpkin-engine") {
+        engines.push("pumpkin".to_string());
+    }
+    engines
+}
+
 /// Read the caller's [`app_error::Occurrence`].
 fn occurrence_arg(value: &Value, method: &str) -> Result<app_error::Occurrence, String> {
     serde_json::from_value(value.clone())
@@ -1400,12 +1440,16 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             serde_json::to_value(crash::diagnose(&lines, used)).map_err(|e| e.to_string())
         }
 
-        "reporting.crash.report" => serde_json::to_value(crash::report(
-            &text("serverId")?,
-            &text("deviceId")?,
-            &console_lines(&args, method)?,
-        ))
-        .map_err(|e| e.to_string()),
+        "reporting.crash.report" => {
+            let host = crash_host_context(&args, method)?;
+            serde_json::to_value(crash::report(
+                &text("serverId")?,
+                &text("deviceId")?,
+                &console_lines(&args, method)?,
+                host.as_ref(),
+            ))
+            .map_err(|e| e.to_string())
+        }
 
         // -- app error reporting --------------------------------------------
         //
@@ -3309,4 +3353,48 @@ geyser"
         assert_eq!(meaning["joined"], "Ada");
     }
 
+    // --- the crash report's host context ------------------------------------
+
+    /// The build's own facts are stamped here, over anything the host sent:
+    /// a host describing its core's abilities describes the ones it assumed.
+    #[test]
+    fn a_crash_report_carries_what_only_this_crate_knows_about_the_build() {
+        let reply = ok(
+            "reporting.crash.report",
+            json!({
+                "serverId": "srv-1",
+                "deviceId": "dev-9",
+                "lines": ["[Homerun] Minecraft 26.2 ready."],
+                "context": {
+                    "platform": "android",
+                    "appVersion": "0.4.2",
+                    "abiVersion": 1,
+                    "engines": ["a lie"],
+                },
+            }),
+        );
+        let logs = reply["body"]["device_logs"].as_str().expect("device_logs");
+
+        assert!(logs.contains(&format!("ffi abi {}", crate::FFI_ABI_VERSION)), "{logs}");
+        let expected = match compiled_engines().as_slice() {
+            [] => "engines: none".to_string(),
+            some => format!("engines: {}", some.join(", ")),
+        };
+        assert!(logs.contains(&expected), "{logs}");
+        assert!(!logs.contains("a lie"), "the host's claim was kept: {logs}");
+        // Whatever this machine answers for its own log, the section exists:
+        // an empty log would read as "nothing happened".
+        assert!(logs.contains("\n\n"), "no app log section: {logs}");
+    }
+
+    /// Both hosts sent the console alone before this existed, and the arm
+    /// must go on accepting exactly that.
+    #[test]
+    fn a_crash_report_without_a_context_is_the_console_alone() {
+        let reply = ok(
+            "reporting.crash.report",
+            json!({ "serverId": "srv-1", "deviceId": "dev-9", "lines": ["x"] }),
+        );
+        assert!(reply["body"].get("device_logs").is_none(), "{reply}");
+    }
 }

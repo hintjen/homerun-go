@@ -51,7 +51,7 @@ use super::Request;
 use crate::reporting::truncate;
 
 mod fingerprint;
-mod redact;
+pub(crate) mod redact;
 
 // ---------------------------------------------------------------------------
 // Policy

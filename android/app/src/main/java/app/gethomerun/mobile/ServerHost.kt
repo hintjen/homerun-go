@@ -399,6 +399,17 @@ object ServerHost {
         Hosting(hostingId, hostingName, hostingState, hostingBackup, null, hostingStarting)
             .also { lastHosting = it }
 
+    /**
+     * The server this device is hosting, or null when idle.
+     *
+     * Lock-free, from the same cached snapshot [hostingSummary] reads, and for
+     * the same reason: [AppErrors] asks from a crash handler, where taking
+     * this monitor could turn a crash into a hang. Slightly stale is the
+     * right trade — it names the launch an error happened during, which is
+     * what the API joins an app error to a crash report on.
+     */
+    fun hostedServerId(): String? = lastHosting.serverId
+
     /** What this device was doing, in a few words, for that handler's log. */
     fun hostingSummary(): String = lastHosting.let {
         when {

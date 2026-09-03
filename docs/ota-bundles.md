@@ -428,8 +428,8 @@ interface from a CDN.
 
 ## The endpoint that answers
 
-Built, on branch `api/ota-ui-bundles` in the `homerun` repo —
-`api/docs/ota-ui-bundles.md` is the server side in full. `UiBundle` is one row
+Built, on branch `api/ota-ui-bundles` in the `homerun` repo — the API
+documents the server side in full. `UiBundle` is one row
 per release per platform; the newest row a device qualifies for resolves.
 
 Two things it does that matter here:

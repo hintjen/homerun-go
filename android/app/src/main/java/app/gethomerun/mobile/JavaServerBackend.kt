@@ -16,6 +16,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -984,9 +985,15 @@ class JavaServerBackend(
         // left to write.
         drainConsole(serverId)
 
-        val ok = runCatching {
-            Json.parseToJsonElement(result).jsonObject["ok"]?.jsonPrimitive?.boolean
-        }.getOrNull() == true
+        val reply = runCatching { Json.parseToJsonElement(result).jsonObject }.getOrNull()
+        val ok = reply?.get("ok")?.jsonPrimitive?.booleanOrNull == true
+        // The supervisor's own account of why. It also writes a refusal into
+        // the console, which is what the crash report is built from; this is
+        // for whoever is reading logcat, where nothing else says it.
+        if (!ok) {
+            val why = reply?.get("error")?.jsonPrimitive?.contentOrNull ?: "no reason given"
+            Log.w(TAG, "$serverId did not run cleanly: $why")
+        }
         // There is no process exit code to read any more — the supervisor
         // reports whether the run unwound cleanly, and 0 stands in for that.
         val code = if (ok) 0 else 1

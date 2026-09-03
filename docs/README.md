@@ -499,7 +499,7 @@ How a message sent by the API lands in this phone's tray — FCM behind the
   force-stopped app) that read exactly like non-delivery
 
 **Read this for**: Working on push, a notification that never arrived, or a
-token the API keeps deleting. API half: `homerun/api/docs/push-notifications.md`.
+token the API keeps deleting. The API documents its half.
 
 ---
 
