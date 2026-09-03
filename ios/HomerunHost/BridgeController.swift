@@ -399,7 +399,7 @@ extension BridgeController: WKScriptMessageHandler {
         // Never guess at an unknown version — the shapes may differ.
         guard incoming.v == BridgeEnvelope.version else {
             reply(
-                to: incoming.id, message: "This version of Homerun cannot talk to the app screen.",
+                to: incoming.id, message: "This version of Homerun Go cannot talk to the app screen.",
                 code: "UNSUPPORTED_VERSION")
             return
         }

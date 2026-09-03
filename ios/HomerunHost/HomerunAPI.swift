@@ -35,11 +35,11 @@ enum HomerunAPI {
         var errorDescription: String? {
             switch self {
             case .notAuthenticated:
-                return "Homerun is not signed in on this device."
+                return "Homerun Go is not signed in on this device."
             case .http(let status, let body):
-                return "The Homerun service returned \(status). \(body)"
+                return "The Homerun Go service returned \(status). \(body)"
             case .malformed:
-                return "The Homerun service sent a reply Homerun could not read."
+                return "The Homerun Go service sent a reply the app could not read."
             }
         }
     }

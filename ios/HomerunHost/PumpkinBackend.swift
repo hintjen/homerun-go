@@ -87,7 +87,7 @@ final class PumpkinBackend: ServerBackend {
         }
     }
 
-    /// A line from Homerun rather than from the engine.
+    /// A line from Homerun Go rather than from the engine.
     ///
     /// Emitted for whoever is watching *and* written into the engine's console
     /// buffer, so a player who opens the console after a slow launch still sees
@@ -97,7 +97,7 @@ final class PumpkinBackend: ServerBackend {
     ///
     /// The first note of a launch also clears the previous run's console. That
     /// rule is the core's, so nothing here has to sequence it.
-    /// Put a line of Homerun's *own* into a server's console — what the app
+    /// Put a line of Homerun Go's *own* into a server's console — what the app
     /// worked out and the server did not say — on the stream the player is
     /// already looking at.
     ///

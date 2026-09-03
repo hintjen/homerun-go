@@ -54,7 +54,7 @@ enum HomerunFFI {
         command.withCString { decode(homerun_server_command($0)) }
     }
 
-    /// A line from Homerun itself into the server's console — a world
+    /// A line from Homerun Go itself into the server's console — a world
     /// restoring, the tunnel coming up, a launch waiting on its predecessor.
     ///
     /// Before this, the host emitted those as `native-server-log` events and

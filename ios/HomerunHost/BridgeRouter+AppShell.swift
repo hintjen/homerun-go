@@ -384,7 +384,7 @@ extension BridgeRouter {
             let message = payload["message"] as? String
         else { return nil }
         await NotificationPresenter.show(
-            title: payload["title"] as? String ?? "Homerun", body: message)
+            title: payload["title"] as? String ?? "Homerun Go", body: message)
         return nil
     }
 

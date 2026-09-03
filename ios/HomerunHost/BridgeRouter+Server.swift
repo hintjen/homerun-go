@@ -19,7 +19,7 @@ extension BridgeRouter {
     func nativeServerStart(_ params: Any?) async throws -> Any? {
         guard let payload = params as? [String: Any],
             let serverId = payload["serverId"] as? String
-        else { return ["success": false, "error": "Homerun could not tell which server to start."] }
+        else { return ["success": false, "error": "Homerun Go could not tell which server to start."] }
 
         // Admission, before anything slow. The core counts the server active
         // from here, which is what the contract means by "from the moment the
@@ -53,7 +53,7 @@ extension BridgeRouter {
             // one thing that knows whether anything else holds the slot.
             return [
                 "success": false,
-                "error": "Homerun could not work out whether this server can start.",
+                "error": "Homerun Go could not work out whether this server can start.",
             ]
         }
 
@@ -100,7 +100,7 @@ extension BridgeRouter {
                 // precisely the silent-wrong-world outcome this exists to stop.
                 return [
                     "success": false,
-                    "error": "Homerun could not work out whether this server can start.",
+                    "error": "Homerun Go could not work out whether this server can start.",
                 ]
             }
         }
@@ -159,7 +159,7 @@ extension BridgeRouter {
 
     func nativeServerStop(_ params: Any?) async throws -> Any? {
         guard let serverId = (params as? [String: Any])?["serverId"] as? String else {
-            return ["success": false, "error": "Homerun could not tell which server to stop."]
+            return ["success": false, "error": "Homerun Go could not tell which server to stop."]
         }
 
         // The core records the intent and keeps the server counted active for
@@ -187,7 +187,7 @@ extension BridgeRouter {
 
     func nativeServerDelete(_ params: Any?) async throws -> Any? {
         guard let serverId = (params as? [String: Any])?["serverId"] as? String else {
-            return ["success": false, "error": "Homerun could not tell which server to delete."]
+            return ["success": false, "error": "Homerun Go could not tell which server to delete."]
         }
         do {
             try backend.delete(serverId: serverId)
