@@ -48,4 +48,4 @@ jobs:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/hintjen/homerun-go/blob/main/CLA.md"
           branch: "cla-signatures"
-          allowlist: "shuabritt,justin-russell,*[bot]"
+          allowlist: "justin-russell,*[bot]"
