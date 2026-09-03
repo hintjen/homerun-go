@@ -18,6 +18,13 @@
 # email is not linked to their account is reported as "not a GitHub user"
 # and cannot sign until they link it.
 #
+# The workflow that runs is main's, whatever branch a PR targets: an
+# allowlist change is live only once it is on main. Once a contributor has
+# posted the signing phrase on a PR, every later run of that PR re-reads it,
+# so a signature survives a ledger edit while the comment stands; the bot
+# edits its request comment into the all-signed notice rather than posting
+# a new one. All of this was proven on PRs 3–5, throwaways closed unmerged.
+#
 # This runs on pull_request_target with write permissions, which is safe
 # only because nothing here checks out or executes the PR's code. Keep it
 # that way, and keep the action pinned to a commit.
@@ -48,4 +55,4 @@ jobs:
           path-to-signatures: "signatures/cla.json"
           path-to-document: "https://github.com/hintjen/homerun-go/blob/main/CLA.md"
           branch: "cla-signatures"
-          allowlist: "justin-russell,*[bot]"
+          allowlist: "shuabritt,justin-russell,*[bot]"
