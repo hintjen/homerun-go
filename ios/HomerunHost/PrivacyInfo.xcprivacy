@@ -37,16 +37,143 @@
 	</array>
 
 	<!--
-	  PLACEHOLDER — this section is not audited yet, and an empty array is
-	  not a neutral default. It is an affirmative declaration that the app
-	  collects nothing, and it has to match the answers given in App Store
-	  Connect. The app signs players in and talks to the gateway, so this
-	  is almost certainly wrong as it stands: walk HomerunAPI.swift and
-	  declare the account identifier and anything else that leaves the
-	  device before the first external build.
+	  What the app collects, and where each entry comes from. Apple holds us
+	  to this: it has to match the App Privacy answers in App Store Connect,
+	  and an empty array is not a neutral default — it is an affirmative
+	  "collects nothing".
+
+	  Every type below is `Linked`: the account is the point of the product,
+	  and the reports carry the device id that names an install. None is used
+	  for `Tracking`, which in Apple's sense means sharing with a data broker
+	  or joining to another company's data for advertising. There is no ad
+	  SDK in the app and no advertising identifier is read.
+
+	    EmailAddress          The address you sign in with, and what Google
+	                          or Apple returns when you sign in with them.
+	                          The interface hands it down in
+	                          `credentials-received`; HomerunAPI.swift.
+	    UserID                The Homerun account id, and the Minecraft
+	                          account you link — UUID, XUID and gamertag.
+	                          MinecraftAuth.swift, HomerunAPI.swift.
+	    DeviceID              The device id the API issues at registration,
+	                          and the push token. DeviceRegistrar.swift,
+	                          PushMessaging.swift.
+	    ProductInteraction    Analytics events, captured by the shared
+	                          interface. The host carries no analytics SDK
+	                          itself; it hands the interface a few events of
+	                          its own — BridgeController.swift.
+	    CrashData             A crash report when a server or the app dies:
+	                          the console tail, scrubbed of addresses and
+	                          chat, and the app's own log, redacted.
+	                          reporting/crash.rs, AppErrors.swift.
+	    PerformanceData       Memory and CPU while a server runs, reported
+	                          with its status. reporting/stats.rs.
+	    OtherDiagnosticData   The device model, OS version, app version and
+	                          interface bundle attached to those reports, and
+	                          the phone's public address, which is how a
+	                          friend's client is told where to connect.
+	                          reporting/stats.rs, HomerunAPI.swift.
+
+	  Deliberately not declared: location (no location API is used — the
+	  public address above is declared as diagnostic data, which is what it
+	  is used for), contacts, photos, health, purchases, search history,
+	  browsing history, sensitive info, and any advertising identifier.
+
+	  Firebase Cloud Messaging ships its own manifest through SPM. The
+	  archive's aggregated privacy report is where both are read together —
+	  check that report, not this file alone, before answering the App Store
+	  Connect questionnaire.
 	-->
 	<key>NSPrivacyCollectedDataTypes</key>
-	<array/>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeDeviceID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeCrashData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePerformanceData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherDiagnosticData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
 
 	<!-- No ad networks, no cross-app tracking, nothing to declare. -->
 	<key>NSPrivacyTracking</key>
