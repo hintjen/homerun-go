@@ -69,8 +69,9 @@ pub struct Manifest {
     /// Monotonic across every release on a channel. This is the ordering, and
     /// the reason ids are free to be dates.
     pub serial: u64,
-    /// `android` or `ios`. Signed, so a manifest cannot be replayed at the
-    /// other platform.
+    /// `android`, `ios` or `windows`. Signed, so a manifest cannot be replayed
+    /// at another platform. Compared as a string and never matched against a
+    /// list, so a new host needs manifests signed for it and no change here.
     pub platform: String,
     /// Ed25519 over [`Manifest::signing_payload`], lowercase hex, 128 chars.
     pub signature: String,
@@ -155,7 +156,7 @@ pub struct Installed {
     /// This host's `BRIDGE_HOST_REVISION`.
     #[serde(rename = "hostRevision")]
     pub host_revision: u32,
-    /// `android` or `ios`.
+    /// `android`, `ios` or `windows` — the desktop, through `homerun-core-node`.
     pub platform: String,
 }
 
