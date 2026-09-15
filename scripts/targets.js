@@ -190,12 +190,20 @@ const TARGETS = {
     outName: "homerun-desktop-minecraft-pumpkin.exe",
     outDir: path.join(ROOT, "dist", "desktop"),
     requiresWindows: true,
+    staticCrt: true,
   },
   // Windows x64 only, because that is the only architecture Homerun Desktop
   // ships. A `.node` is a plain shared library with a renamed extension;
   // Node-API is ABI-stable across Node *and* Electron versions, so this needs
   // no rebuild when either moves — which is the whole reason it is Node-API
   // and not a raw V8 addon.
+  //
+  // `staticCrt` on both desktop targets: link the Visual C++ runtime in rather
+  // than importing VCRUNTIME140.dll, which a PC only has if something installed
+  // the redistributable. beta.34 shipped both without it, and on such a PC the
+  // engine exited 0xC0000135 before printing a line while the addon failed to
+  // load. build-rust.js checks the staged artifact's imports; see
+  // scripts/check-windows-runtime.js.
   "core-node": {
     label: "homerun-core for Homerun Desktop (Node addon, Windows x64)",
     kind: "cargo",
@@ -205,6 +213,7 @@ const TARGETS = {
     outName: "homerun_core.node",
     outDir: path.join(ROOT, "dist", "desktop"),
     requiresWindows: true,
+    staticCrt: true,
   },
   host: {
     label: "this machine (tests only)",
