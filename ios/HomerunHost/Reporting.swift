@@ -53,7 +53,14 @@ enum Reporting {
     /// until the run ends. Wider than ``runningId`` on purpose: an app error
     /// during the minutes *before* running is the one most worth tying to
     /// the server it happened to.
-    private static var armedId: String?
+    ///
+    /// `nonisolated(unsafe)` because ``hostedServerId()`` is read from
+    /// MetricKit's queue and from a crash handler, and neither can hop to the
+    /// main actor: a dying process does not get to await one, and a crash
+    /// handler that blocks reports nothing at all. Written only from the main
+    /// actor, so the race is a torn read of one optional field on a report
+    /// that is already best-effort — the alternative is no report.
+    nonisolated(unsafe) private static var armedId: String?
 
     /// Opaque cadence state from `reporting.stats.schedule`. Never inspected —
     /// the core owns the interval, the debounce, and the rule that a presence
@@ -191,7 +198,7 @@ enum Reporting {
     /// Read by `AppErrors` for every report's context, so an app error can be
     /// joined on the API to the crash report of the server it happened
     /// during. Cheap and lock-free: it is also read from a crash handler.
-    static func hostedServerId() -> String? { armedId }
+    nonisolated static func hostedServerId() -> String? { armedId }
 
     /// Ask the core when to report next, and set one timer to do it.
     ///

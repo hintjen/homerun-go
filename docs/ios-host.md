@@ -274,7 +274,12 @@ port already paid for once.
 answers a support request with. Android reads its own logcat; iOS reads
 `OSLogStore(scope: .currentProcessIdentifier)`, which can see this process and
 no other — the same line logd draws for `logcat --pid`, and the reason neither
-platform needs a permission for it.
+platform needs a permission for it. What leaves is redacted — tokens, query
+strings, email addresses, home directories, IP literals — by the same scanner
+an error report goes through, applied in the core as the frame is built rather
+than by either host, so neither can forget it. The live console a dashboard
+subscribes to is scrubbed the same way a crash report is: addresses and chat
+go, player names stay.
 
 ### What has actually been run
 
@@ -294,6 +299,30 @@ script that captures `console.*` and posts it over the bridge — changing the
 page's console for every user to serve a support flow. The field arrives empty
 rather than wrong.
 
+## The privacy manifest — `ios/HomerunHost/PrivacyInfo.xcprivacy`
+
+Two declarations in one file, and they fail in opposite directions.
+
+**`NSPrivacyAccessedAPITypes`** is the one that blocks an upload. Use a
+required-reason API without naming it and Apple rejects the build
+(ITMS-91053) — by email, after the upload succeeded, so nothing local
+catches it and the build simply never appears in TestFlight. Two entries
+today: `UserDefaults` and `DiskSpace`.
+
+**`NSPrivacyCollectedDataTypes`** blocks nothing, which is why it was empty
+for so long. An empty array is not "not answered yet"; it is an affirmative
+declaration that the app collects nothing, and Apple holds the App Store
+Connect answers to it. Seven types are declared — email address, user id,
+device id, product interaction, crash data, performance data and other
+diagnostic data — each `Linked` and none used for `Tracking`. The file
+itself says where each one comes from in the code; keep that list true when
+a new field starts leaving the device.
+
+Firebase Cloud Messaging carries its own manifest through SPM, so the
+authority on what an archive declares is Xcode's **aggregated privacy
+report**, not this file read alone. Generate it from the archive before
+answering the questionnaire.
+
 ## File map
 
 | File | Role |
@@ -301,6 +330,7 @@ rather than wrong.
 | `ios/project.yml` | XcodeGen definition: sources, linking, signing, Info.plist |
 | `ios/HomerunHost/Info.plist` | Bundle metadata, `homerun://` URL scheme, no background modes |
 | `ios/HomerunHost/HomerunHost.entitlements` | Empty until there is a team; associated domains land at M2 |
+| `ios/HomerunHost/PrivacyInfo.xcprivacy` | Required-reason APIs, and the seven data types the app declares it collects |
 | `ios/HomerunHost/AppDelegate.swift` | `@main`, window, owns the bridge |
 | `ios/HomerunHost/MainViewController.swift` | Full-screen WebView layout, status bar style |
 | `ios/HomerunHost/ScreenAwake.swift` | Named-reason holder for `isIdleTimerDisabled`: the screen stays lit while hosting or uploading a backup |

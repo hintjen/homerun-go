@@ -61,7 +61,11 @@ final class BridgeRouter {
     /// So: bump this whenever the table below gains a channel, and add the
     /// matching ledger entry. `scripts/check-host-revision.js` compares the two
     /// and fails the build if you do one without the other.
-    static let hostRevision = 12
+    ///
+    /// `nonisolated` because `AppErrors.context()` stamps it into every report,
+    /// and that runs on MetricKit's queue and in a crash handler as well as on
+    /// the main actor. Safe to read anywhere: it is an immutable `Int`.
+    nonisolated static let hostRevision = 12
 
     private(set) var handlers: [String: Handler] = [:]
 

@@ -38,7 +38,7 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `jni_bridge.rs` | The JNI adapter around the C surface itself (Android only). Calls the same C functions rather than reaching past them. |
 | `host_dispatch.rs` | The shared decisions that need one effect — a socket, a file — on the same wire as the pure ones. |
 | `device_ws/` | The websocket the dashboard connects to: listener, TLS, ACME, JWKS. Behind `device-ws`, on for both phone targets. See `plans/device-websocket.md`. |
-| `app_logs.rs` | This app's own logs, for `get-app-logs`: logcat on Android, a host-registered provider everywhere else. Always compiled. |
+| `app_logs.rs` | This app's own logs, for `get-app-logs`: logcat on Android, a host-registered provider everywhere else. Redaction is not here: the core scrubs the frame as it builds it (`device_ws::protocol::outgoing`), so no driver can send the log raw. Always compiled. |
 | `host_log.rs` | Where this crate's diagnostics go when the platform captures neither stdout nor stderr. Android wires logcat itself; iOS registers a sink. Always compiled. |
 | `backup_job.rs` | Progress, cancellation and the one-at-a-time guard for a backup. Built everywhere. |
 | `backup_engine.rs` | The linked backup engine. iOS only, behind `backup-engine`. |
