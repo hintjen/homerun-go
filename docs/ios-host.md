@@ -386,6 +386,18 @@ start is the launch screen: `UIColorName` is only honoured when the named
 colour exists in an asset catalog that actually ships, and a typo fails silently
 back to the system background.
 
+**Crash loop at launch, `NSInvalidArgumentException: Attempt to insert non-property
+list object`, stack ending in `_CFPreferencesSetAppValueWithContainerAndConfiguration`.**
+Something the page sent went straight into `UserDefaults`. A bridged JSON `null`
+decodes to `NSNull`, which is not a property-list type, and `UserDefaults.set`
+throws an Objective-C exception rather than failing — Swift cannot catch it, so
+the process dies. If the page makes that call on every boot, every launch dies
+the same way. `journey-modals-set` did exactly this for any modal the journey
+service delivered, since every one carries null fields and the page saves it at
+display time; `HostStore` now stores that payload as JSON bytes. Any
+new store of page data should do the same: in `UserDefaults`, keep only values
+the host built itself.
+
 **`xcodegen generate` fails on a missing path.** `HomerunHost/web/` is not
 staged. Run `npm run build:ios`.
 
