@@ -248,8 +248,7 @@ extension BridgeRouter {
 
     func journeyModalsSet(_ params: Any?) async throws -> Any? {
         guard let modals = params as? [String: Any] else { return false }
-        HostStore.journeyModals = modals
-        return true
+        return HostStore.storeJourneyModals(modals)
     }
 
     // MARK: - Device facts

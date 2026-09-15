@@ -140,9 +140,43 @@ enum HostStore {
         set { defaults.set(newValue, forKey: Key.clientNonce) }
     }
 
+    /// Journey-modal state, exactly as the page handed it over.
+    ///
+    /// # Why this is JSON bytes and not a dictionary
+    ///
+    /// This is the page's own object, and the page's objects contain `null` —
+    /// every modal the journey service delivers carries `"gate_feature": null`
+    /// and friends.
+    /// Bridged JSON decodes `null` to `NSNull`, which is not a property-list
+    /// type, and `UserDefaults.set` answers one with an
+    /// `NSInvalidArgumentException` rather than an error. It was thrown inside
+    /// a bridge handler, so it took the app down; and because the page saves
+    /// its modals on every boot, it took it down again on every launch after.
+    /// Android never had this, because it stores the same payload as a string.
+    ///
+    /// Encoding here means the store accepts whatever JSON accepts, so no
+    /// future field on the UI's side can reintroduce the crash.
     static var journeyModals: [String: Any] {
-        get { defaults.dictionary(forKey: Key.journeyModals) ?? [:] }
-        set { defaults.set(newValue, forKey: Key.journeyModals) }
+        if let data = defaults.data(forKey: Key.journeyModals),
+            let stored = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        {
+            return stored
+        }
+        // Builds before the fix wrote a plist dictionary. Any that was written
+        // has no nulls in it, since a null is exactly what failed to write.
+        return defaults.dictionary(forKey: Key.journeyModals) ?? [:]
+    }
+
+    /// False only for something JSON itself cannot represent, which a bridged
+    /// payload never is — checked anyway, because the alternative to checking
+    /// is another exception rather than an error.
+    @discardableResult
+    static func storeJourneyModals(_ modals: [String: Any]) -> Bool {
+        guard JSONSerialization.isValidJSONObject(modals),
+            let data = try? JSONSerialization.data(withJSONObject: modals)
+        else { return false }
+        defaults.set(data, forKey: Key.journeyModals)
+        return true
     }
 
     /// Mobile has no install wizard, so "installed" means first-run setup
