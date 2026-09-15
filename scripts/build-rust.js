@@ -13,6 +13,7 @@
  */
 const { execFileSync } = require("child_process");
 const { featureProblems } = require("./check-features");
+const { redistributableImports } = require("./check-windows-runtime");
 const fs = require("fs");
 const path = require("path");
 
@@ -161,6 +162,26 @@ const targetRoot = process.env.CARGO_TARGET_DIR
 // cargo has to agree with the path we read back from below.
 const cargoEnv = { ...process.env, CARGO_TARGET_DIR: targetRoot };
 
+/*
+  Link the Visual C++ runtime into the desktop binaries -- see `staticCrt` in
+  targets.js for what shipping without it cost.
+
+  RUSTFLAGS rather than a `[target.x86_64-pc-windows-msvc]` block in a
+  `.cargo/config.toml`: with `--target` given, RUSTFLAGS reaches only the
+  artifact being built, while a target block for the host's own triple also
+  reaches build scripts and proc-macros, which never ship. Appended, so a
+  RUSTFLAGS already in the environment still applies. cc-rs reads the same
+  target feature and compiles the C in our dependencies /MT to match.
+
+  Changing RUSTFLAGS invalidates cargo's fingerprints, so the first build after
+  this is a full one, LTO link included.
+*/
+if (target.staticCrt) {
+  cargoEnv.RUSTFLAGS = [process.env.RUSTFLAGS, "-C target-feature=+crt-static"]
+    .filter(Boolean)
+    .join(" ");
+}
+
 // --- build ----------------------------------------------------------------
 
 console.log(`\nBuilding ${target.label} (${profile})\n`);
@@ -255,6 +276,21 @@ if (crate === CRATE) {
     );
   }
   console.log(`Features verified: ${asked}`);
+}
+
+if (target.staticCrt) {
+  const needs = redistributableImports(fs.readFileSync(dest));
+  if (needs.length) {
+    fail(
+      `The staged ${target.outName || target.artifact} imports ${needs.join(", ")}.\n` +
+        "  Those come from the Visual C++ Redistributable, so it will not load on a\n" +
+        "  PC without it -- and every machine that builds or tests it has it.\n" +
+        "  The build asked for +crt-static; something linked the DLL back in (a C++\n" +
+        "  dependency built /MD, or RUSTFLAGS overridden). See\n" +
+        "  scripts/check-windows-runtime.js."
+    );
+  }
+  console.log("Windows runtime verified: no Visual C++ Redistributable DLLs imported");
 }
 
 if (debug) {
