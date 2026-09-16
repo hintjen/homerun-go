@@ -246,6 +246,18 @@
           "report-error"
         ]
       }
+    },
+    {
+      "revision": 13,
+      "summary": "Both hosts accept the uninstall exit-survey link and drop it. The shared UI stores the link on every profile load so the desktop's uninstaller, which has no session, can open it; the channel is core so the UI calls it without a gate. Neither mobile host answered it, so every profile load on a phone produced an UNKNOWN_METHOD rejection that nothing caught, and it surfaced as an error report. A phone has no uninstall hook to run the survey from, so there is nothing to store. A host below 13 still rejects the call; that is harmless to the player, because the UI neither awaits it nor shows its error.",
+      "adds": {
+        "android": [
+          "set-uninstall-survey-url"
+        ],
+        "ios": [
+          "set-uninstall-survey-url"
+        ]
+      }
     }
   ]
 }

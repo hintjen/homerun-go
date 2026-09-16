@@ -1223,6 +1223,11 @@ class BridgeRouter(
             null
         },
 
+        // Accepted and dropped. Only the desktop's uninstaller reads this link,
+        // and a phone app has no uninstall hook to run it from; the channel is
+        // core so the UI can call it without asking which host it is on.
+        "set-uninstall-survey-url" to { _ -> null },
+
         "cache-client-nonce" to { params ->
             prefs.edit().putString(KEY_CLIENT_NONCE, params?.jsonPrimitive?.content).apply()
             null
@@ -2084,7 +2089,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 12
+        const val HOST_REVISION = 13
 
         /**
          * Auth callbacks come home on this prefix rather than one of the

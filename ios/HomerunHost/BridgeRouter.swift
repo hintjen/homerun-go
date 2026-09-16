@@ -65,7 +65,7 @@ final class BridgeRouter {
     /// `nonisolated` because `AppErrors.context()` stamps it into every report,
     /// and that runs on MetricKit's queue and in a crash handler as well as on
     /// the main actor. Safe to read anywhere: it is an immutable `Int`.
-    nonisolated static let hostRevision = 12
+    nonisolated static let hostRevision = 13
 
     private(set) var handlers: [String: Handler] = [:]
 
@@ -117,6 +117,7 @@ final class BridgeRouter {
             "haptic": haptic,
             "report-error": reportError,
             "set-posthog-distinct-id": setPosthogDistinctID,
+            "set-uninstall-survey-url": setUninstallSurveyURL,
             "cache-client-nonce": cacheClientNonce,
             "clipboard-write-text": clipboardWriteText,
             "open-external-url": openExternalURL,

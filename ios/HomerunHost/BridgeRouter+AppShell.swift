@@ -99,6 +99,13 @@ extension BridgeRouter {
         return nil
     }
 
+    // Accepted and dropped. Only the desktop's uninstaller reads this link,
+    // and a phone app has no uninstall hook to run it from; the channel is
+    // core so the UI can call it without asking which host it is on.
+    func setUninstallSurveyURL(_ params: Any?) async throws -> Any? {
+        nil
+    }
+
     func cacheClientNonce(_ params: Any?) async throws -> Any? {
         HostStore.clientNonce = params as? String
         return nil
