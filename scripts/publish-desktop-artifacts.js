@@ -17,6 +17,16 @@
  * nobody re-downloads 114 MB to arrive where they already were. The fork
  * revision rides along as `rev` for people, not for comparison.
  *
+ * # The Minecraft version
+ *
+ * `minecraftVersion` and `protocol` are the client a build accepts, and they
+ * are asked of the built engine itself (`--minecraft-version`) rather than read
+ * from source here, so they cannot describe a different build than the one being
+ * published. The desktop pins a server's `VERSION` to it, which is what lets a
+ * launcher on any device start a client that can join. So this has to run on a
+ * machine that can execute the engine — the Windows runner — and a manifest
+ * without it is refused rather than written.
+ *
  * # What this does not do
  *
  * It does not upload. The digests and the manifest are computed here and the
@@ -27,8 +37,10 @@
  *   npm run rust:pumpkin-bin-windows && npm run rust:core-node
  *   node scripts/publish-desktop-artifacts.js
  */
+const { execFileSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const { ROOT, TARGETS } = require("./targets");
@@ -66,6 +78,53 @@ function pumpkinRev() {
   return match ? match[1] : null;
 }
 
+/**
+ * The Minecraft version the built engine serves, from the engine.
+ *
+ * Run in an empty temp directory with a timeout: an engine built without the
+ * flag ignores it and starts a server in its CWD, and that must neither litter
+ * the checkout nor hang the publish.
+ */
+function engineMinecraftVersion(file) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pumpkin-version-"));
+  let out;
+  try {
+    out = execFileSync(file, ["--minecraft-version"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+  } catch (error) {
+    console.error(
+      `\nCould not ask ${path.relative(ROOT, file)} for its Minecraft version: ${error.message}\n` +
+        "  It has to run here, so publish from Windows, and from a build that has\n" +
+        "  the --minecraft-version flag.\n"
+    );
+    process.exit(1);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(out.trim().split(/\r?\n/).pop());
+  } catch {
+    parsed = null;
+  }
+  const minecraftVersion = parsed?.minecraftVersion;
+  const protocol = parsed?.protocol;
+  if (
+    typeof minecraftVersion !== "string" ||
+    !/^\d+(\.\d+){1,2}$/.test(minecraftVersion) ||
+    !Number.isInteger(protocol) ||
+    protocol <= 0
+  ) {
+    console.error(`\nThe engine answered --minecraft-version with something else:\n  ${out.trim()}\n`);
+    process.exit(1);
+  }
+  return { minecraftVersion, protocol };
+}
+
 const engine = requireArtifact("pumpkin-bin-windows");
 const addon = requireArtifact("core-node");
 
@@ -75,6 +134,7 @@ const engineSize = fs.statSync(engine).size;
 // short enough to be a directory name a person can read in a log line.
 const build = engineDigest.slice(0, 12);
 const engineName = `homerun-desktop-minecraft-pumpkin-${build}.exe`;
+const { minecraftVersion, protocol } = engineMinecraftVersion(engine);
 
 const manifest = {
   build,
@@ -82,6 +142,8 @@ const manifest = {
   sha256: engineDigest,
   size: engineSize,
   rev: pumpkinRev() || undefined,
+  minecraftVersion,
+  protocol,
 };
 
 const manifestPath = path.join(DIST, "pumpkin-latest.json");
@@ -94,6 +156,7 @@ console.log(`  build          ${build}`);
 console.log(`  sha256         ${engineDigest}`);
 console.log(`  size           ${(engineSize / 1024 / 1024).toFixed(1)} MB`);
 console.log(`  rev            ${manifest.rev ?? "(unknown)"}`);
+console.log(`  minecraft      ${minecraftVersion} (protocol ${protocol})`);
 console.log(`\nNode addon       ${path.relative(ROOT, addon)}`);
 console.log(`  sha256         ${addonDigest}`);
 console.log(`\nManifest         ${path.relative(ROOT, manifestPath)}`);
