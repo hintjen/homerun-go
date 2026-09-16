@@ -49,7 +49,13 @@
 //!
 //! **The working directory.** Pumpkin reads `pumpkin.toml` and `data/` from the
 //! process CWD, and `ProcessEngine` sets that to the server's own directory. No
-//! path is passed and none is parsed; there are no arguments at all.
+//! path is passed and none is parsed.
+//!
+//! **One argument, and it is not for the host.** [`MINECRAFT_VERSION_FLAG`]
+//! prints the Minecraft version this build serves and exits without touching
+//! the directory. The desktop publish script records it in the manifest, which
+//! is how a launcher knows which client can join. Only a build that has the flag
+//! may be asked: an older one ignores its arguments and starts a server.
 
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
@@ -82,10 +88,26 @@ use homerun_pumpkin_ffi::{engine_settings, pumpkin_settings};
 /// not an error.
 const SETTINGS_FILE: &str = "homerun-settings.json";
 
+/// Print `{"minecraftVersion", "protocol"}` and exit. See the module docs.
+const MINECRAFT_VERSION_FLAG: &str = "--minecraft-version";
+
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
+    // First, before the config is read: `PumpkinConfig::load` writes a default
+    // `pumpkin.toml` into the CWD, and a version query must leave no trace.
+    if std::env::args().skip(1).any(|arg| arg == MINECRAFT_VERSION_FLAG) {
+        println!(
+            "{}",
+            serde_json::json!({
+                "minecraftVersion": CURRENT_MC_VERSION.to_string(),
+                "protocol": CURRENT_MC_VERSION.protocol_version(),
+            })
+        );
+        return;
+    }
+
     MAIN_THREAD
         .set(thread::current().id())
         .expect("the main thread id is set once, here");
