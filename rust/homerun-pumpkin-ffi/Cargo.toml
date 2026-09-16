@@ -75,9 +75,9 @@ device-ws = [
 #
 # Pinned to an exact rev on purpose: upstream tracks Minecraft protocol
 # releases, and that churn must not land in an app build uninvited.
-pumpkin = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "6282dcf716cab559c5c3188b8e1fc5a8d5de64ab", optional = true }
-pumpkin-config = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "6282dcf716cab559c5c3188b8e1fc5a8d5de64ab", optional = true }
-pumpkin-util = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "6282dcf716cab559c5c3188b8e1fc5a8d5de64ab", optional = true }
+pumpkin = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
+pumpkin-config = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
+pumpkin-util = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "time",
