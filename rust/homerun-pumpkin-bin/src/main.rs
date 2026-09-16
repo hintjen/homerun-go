@@ -129,7 +129,14 @@ async fn main() {
 
     // The bind decision is ours here, unlike in the linked engine: a taken port
     // should end this process, and only this process.
-    let server = match PumpkinServer::new(config.basic, config.advanced, vanilla_data).await {
+    let server = match PumpkinServer::new(
+        config.basic,
+        config.advanced,
+        pumpkin_settings::host_telemetry(config.telemetry),
+        vanilla_data,
+    )
+    .await
+    {
         Ok(server) => server,
         Err(err) => {
             tracing::error!("The server could not start: {err}");
