@@ -94,6 +94,19 @@ interface ServerBackend {
     fun perfHistory(serverId: String): List<PerfSample> = emptyList()
 
     /**
+     * The Minecraft version this engine serves *whatever it is asked for*, or
+     * null when it serves what it is asked (a JVM fetches the jar for the
+     * version in `VERSION`) or cannot say.
+     *
+     * Pumpkin implements one version per build and ignores `VERSION`, but
+     * every launcher reads `VERSION` to pick a client. The bridge asks this
+     * before a launch and, through `minecraft.hosting.pinVersion`, writes
+     * the answer back to the API so the client a player gets is one the
+     * server will let in. Null means "nothing to correct", never "refuse".
+     */
+    suspend fun servedVersion(): String? = null
+
+    /**
      * Run a console command. The JVM backend can use RCON; Pumpkin dispatches
      * in-process. Either way the reply arrives on `native-server-rcon-response`.
      */
@@ -204,6 +217,17 @@ data class ServerConfig(
      * process's environment, and this carries the repository password.
      */
     val backupContext: BackupContext? = null,
+    /**
+     * Lines the bridge wants at the top of this launch's console — what it
+     * worked out about the server before handing it over, such as a
+     * `VERSION` it corrected.
+     *
+     * Carried here rather than written by the bridge because a backend
+     * clears the console as the first thing `start` does; a line written
+     * before that is wiped before anyone reads it. Backends write these right
+     * after that clear. Already badged, or the backend badges them.
+     */
+    val launchNotes: List<String> = emptyList(),
     /**
      * Forwarded into the server process's environment, so it must never carry
      * anything secret — no tokens, no credentials.

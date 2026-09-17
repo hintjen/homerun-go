@@ -58,6 +58,7 @@ pub fn call(method: &str, args: &str) -> String {
             std::panic::catch_unwind(|| stats_poll(args))
                 .unwrap_or_else(|_| Err(format!("the native host panicked handling \"{method}\""))),
         ),
+        "engine.pumpkinServes" => Some(Ok(pumpkin_serves())),
         _ => None,
     };
 
@@ -65,6 +66,34 @@ pub fn call(method: &str, args: &str) -> String {
         Some(Ok(value)) => json!({ "ok": true, "value": value }).to_string(),
         Some(Err(error)) => json!({ "ok": false, "error": error }).to_string(),
         None => core_dispatch::call(method, args),
+    }
+}
+
+/// Which Minecraft the **linked** Pumpkin engine serves:
+/// `{"minecraftVersion", "protocol"}`, or `null` from a build that links none.
+///
+/// Not a decision — the answer is a constant of the build — but it is one only
+/// this crate can give, because `pumpkin_data` is the engine's own crate and
+/// nothing in `homerun-core` may depend on it. Here rather than a new export
+/// because it is instantaneous and needs no ABI bump; iOS asks over
+/// `homerun_core_call` like everything else.
+///
+/// Android gets `null`: it spawns the engine instead of linking it, and asks
+/// the binary directly (`homerun-pumpkin-bin --minecraft-version`), which
+/// prints this same shape. What a host does with the answer is
+/// `minecraft.hosting.pinVersion`.
+pub fn pumpkin_serves() -> Value {
+    #[cfg(feature = "pumpkin-engine")]
+    {
+        use pumpkin_data::packet::CURRENT_MC_VERSION;
+        json!({
+            "minecraftVersion": CURRENT_MC_VERSION.to_string(),
+            "protocol": CURRENT_MC_VERSION.protocol_version(),
+        })
+    }
+    #[cfg(not(feature = "pumpkin-engine"))]
+    {
+        Value::Null
     }
 }
 

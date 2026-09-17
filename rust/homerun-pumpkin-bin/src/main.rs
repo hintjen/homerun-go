@@ -51,11 +51,14 @@
 //! process CWD, and `ProcessEngine` sets that to the server's own directory. No
 //! path is passed and none is parsed.
 //!
-//! **One argument, and it is not for the host.** [`MINECRAFT_VERSION_FLAG`]
-//! prints the Minecraft version this build serves and exits without touching
-//! the directory. The desktop publish script records it in the manifest, which
-//! is how a launcher knows which client can join. Only a build that has the flag
-//! may be asked: an older one ignores its arguments and starts a server.
+//! **One argument.** [`MINECRAFT_VERSION_FLAG`] prints the Minecraft version
+//! this build serves and exits without touching the directory. Two things ask:
+//! the desktop publish script, which records it in the manifest so a launcher
+//! knows which client can join, and the Android host at launch, which pins the
+//! server's `VERSION` to it (`minecraft.hosting.pinVersion`). The shape is
+//! `host_dispatch::pumpkin_serves`, the same answer the linked engine gives
+//! iOS, so the two cannot drift. Only a build that has the flag may be asked:
+//! an older one ignores its arguments and starts a server.
 
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
@@ -98,13 +101,7 @@ async fn main() {
     // First, before the config is read: `PumpkinConfig::load` writes a default
     // `pumpkin.toml` into the CWD, and a version query must leave no trace.
     if std::env::args().skip(1).any(|arg| arg == MINECRAFT_VERSION_FLAG) {
-        println!(
-            "{}",
-            serde_json::json!({
-                "minecraftVersion": CURRENT_MC_VERSION.to_string(),
-                "protocol": CURRENT_MC_VERSION.protocol_version(),
-            })
-        );
+        println!("{}", homerun_pumpkin_ffi::host_dispatch::pumpkin_serves());
         return;
     }
 

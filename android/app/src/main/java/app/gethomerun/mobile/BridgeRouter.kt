@@ -1586,16 +1586,48 @@ class BridgeRouter(
                                     throw ServerBackendException.Engine(it)
                                 }
                             }
+                            // Pumpkin serves one Minecraft version whatever `VERSION`
+                            // says, and every launcher reads `VERSION` to pick a
+                            // client — so the server is corrected to what the engine
+                            // serves before it starts, the same write-back the desktop
+                            // does. Here rather than in the backend because the PATCH
+                            // needs the user token, which never reaches a backend.
+                            // Only with settings in hand: with none there is no saved
+                            // value to compare, and no token that could write one.
+                            // Best effort — a launch on a stale version beats no launch.
+                            var version = settings?.version
+                            var settingsEnv = settings?.env
+                            val launchNotes = mutableListOf<String>()
+                            if (settings != null) {
+                                val pin = runCatching { Core.pinVersion(settings.version, engine.servedVersion()) }
+                                    .onFailure { Log.w(TAG, "$serverId: could not decide a version pin: ${it.message}") }
+                                    .getOrNull()
+                                if (pin != null) {
+                                    launchNotes += pin.line
+                                    val failure = HomerunApi.pinVersion(api, serverId, pin.version, token)
+                                    if (failure == null) {
+                                        version = pin.version
+                                        settingsEnv = buildJsonObject {
+                                            settings.env.forEach { (key, value) -> put(key, value) }
+                                            put("VERSION", pin.version)
+                                        }
+                                    } else {
+                                        launchNotes += "[Homerun] Could not update the server's Minecraft version: $failure"
+                                    }
+                                }
+                            }
+
                             engine.start(
                                 serverId,
                                 ServerConfig(
                                     name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
                                     memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
-                                    version = settings?.version,
+                                    version = version,
                                     loader = settings?.loader ?: "vanilla",
                                     // Read and written to files by the backend, never
                                     // forwarded into the server's environment.
-                                    settingsEnv = settings?.env,
+                                    settingsEnv = settingsEnv,
+                                    launchNotes = launchNotes,
                                     gameType = settings?.rawGameType ?: "java",
                                     // Null when the server has no repository, backups are
                                     // off for it, this device is not registered, or it is

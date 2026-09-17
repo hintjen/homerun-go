@@ -1360,6 +1360,18 @@ that platform cannot spawn a process at all.
   every enum a second time, and a wrong one is silent — `GameMode` serialises
   as `"Survival"`, so a lower-cased guess is dropped on load and the server
   starts on its own defaults.
+- **Its `VERSION` corrected before it starts.** Pumpkin serves one Minecraft
+  version per build and ignores `VERSION`, but every launcher reads
+  `VERSION` to pick a client. `PumpkinBackend.servedVersion` runs
+  `libpumpkin.so --minecraft-version` once per process — waiting *before*
+  reading, because a binary that predates the flag starts a server instead
+  and never closes its stdout — and the bridge's start handler PATCHes the
+  answer into the server when it differs (`minecraft.hosting.pinVersion`),
+  the same write-back Homerun Desktop does. The console line explaining it
+  rides in on `ServerConfig.launchNotes`, written just after
+  `nativeConsoleBegin` so the clear does not eat it. Best effort: a failed
+  PATCH is a console line, never a refused launch. `docs/core-bridge.md`
+  § *Pinning a Pumpkin server's version*.
 
 ## Triage
 

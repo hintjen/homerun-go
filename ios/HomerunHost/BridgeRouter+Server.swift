@@ -130,6 +130,36 @@ extension BridgeRouter {
         if let settings {
             config.settingsEnv = settings.env
             config.gameType = settings.gameType
+
+            // Pumpkin serves one Minecraft version whatever `VERSION` says,
+            // and every launcher reads `VERSION` to pick a client — so the
+            // server is corrected to what the engine serves before it starts,
+            // the same write-back the desktop does. Here rather than in the
+            // backend because the PATCH needs the user token, which never
+            // reaches a backend. Only with settings in hand: with none there
+            // is no saved value to compare, and no token that could write one.
+            // Best effort — a launch on a stale version beats no launch.
+            let saved = (settings.env["VERSION"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let served = await backend.servedVersion()
+            let pin: Core.VersionPin?
+            do {
+                pin = try Core.pinVersion(saved: saved, served: served)
+            } catch {
+                HostLog.host.error(
+                    "could not decide a version pin: \(error.localizedDescription, privacy: .public)")
+                pin = nil
+            }
+            if let pin {
+                config.launchNotes.append(pin.line)
+                if let failure = await HomerunAPI.pinVersion(
+                    apiURL: apiURL, serverId: serverId, version: pin.version, userToken: token)
+                {
+                    config.launchNotes.append(
+                        "[Homerun] Could not update the server's Minecraft version: \(failure)")
+                } else {
+                    config.settingsEnv["VERSION"] = pin.version
+                }
+            }
         }
 
         if !token.isEmpty, !apiURL.isEmpty {

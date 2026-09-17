@@ -471,6 +471,36 @@ object HomerunApi {
     }
 
     /**
+     * Write the Minecraft version a Pumpkin server actually serves into its
+     * `VERSION`, so every launcher — here and on any other device — picks a
+     * client the server will let in. The same PATCH Homerun Desktop sends
+     * (`pinPumpkinVersion`), with the **user** token: it changes what the
+     * server *is*, not what it is doing.
+     *
+     * Returns the failure for the console rather than swallowing it: the
+     * server starts either way, but a player whose friends cannot join
+     * deserves to read why. Null means it was written.
+     */
+    suspend fun pinVersion(
+        apiUrl: String,
+        serverId: String,
+        version: String,
+        userToken: String,
+    ): String? = withContext(Dispatchers.IO) {
+        if (userToken.isBlank()) return@withContext "no user token"
+        val body = buildJsonObject {
+            put("environment_variables", buildJsonObject { put("VERSION", version) })
+        }
+        runCatching { patch(apiUrl, "/api/server/$serverId/", body, userToken) }
+            .onFailure { Log.w(TAG, "could not pin $serverId to $version: ${it.message}") }
+            .fold(
+                onSuccess = { null },
+                // A failure with no message is still a failure; null here means "written".
+                onFailure = { it.message ?: "the request failed" },
+            )
+    }
+
+    /**
      * Acknowledge a server's state, with the **device** token. This is the
      * report the API and the web dashboard wait on — the bridge event of the
      * same name only reaches the page in front of us.

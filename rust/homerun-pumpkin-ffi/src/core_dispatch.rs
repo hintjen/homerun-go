@@ -1013,6 +1013,21 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             Ok(Value::Bool(hosting::is_nukkit(&text("gameType")?)))
         }
 
+        // Whether a Pumpkin launch should write the server's `VERSION` back
+        // as the Minecraft version the engine serves, and the console line
+        // that says so. `saved` is the API's value, `served` the engine's own
+        // answer (`engine.pumpkinServes`, or the binary's
+        // `--minecraft-version`); either may be absent. Answers `null` when
+        // there is nothing to correct, so a host branches on presence — the
+        // same shape as `refuse`.
+        "minecraft.hosting.pinVersion" => Ok(hosting::pin_version(
+            optional_text("saved").as_deref(),
+            optional_text("served").as_deref(),
+        )
+        .map(|pin| serde_json::to_value(pin).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or(Value::Null)),
+
         // The PowerNukkitX release to run. `blessed` is the API's pin, which is
         // what makes a bad release stoppable without a store update — see
         // `nukkit::release`.
@@ -2557,6 +2572,39 @@ geyser"
 
         // The server is required — guessing it would defeat the check.
         assert!(err("minecraft.hosting.refuse", json!({ "host": ios })).contains("server"));
+    }
+
+    /// What a Pumpkin launch asks once it knows what its engine serves. Null
+    /// is "nothing to write", so a host branches on presence.
+    #[test]
+    fn a_host_can_ask_whether_to_pin_a_pumpkin_servers_version() {
+        let pin = ok(
+            "minecraft.hosting.pinVersion",
+            json!({ "saved": "26.3", "served": "26.2" }),
+        );
+        assert_eq!(pin["version"], "26.2");
+        assert_eq!(
+            pin["line"],
+            "[Homerun] This Pumpkin engine serves Minecraft 26.2; updating the server from 26.3."
+        );
+
+        let same = ok(
+            "minecraft.hosting.pinVersion",
+            json!({ "saved": "26.2", "served": "26.2" }),
+        );
+        assert!(same.is_null(), "a matching version is left alone: {same}");
+
+        // Both arguments are optional: no saved version is still corrected,
+        // and no served version corrects nothing.
+        let unversioned = ok("minecraft.hosting.pinVersion", json!({ "served": "26.2" }));
+        assert_eq!(unversioned["version"], "26.2");
+        let unasked = ok("minecraft.hosting.pinVersion", json!({ "saved": "26.3" }));
+        assert!(unasked.is_null(), "{unasked}");
+        let null = ok(
+            "minecraft.hosting.pinVersion",
+            json!({ "saved": "26.3", "served": Value::Null }),
+        );
+        assert!(null.is_null(), "{null}");
     }
 
     /// The loop a host implements, on the wire: ask, read, record, read back.

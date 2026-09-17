@@ -2296,6 +2296,7 @@ dependencies = [
  "log",
  "pumpkin",
  "pumpkin-config",
+ "pumpkin-data",
  "pumpkin-util",
  "reqwest 0.12.28",
  "rustic_backend",
