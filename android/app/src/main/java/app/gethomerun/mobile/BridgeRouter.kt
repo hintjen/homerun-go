@@ -1410,7 +1410,8 @@ class BridgeRouter(
 
         // ─── app store review ────────────────────────────────────────────
 
-        // The shared UI picked the moment (activation — its lib/appReview.ts);
+        // The shared UI picked the moment (minutes into the first session
+        // with a player — its lib/appReview.ts);
         // this host only asks. Play's policy leaves no other prompt to make,
         // and the card is Play's to show or withhold. `requested` means the
         // call was made, never that a card appeared: nothing reports that.

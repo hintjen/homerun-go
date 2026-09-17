@@ -430,7 +430,8 @@ extension BridgeRouter {
     // MARK: - App Store review (`appReview` capability, revision 13)
 
     /// Ask StoreKit for the in-app review sheet. The UI picked the moment
-    /// (activation — see the shared UI's lib/appReview.ts); this host only
+    /// (minutes into the first session with a player — the shared UI's
+    /// lib/appReview.ts); this host only
     /// makes the call, because App Store Review Guideline 1.1.7 leaves no
     /// other kind of prompt to make. StoreKit decides whether a sheet
     /// appears — at most three a year per user, and never in a build
