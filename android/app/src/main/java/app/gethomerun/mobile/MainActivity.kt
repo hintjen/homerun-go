@@ -1,6 +1,11 @@
 package app.gethomerun.mobile
 
 import android.Manifest
+import com.google.android.gms.tasks.Task
+import com.google.android.play.core.review.ReviewManagerFactory
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.BroadcastReceiver
@@ -645,6 +650,23 @@ class MainActivity : ComponentActivity() {
         // Both references die with the activity (onDestroy), like every
         // other router tie.
         PushMessaging.router = router
+        // In-app review: Play wants an Activity to launch the card over, so
+        // the router borrows this one. Two awaits: Play first decides whether
+        // this install may see a card at all (quota, sideload), then the
+        // launch resolves once it has shown — or silently not shown — it.
+        // Either failure is `false`, never a thrown error up the bridge: the
+        // UI has nothing to do about a card Play chose not to show.
+        router.requestAppReview = requestAppReview@{
+            val manager = ReviewManagerFactory.create(this)
+            val info = runCatching { manager.requestReviewFlow().awaitTask() }
+                .getOrElse { err ->
+                    Log.w(TAG, "in-app review unavailable: ${err.message}")
+                    return@requestAppReview false
+                }
+            runCatching { manager.launchReviewFlow(this, info).awaitTask() }
+                .onFailure { err -> Log.w(TAG, "in-app review launch failed: ${err.message}") }
+                .isSuccess
+        }
         router.requestPushPermission = requestPushPermission@{
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
                 // No runtime permission to ask for; the state is the answer.
@@ -1187,6 +1209,21 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val TAG = "HomerunHost"
+
+        /**
+         * Suspend on a Play [Task] without adding coroutines-play-services for
+         * one call site — the same shape [PushMessaging] uses for the FCM
+         * token. A failed task resumes with its exception.
+         */
+        suspend fun <T> Task<T>.awaitTask(): T =
+            suspendCancellableCoroutine { continuation ->
+                addOnCompleteListener { task ->
+                    if (task.isSuccessful) continuation.resume(task.result)
+                    else continuation.resumeWithException(
+                        task.exception ?: IllegalStateException("task failed")
+                    )
+                }
+            }
         const val TAG_WEB = "HomerunWeb"
 
         /** The global the injected backdrop watcher reports through. */

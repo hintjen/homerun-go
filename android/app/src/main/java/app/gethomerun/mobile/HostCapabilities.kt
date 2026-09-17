@@ -36,6 +36,7 @@ data class HostCapabilities(
     val haptics: Boolean,
     val nativeShare: Boolean,
     val remotePush: Boolean,
+    val appReview: Boolean,
     /**
      * Identity providers this host offers on the auth screens and in the
      * claim dialog. Google only here: Sign in with Apple works on Android —
@@ -204,6 +205,12 @@ data class HostCapabilities(
             // own JWT — the same split as social sign-in, and the reason no
             // identity appears anywhere in the push path here.
             remotePush = true,
+            // Flipped true at revision 13 with the handler. Play's in-app
+            // review card, asked for through [BridgeRouter.requestAppReview]
+            // at the moment the shared UI chose; Play decides whether the
+            // card appears and tells nobody, so the answer is only ever
+            // "asked".
+            appReview = true,
             socialProviders = listOf("google"),
             // True as a statement about the platform, like the rest of these:
             // Android ships `libpumpkin.so` and picks the backend from the

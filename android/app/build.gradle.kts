@@ -319,6 +319,7 @@ dependencies {
     implementation(libs.tukaani.xz)
     implementation(libs.firebase.messaging)
     implementation(libs.play.feature.delivery)
+    implementation(libs.play.review)
 }
 
 /**
