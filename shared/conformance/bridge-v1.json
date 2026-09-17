@@ -1,10 +1,10 @@
 {
   "bridgeVersion": 1,
   "counts": {
-    "invoke": 82,
+    "invoke": 83,
     "send": 28,
     "event": 56,
-    "total": 166
+    "total": 167
   },
   "channels": [
     {
@@ -379,6 +379,12 @@
       "kind": "invoke",
       "tier": "capability",
       "capability": "remotePush"
+    },
+    {
+      "channel": "app-review:request",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "appReview"
     },
     {
       "channel": "minecraft:get-setup",
@@ -1003,6 +1009,7 @@
         "haptics": false,
         "nativeShare": false,
         "remotePush": false,
+        "appReview": false,
         "socialProviders": [
           "google"
         ]
@@ -1196,12 +1203,14 @@
         "haptics": true,
         "nativeShare": true,
         "remotePush": true,
+        "appReview": true,
         "socialProviders": [
           "google",
           "apple"
         ]
       },
       "required": [
+        "app-review:request",
         "auth:web-session",
         "cache-client-nonce",
         "check-homerun-storage-limit",
@@ -1324,11 +1333,13 @@
         "haptics": true,
         "nativeShare": true,
         "remotePush": true,
+        "appReview": true,
         "socialProviders": [
           "google"
         ]
       },
       "required": [
+        "app-review:request",
         "auth:web-session",
         "cache-client-nonce",
         "check-homerun-storage-limit",
