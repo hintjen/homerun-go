@@ -1,10 +1,10 @@
 {
   "bridgeVersion": 1,
   "counts": {
-    "invoke": 81,
-    "send": 27,
-    "event": 54,
-    "total": 162
+    "invoke": 83,
+    "send": 28,
+    "event": 56,
+    "total": 167
   },
   "channels": [
     {
@@ -26,6 +26,12 @@
       "channel": "set-posthog-distinct-id",
       "kind": "invoke",
       "tier": "core"
+    },
+    {
+      "channel": "set-uninstall-survey-url",
+      "kind": "invoke",
+      "tier": "core",
+      "note": "Mobile: accept and discard. Only the desktop Squirrel uninstall hook reads what it stores; the channel is core so the shared UI can call it on every host without a gate."
     },
     {
       "channel": "cache-client-nonce",
@@ -375,6 +381,12 @@
       "capability": "remotePush"
     },
     {
+      "channel": "app-review:request",
+      "kind": "invoke",
+      "tier": "capability",
+      "capability": "appReview"
+    },
+    {
       "channel": "minecraft:get-setup",
       "kind": "invoke",
       "tier": "capability",
@@ -543,6 +555,13 @@
       "kind": "send",
       "tier": "capability",
       "capability": "windowChrome"
+    },
+    {
+      "channel": "quit-app",
+      "kind": "send",
+      "tier": "capability",
+      "capability": "windowChrome",
+      "note": "Exit the process, not hide the window. Desktop: app.quit(), which runs the graceful before-quit shutdown. A phone never declares windowChrome and never receives this."
     },
     {
       "channel": "retry-installation",
@@ -724,6 +743,12 @@
       "capability": "backups"
     },
     {
+      "channel": "native-server-backup-blocked",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "backups"
+    },
+    {
       "channel": "installation-progress",
       "kind": "event",
       "tier": "capability",
@@ -758,6 +783,13 @@
       "kind": "event",
       "tier": "capability",
       "capability": "installation"
+    },
+    {
+      "channel": "native-install-started",
+      "kind": "event",
+      "tier": "capability",
+      "capability": "installation",
+      "note": "Emit before any install run started outside first-run — repair, resume, or account change."
     },
     {
       "channel": "native-installation-report",
@@ -947,7 +979,7 @@
           "wsl",
           "javaNative"
         ],
-        "pumpkinServers": false,
+        "pumpkinServers": true,
         "powernukkitxServers": false,
         "installation": true,
         "moveInstallation": true,
@@ -977,9 +1009,9 @@
         "haptics": false,
         "nativeShare": false,
         "remotePush": false,
+        "appReview": false,
         "socialProviders": [
-          "google",
-          "apple"
+          "google"
         ]
       },
       "required": [
@@ -1064,8 +1096,10 @@
         "move-installation-resumed",
         "native-additive-install-started",
         "native-get-latest-bedrock-version",
+        "native-install-started",
         "native-installation-report",
         "native-server-active-ids",
+        "native-server-backup-blocked",
         "native-server-backup-lease-blocked",
         "native-server-delete",
         "native-server-error-report",
@@ -1094,6 +1128,7 @@
         "privilege-elevation-modal-cancelled",
         "push-notification",
         "quit-and-install",
+        "quit-app",
         "report-error",
         "restart-computer",
         "retry-download",
@@ -1109,6 +1144,7 @@
         "set-native-local-network",
         "set-pending-server-upgrade",
         "set-posthog-distinct-id",
+        "set-uninstall-survey-url",
         "show-privilege-elevation-required-modal",
         "show-system-requirements-warning",
         "show-system-time-warning",
@@ -1167,12 +1203,14 @@
         "haptics": true,
         "nativeShare": true,
         "remotePush": true,
+        "appReview": true,
         "socialProviders": [
           "google",
           "apple"
         ]
       },
       "required": [
+        "app-review:request",
         "auth:web-session",
         "cache-client-nonce",
         "check-homerun-storage-limit",
@@ -1210,6 +1248,7 @@
         "minecraft:auth:ready",
         "minecraft:auth:signed-out",
         "native-server-active-ids",
+        "native-server-backup-blocked",
         "native-server-backup-lease-blocked",
         "native-server-delete",
         "native-server-error-report",
@@ -1246,6 +1285,7 @@
         "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
+        "set-uninstall-survey-url",
         "share-content",
         "show-system-time-warning",
         "splash-shown",
@@ -1293,11 +1333,13 @@
         "haptics": true,
         "nativeShare": true,
         "remotePush": true,
+        "appReview": true,
         "socialProviders": [
           "google"
         ]
       },
       "required": [
+        "app-review:request",
         "auth:web-session",
         "cache-client-nonce",
         "check-homerun-storage-limit",
@@ -1336,6 +1378,7 @@
         "minecraft:auth:signed-out",
         "native-get-latest-bedrock-version",
         "native-server-active-ids",
+        "native-server-backup-blocked",
         "native-server-backup-lease-blocked",
         "native-server-delete",
         "native-server-error-report",
@@ -1372,6 +1415,7 @@
         "set-appearance",
         "set-native-local-network",
         "set-posthog-distinct-id",
+        "set-uninstall-survey-url",
         "share-content",
         "show-system-time-warning",
         "splash-shown",

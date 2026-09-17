@@ -1,5 +1,6 @@
 import AuthenticationServices
 import Foundation
+import StoreKit
 import UIKit
 
 /// The non-server half of the bridge: config, identity, storage, clipboard,
@@ -102,6 +103,14 @@ extension BridgeRouter {
     func cacheClientNonce(_ params: Any?) async throws -> Any? {
         HostStore.clientNonce = params as? String
         return nil
+    }
+
+    /// Accepted and discarded: only the desktop Squirrel uninstall hook reads
+    /// what this stores, and the channel is core so the shared UI can call it
+    /// everywhere without a gate. Answering is what keeps the UI's promise
+    /// from hanging (PROTOCOL.md §5).
+    func setUninstallSurveyURL(_ params: Any?) async throws -> Any? {
+        nil
     }
 
     func clipboardWriteText(_ params: Any?) async throws -> Any? {
@@ -416,6 +425,37 @@ extension BridgeRouter {
         // have to meet as `Any` before `??` sees them.
         let token: Any = await PushMessaging.shared.currentToken() ?? NSNull()
         return ["token": token]
+    }
+
+    // MARK: - App Store review (`appReview` capability, revision 13)
+
+    /// Ask StoreKit for the in-app review sheet. The UI picked the moment
+    /// (minutes into the first session with a player — the shared UI's
+    /// lib/appReview.ts); this host only
+    /// makes the call, because App Store Review Guideline 1.1.7 leaves no
+    /// other kind of prompt to make. StoreKit decides whether a sheet
+    /// appears — at most three a year per user, and never in a build
+    /// installed outside the store — and tells nobody, so `requested` is
+    /// only ever "the call was made".
+    ///
+    /// `AppStore.requestReview(in:)` (StoreKit 2, our iOS 16 floor) rather
+    /// than the deprecated `SKStoreReviewController`. It is main-actor-only
+    /// and wants the foreground window scene, hence the hop. No scene — the
+    /// app is not in front — is `false`, not an error: the UI already checks
+    /// visibility, this is the backstop.
+    func appReviewRequest(_ params: Any?) async throws -> Any? {
+        let moment = (params as? [String: Any])?["moment"] as? String ?? "unknown"
+        let requested = await MainActor.run { () -> Bool in
+            guard
+                let scene = UIApplication.shared.connectedScenes
+                    .compactMap({ $0 as? UIWindowScene })
+                    .first(where: { $0.activationState == .foregroundActive })
+            else { return false }
+            AppStore.requestReview(in: scene)
+            return true
+        }
+        HostLog.bridge.info("app-review:request moment=\(moment, privacy: .public) requested=\(requested)")
+        return ["requested": requested]
     }
 
     // MARK: - Deep links

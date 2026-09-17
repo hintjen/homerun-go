@@ -715,6 +715,17 @@ class BridgeRouter(
     var requestPushPermission: (suspend () -> String)? = null
 
     /**
+     * Set by [MainActivity], because Play's review flow launches over an
+     * Activity and the router does not hold one. Suspends until the flow has
+     * been handed to Play (not until a card is answered — Play resolves the
+     * launch as soon as it has decided, shown or not, and never says which).
+     * Returns whether the request was made. Null while no activity is
+     * attached, in which case `app-review:request` answers `false`.
+     */
+    @Volatile
+    var requestAppReview: (suspend () -> Boolean)? = null
+
+    /**
      * The OS notification-permission state, in the contract's vocabulary.
      *
      * Below API 33 there is no runtime permission: notifications are on
@@ -1228,6 +1239,12 @@ class BridgeRouter(
             null
         },
 
+        // Accepted and discarded: only the desktop Squirrel uninstall hook reads
+        // what this stores, and the channel is core so the shared UI can call
+        // it everywhere without a gate. Answering is what keeps the UI's
+        // promise from hanging (PROTOCOL.md §5).
+        "set-uninstall-survey-url" to { _ -> null },
+
         /*
          * Run an OAuth redirect in a real browser and hand back where it
          * landed. A Custom Tab, never our own WebView: Google answers
@@ -1389,6 +1406,20 @@ class BridgeRouter(
                 val token = PushMessaging.currentToken()
                 if (token != null) put("token", token) else put("token", JsonNull)
             }
+        },
+
+        // ─── app store review ────────────────────────────────────────────
+
+        // The shared UI picked the moment (minutes into the first session
+        // with a player — its lib/appReview.ts);
+        // this host only asks. Play's policy leaves no other prompt to make,
+        // and the card is Play's to show or withhold. `requested` means the
+        // call was made, never that a card appeared: nothing reports that.
+        "app-review:request" to { params ->
+            val moment = (params as? JsonObject)?.get("moment")?.jsonPrimitive?.contentOrNull
+            val requested = requestAppReview?.invoke() ?: false
+            Log.i(TAG, "app-review:request moment=$moment requested=$requested")
+            buildJsonObject { put("requested", requested) }
         },
 
         // ─── files ───────────────────────────────────────────────────────
@@ -2084,7 +2115,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 12
+        const val HOST_REVISION = 13
 
         /**
          * Auth callbacks come home on this prefix rather than one of the
