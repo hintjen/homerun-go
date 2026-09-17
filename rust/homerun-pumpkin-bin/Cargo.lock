@@ -1797,6 +1797,7 @@ dependencies = [
  "log",
  "pumpkin",
  "pumpkin-config",
+ "pumpkin-data",
  "pumpkin-util",
  "serde",
  "serde_json",

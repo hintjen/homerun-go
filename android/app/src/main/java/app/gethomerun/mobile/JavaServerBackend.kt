@@ -284,6 +284,11 @@ class JavaServerBackend(
         order.at("announceStarting")
         transition(serverId, ServerState.STARTING)
         reset()
+        // Only after the clear in `reset`, or the bridge's lines are wiped
+        // before anyone reads them. Empty for a JVM today — nothing the bridge
+        // works out applies to a server that fetches the version it is asked
+        // for — but the contract is the backend's, not the engine's.
+        config.launchNotes.forEach { note(serverId, it) }
         // Before the slow work, not after it. Everything below writes into the
         // supervisor's console — a jar being adopted, a world coming back —
         // and the pump is what turns those into events. Starting it at the

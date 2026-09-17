@@ -389,6 +389,36 @@ enum Core {
         return refusal["message"] as? String
     }
 
+    /// What a Pumpkin launch writes back as the server's `VERSION`, and the
+    /// console line that says so.
+    struct VersionPin {
+        let version: String
+        let line: String
+    }
+
+    /// Whether to pin a server's `VERSION` to the Minecraft version its
+    /// Pumpkin engine serves. `saved` is the API's value; `served` is what the
+    /// engine says about itself (``pumpkinServes()``). Nil when they already
+    /// agree, or the engine could not be asked — nothing to write.
+    static func pinVersion(saved: String?, served: String?) throws -> VersionPin? {
+        var args: [String: Any] = [:]
+        if let saved { args["saved"] = saved }
+        if let served { args["served"] = served }
+        guard let pin = try call("minecraft.hosting.pinVersion", args) as? [String: Any],
+            let version = pin["version"] as? String,
+            let line = pin["line"] as? String
+        else { return nil }
+        return VersionPin(version: version, line: line)
+    }
+
+    /// Which Minecraft the linked Pumpkin engine serves, or nil from a build
+    /// that links none. A constant of the build, answered by the FFI crate
+    /// rather than the core because only the engine's own crate knows it.
+    static func pumpkinServes() throws -> String? {
+        guard let reply = try call("engine.pumpkinServes") as? [String: Any] else { return nil }
+        return (reply["minecraftVersion"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
     // MARK: - Who owns a server right now
 
     /// The lifecycle of the servers this device hosts.

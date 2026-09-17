@@ -158,6 +158,36 @@ enum HomerunAPI {
         }
     }
 
+    /// Write the Minecraft version a Pumpkin server actually serves into its
+    /// `VERSION`, so every launcher — here and on any other device — picks a
+    /// client the server will let in. The same PATCH Homerun Desktop sends
+    /// (`pinPumpkinVersion`), with the **user** token: it changes what the
+    /// server *is*, not what it is doing.
+    ///
+    /// Returns the failure for the console rather than swallowing it: the
+    /// server starts either way, but a player whose friends cannot join
+    /// deserves to read why. Nil means it was written.
+    static func pinVersion(
+        apiURL: String,
+        serverId: String,
+        version: String,
+        userToken: String
+    ) async -> String? {
+        guard !userToken.isEmpty else { return "no user token" }
+        do {
+            _ = try await patch(
+                apiURL: apiURL, path: "/api/server/\(serverId)/",
+                body: ["environment_variables": ["VERSION": version]],
+                token: userToken)
+            return nil
+        } catch {
+            HostLog.host.error(
+                "could not pin \(serverId, privacy: .public) to \(version, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return error.localizedDescription
+        }
+    }
+
     /// Report the outcome of a backup or restore.
     ///
     /// For a backup this is also what **releases the lease**, on success and on

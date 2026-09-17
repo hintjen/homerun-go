@@ -70,6 +70,16 @@ protocol ServerBackend: AnyObject {
     /// Console lines since `cursor`, with a cursor for the next call.
     func logs(serverId: String, since cursor: Int) -> LogSlice
 
+    /// The Minecraft version this engine serves *whatever it is asked for*,
+    /// or nil when it serves what it is asked, or cannot say.
+    ///
+    /// Pumpkin implements one version per build and ignores `VERSION`, but
+    /// every launcher reads `VERSION` to pick a client. The bridge asks this
+    /// before a launch and, through `minecraft.hosting.pinVersion`, writes the
+    /// answer back to the API so the client a player gets is one the server
+    /// will let in. Nil means "nothing to correct", never "refuse".
+    func servedVersion() async -> String?
+
     /// Run a console command. Pumpkin has no RCON, so this dispatches
     /// in-process; the reply arrives on `native-server-rcon-response`.
     func command(serverId: String, command: String) async throws
@@ -99,6 +109,9 @@ protocol ServerBackend: AnyObject {
 extension ServerBackend {
     /// A backend that does not sample says so by saying nothing.
     func perfSamples(serverId: String) -> [PerfSample] { [] }
+
+    /// A backend that serves what it is asked for has nothing to correct.
+    func servedVersion() async -> String? { nil }
 }
 
 /// Why a server became unreachable. The shared UI words each one differently.
@@ -149,6 +162,16 @@ struct ServerConfig {
 
     /// The API's `game_type`, verbatim. See `HomerunAPI.ServerSettings`.
     var gameType: String = "java"
+
+    /// Lines the bridge wants at the top of this launch's console — what it
+    /// worked out about the server before handing it over, such as a
+    /// `VERSION` it corrected.
+    ///
+    /// Carried here rather than written by the bridge because a backend
+    /// clears the console as the first thing `start` does; a line written
+    /// before that is wiped before anyone reads it. Backends write these
+    /// right after that clear, badged.
+    var launchNotes: [String] = []
 }
 
 /// The settings and identity one launch needs to back itself up.

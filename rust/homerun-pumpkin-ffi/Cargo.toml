@@ -20,6 +20,7 @@ default = []
 pumpkin-engine = [
     "dep:pumpkin",
     "dep:pumpkin-config",
+    "dep:pumpkin-data",
     "dep:pumpkin-util",
     "dep:tokio",
     "dep:uuid",
@@ -78,6 +79,9 @@ device-ws = [
 pumpkin = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
 pumpkin-config = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
 pumpkin-util = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
+# Only for `CURRENT_MC_VERSION`: which Minecraft the linked engine serves, so
+# a host can pin the server's VERSION to it (`host_dispatch::pumpkin_serves`).
+pumpkin-data = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a095ba017e35e67fb48b44e2d5acea3b1608a7", optional = true }
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "time",

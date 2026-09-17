@@ -1060,6 +1060,29 @@ object Core {
         }).jsonPrimitive.boolean
 
     /**
+     * What a Pumpkin launch writes back as the server's `VERSION`, and the
+     * console line that says so — or null when the saved value already is
+     * what the engine serves, or the engine could not be asked.
+     */
+    data class VersionPin(val version: String, val line: String)
+
+    /**
+     * Whether to pin a server's `VERSION` to the Minecraft version its
+     * Pumpkin engine serves. See [ServerBackend.servedVersion] for where
+     * [served] comes from; [saved] is the API's `VERSION`, absent or not.
+     */
+    fun pinVersion(saved: String?, served: String?): VersionPin? {
+        val value = call("minecraft.hosting.pinVersion", buildJsonObject {
+            saved?.let { put("saved", it) }
+            served?.let { put("served", it) }
+        }) as? JsonObject ?: return null
+        return VersionPin(
+            version = value["version"]?.jsonPrimitive?.content ?: return null,
+            line = value["line"]?.jsonPrimitive?.content ?: return null,
+        )
+    }
+
+    /**
      * Which PowerNukkitX release to run, out of the GitHub releases array.
      *
      * [blessed] is the API's pin. It is what makes a bad release stoppable
