@@ -329,8 +329,8 @@ feature has five truncation sites.
 | Grouping | `…/app_error/fingerprint.rs` |
 | Redaction | `…/app_error/redact.rs` |
 | Head/tail truncation | `rust/homerun-core/src/reporting/truncate.rs` |
-| Process-global ledger, stash/drain | `rust/homerun-pumpkin-ffi/src/errors.rs` |
-| Dispatch arms, panic-hook install | `rust/homerun-pumpkin-ffi/src/core_dispatch.rs` |
+| Process-global ledger, stash/drain | `rust/homerun-supervisor/src/errors.rs` |
+| Dispatch arms, panic-hook install | `rust/homerun-supervisor/src/core_dispatch.rs` |
 | Android reporter | `android/…/AppErrors.kt` |
 | Android OS-reported deaths | `android/…/ExitReasons.kt` |
 | Android pre-boot hook | `android/…/MainActivity.kt` (bootstrap script), `BridgeRouter.kt` (`logJsError`) |

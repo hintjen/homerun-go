@@ -458,7 +458,7 @@ Not in this repo, and **the first one fails silently**:
 | `rust/homerun-core/src/minecraft/jvm.rs` | `NUKKIT_PROGRAM_ARGS`, `NUKKIT_JVM_OPTIONS` |
 | `rust/homerun-core/src/minecraft/console.rs` | `player_before_address`, `bedrock_version` |
 | `rust/homerun-core/src/game.rs` | `config_inputs_for`, `LineMeaning::announced_version` — both additive |
-| `rust/homerun-pumpkin-ffi/src/core_dispatch.rs` | `minecraft.exposure`, `minecraft.hosting.isNukkit`, `minecraft.nukkit.release`, the game type on `jvm.launch` and `game.configInputs` |
+| `rust/homerun-supervisor/src/core_dispatch.rs` | `minecraft.exposure`, `minecraft.hosting.isNukkit`, `minecraft.nukkit.release`, the game type on `jvm.launch` and `game.configInputs` |
 | `android/.../ServerJar.kt` | `ensureNukkit`, and `place` — the half of `ensure` that does not care what published the jar |
 | `android/.../JavaServerBackend.kt` | `prepareNukkit`, the skipped EULA, the skipped mod and plugin sync, the exposure on the tunnel |
 | `android/.../WireProxy.kt`, `TunnelSession.kt` | The exposure, threaded to `tunnel.render` |

@@ -347,7 +347,7 @@ in the UI.
 |---|---|
 | `rust/homerun-core/src/minecraft/crossplay.rs` | every decision: which jars, from where, what Geyser is told |
 | `rust/homerun-core/src/minecraft/mod.rs` | `exposure_for`, and `Minecraft::forwards` which renders it |
-| `rust/homerun-pumpkin-ffi/src/core_dispatch.rs` | the five `minecraft.crossplay.*` and `minecraft.exposure` arms |
+| `rust/homerun-supervisor/src/core_dispatch.rs` | the five `minecraft.crossplay.*` and `minecraft.exposure` arms |
 | `android/…/CrossplayInstaller.kt` | the Floodgate fetch and the config seed |
 | `android/…/ModInstaller.kt` | folds the crossplay slugs in before resolving |
 | `android/…/WireProxy.kt`, `TunnelSession.kt` | carry `exposure` to the tunnel |

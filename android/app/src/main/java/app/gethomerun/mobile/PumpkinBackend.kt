@@ -31,7 +31,7 @@ import java.time.Instant
  *
  * # Why not in-process, when the library can link it
  *
- * `homerun-pumpkin-ffi` can compile Pumpkin straight into the app, and on iOS
+ * `homerun-supervisor` can compile Pumpkin straight into the app, and on iOS
  * it must, because that platform cannot spawn anything. Android can, and every
  * consequence of not doing so is one this app was paying for:
  *
@@ -348,7 +348,7 @@ class PumpkinBackend(
      *
      * The file carries the *raw* inputs, not a rendered `pumpkin.toml`. What
      * a setting means — the clamps, the online-mode pairing Pumpkin asserts,
-     * which keys it even has — is `homerun-pumpkin-ffi`'s and the engine reads
+     * which keys it even has — is `homerun-supervisor`'s and the engine reads
      * it with the same code the linked build uses. Rendering TOML here would
      * be a second spelling of every key and every enum, and getting one wrong
      * is silent: the value is dropped on load and the server starts on

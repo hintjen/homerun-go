@@ -369,7 +369,7 @@ pub fn resolve_players(names: &[String], resolved: &[Identity], online: bool) ->
 /// > **Not for Pumpkin.** Its `ops.json` field is `bypasses_player_limit` and
 /// > its loader has no serde default, so a file written from here panics it at
 /// > startup. A host driving Pumpkin seeds its structs instead — see
-/// > `homerun-pumpkin-ffi::pumpkin_settings`.
+/// > `homerun-supervisor::pumpkin_settings`.
 pub fn ops_json(players: &[Player]) -> Value {
     Value::Array(
         players

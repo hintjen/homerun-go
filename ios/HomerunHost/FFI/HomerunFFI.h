@@ -1,6 +1,6 @@
 /*
- * The C surface of `rust/homerun-pumpkin-ffi`, hand-written because the crate
- * generates no header. It must match `rust/homerun-pumpkin-ffi/src/lib.rs`
+ * The C surface of `rust/homerun-supervisor`, hand-written because the crate
+ * generates no header. It must match `rust/homerun-supervisor/src/lib.rs`
  * exactly — a signature that drifts links fine and corrupts the stack at
  * runtime. See docs/ffi.md.
  *

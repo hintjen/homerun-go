@@ -7,7 +7,11 @@
 const path = require("path");
 
 const ROOT = path.resolve(__dirname, "..");
-const CRATE = path.join(ROOT, "rust", "homerun-pumpkin-ffi");
+const CRATE = path.join(ROOT, "rust", "homerun-supervisor");
+// The crate is `homerun-supervisor`; its *lib target* is still
+// `homerun_pumpkin_ffi`, and that is what names the file every output path
+// below is built from. Android loads it and iOS links it by that name, so it
+// is frozen deliberately — see `[lib]` in that crate's Cargo.toml.
 const CRATE_NAME = "homerun_pumpkin_ffi";
 
 /**

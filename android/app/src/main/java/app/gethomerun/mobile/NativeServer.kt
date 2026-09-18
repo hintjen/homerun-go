@@ -3,7 +3,7 @@ package app.gethomerun.mobile
 import android.util.Log
 
 /**
- * The raw JNI surface of `homerun-pumpkin-ffi`.
+ * The raw JNI surface of `homerun-supervisor`.
  *
  * Thin on purpose: every method returns the JSON string the Rust layer
  * produced, and nothing here interprets it. [PumpkinBackend] owns the

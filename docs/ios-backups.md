@@ -143,7 +143,7 @@ this landed, used by nobody.
 | `PumpkinBackend.swift` | Restore in `start`; the ack and the on-stop backup in `finish`. |
 | `BridgeRouter+Server.swift` | The lease gate, and building `BackupContext`. |
 | `HostStore.swift` | The pending-report outbox. |
-| `rust/homerun-pumpkin-ffi/src/backup_engine.rs` | The engine. See [`ffi.md`](./ffi.md#backups--backup_jobrs-backup_enginers). |
+| `rust/homerun-supervisor/src/backup_engine.rs` | The engine. See [`ffi.md`](./ffi.md#backups--backup_jobrs-backup_enginers). |
 
 ## Triage
 

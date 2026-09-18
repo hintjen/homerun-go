@@ -1846,7 +1846,7 @@ name = "homerun-pumpkin-bin"
 version = "0.1.0"
 dependencies = [
  "homerun-core",
- "homerun-pumpkin-ffi",
+ "homerun-supervisor",
  "pumpkin",
  "pumpkin-config",
  "pumpkin-data",
@@ -1856,7 +1856,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "homerun-pumpkin-ffi"
+name = "homerun-supervisor"
 version = "0.1.0"
 dependencies = [
  "android_logger",

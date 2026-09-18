@@ -216,7 +216,7 @@ follow-up.
 | `ios/HomerunHost/PumpkinBackend.swift` | `note(serverId:line:)` — the host's own lines, badged once |
 | `ios/coretest/main.swift` | Every wrapper above, against the real core, with no simulator |
 | `rust/homerun-core/src/reporting/` | The payloads, the cadence, the parsers |
-| `rust/homerun-pumpkin-ffi/src/host_dispatch.rs` | The poll and the ping — the two calls with effects |
+| `rust/homerun-supervisor/src/host_dispatch.rs` | The poll and the ping — the two calls with effects |
 
 ## Triage
 

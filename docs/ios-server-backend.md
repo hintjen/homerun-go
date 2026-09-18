@@ -385,15 +385,15 @@ a build mismatch is exactly when you least want to launch blind.
 | `ios/HomerunHost/FFI/StartRequest.swift` | The start request's wire form. A leaf, so `ios/coretest` can check it against the real parser |
 | `ios/HomerunHost/MojangDirectory.swift` | Name → UUID. The only outbound call here that is not to our own API |
 | `rust/homerun-core/src/minecraft/hosting.rs` | Which servers this host may run at all. Shared with Android, so neither app refuses alone |
-| `rust/homerun-pumpkin-ffi/src/engine_settings.rs` | What a setting *means* to an engine. No Pumpkin, so it is in the fast test suite |
-| `rust/homerun-pumpkin-ffi/src/pumpkin_settings.rs` | Assignment onto Pumpkin's own types |
+| `rust/homerun-supervisor/src/engine_settings.rs` | What a setting *means* to an engine. No Pumpkin, so it is in the fast test suite |
+| `rust/homerun-supervisor/src/pumpkin_settings.rs` | Assignment onto Pumpkin's own types |
 | `ios/HomerunHost/DeviceMetrics.swift` | Process memory and CPU **counters**, from Mach. No arithmetic |
 | `ios/HomerunHost/FFI/Core.swift` | The shared decisions, including `Core.Metrics` — the run's graph |
 | `ios/HomerunHost/BridgeRouter+Server.swift` | The `native-server-*` channels |
 | `ios/HomerunHost/WireProxy.swift` | Tunnel config, lifecycle, handshake watchdog |
 | `ios/HomerunHost/HomerunAPI.swift` | Device registration; tunnel credential polling |
 | `go/wireproxy-ios/` | gomobile binding over the wireproxy fork |
-| `rust/homerun-pumpkin-ffi/examples/boot_engine.rs` | Boots the real engine host-native |
+| `rust/homerun-supervisor/examples/boot_engine.rs` | Boots the real engine host-native |
 
 ## Triage
 

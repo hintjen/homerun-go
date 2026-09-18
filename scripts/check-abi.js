@@ -44,7 +44,7 @@ const EXPECTATIONS = [
   },
 ];
 
-const CRATE = path.join(ROOT, "rust", "homerun-pumpkin-ffi", "src", "lib.rs");
+const CRATE = path.join(ROOT, "rust", "homerun-supervisor", "src", "lib.rs");
 
 function read(file, pattern, what) {
   let source;

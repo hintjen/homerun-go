@@ -1816,7 +1816,7 @@ object Core {
     // failures are the same bug, whether this one is worth sending again,
     // what has to be redacted, what the body looks like — so that this host
     // and the iOS one cannot drift on any of them. See
-    // `homerun-core::reporting::app_error` and `homerun-pumpkin-ffi::errors`.
+    // `homerun-core::reporting::app_error` and `homerun-supervisor::errors`.
 
     /**
      * Point the core's crash artefacts at a directory this app owns.
@@ -1925,7 +1925,7 @@ object Core {
      * The supervisor does this rather than this app, because the replies come
      * back as ordinary console lines and only the supervisor can keep them out
      * of the console buffer the UI reads. Filtering them here would be too
-     * late: the line is already stored. See `homerun-pumpkin-ffi::server::Ask`.
+     * late: the line is already stored. See `homerun-supervisor::server::Ask`.
      *
      * Either field is null on its own — a plugin shadowing `/list` should not
      * cost the gametime.

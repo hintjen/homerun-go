@@ -8,7 +8,7 @@ description = "Node-API surface on homerun-core, so Homerun Desktop stops keepin
 
 [lib]
 # cdylib only. Node loads the addon as a shared library and nothing in this
-# repo links it — unlike homerun-pumpkin-ffi, which iOS also links statically.
+# repo links it — unlike homerun-supervisor, which iOS also links statically.
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -17,7 +17,7 @@ homerun-core = { path = "../homerun-core" }
 # The binding lives in its own crate rather than behind a feature on
 # homerun-core, because the core's dependency list is a stated rule in
 # CLAUDE.md — serde, serde_json, ed25519-dalek — and napi is not on it. Same
-# separation homerun-pumpkin-ffi has for the C ABI.
+# separation homerun-supervisor has for the C ABI.
 napi = { version = "2", default-features = false }
 napi-derive = "2"
 

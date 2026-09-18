@@ -2,7 +2,7 @@
 
 How both mobile hosts reach `homerun-core`.
 
-**Source**: `rust/homerun-pumpkin-ffi/src/core_dispatch.rs` (the dispatch, with
+**Source**: `rust/homerun-supervisor/src/core_dispatch.rs` (the dispatch, with
 no platform in it), `core_bridge.rs` (the JNI adapter) and `lib.rs`'s
 `homerun_core_call` (the C ABI); `android/.../Core.kt` and
 `ios/HomerunHost/FFI/Core.swift` on the host side.

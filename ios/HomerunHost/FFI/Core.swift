@@ -15,7 +15,7 @@ import Foundation
 ///
 /// One native entry point — `homerun_core_call(method, argsJson)` — replying
 /// `{ok:true, value}` or `{ok:false, error}`. This is the same dispatch Android
-/// reaches over JNI (`core_dispatch::call` in `homerun-pumpkin-ffi`), so the
+/// reaches over JNI (`core_dispatch::call` in `homerun-supervisor`), so the
 /// two platforms cannot disagree about what a method means, only about how a
 /// string crosses the boundary.
 ///
@@ -887,7 +887,7 @@ enum Core {
     // failures are the same bug, whether this one is worth sending again,
     // what has to be redacted, what the body looks like — so that this host
     // and the Android one cannot drift on any of them. See
-    // `homerun-core::reporting::app_error` and `homerun-pumpkin-ffi::errors`.
+    // `homerun-core::reporting::app_error` and `homerun-supervisor::errors`.
 
     /// Point the core's crash artefacts at a directory this app owns.
     ///

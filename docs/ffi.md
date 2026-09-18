@@ -1,10 +1,41 @@
-# `homerun-pumpkin-ffi` — the C surface
+# `homerun-supervisor` — the C surface
 
 The Rust library both mobile hosts link. It owns the server's lifecycle,
 console buffer, and crash reporting, and exposes them over a C ABI so Swift
 and Kotlin talk to one implementation instead of two.
 
-Source: `rust/homerun-pumpkin-ffi/`.
+Source: `rust/homerun-supervisor/`.
+
+### The package is `homerun-supervisor`; the library file is not
+
+The crate was called `homerun-pumpkin-ffi` until it was renamed, and the name
+was already a misnomer: it supervises the JVM, PowerNukkitX and restic as well
+as Pumpkin, and for a child process as readily as a linked engine.
+
+The rename stopped at the package. The **lib target is still**
+`homerun_pumpkin_ffi`, so the files it produces are still
+`libhomerun_pumpkin_ffi.so` and `libhomerun_pumpkin_ffi.a`. Three things read
+that name and none of them is rebuilt from this crate's manifest:
+
+- `System.loadLibrary("homerun_pumpkin_ffi")` in `Core.kt` and
+  `NativeServer.kt`, and the `.so` the APK packages under that name
+- `-lhomerun_pumpkin_ffi` in `ios/project.yml`
+- crash backtraces, which name frames `homerun_pumpkin_ffi::…` inside
+  `libhomerun_pumpkin_ffi.so`. `homerun-core::reporting::app_error::fingerprint`
+  groups reports on exactly that string, so moving it would split every
+  existing report's fingerprint in two — the tests there pin the old name on
+  purpose.
+
+So `[lib] name` is frozen in the same spirit as the `homerun_server_*` exports
+and `FFI_ABI_VERSION`: changing it is a separate change that needs the Android
+and iOS builds to verify it, not this crate's suite. It may never be worth it.
+
+Rust source does not inherit the old spelling. Dependent crates name the
+package explicitly (`homerun-supervisor = { package = "homerun-supervisor", … }`),
+which makes the extern name follow the package, so they `use
+homerun_supervisor::…`. The one exception is this crate's own `examples/`,
+compiled inside the package, where the lib target's name is the only spelling
+available.
 
 ## Why this crate exists at all
 

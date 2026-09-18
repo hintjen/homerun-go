@@ -23,8 +23,8 @@ import kotlinx.coroutines.launch
  *
  * # Why a service at all
  *
- * The Minecraft server is a child process of this app's process, spawned by the
- * supervisor in `homerun-pumpkin-ffi`. Android does not know or care that it
+ * The Minecraft server is a child process of this app's process, spawned by
+ * `homerun-supervisor`. Android does not know or care that it
  * exists: it accounts for the *app* process, and once that process has no
  * visible activity it becomes a cached process — first in line for the
  * low-memory killer, on a device that is simultaneously being asked to run a

@@ -1,12 +1,34 @@
 [package]
-name = "homerun-pumpkin-ffi"
+name = "homerun-supervisor"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 publish = false
-description = "C ABI around the Pumpkin server for the Homerun iOS and Android hosts"
+description = "The supervisor: owns a running server — state machine, console, stop ladder, crash capture, sampling — for a linked engine and a child process alike, behind a C ABI"
 
 [lib]
+# The **package** is `homerun-supervisor`; this lib target deliberately is not.
+#
+# The file name is load-bearing in three places that this rename must not
+# touch, because none of them is rebuilt from this manifest:
+#
+#   - Android calls `System.loadLibrary("homerun_pumpkin_ffi")` and the APK
+#     packages `libhomerun_pumpkin_ffi.so` by that name
+#   - iOS links `-lhomerun_pumpkin_ffi` against `libhomerun_pumpkin_ffi.a`
+#   - a crash backtrace off a device names frames
+#     `homerun_pumpkin_ffi::…` inside `libhomerun_pumpkin_ffi.so`, which is
+#     what `homerun-core::reporting::app_error::fingerprint` groups on — so
+#     moving it would split every existing report's fingerprint in two
+#
+# `[lib] name` is what decides all three, so it stays put and the rename stops
+# at the package. Moving the artifact is a separate, separately-verified
+# change (it needs the Android and iOS builds, not just this crate's suite) —
+# or never; the name costs nothing where it is.
+#
+# Dependents do not inherit the old spelling: each renames this back to
+# `homerun_supervisor` with an explicit `package =` key, so Rust source says
+# the name the package has. See `rust/homerun-pumpkin-bin/Cargo.toml`.
+name = "homerun_pumpkin_ffi"
 # staticlib -> iOS links libhomerun_pumpkin_ffi.a
 # cdylib    -> Android loads libhomerun_pumpkin_ffi.so
 crate-type = ["staticlib", "cdylib", "rlib"]

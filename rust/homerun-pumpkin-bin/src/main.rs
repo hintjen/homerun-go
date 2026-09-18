@@ -2,7 +2,7 @@
 //!
 //! # Why this exists rather than linking the engine
 //!
-//! `homerun-pumpkin-ffi` can link Pumpkin straight into the app, and on iOS it
+//! `homerun-supervisor` can link Pumpkin straight into the app, and on iOS it
 //! must — that platform cannot spawn a process at all. Android can, and every
 //! consequence of not doing so is one this app pays for:
 //!
@@ -71,7 +71,7 @@ use pumpkin_data::packet::CURRENT_MC_VERSION;
 use tracing::{info, warn};
 
 use homerun_core::game::Identity;
-use homerun_pumpkin_ffi::{engine_settings, pumpkin_settings};
+use homerun_supervisor::{engine_settings, pumpkin_settings};
 
 /// What the host leaves in the server directory for this process to read.
 ///

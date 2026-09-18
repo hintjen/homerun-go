@@ -25,7 +25,7 @@ planning notes that live alongside that pipeline, not here.
 homerun-go/
 ├── ios/       Swift host — WKWebView, bridge router, PumpkinBackend
 ├── android/   Kotlin host — WebView, bridge router, Pumpkin + JVM backends
-├── rust/      homerun-core (decisions) + homerun-pumpkin-ffi (the supervisor)
+├── rust/      homerun-core (decisions) + homerun-supervisor (the supervisor)
 ├── go/        wireproxy-ios — the tunnel, built as a library for iOS
 ├── shared/    the vendored bridge contract + conformance checker
 ├── scripts/   the build system — staging the UI, cross-compiling, the gates

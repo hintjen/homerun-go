@@ -644,7 +644,7 @@ class JavaServerBackend(
         // into a loss.
         if (Core.isMinigame(config.settingsEnv)) ephemeral += serverId else ephemeral -= serverId
 
-        // From here the supervisor in `homerun-pumpkin-ffi` owns the process:
+        // From here `homerun-supervisor` owns the process:
         // it spawns it, reads its console, climbs the stop ladder and reports
         // what the exit meant. This host no longer manages any of that — the
         // same state machine runs the linked engine on iOS.
@@ -912,7 +912,7 @@ class JavaServerBackend(
      * Page the supervisor's console into this host's buffer.
      *
      * A cursor rather than a stream: the process belongs to
-     * `homerun-pumpkin-ffi` now, and its console is read the same way the
+     * `homerun-supervisor` now, and its console is read the same way the
      * Pumpkin backend reads its own. Kept locally as well because this buffer
      * also holds the host's own notes — the jar download, the runtime unpack —
      * which happen minutes before there is a server to have a console.

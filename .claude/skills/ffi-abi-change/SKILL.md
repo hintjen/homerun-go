@@ -1,6 +1,6 @@
 ---
 name: ffi-abi-change
-description: Add, change, or remove a `homerun_*` C ABI export in homerun-pumpkin-ffi and wire it through to both hosts. Use when a host needs to call something new in Rust, when an export's shape changes, or when diagnosing UnsatisfiedLinkError, "the native core has no method", an ABI mismatch in logcat, a server backend that is silently unavailable while the rest of the app works, or a native change that seems not to have taken effect. Not for adding a `core.*` method — that is a dispatch arm, see docs/core-bridge.md.
+description: Add, change, or remove a `homerun_*` C ABI export in homerun-supervisor and wire it through to both hosts. Use when a host needs to call something new in Rust, when an export's shape changes, or when diagnosing UnsatisfiedLinkError, "the native core has no method", an ABI mismatch in logcat, a server backend that is silently unavailable while the rest of the app works, or a native change that seems not to have taken effect. Not for adding a `core.*` method — that is a dispatch arm, see docs/core-bridge.md.
 ---
 
 # Changing the C ABI
@@ -28,7 +28,7 @@ need no version bump. Prefer them.
 Work top to bottom; each one is cheap, and the whole set is what makes the
 call actually reachable.
 
-**1. The Rust export** — `rust/homerun-pumpkin-ffi/src/lib.rs`
+**1. The Rust export** — `rust/homerun-supervisor/src/lib.rs`
 
 ```rust
 #[no_mangle]
@@ -59,7 +59,7 @@ also moved *when the console gets cleared* out of `start`. It was still
 additive — a host that calls neither behaves exactly as before — but only
 because that fallback was deliberately kept. Say which it is.
 
-**3. The JNI wrapper** — `rust/homerun-pumpkin-ffi/src/jni_bridge.rs`
+**3. The JNI wrapper** — `rust/homerun-supervisor/src/jni_bridge.rs`
 
 ```rust
 #[no_mangle]

@@ -38,7 +38,7 @@
 //! this addon is loaded into the desktop app's main process, so that would be
 //! the whole app. Nothing here can panic today — these are total functions
 //! over `&str` — and anything added later that could must catch first, the way
-//! `homerun-pumpkin-ffi` does for the C ABI.
+//! `homerun-supervisor` does for the C ABI.
 
 #![deny(clippy::panic, clippy::unwrap_used, clippy::expect_used)]
 
