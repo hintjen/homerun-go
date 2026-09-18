@@ -21,6 +21,18 @@
 //! schema describes each one. Adding a field to the types without adding it
 //! here fails that test, by name.
 //!
+//! # The generated file is committed
+//!
+//! `schema/game.v0.json` at the crate root is the output of [`document`],
+//! checked in. [`tests::the_committed_schema_is_not_stale`] fails when the two
+//! disagree, and says which command regenerates it.
+//!
+//! Committing a generated file usually earns its keep only if something
+//! cannot generate it, and here two things cannot: the monorepo pins a copy at
+//! `games/schema/game.v0.json` and wants to diff it in CI without a Rust
+//! toolchain, and a reviewer wants to see a schema change *as a diff* rather
+//! than infer it from a change to a `json!` macro.
+//!
 //! # What the schema does *not* do
 //!
 //! It describes shape, not sense. Everything in [`super::validate`] — a
@@ -35,7 +47,7 @@ use serde_json::{json, Value};
 use super::descriptor::SCHEMA_VERSION;
 
 /// The `$id` the monorepo's pinned copy is published under.
-pub const SCHEMA_ID: &str = "https://schemas.gethomerun.com/game.v0.json";
+pub const SCHEMA_ID: &str = "https://gethomerun.app/schemas/game.v0.json";
 
 /// The descriptor schema, as a JSON Schema 2020-12 document.
 pub fn schema() -> Value {
@@ -291,6 +303,13 @@ pub fn document() -> String {
     format!("{}\n", serde_json::to_string_pretty(&schema()).unwrap())
 }
 
+/// The committed copy of [`document`], at `schema/game.v0.json`.
+///
+/// Callers that only want to hand the schema to something — a validator, a
+/// pinning script — should use this rather than re-rendering it, so that what
+/// they act on is the file that was reviewed.
+pub const COMMITTED: &str = include_str!("../../schema/game.v0.json");
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +485,22 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    /// The committed file has to be what the types produce today.
+    ///
+    /// Without this, `schema/game.v0.json` is a copy that was true once — and
+    /// the monorepo pins *it*, so a stale copy would be checked against real
+    /// descriptors in CI and quietly pass things this build refuses.
+    #[test]
+    fn the_committed_schema_is_not_stale() {
+        assert_eq!(
+            COMMITTED,
+            document(),
+            "\n\nrust/homerun-core/schema/game.v0.json is out of date with the \
+             types in engine::descriptor.\nRegenerate it:\n\n    npm run \
+             schema:descriptor -- rust/homerun-core/schema/game.v0.json\n\n"
+        );
     }
 
     #[test]
