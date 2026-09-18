@@ -1,5 +1,8 @@
 # Multi-game engine session recovery
 
+> Historical checkpoint. The same branch now continues implementation; read
+> `docs/game-runner.md` for its current behavior and validation limits.
+
 ## Overview
 
 Recovered 2026-09-18 from the transferred engine session log. This branch preserves the interrupted start of the runner, on top of the completed engine effects branch. It is a WIP snapshot, not a working runner or a merge candidate.

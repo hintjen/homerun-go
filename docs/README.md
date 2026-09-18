@@ -12,6 +12,11 @@ change falls on.
 
 ## Documentation Index
 
+### [The desktop game runner](./game-runner.md)
+
+The standalone CLI and Electron's NDJSON supervisor: ownership, cancellation,
+readiness, protocol events, fixture tests and the limits of probe evidence.
+
 ### 🔨 [Building](./building.md)
 
 How to produce what Xcode and Gradle need: the shared UI bundle staged into

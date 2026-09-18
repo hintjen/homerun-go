@@ -73,7 +73,7 @@ pub enum Command {
         /// Generated per server by the host, stored by it, never sent to the
         /// API. `engine.secrets` says which ones a descriptor needs.
         #[serde(default)]
-        secrets: Map<String, String>,
+        secrets: std::collections::BTreeMap<String, String>,
         #[serde(default)]
         bind_address: Option<String>,
         #[serde(default)]
@@ -93,7 +93,9 @@ pub enum Command {
         req_id: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
-    Stop { server_id: String },
+    Stop {
+        server_id: String,
+    },
     Status,
     Shutdown,
     /// A command added after this runner shipped.
@@ -152,11 +154,18 @@ pub enum Event {
         ports: std::collections::BTreeMap<String, u16>,
     },
     #[serde(rename_all = "camelCase")]
-    ServerStarted { server_id: String },
+    ServerStarted {
+        server_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    TunnelStarted { server_id: String },
+    TunnelStarted {
+        server_id: String,
+    },
     #[serde(rename_all = "camelCase")]
-    TunnelFailed { server_id: String, message: String },
+    TunnelFailed {
+        server_id: String,
+        message: String,
+    },
     #[serde(rename_all = "camelCase")]
     Players {
         server_id: String,
@@ -197,7 +206,9 @@ pub enum Event {
         tail: Vec<String>,
     },
     #[serde(rename_all = "camelCase")]
-    Status { servers: Vec<ServerStatus> },
+    Status {
+        servers: Vec<ServerStatus>,
+    },
     #[serde(rename_all = "camelCase")]
     Error {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,6 +255,7 @@ pub mod codes {
 
     /// Every one of them, for the test that keeps this list and the
     /// document's in step.
+    #[cfg(test)]
     pub const ALL: [&str; 8] = [
         LICENCE_NOT_ACCEPTED,
         DESCRIPTOR_INVALID,
@@ -368,9 +380,8 @@ mod tests {
     fn a_fetch_that_does_not_mention_the_licence_has_not_accepted_it() {
         let Command::Fetch {
             licence_accepted, ..
-        } = parse(
-            r#"{"cmd":"fetch","serverId":"s1","descriptor":{},"runtimeRoot":"/rt"}"#,
-        ) else {
+        } = parse(r#"{"cmd":"fetch","serverId":"s1","descriptor":{},"runtimeRoot":"/rt"}"#)
+        else {
             panic!("expected a fetch");
         };
         assert!(!licence_accepted, "absent must mean not accepted");
@@ -380,7 +391,8 @@ mod tests {
         } = parse(
             r#"{"cmd":"start","serverId":"s1","descriptor":{},"serverDir":"/s",
                 "runtimeRoot":"/rt"}"#,
-        ) else {
+        )
+        else {
             panic!("expected a start");
         };
         assert!(!licence_accepted, "absent must mean not accepted");
@@ -389,7 +401,10 @@ mod tests {
     /// Either side may be newer. Neither may fall over because of it.
     #[test]
     fn a_command_from_a_newer_desktop_is_unknown_rather_than_fatal() {
-        assert_eq!(parse(r#"{"cmd":"teleport","serverId":"s1"}"#), Command::Unknown);
+        assert_eq!(
+            parse(r#"{"cmd":"teleport","serverId":"s1"}"#),
+            Command::Unknown
+        );
     }
 
     #[test]
@@ -541,7 +556,10 @@ mod tests {
         assert_eq!(error["event"], "error");
         assert_eq!(error["code"], "busy");
 
-        assert_eq!(rendered(Event::ShutdownComplete)["event"], "shutdown-complete");
+        assert_eq!(
+            rendered(Event::ShutdownComplete)["event"],
+            "shutdown-complete"
+        );
     }
 
     /// Every event about a server carries its id, so a desktop running one

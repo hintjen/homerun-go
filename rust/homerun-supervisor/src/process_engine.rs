@@ -51,7 +51,7 @@ use std::time::{Duration, Instant};
 use homerun_core::minecraft::{console, jvm};
 use serde::{Deserialize, Serialize};
 
-use crate::engine::{Engine, PlayerEntry, Roster, RunOutcome, RunRequest, StopSignal};
+use crate::engine::{Engine, Roster, RunOutcome, RunRequest, StopSignal};
 use crate::platform;
 
 /// Everything needed to start the server, decided by the host.
@@ -325,6 +325,49 @@ impl Engine for ProcessEngine {
         on_line: &dyn Fn(String),
         on_ready: &dyn Fn(),
     ) -> RunOutcome {
+        self.run_streamed(request, stop, &|line, _| on_line(line), on_ready)
+    }
+
+    fn command(&self, command: &str) -> Result<(), String> {
+        if self.live().is_none() {
+            return Err(jvm::Refusal::NotAcceptingCommands.text().to_string());
+        }
+        self.say(command)
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.live().as_ref().map(|run| run.pid)
+    }
+
+    fn usage(&self) -> Option<(u64, f64)> {
+        platform::process_stats(self.pid()?).map(|s| (s.rss_kb, s.cpu_seconds))
+    }
+
+    fn players(&self) -> Option<Roster> {
+        let live = self.live();
+        let roster = live.as_ref()?.roster.lock().ok()?;
+        Some((
+            roster
+                .players
+                .iter()
+                .map(|name| (name.clone(), None))
+                .collect(),
+            roster.max,
+        ))
+    }
+}
+
+impl ProcessEngine {
+    /// Like `Engine::run`, retaining each pipe's identity for the NDJSON host.
+    /// Both pipes are drained independently: a quiet stdout must not hide
+    /// stderr readiness or let a full stderr pipe deadlock startup.
+    pub fn run_streamed(
+        &self,
+        request: &RunRequest,
+        stop: StopSignal,
+        on_line: &dyn Fn(String, &'static str),
+        on_ready: &dyn Fn(),
+    ) -> RunOutcome {
         let mut command = Command::new(&self.invocation.program);
         command
             .args(&self.invocation.args)
@@ -358,17 +401,27 @@ impl Engine for ProcessEngine {
         // stderr on its own thread, merged into the same console. A server
         // that only complains on stderr — a bad JVM flag, a missing class —
         // would otherwise fail silently as far as the player can see.
-        let stderr = child.stderr.take().map(|stderr| {
-            let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, &'static str)>(256);
+        fn pump(
+            reader: impl std::io::Read + Send + 'static,
+            tx: std::sync::mpsc::SyncSender<(String, &'static str)>,
+            stream: &'static str,
+        ) {
             std::thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    if tx.send(line).is_err() {
-                        return;
+                for line in BufReader::new(reader).lines().map_while(Result::ok) {
+                    if tx.send((line, stream)).is_err() {
+                        break;
                     }
                 }
             });
-            rx
-        });
+        }
+        if let Some(stdout) = child.stdout.take() {
+            pump(stdout, tx.clone(), "stdout");
+        }
+        if let Some(stderr) = child.stderr.take() {
+            pump(stderr, tx.clone(), "stderr");
+        }
+        drop(tx);
 
         // The stop watcher: `run` is busy reading stdout for the whole life of
         // the server, so climbing the ladder has to happen from somewhere
@@ -382,23 +435,25 @@ impl Engine for ProcessEngine {
         );
 
         let mut ready = false;
-        if let Some(stdout) = child.stdout.take() {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if let Some(err) = stderr.as_ref() {
-                    for line in err.try_iter() {
-                        observe(&line, &roster, &self.supervision.presence);
-                        on_line(line);
+        loop {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok((line, stream)) => {
+                    observe(&line, &roster, &self.supervision.presence);
+                    on_line(line.clone(), stream);
+                    // The console saying it is accepting connections is the only
+                    // honest signal for this; the process existing is not one.
+                    if !ready && self.is_ready(&line) {
+                        ready = true;
+                        on_ready();
                     }
                 }
-
-                observe(&line, &roster, &self.supervision.presence);
-                // The console saying it is accepting connections is the only
-                // honest signal for this; the process existing is not one.
-                if !ready && self.is_ready(&line) {
-                    ready = true;
-                    on_ready();
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // A descendant may retain a pipe after the actual server exits.
+                    if child.try_wait().ok().flatten().is_some() {
+                        break;
+                    }
                 }
-                on_line(line);
             }
         }
 
@@ -408,10 +463,8 @@ impl Engine for ProcessEngine {
         *self.live() = None;
 
         // Whatever stderr had left to say, now that stdout is done.
-        if let Some(err) = stderr {
-            for line in err.try_iter() {
-                on_line(line);
-            }
+        for (line, stream) in rx.try_iter() {
+            on_line(line, stream);
         }
 
         match status {
@@ -425,40 +478,6 @@ impl Engine for ProcessEngine {
             }),
             Err(err) => RunOutcome::Crashed(format!("could not wait for the server: {err}")),
         }
-    }
-
-    fn command(&self, command: &str) -> Result<(), String> {
-        // A command before the process exists is a refusal whatever the
-        // route: RCON would otherwise try to open a socket to a port nothing
-        // has bound and report that as the console being unreachable, which
-        // is true and unhelpful.
-        if self.live().is_none() {
-            return Err(jvm::Refusal::NotAcceptingCommands.text().to_string());
-        }
-        self.say(command)
-    }
-
-    fn pid(&self) -> Option<u32> {
-        self.live().as_ref().map(|run| run.pid)
-    }
-
-    fn usage(&self) -> Option<(u64, f64)> {
-        let stats = platform::process_stats(self.pid()?)?;
-        Some((stats.rss_kb, stats.cpu_seconds))
-    }
-
-    fn players(&self) -> Option<Roster> {
-        let live = self.live();
-        let roster = live.as_ref()?.roster.lock().ok()?;
-        let players: Vec<PlayerEntry> = roster
-            .players
-            .iter()
-            // Console lines carry a name and never a UUID. Offline-mode
-            // servers have none to give, and inventing one would be worse
-            // than admitting it is unknown.
-            .map(|name| (name.clone(), None))
-            .collect();
-        Some((players, roster.max))
     }
 }
 

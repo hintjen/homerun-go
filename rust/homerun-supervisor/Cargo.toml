@@ -74,6 +74,7 @@ process-engine = ["dep:libc"]
 # there is nothing here without one.
 game-engine = [
     "process-engine",
+    "dep:tokio",
     "dep:reqwest",
     "dep:tungstenite",
     "dep:sha2",

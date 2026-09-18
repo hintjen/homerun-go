@@ -210,87 +210,102 @@ fn download(
         }
     }
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(None)
-        .connect_timeout(std::time::Duration::from_secs(30))
+    // A synchronous caller still needs to cancel while the peer is silent.
+    // Racing the whole transfer against cancellation drops the socket future,
+    // without imposing a deadline on legitimate multi-gigabyte downloads.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
-        .map_err(|_| "Homerun could not start a download on this computer.".to_string())?;
+        .map_err(|_| "Homerun could not start a download worker.".to_string())?;
+    runtime.block_on(async {
+        tokio::select! {
+           result = async {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|_| "Homerun could not start a download on this computer.".to_string())?;
 
-    let mut request = client.get(url);
-    if already > 0 {
-        request = request.header(reqwest::header::RANGE, format!("bytes={already}-"));
-    }
-
-    let mut response = request
-        .send()
-        .map_err(|_| format!("Homerun could not reach {}.", host_of(url)))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "{} did not have the file Homerun asked for.",
-            host_of(url)
-        ));
-    }
-
-    // A server that ignored the Range header sends 200 and the whole file;
-    // appending to the part would then corrupt it in a way the digest catches
-    // but only after the whole transfer.
-    let resuming = already > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
-    let mut file = if resuming {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .open(part)
-            .map_err(|_| cannot_write(part))?;
-        file.seek(SeekFrom::Start(already))
-            .map_err(|_| cannot_write(part))?;
-        file
-    } else {
-        fs::File::create(part).map_err(|_| cannot_write(part))?
-    };
-
-    let mut received = if resuming { already } else { 0 };
-    let total = response
-        .content_length()
-        .map(|len| len + if resuming { already } else { 0 })
-        .or(expected_size);
-
-    let mut buffer = vec![0u8; 512 * 1024];
-    let mut since_report = 0u64;
-    loop {
-        if (ctx.cancelled)() {
-            return Err(cancelled());
+        let mut request = client.get(url);
+        if already > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={already}-"));
         }
-        let read = response
-            .read(&mut buffer)
-            .map_err(|_| format!("the download from {} was interrupted.", host_of(url)))?;
-        if read == 0 {
-            break;
-        }
-        file.write_all(&buffer[..read])
-            .map_err(|_| cannot_write(part))?;
-        received += read as u64;
-        since_report += read as u64;
 
-        // Every few megabytes rather than every chunk: this crosses an FFI
-        // boundary and then a JSON line, and a report per 512KiB of a nine
-        // gigabyte download is eighteen thousand of them.
-        if since_report >= 4 * 1024 * 1024 {
-            since_report = 0;
-            (ctx.on_progress)(Progress::Bytes {
-                phase: "download",
-                received,
-                total,
-            });
-        }
-    }
+        let mut response = request
+            .send()
+            .await
+            .map_err(|_| format!("Homerun could not reach {}.", host_of(url)))?;
 
-    file.flush().map_err(|_| cannot_write(part))?;
-    (ctx.on_progress)(Progress::Bytes {
-        phase: "download",
-        received,
-        total,
-    });
-    Ok(())
+        if !response.status().is_success() {
+            return Err(format!(
+                "{} did not have the file Homerun asked for.",
+                host_of(url)
+            ));
+        }
+
+        // A server that ignored the Range header sends 200 and the whole file;
+        // appending to the part would then corrupt it in a way the digest catches
+        // but only after the whole transfer.
+        let resuming = already > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let mut file = if resuming {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(part)
+                .map_err(|_| cannot_write(part))?;
+            file.seek(SeekFrom::Start(already))
+                .map_err(|_| cannot_write(part))?;
+            file
+        } else {
+            fs::File::create(part).map_err(|_| cannot_write(part))?
+        };
+
+        let mut received = if resuming { already } else { 0 };
+        let total = response
+            .content_length()
+            .map(|len| len + if resuming { already } else { 0 })
+            .or(expected_size);
+
+        let mut since_report = 0u64;
+        loop {
+            if (ctx.cancelled)() {
+                return Err(cancelled());
+            }
+            let chunk = response
+                .chunk().await
+                .map_err(|_| format!("the download from {} was interrupted.", host_of(url)))?;
+            let Some(chunk) = chunk else { break; };
+            let read = chunk.len();
+            file.write_all(&chunk)
+                .map_err(|_| cannot_write(part))?;
+            received += read as u64;
+            since_report += read as u64;
+
+            // Every few megabytes rather than every chunk: this crosses an FFI
+            // boundary and then a JSON line, and a report per 512KiB of a nine
+            // gigabyte download is eighteen thousand of them.
+            if since_report >= 4 * 1024 * 1024 {
+                since_report = 0;
+                (ctx.on_progress)(Progress::Bytes {
+                    phase: "download",
+                    received,
+                    total,
+                });
+            }
+        }
+
+        file.flush().map_err(|_| cannot_write(part))?;
+        (ctx.on_progress)(Progress::Bytes {
+            phase: "download",
+            received,
+            total,
+        });
+        Ok(())
+           } => result,
+           _ = async { loop {
+               if (ctx.cancelled)() { return; }
+               tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+           }} => Err(cancelled()),
+          }
+    })
 }
 
 /// The sha256 of a file, read in one pass.
@@ -517,48 +532,69 @@ fn run_streaming(
         .spawn()
         .map_err(|_| format!("Homerun could not run {}.", program.display()))?;
 
-    let stderr = child.stderr.take().map(|stderr| {
+    let (tx, rx) = std::sync::mpsc::sync_channel(256);
+    fn pump(reader: impl Read + Send + 'static, tx: std::sync::mpsc::SyncSender<String>) {
         std::thread::spawn(move || {
-            let mut text = String::new();
-            let mut stderr = stderr;
-            let _ = stderr.read_to_string(&mut text);
-            text
-        })
-    });
-
-    let mut collected = String::new();
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(reader)
+                .lines()
+                .map_while(Result::ok)
+            {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+    }
     if let Some(stdout) = child.stdout.take() {
-        use std::io::BufRead;
-        for line in std::io::BufReader::new(stdout)
-            .lines()
-            .map_while(Result::ok)
-        {
-            if (ctx.cancelled)() {
-                let _ = child.kill();
-                return Err(cancelled());
-            }
-            // Checked as it arrives, so a prompt ends the run rather than
-            // being discovered after it has sat waiting for an answer.
-            if prompt_detected(&line) {
-                let _ = child.kill();
-                collected.push_str(&line);
-                return Ok(collected);
-            }
-            (ctx.on_progress)(Progress::Note {
-                phase,
-                message: line.clone(),
-            });
-            collected.push_str(&line);
-            collected.push('\n');
+        pump(stdout, tx.clone());
+    }
+    if let Some(stderr) = child.stderr.take() {
+        pump(stderr, tx.clone());
+    }
+    drop(tx);
+    let mut collected = String::new();
+    loop {
+        if (ctx.cancelled)() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(cancelled());
         }
+        let line = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                continue;
+            }
+        };
+        // Checked as it arrives, so a prompt ends the run rather than
+        // being discovered after it has sat waiting for an answer.
+        if prompt_detected(&line) {
+            let _ = child.kill();
+            let _ = child.wait();
+            collected.push_str(&line);
+            return Ok(collected);
+        }
+        (ctx.on_progress)(Progress::Note {
+            phase,
+            message: line.clone(),
+        });
+        // Keep success markers and the recent tail, not an install's
+        // potentially enormous lifetime output.
+        if collected.len() > 65536
+            && !collected.contains("Success! App")
+            && !collected.contains("fully installed")
+        {
+            collected.clear();
+        }
+        collected.push_str(&line);
+        collected.push('\n');
     }
 
     let _ = child.wait();
-    if let Some(stderr) = stderr {
-        if let Ok(text) = stderr.join() {
-            collected.push_str(&text);
-        }
-    }
     Ok(collected)
 }
 

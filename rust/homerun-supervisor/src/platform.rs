@@ -103,6 +103,75 @@ pub fn process_stats(pid: u32) -> Option<Stats> {
     imp::process_stats(pid)
 }
 
+/// Capacity for the doctor's verdict. Zero means unobserved, never unlimited.
+/// Probe the nearest existing ancestor when a new install folder does not exist.
+pub fn machine_capacity(path: &Path) -> homerun_core::engine::doctor::Machine {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let existing = absolute
+        .ancestors()
+        .find(|p| p.exists())
+        .unwrap_or(Path::new("."));
+    let mut machine = homerun_core::engine::doctor::Machine {
+        host: HOST.into(),
+        ram_mb: 0,
+        disk_mb: 0,
+        cpu_cores: std::thread::available_parallelism()
+            .ok()
+            .map(|n| n.get() as u32),
+    };
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "[Console]::WriteLine((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory); [Console]::WriteLine((Get-Item -LiteralPath $env:HOMERUN_CAPACITY_PATH).PSDrive.Free)"])
+            .env("HOMERUN_CAPACITY_PATH", existing).output();
+        if let Ok(output) = output {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut lines = text.lines();
+            machine.ram_mb = lines
+                .next()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+                / 1_048_576;
+            machine.disk_mb = lines
+                .next()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+                / 1_048_576;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(text) = std::fs::read_to_string("/proc/meminfo") {
+            machine.ram_mb = text
+                .lines()
+                .find(|s| s.starts_with("MemTotal:"))
+                .and_then(|s| s.split_whitespace().nth(1))
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+                / 1024;
+        }
+        if let Ok(output) = std::process::Command::new("df")
+            .arg("-Pk")
+            .arg(existing)
+            .output()
+        {
+            machine.disk_mb = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .last()
+                .and_then(|s| s.split_whitespace().nth(3))
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0)
+                / 1024;
+        }
+    }
+    machine
+}
+
 /// Ask a process to stop the way a person pressing Ctrl+C would.
 ///
 /// `Err` on Windows, always, and that is a platform fact rather than a gap to
