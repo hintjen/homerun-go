@@ -423,6 +423,29 @@ adb logcat -d --pid=$(adb shell pidof -s <appId>)   # everything from the app
 the tool call. Find the project's tags by grepping for `Log.i(`/`Log.w(` or a
 `TAG` constant. WebView-based apps are also inspectable at `chrome://inspect`.
 
+**The buffer rotates, and it takes your evidence with it.** The default ring is
+a few MB shared by the whole device, so on a real phone — where the system is
+chattering constantly — the interesting window can age out in **minutes**, and
+a tag that logged three lines ten minutes ago dumps as empty. That reads
+exactly like "the code never ran", which is the wrong conclusion and an
+expensive one: on 2026-09-18 the two minutes that would have proved *why* a
+device re-registered were already gone by the time the question was worth
+asking, and the answer had to be inferred from timestamps instead.
+
+So when you are about to do anything whose cause you may need to prove later —
+a sign-in, a first launch, an account switch — start a capture **before** it
+and keep it off the device:
+
+```bash
+adb -s "$SERIAL" logcat -c
+adb -s "$SERIAL" logcat -v threadtime > <scratchpad>/run.log 2>&1 &   # keep it
+adb -s "$SERIAL" logcat -G 16M                                       # or enlarge the ring
+```
+
+`logcat -G` resizes the buffer and persists until reboot; a redirect to a file
+costs nothing and is the one that always works. Grep the file afterwards rather
+than re-dumping the device — the file is the only copy that is still complete.
+
 ## Waiting for slow things
 
 Cold starts, downloads and first-run unpacking take tens of seconds. Do **not**

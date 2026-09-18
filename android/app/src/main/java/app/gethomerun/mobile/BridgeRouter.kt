@@ -1102,11 +1102,31 @@ class BridgeRouter(
                 // server it is hosting. See [ServerHost.keepAlive].
                 scope.launch(
                     Dispatchers.IO + ServerHost.keepAlive(TAG, "registering this device"),
-                ) { DeviceRegistry.ensure(apiUrl(), userToken()) }
-                // The device's own link, which the dashboard dials to reach
-                // this device's console. Provisioning polls for up to a
-                // minute, so like registration it is started and not awaited.
-                DeviceWebsocket.ensure(apiUrl(), userToken())
+                ) {
+                    // Failing to register must not skip the link: `bringUp`
+                    // calls `DeviceRegistry.ensure` again and would retry there.
+                    runCatching { DeviceRegistry.ensure(apiUrl(), userToken()) }
+                        .onFailure { Log.w(TAG, "could not register before linking: ${it.message}") }
+
+                    // The device's own link, which the dashboard dials to reach
+                    // this device's console. Provisioning polls for up to a
+                    // minute, so like registration it is started and not awaited.
+                    //
+                    // **After** registration, inside the same launch, and that
+                    // ordering is the whole point. A different account signing
+                    // in makes [DeviceRegistry] register a *new* device row, and
+                    // [DeviceWebsocket.ensure]'s stale-link guard catches that
+                    // by comparing the row it linked against the current one.
+                    // Called beside the registration instead of after it, the
+                    // guard read the id that was about to be replaced, found it
+                    // unchanged, and then returned early because the tunnel was
+                    // still up -- so the link stayed bound to the abandoned row
+                    // for the life of the process. Nothing calls `ensure` again
+                    // (a resume does not), so the dashboard was left dialling a
+                    // device the API no longer knows, which it reports as a
+                    // console that spins for ever with no error anywhere.
+                    DeviceWebsocket.ensure(apiUrl(), userToken())
+                }
 
                 emit("credentials-set")
             }

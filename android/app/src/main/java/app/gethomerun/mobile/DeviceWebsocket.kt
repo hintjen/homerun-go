@@ -82,6 +82,17 @@ object DeviceWebsocket {
      * because the dashboard asks the API for this account's device and gets an
      * fqdn no phone is answering. Compared on every [ensure] so the switch is
      * caught there, rather than waiting for a backgrounding to clear it.
+     *
+     * **This only works if [ensure] runs *after* the registration it is meant
+     * to notice.** It reads [DeviceRegistry.currentDeviceId] synchronously, so
+     * called alongside a registration still in flight it compares the old id
+     * with itself, finds no change, and then returns early because the tunnel
+     * is still up. Nothing calls [ensure] again afterwards -- a resume does not
+     * -- so the link stays bound to the abandoned row until the process
+     * restarts, and the only symptom is a dashboard console that spins for
+     * ever: no crash, no error frame, no failed request, because the page never
+     * gets an address to dial at all. The login handler in `BridgeRouter`
+     * sequences the two for this reason; keep them sequenced.
      */
     private var linkedDeviceId: String? = null
 
