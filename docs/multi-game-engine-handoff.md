@@ -8,7 +8,8 @@ another machine's checkout paths. Raw session logs are not committed.
 Fetch `hintjen/homerun-go`, check out `feat/multi-game-engine`, and read
 [game-runner.md](./game-runner.md), [desktop-game-artifacts.md](./desktop-game-artifacts.md),
 and the current monorepo `feat/multi-game:plans/multi-game-contracts.md`.
-The engine work is consolidated on `feat/multi-game-engine`, targeting `main`.
+The engine work is consolidated in [PR 24](https://github.com/hintjen/homerun-go/pull/24)
+on `feat/multi-game-engine`, targeting `main`.
 It contains the complete former PR 19–23 stack plus the current main changes
 through `56af846`. The original branches remain available as historical
 checkpoints; use the consolidated PR for review and merging.
