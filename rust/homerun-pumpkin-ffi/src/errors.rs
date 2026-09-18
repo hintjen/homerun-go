@@ -246,10 +246,41 @@ fn parse(path: &Path, body: &str) -> Option<(Option<Context>, Occurrence)> {
             kind: "panic".to_string(),
             message: message.to_string(),
             stack,
+            location: location_from(message),
             at_ms: stamp_from(name),
             ..Occurrence::default()
         },
     ))
+}
+
+/// The `(at file:line)` the hook appends, lifted into the structured field.
+///
+/// [`crate::crash::describe`] writes `"{payload} (at {file}:{line})"`, so a
+/// native panic has always carried where it happened — as prose, inside the
+/// message, where nothing could read it. The report has a `location` field for
+/// this and it arrived empty on every one of them; the dashboard renders it as
+/// "Where" and showed a dash.
+///
+/// It is not only cosmetic. `app_error::fingerprint` groups on the backtrace
+/// when there is a usable one and falls back to location plus message when
+/// there is not — and on iOS there never is, because the release profile
+/// strips the staticlib and every frame resolves to `__mh_execute_header`.
+/// Without this, two unrelated panics group as one bug.
+///
+/// Conservative on purpose: only a suffix shaped exactly like the hook's own
+/// counts, so a panic payload that merely ends in parentheses is left alone.
+fn location_from(message: &str) -> Option<String> {
+    let (_, at) = message.trim_end().strip_suffix(')')?.rsplit_once("(at ")?;
+
+    // `file:line`, nothing else. Whitespace means we are looking at a
+    // sentence, not a location the hook wrote.
+    let (file, line) = at.rsplit_once(':')?;
+    let shaped = !file.is_empty()
+        && !line.is_empty()
+        && !at.contains(char::is_whitespace)
+        && line.bytes().all(|b| b.is_ascii_digit());
+
+    shaped.then(|| at.to_string())
 }
 
 /// The unix seconds the panic hook put in the filename, as milliseconds.
@@ -393,6 +424,28 @@ mod tests {
         assert!(body["stack"].as_str().unwrap().contains("homerun_core"));
         // The time the app died, not the time it next started.
         assert_eq!(body["lastSeenMs"], 1_755_640_000_000i64);
+        // Where it happened is a field, not just prose in the message. It
+        // arrived empty on every native panic until the dashboard showed a
+        // dash for one that mattered.
+        assert_eq!(body["location"], "server.rs:42");
+    }
+
+    #[test]
+    fn a_panic_location_is_only_read_from_the_shape_the_hook_writes() {
+        // What the hook writes.
+        assert_eq!(
+            location_from("Cannot start a runtime (at src/pumpkin_engine.rs:208)"),
+            Some("src/pumpkin_engine.rs:208".to_string())
+        );
+        // A payload that merely ends in parentheses is not a location, and
+        // guessing one would put a sentence in the field grouping depends on.
+        assert_eq!(location_from("the world was not where we left it"), None);
+        assert_eq!(
+            location_from("assertion failed (at the end of the tick)"),
+            None
+        );
+        assert_eq!(location_from("no line number (at src/lib.rs)"), None);
+        assert_eq!(location_from("(at :12)"), None);
     }
 
     #[test]
