@@ -196,6 +196,10 @@ fn frames(stack: &str) -> Vec<String> {
     let parsed: Vec<(String, &str)> = stack
         .lines()
         .filter_map(|line| parse_frame(line).map(|frame| (frame, line)))
+        // Dropped before anything below, the `meaningful.is_empty()` rescue
+        // included: a noisy frame still names something real, one of these
+        // names nothing in particular.
+        .filter(|(frame, _)| !identifies_nothing(frame))
         .collect();
 
     let mut meaningful: Vec<String> = parsed
@@ -419,6 +423,37 @@ fn is_noise(frame: &str) -> bool {
     MARKERS.iter().any(|marker| frame.contains(marker))
 }
 
+/// A frame that identifies no particular failure — as distinct from
+/// [`is_noise`], where the frame names something real and merely uninteresting.
+///
+/// This is what a **stripped** image produces. `[profile.release]` sets
+/// `strip = true` on the iOS staticlib, so there is no symbol table to resolve
+/// against and `dladdr` falls back to `__mh_execute_header`, the Mach-O image
+/// base, for every Rust frame. What survives is whatever happens to be
+/// exported — on iOS that is `___isPlatformVersionAtLeast`, a compiler-rt
+/// availability check that appears at the same place in every backtrace on the
+/// platform *because* everything around it failed to resolve.
+///
+/// So the whole stack is the same for every native panic iOS reports. Grouping
+/// on it merges unrelated bugs into one, which is what it did: a Tokio panic
+/// from the dashboard's console arrived under the same fingerprint as
+/// everything else. These are dropped before [`frames`] does anything else,
+/// its "keep the top frame" rescue included — that rescue exists so a throw
+/// inside a framework still groups by *which* framework, and there is no such
+/// information here to preserve.
+///
+/// With them gone the stack is empty and [`signature`] falls through to
+/// location plus message, which does discriminate: the panic hook writes
+/// `(at file:line)` and `Occurrence::location` carries it.
+fn identifies_nothing(frame: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "__mh_execute_header",
+        "<unknown>",
+        "___isPlatformVersionAtLeast",
+    ];
+    MARKERS.iter().any(|marker| frame.contains(marker))
+}
+
 // ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
@@ -493,6 +528,52 @@ mod tests {
             message: message.to_string(),
             ..Occurrence::default()
         }
+    }
+
+    // -- stacks that carry no symbols ---------------------------------------
+
+    /// A release iOS build is stripped, so every Rust frame resolves to the
+    /// image base and two unrelated panics arrive with byte-identical stacks.
+    /// Grouping on that put every native panic on the platform in one bucket —
+    /// found when a Tokio panic from the dashboard's console shared a
+    /// fingerprint with everything else iOS had ever reported.
+    #[test]
+    fn two_unsymbolicated_panics_are_not_one_bug() {
+        let stack = "   0: __mh_execute_header\n   1: __mh_execute_header\n   \
+                     2: ___isPlatformVersionAtLeast\n   3: __mh_execute_header\n  33: <unknown>";
+
+        let mut runtime = occurrence(Source::Native, "panic", "Cannot start a runtime");
+        runtime.stack = Some(stack.to_string());
+        runtime.location = Some("src/pumpkin_engine.rs:208".to_string());
+
+        let mut world = occurrence(
+            Source::Native,
+            "panic",
+            "the world was not where we left it",
+        );
+        world.stack = Some(stack.to_string());
+        world.location = Some("src/server.rs:512".to_string());
+
+        assert_ne!(signature(&runtime), signature(&world));
+        assert_ne!(
+            hash(Source::Native, "panic", &signature(&runtime)),
+            hash(Source::Native, "panic", &signature(&world))
+        );
+    }
+
+    /// The other half: a stack that *does* carry symbols still decides the
+    /// group, so Android tombstones and JS stacks are unaffected.
+    #[test]
+    fn a_symbolicated_stack_still_wins_over_the_location() {
+        let mut one = occurrence(Source::Native, "panic", "same sentence");
+        one.stack = Some("   0: homerun_pumpkin_ffi::server::stop".to_string());
+        one.location = Some("src/a.rs:1".to_string());
+
+        let mut two = occurrence(Source::Native, "panic", "same sentence");
+        two.stack = Some("   0: homerun_pumpkin_ffi::backup::run".to_string());
+        two.location = Some("src/a.rs:1".to_string());
+
+        assert_ne!(signature(&one), signature(&two));
     }
 
     // -- paths --------------------------------------------------------------

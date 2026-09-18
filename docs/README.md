@@ -154,7 +154,7 @@ bundle is embedded and served, and how the device's capabilities reach the UI.
 - Linking the Rust static library, including the link flags nothing references
 - Why the bundle is served over `homerun-app://` and never `file://`
 - Path resolution, the traversal guard, and why a missing asset 404s
-- Capability injection at document start, read from the vendored contract
+- Capability injection at document start, read from the vendored manifest
 - Why the shell is UIKit rather than SwiftUI
 
 **Read this for**: Setting up the Xcode build, or debugging a blank screen.
@@ -355,6 +355,31 @@ sent.
 
 ---
 
+### 🔐 [Who terminates TLS for the device websocket](./device-websocket-tls.md)
+
+Why a phone stopped ordering its own certificate, and how it learns — per
+`link_up`, from the API — whether the gateway or the phone terminates TLS for
+the dashboard's console connection.
+
+**Contains**:
+- The rate limit that made a certificate per device unworkable, and why a device
+  past it fails with no witness at all
+- The two modes side by side: what the dashboard dials, what the tunnel
+  forwards, and what is reachable from the internet in each
+- Why the reading rule is downgrade-only, and what a phone that talked itself
+  into gateway mode would do
+- Why a gateway-mode link still has an `fqdn` and must order nothing for it
+- The forward that has to point at the **plaintext** port now — the mirror image
+  of the mistake the old forward was documented against
+- The misconfiguration report that must *not* fire, and why it is the branch
+  most likely to be tidied away
+- What is tested, and that the Kotlin and Swift have never been compiled
+
+**Read this for**: A console that will not connect, a phone still ordering
+certificates, or before touching anything between `link_up` and the tunnel.
+
+---
+
 ### 📍 [Region latency](./region-latency.md)
 
 One channel, three hosts, and the reason a player can be put on the wrong
@@ -544,7 +569,7 @@ How a message sent by the API lands in this phone's tray — FCM behind the
   force-stopped app) that read exactly like non-delivery
 
 **Read this for**: Working on push, a notification that never arrived, or a
-token the API keeps deleting. API half: `homerun/api/docs/push-notifications.md`.
+token the API keeps deleting. The API documents its half.
 
 ---
 

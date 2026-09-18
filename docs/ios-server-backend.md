@@ -47,6 +47,19 @@ ending.
 This is the same rule as the bridge's no-call-timeout (PROTOCOL.md §5), for
 the same reason, and it is why `native-server-start` must never be given one.
 
+### The server's `VERSION` is corrected first
+
+The engine serves one Minecraft version — the one linked into this build —
+and ignores `VERSION`, but every launcher reads `VERSION` to pick a client.
+Before `start`, the bridge asks `PumpkinBackend.servedVersion()` (which is
+`engine.pumpkinServes`, a constant of the build) and, through
+`minecraft.hosting.pinVersion`, PATCHes the answer into the server when it
+differs — the same write-back Homerun Desktop and Android do. The console line
+saying so arrives on `ServerConfig.launchNotes` and is written right after
+`HomerunFFI.beginConsole()`, because that clear would otherwise eat it. Best
+effort: a failed PATCH is a console line, never a refused launch.
+`docs/core-bridge.md` § *Pinning a Pumpkin server's version*.
+
 ## Settings — what a player chose, and what the engine gets
 
 A player's choices arrive as the API's `environment_variables`. **Pumpkin does

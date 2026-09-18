@@ -19,7 +19,7 @@ extension BridgeRouter {
     func nativeServerStart(_ params: Any?) async throws -> Any? {
         guard let payload = params as? [String: Any],
             let serverId = payload["serverId"] as? String
-        else { return ["success": false, "error": "Homerun could not tell which server to start."] }
+        else { return ["success": false, "error": "Homerun Go could not tell which server to start."] }
 
         // Admission, before anything slow. The core counts the server active
         // from here, which is what the contract means by "from the moment the
@@ -53,7 +53,7 @@ extension BridgeRouter {
             // one thing that knows whether anything else holds the slot.
             return [
                 "success": false,
-                "error": "Homerun could not work out whether this server can start.",
+                "error": "Homerun Go could not work out whether this server can start.",
             ]
         }
 
@@ -100,7 +100,7 @@ extension BridgeRouter {
                 // precisely the silent-wrong-world outcome this exists to stop.
                 return [
                     "success": false,
-                    "error": "Homerun could not work out whether this server can start.",
+                    "error": "Homerun Go could not work out whether this server can start.",
                 ]
             }
         }
@@ -130,6 +130,36 @@ extension BridgeRouter {
         if let settings {
             config.settingsEnv = settings.env
             config.gameType = settings.gameType
+
+            // Pumpkin serves one Minecraft version whatever `VERSION` says,
+            // and every launcher reads `VERSION` to pick a client — so the
+            // server is corrected to what the engine serves before it starts,
+            // the same write-back the desktop does. Here rather than in the
+            // backend because the PATCH needs the user token, which never
+            // reaches a backend. Only with settings in hand: with none there
+            // is no saved value to compare, and no token that could write one.
+            // Best effort — a launch on a stale version beats no launch.
+            let saved = (settings.env["VERSION"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let served = await backend.servedVersion()
+            let pin: Core.VersionPin?
+            do {
+                pin = try Core.pinVersion(saved: saved, served: served)
+            } catch {
+                HostLog.host.error(
+                    "could not decide a version pin: \(error.localizedDescription, privacy: .public)")
+                pin = nil
+            }
+            if let pin {
+                config.launchNotes.append(pin.line)
+                if let failure = await HomerunAPI.pinVersion(
+                    apiURL: apiURL, serverId: serverId, version: pin.version, userToken: token)
+                {
+                    config.launchNotes.append(
+                        "[Homerun] Could not update the server's Minecraft version: \(failure)")
+                } else {
+                    config.settingsEnv["VERSION"] = pin.version
+                }
+            }
         }
 
         if !token.isEmpty, !apiURL.isEmpty {
@@ -159,7 +189,7 @@ extension BridgeRouter {
 
     func nativeServerStop(_ params: Any?) async throws -> Any? {
         guard let serverId = (params as? [String: Any])?["serverId"] as? String else {
-            return ["success": false, "error": "Homerun could not tell which server to stop."]
+            return ["success": false, "error": "Homerun Go could not tell which server to stop."]
         }
 
         // The core records the intent and keeps the server counted active for
@@ -187,7 +217,7 @@ extension BridgeRouter {
 
     func nativeServerDelete(_ params: Any?) async throws -> Any? {
         guard let serverId = (params as? [String: Any])?["serverId"] as? String else {
-            return ["success": false, "error": "Homerun could not tell which server to delete."]
+            return ["success": false, "error": "Homerun Go could not tell which server to delete."]
         }
         do {
             try backend.delete(serverId: serverId)

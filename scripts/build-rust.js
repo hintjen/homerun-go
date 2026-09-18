@@ -12,6 +12,8 @@
  * a file you never mentioned, and a missing NDK gives one about `cc`.
  */
 const { execFileSync } = require("child_process");
+const { featureProblems } = require("./check-features");
+const { redistributableImports } = require("./check-windows-runtime");
 const fs = require("fs");
 const path = require("path");
 
@@ -116,6 +118,72 @@ if (target.kind === "ndk") {
   }
 }
 
+// --- where cargo will put it -----------------------------------------------
+
+const crate = target.crate || CRATE;
+
+/*
+  Honor CARGO_TARGET_DIR the way cargo does (resolved against the cwd cargo ran
+  in, which is the crate dir). CI sets it to a directory outside the workspace
+  so `git clean` between runs cannot throw the build cache away.
+
+  Then give each crate its own tree inside it. These crates are standalone —
+  there is no workspace Cargo.toml — so a plain `cargo build` already keeps
+  them apart in `<crate>/target`. A single shared CARGO_TARGET_DIR is what
+  collapses them into one, and that collapse is not cosmetic.
+
+  `homerun-supervisor` is crate-type = ["staticlib", "cdylib", "rlib"], and
+  `homerun-pumpkin-bin` depends on it with features = ["pumpkin-engine"]. So
+  building the binary also builds that cdylib, with different features, into
+  the same `<triple>/<profile>/libhomerun_pumpkin_ffi.so` the `android` target
+  stages from.
+
+  On 2026-08-31 that is what shipped. Three publish runs against one warm
+  cache: the first staged 6.2 MB, the two after it staged 110.3 MB — the
+  binary's copy, with no process-engine and no device-ws — while
+  `rust:android` reported success in 3.05s having relinked nothing. 0.1.0
+  (1013) reached Google Play, where every server launch failed with "This
+  build cannot run a server as a separate process.", Java and Pumpkin alike,
+  since Android spawns both as child processes.
+
+  Which piece of cargo's bookkeeping let two builds land on one file is not
+  established. A fresh unit *is* re-uplifted — overwrite that path by hand
+  and the next build puts its own artifact back — so a merely stale uplift
+  is not the answer. Not sharing the directory removes the question; the
+  check further down is what catches it if the answer is something else again.
+*/
+const targetRoot = process.env.CARGO_TARGET_DIR
+  ? path.join(
+      path.resolve(crate, process.env.CARGO_TARGET_DIR),
+      path.basename(crate)
+    )
+  : path.join(crate, "target");
+
+// cargo has to agree with the path we read back from below.
+const cargoEnv = { ...process.env, CARGO_TARGET_DIR: targetRoot };
+
+/*
+  Link the Visual C++ runtime into the desktop binaries -- see `staticCrt` in
+  targets.js for what shipping without it cost.
+
+  RUSTFLAGS rather than a `[target.x86_64-pc-windows-msvc]` block in a
+  `.cargo/config.toml`: with `--target` given, RUSTFLAGS reaches only the
+  artifact being built, while a target block for the host's own triple also
+  reaches build scripts and proc-macros, which never ship. Appended, so a
+  RUSTFLAGS already in the environment still applies. cc-rs reads the same
+  target feature and compiles the C in our dependencies /MT to match.
+
+  Changing RUSTFLAGS invalidates cargo's fingerprints, so the first build after
+  this is a full one, LTO link included.
+*/
+if (target.staticCrt) {
+  if (cargoEnv.CARGO_ENCODED_RUSTFLAGS !== undefined) {
+    cargoEnv.CARGO_ENCODED_RUSTFLAGS = [cargoEnv.CARGO_ENCODED_RUSTFLAGS, "-C", "target-feature=+crt-static"].filter(Boolean).join("\x1f");
+  } else {
+    cargoEnv.RUSTFLAGS = `${cargoEnv.RUSTFLAGS || ""} -C target-feature=+crt-static`.trim();
+  }
+}
+
 // --- build ----------------------------------------------------------------
 
 console.log(`\nBuilding ${target.label} (${profile})\n`);
@@ -133,7 +201,7 @@ const features = args.includes("--stub") ? [] : target.features ?? [];
 const engineArgs = features.length ? ["--features", features.join(",")] : [];
 
 if (target.kind === "host") {
-  run("cargo", ["build", ...profileArgs]);
+  run("cargo", ["build", ...profileArgs], { env: cargoEnv });
   console.log("\nHost build done. `cargo test` runs the suite.");
   process.exit(0);
 }
@@ -152,17 +220,10 @@ if (target.kind === "ndk") {
     "build",
     ...profileArgs,
     ...engineArgs,
-  ]);
+  ], { env: cargoEnv });
 } else {
-  const buildEnv = { ...process.env };
+  const buildEnv = { ...cargoEnv };
   if (target.deploymentTarget) buildEnv.IPHONEOS_DEPLOYMENT_TARGET = target.deploymentTarget;
-  if (target.staticCrt) {
-    if (buildEnv.CARGO_ENCODED_RUSTFLAGS !== undefined) {
-      buildEnv.CARGO_ENCODED_RUSTFLAGS = [buildEnv.CARGO_ENCODED_RUSTFLAGS, "-C", "target-feature=+crt-static"].filter(Boolean).join("\x1f");
-    } else {
-      buildEnv.RUSTFLAGS = `${buildEnv.RUSTFLAGS || ""} -C target-feature=+crt-static`.trim();
-    }
-  }
   if (name === "core-node" && !buildEnv.HOMERUN_CORE_BUILD_ID) {
     const revision = capture("git", ["rev-parse", "HEAD"])?.trim() || "unknown";
     const dirty = capture("git", ["status", "--porcelain"])?.trim();
@@ -183,13 +244,6 @@ if (target.kind === "ndk") {
 
 // --- stage the artifact ---------------------------------------------------
 
-const crate = target.crate || CRATE;
-// Honor CARGO_TARGET_DIR the way cargo does (resolved against the cwd cargo
-// ran in, which is the crate dir). CI sets it to a directory outside the
-// workspace so `git clean` between runs cannot throw the build cache away.
-const targetRoot = process.env.CARGO_TARGET_DIR
-  ? path.resolve(crate, process.env.CARGO_TARGET_DIR)
-  : path.join(crate, "target");
 const built = path.join(targetRoot, target.triple, profile, target.artifact);
 if (!fs.existsSync(built)) {
   fail(
@@ -204,6 +258,47 @@ fs.copyFileSync(built, dest);
 
 const mb = (fs.statSync(dest).size / 1024 / 1024).toFixed(1);
 console.log(`\n${target.artifact} -> ${dest}  (${mb} MB)`);
+
+// --- prove it is the library we asked for ---------------------------------
+
+/*
+  The per-crate target trees above should make a mismatched artifact
+  impossible. This is what says so out loud if it happens anyway -- at the
+  second it happens, rather than in a store listing.
+
+  The markers and the reasoning live in check-features.js, which also runs
+  standalone against any binary, including one pulled off a device.
+*/
+if (crate === CRATE) {
+  const wrong = featureProblems(fs.readFileSync(dest), features);
+  const asked = features.length ? features.join(", ") : "none (--stub)";
+  if (wrong.length) {
+    fail(
+      `The staged ${target.artifact} is not the build that was asked for.\n` +
+        wrong.map((w) => `  - ${w}`).join("\n") +
+        `\n\n  Requested:   ${asked}` +
+        `\n  Staged from: ${built}\n` +
+        "  Most likely another crate built this same cdylib with different\n" +
+        "  features and uplifted it over the top."
+    );
+  }
+  console.log(`Features verified: ${asked}`);
+}
+
+if (target.staticCrt) {
+  const needs = redistributableImports(fs.readFileSync(dest));
+  if (needs.length) {
+    fail(
+      `The staged ${target.outName || target.artifact} imports ${needs.join(", ")}.\n` +
+        "  Those come from the Visual C++ Redistributable, so it will not load on a\n" +
+        "  PC without it -- and every machine that builds or tests it has it.\n" +
+        "  The build asked for +crt-static; something linked the DLL back in (a C++\n" +
+        "  dependency built /MD, or RUSTFLAGS overridden). See\n" +
+        "  scripts/check-windows-runtime.js."
+    );
+  }
+  console.log("Windows runtime verified: no Visual C++ Redistributable DLLs imported");
+}
 
 if (debug) {
   console.log(

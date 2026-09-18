@@ -111,7 +111,7 @@ char *homerun_server_players(void);
 char *homerun_server_logs_since(uint64_t cursor);
 char *homerun_server_command(const char *command);
 
-/* A line from Homerun itself — a jar downloading, a world restoring, the
+/* A line from Homerun Go itself — a jar downloading, a world restoring, the
  * tunnel coming up — into the same console the server writes to. Most of
  * these happen before there is a run at all, and they are the only account a
  * slow launch ever gets. Appends only. */

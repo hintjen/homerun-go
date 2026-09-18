@@ -191,7 +191,10 @@ enum AppErrors {
     /// may not be registered, the keychain is unreadable before first unlock —
     /// and the report that arrives during exactly that window is the one worth
     /// most. A partial context beats no report.
-    private static func context() -> [String: Any] {
+    ///
+    /// Not private: `Reporting` builds a crash report's host context from it,
+    /// so the two reports describe the app in the same words.
+    static func context() -> [String: Any] {
         var context: [String: Any] = [
             "deviceId": HostStore.registeredDeviceId ?? "",
             "session": session,
@@ -206,6 +209,12 @@ enum AppErrors {
         // stops three platforms disagreeing about which one they are on.
         if let apiURL = HostStore.apiURL {
             context["apiUrl"] = apiURL
+        }
+        // The launch this error happened during, if one was in progress. It
+        // is what lets the API put a Swift or Rust failure beside the crash
+        // report of the server it took down.
+        if let serverId = Reporting.hostedServerId() {
+            context["serverId"] = serverId
         }
         return context
     }

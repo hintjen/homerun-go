@@ -5,10 +5,15 @@ another machine's checkout paths. Raw session logs are not committed.
 
 ## Start here
 
-Fetch `hintjen/homerun-go`, check out `engine/game-artifacts`, and read
+Fetch `hintjen/homerun-go`, check out `feat/multi-game-engine`, and read
 [game-runner.md](./game-runner.md), [desktop-game-artifacts.md](./desktop-game-artifacts.md),
 and the current monorepo `feat/multi-game:plans/multi-game-contracts.md`.
-The engine work is a stack of draft PRs, not separate branches from main.
+The engine work is consolidated on `feat/multi-game-engine`, targeting `main`.
+It contains the complete former PR 19–23 stack plus the current main changes
+through `56af846`. The original branches remain available as historical
+checkpoints; use the consolidated PR for review and merging.
+
+The former stack was:
 
 | Piece | Remote branch | Review |
 |---|---|---|
@@ -41,17 +46,22 @@ script hashes final bytes and prepares immutable URLs plus manifests:
 
 ## Verified on Windows
 
-- `npm test`: 883 core tests, 230 supervisor tests (one pre-existing ignored),
+- `npm test` after consolidation: 908 core tests, 243 supervisor tests (one pre-existing ignored),
   8 protocol and 11 runner lifecycle tests; existing ABI/revision/capability/UI
-  bundle checks; real addon smoke checks; five artifact tests. All passed.
+  bundle checks; 22 real addon smoke checks; artifact tests. All passed.
+  The artifact suite now has six tests, including preservation of Pumpkin's
+  Minecraft version probe. iOS and Android bridge conformance checks passed.
 - `npm run rust:game-runner` and `npm run rust:core-node`: release builds passed.
-  The unsigned runner was 4,717,568 bytes; addon 246,272 bytes. Sizes are
-  observations, not contract values.
+  Both Windows artifacts passed the check for redistributable DLL imports.
 - Release runner hello/shutdown succeeded; `ready.build` matched the prepared
   manifest's digest prefix.
 - Deliberate regressions proved tests catch bypassed licence acceptance,
   skipped graceful-save commands, and a stale artifact identity after a byte
   change. Source was restored and tests rerun green.
+  Consolidation also exposed panic-test interference: the runtime tests now
+  hold the crash module's shared guard through runtime shutdown. A deliberately
+  removed Pumpkin version query failed its regression test, then passed after
+  restoration.
 
 ## Other sessions' pushed work
 
@@ -72,9 +82,9 @@ packaging and full Windows integration remain unverified.
 
 ## Next work, in order
 
-1. Review the engine stack and the desktop/UI recovery branches. Reconcile the
+1. Review the consolidated engine PR and the desktop/UI recovery branches. Reconcile the
    monorepo branches with the latest API/contracts before integration. Nothing
-   in this handoff authorizes merging or releasing the stack.
+   in this handoff authorizes merging or releasing the work.
 2. Wire the engine artifact names into the monorepo release workflow: runner
    build/sign/upload, addon manifest, final-byte digests after signing. Update
    `download-assets.js` to pin and verify the addon digest. Build the desktop

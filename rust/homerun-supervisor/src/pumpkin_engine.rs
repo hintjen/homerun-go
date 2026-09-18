@@ -141,7 +141,13 @@ impl Engine for PumpkinEngine {
             );
             init_logger(&config.advanced);
 
-            let server = match PumpkinServer::new(config.basic, config.advanced, vanilla_data).await
+            let server = match PumpkinServer::new(
+                config.basic,
+                config.advanced,
+                pumpkin_settings::host_telemetry(config.telemetry),
+                vanilla_data,
+            )
+            .await
             {
                 Ok(server) => server,
                 Err(e) => {
@@ -202,21 +208,32 @@ impl Engine for PumpkinEngine {
         let server = active.server.clone();
         let owned = command.to_string();
 
-        // Called from the host's thread, which is outside the runtime — so
-        // block_on is safe here. The reply is written to the console rather
-        // than returned; the UI reads it from the log.
-        active.runtime.block_on(async move {
+        // The caller may or may not be inside a runtime — from the app this
+        // arrives on a host thread, from the dashboard on a device websocket
+        // task — so whether it is legal to wait is `runtime_dispatch`'s call,
+        // not an assumption made here. It used to be assumed, and the
+        // dashboard's console paid for it. The reply is written to the console
+        // rather than returned; the UI reads it from the log either way.
+        //
+        // Dispatch is synchronous upstream now, but still made from a task on
+        // the server's runtime, as the engine does with its own console input.
+        // Spawned rather than run inline so a command lands on a worker thread
+        // like that one does: a command that reaches for runtime-worker-only
+        // machinery would otherwise panic here and nowhere else.
+        let dispatched = crate::runtime_dispatch::dispatch(&active.runtime, async move {
             // `ArcSwap` upstream, not an `RwLock`, since Pumpkin made the
             // dispatcher hot-swappable for plugin reloads.
             let dispatcher = server.command_dispatcher.load();
             // Two dispatchers exist with a `handle_command`; the one behind
             // this field takes a resolved `CommandSource`. Mirrors how the
             // engine dispatches its own console input.
-            let source = CommandSender::Console.into_source(&server).await;
-            dispatcher.handle_command(&source, &owned).await;
+            let source = CommandSender::Console.into_source(&server);
+            dispatcher.handle_command(&source, &owned);
         });
 
-        Ok(())
+        // A panicking command must not take the host's thread with it; the
+        // task boundary is what catches it.
+        dispatched.map_err(|_| "That command could not be run.".to_string())
     }
 
     fn players(&self) -> Option<Roster> {

@@ -3,7 +3,7 @@ import Foundation
 /// Turning a player's name into the UUID a server keys them by.
 ///
 /// Its own file because it is the only outbound request this host makes that
-/// is not to Homerun's API: it goes to Mojang, on the player's behalf, and
+/// is not to the app's own API: it goes to Mojang, on the player's behalf, and
 /// nothing about it shares the API layer's token handling or error semantics.
 ///
 /// An **offline** server needs none of this — its UUIDs are a function of the

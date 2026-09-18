@@ -75,6 +75,13 @@ pub struct Config {
     /// by browsers, which is the point: staging has generous rate limits and
     /// production allows five certificates per hostname per week.
     pub acme_staging: bool,
+    /// True when the **gateway** terminates TLS for this link
+    /// ([`homerun_core::device_ws::TlsMode::Gateway`]). No certificate is
+    /// ordered, no challenge listener is ever bound, and the TLS listener takes
+    /// no connections: the gateway relays a decrypted websocket to the
+    /// *plaintext* listener through the tunnel. Decided by the API per link-up
+    /// and read by the core; a host passes it through and never sets it itself.
+    pub gateway_tls: bool,
     /// Who this install is, so a certificate failure can be reported as an app
     /// error rather than only logged. Absent on a host that has not wired it
     /// up, and then nothing is reported -- see [`note_cert_failure`].
@@ -222,12 +229,22 @@ pub fn start(config: Config) -> Result<Bound, String> {
 
     let (shutdown, mut stopping) = tokio::sync::oneshot::channel();
     let expect_proxy = config.expect_proxy_protocol;
-    let tls_inputs = config
-        .fqdn
-        .clone()
-        .zip(config.storage_dir.clone())
-        .zip(config.challenge_port)
-        .map(|((fqdn, dir), port)| (fqdn, dir, port));
+    let gateway_tls = config.gateway_tls;
+    // In gateway mode there is nothing to obtain, whatever else the host
+    // passed. Checked here rather than trusted to the host omitting `fqdn`:
+    // an order for a name the gateway no longer routes to this device cannot
+    // validate, and each attempt spends the rate limit gateway mode exists to
+    // stop spending.
+    let tls_inputs = if gateway_tls {
+        None
+    } else {
+        config
+            .fqdn
+            .clone()
+            .zip(config.storage_dir.clone())
+            .zip(config.challenge_port)
+            .map(|((fqdn, dir), port)| (fqdn, dir, port))
+    };
     let staging = config.acme_staging;
     // Cloned out before `config` is moved into `Shared` below, because the TLS
     // task outlives this scope and cannot borrow it.
@@ -247,7 +264,11 @@ pub fn start(config: Config) -> Result<Bound, String> {
     .collect();
     let state = Arc::new(Shared::new(config));
 
-    // The plaintext loop: the app's own UI, and nothing else.
+    // The plaintext loop. The app's own UI over loopback, always — and in
+    // gateway mode also every remote dashboard, arriving through the tunnel
+    // already decrypted by the gateway. Either way a connection here has proved
+    // nothing yet: `serve` still demands a Keycloak token as the first frame
+    // and asks the API what the caller may touch, exactly as the TLS path does.
     {
         let state = Arc::clone(&state);
         runtime.spawn(async move {
@@ -282,6 +303,15 @@ pub fn start(config: Config) -> Result<Bound, String> {
         };
 
         let acceptor = match tls_inputs {
+            None if gateway_tls => {
+                // Working as designed, so neither a warning nor a report: the
+                // certificate is the gateway's. The `named && missing` check
+                // below must not run here — a gateway-mode host rightly passes
+                // no challenge port, and reporting that as a misconfiguration
+                // would file a fatal row for every healthy device.
+                log::info("the gateway terminates TLS for this link — no certificate is ordered here");
+                None
+            }
             None => {
                 log::warn("no hostname or storage — serving plaintext, which no browser will use");
                 // An unnamed device has no hostname to certify and is working
@@ -780,6 +810,7 @@ impl Connection {
                 // [`app_logs`]. Read on the caller's task rather than
                 // spawned: it is one `logcat -d` that returns in milliseconds,
                 // and a support request is not a hot path.
+                // Redaction happens in the frame constructor, in the core.
                 let (main_log, renderer_log) = crate::app_logs::collect();
                 self.send(outgoing::app_logs(&main_log, &renderer_log));
                 true

@@ -1,5 +1,6 @@
 package app.gethomerun.mobile
 
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -283,9 +284,21 @@ object Reporting : ServerHost.Listener {
             ServerHost.note(serverId, it.message)
         }
 
-        Core.crashReport(serverId, registration.deviceId, lines)?.let {
+        // The console is the server's account of what happened. This is the
+        // app's: which build, which bundle, what the core can do, and its own
+        // log — for the crash the console cannot explain, because the launch
+        // was refused before a server existed. The core fills in its half
+        // and the API already has a column for it.
+        Core.crashReport(serverId, registration.deviceId, lines, hostContext())?.let {
             send(it, userSigned = false)
         }
+    }
+
+    /** What this app is, for a crash report. Never throws: every reader is guarded. */
+    private fun hostContext(): JsonObject = buildJsonObject {
+        runCatching { AppErrors.context() }.getOrNull()?.forEach { (key, value) -> put(key, value) }
+        put("device", listOf(Build.MANUFACTURER, Build.MODEL).filter { !it.isNullOrBlank() }.joinToString(" "))
+        put("os", "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
     }
 
     /**

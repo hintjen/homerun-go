@@ -82,9 +82,12 @@ checkout before the first build:
 - `*-google-services.json` — **configuration** fails, not the build:
   "Property '$1' specifies file … which doesn't exist".
 - `android/app/src/main/assets/web` — the UI bundle.
-- `android/app/src/main/assets/jre-*` — without it `JavaRuntime.isAvailable`
-  is false and the host reports one fewer engine than the build actually has,
-  which reads as a routing bug rather than a missing file.
+- `android/app/src/main/assets/jre-25` **and**
+  `android/jre21/src/main/assets/jre-21` — Java 21 is an on-demand feature
+  module, so it stages outside the app. `npm run jre:android` writes both;
+  without either, `JavaRuntime.isAvailable` is false and the host reports one
+  fewer engine than the build actually has, which reads as a routing bug rather
+  than a missing file.
 - `android/app/src/main/jniLibs/<abi>/*.so` — for anything you are not
   rebuilding yourself.
 
@@ -420,6 +423,29 @@ adb logcat -d --pid=$(adb shell pidof -s <appId>)   # everything from the app
 the tool call. Find the project's tags by grepping for `Log.i(`/`Log.w(` or a
 `TAG` constant. WebView-based apps are also inspectable at `chrome://inspect`.
 
+**The buffer rotates, and it takes your evidence with it.** The default ring is
+a few MB shared by the whole device, so on a real phone — where the system is
+chattering constantly — the interesting window can age out in **minutes**, and
+a tag that logged three lines ten minutes ago dumps as empty. That reads
+exactly like "the code never ran", which is the wrong conclusion and an
+expensive one: on 2026-09-18 the two minutes that would have proved *why* a
+device re-registered were already gone by the time the question was worth
+asking, and the answer had to be inferred from timestamps instead.
+
+So when you are about to do anything whose cause you may need to prove later —
+a sign-in, a first launch, an account switch — start a capture **before** it
+and keep it off the device:
+
+```bash
+adb -s "$SERIAL" logcat -c
+adb -s "$SERIAL" logcat -v threadtime > <scratchpad>/run.log 2>&1 &   # keep it
+adb -s "$SERIAL" logcat -G 16M                                       # or enlarge the ring
+```
+
+`logcat -G` resizes the buffer and persists until reboot; a redirect to a file
+costs nothing and is the one that always works. Grep the file afterwards rather
+than re-dumping the device — the file is the only copy that is still complete.
+
 ## Waiting for slow things
 
 Cold starts, downloads and first-run unpacking take tens of seconds. Do **not**
@@ -485,6 +511,24 @@ state — you cannot go back for it.
 state and hides every bug about carrying state over: what a second launch
 clears, what it wrongly keeps, what it replays. Most of the interesting
 defects only appear on run two.
+
+### Forcing a server crash report on a real phone
+
+Two things learned on a Pixel while proving crash reporting (2026-09-03):
+
+- **`kill -9` on the JVM is not a crash.** `run-as <appId> kill -9 <pid of
+  libjavabin.so>` ends the run, but the core judges a signal death as *the
+  server was terminated* and lands on `STOPPED` — the same verdict as a
+  low-memory kill, on purpose — so no crash report goes out.
+- **Hold the server's port from adb instead.** `adb reverse tcp:25565 tcp:9`
+  makes adbd listen on 25565 on the device; the next start fails in the
+  supervisor's preflight, which is a genuine `CRASHED` with a console line
+  to report. `adb reverse --remove tcp:25565` afterwards.
+
+And the silence that follows is success: `Reporting` logs nothing when a crash
+report is sent, only when it is not (`no credential`, `crashed with an empty
+console`, or `HomerunApi`'s `did not go through`). Prove delivery on the API
+or in Discord, not in logcat.
 
 ## Diagnosing: probe, don't theorise
 

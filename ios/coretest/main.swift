@@ -21,7 +21,7 @@
 //         ios/HomerunHost/HostLog.swift ios/HomerunHost/DeviceMetrics.swift \
 //         ios/HomerunHost/ServerBackendError.swift ios/HomerunHost/LaunchOrder.swift \
 //         ios/coretest/main.swift \
-//         rust/homerun-pumpkin-ffi/target/release/libhomerun_pumpkin_ffi.a \
+//         rust/homerun-supervisor/target/release/libhomerun_pumpkin_ffi.a \
 //         -o /tmp/coretest && /tmp/coretest
 //
 // Deliberately short. Everything on that list is a leaf — decisions, an error
@@ -1679,6 +1679,53 @@ check("a device with no certificate forwards only :443") {
     try expect(config.contains("8443"), "no :443 forward")
     try expect(!config.contains("8080"), "forwarded :80 with nothing behind it")
     return "8443 only"
+}
+
+check("the link_up body asks for gateway-terminated TLS") {
+    // One definition in the core, so Kotlin and Swift cannot come to ask for
+    // different things — one phone asking and the other not is a phone that
+    // silently keeps ordering certificates.
+    let body = try Core.deviceWsLinkUpRequest()
+    try expect((body["ws_tls"] as? String) == "gateway", "asked for \(body)")
+    return "ws_tls=gateway"
+}
+
+check("only the API saying gateway puts a link in gateway mode") {
+    let native: [String: Any] = [
+        "client_privkey": "aPrivateKey=",
+        "gateway_pubkey": "aPublicKey=",
+        "link_address": "gateway.example:51820",
+    ]
+    let url = "wss://ws-us-east-2.example/d/0f8fad5b-d9cb-469f-a165-70867728950e"
+    guard
+        let gateway = try Core.deviceLinkFromBody(
+            ["fqdn": "a.b.c", "ws_tls": "gateway", "ws_url": url, "native_config": native]),
+        let older = try Core.deviceLinkFromBody(["fqdn": "a.b.c", "native_config": native]),
+        let odd = try Core.deviceLinkFromBody(
+            ["fqdn": "a.b.c", "ws_tls": "GATEWAY", "native_config": native])
+    else { throw Wrong(what: "no link out of a complete body") }
+    try expect(gateway.gatewayTls, "the API said gateway and the link did not")
+    try expect(gateway.wsUrl == url, "ws_url was \(gateway.wsUrl ?? "nil")")
+    // An API older than the field sends none. Reading that as gateway mode
+    // would bring up a tunnel on a port nothing is sent to.
+    try expect(!older.gatewayTls, "an API that said nothing was read as gateway mode")
+    try expect(!odd.gatewayTls, "an unknown value was read as gateway mode")
+    return "gateway / device / device"
+}
+
+check("a gateway-mode tunnel is one forward, at the plaintext socket") {
+    let link: [String: Any] = [
+        "client_privkey": "aPrivateKey=",
+        "gateway_pubkey": "aPublicKey=",
+        "link_address": "gateway.example:51820",
+    ]
+    let config = try Core.deviceWsGatewayTunnelConfig(link: link, wsTarget: 51236)
+    // 4000 is the gateway's: the svc_port the API registers for the route.
+    try expect(config.contains("ListenPort = 4000"), "no relay forward")
+    try expect(config.contains("51236"), "the plaintext socket is not the target")
+    try expect(!config.contains("8443"), "forwarded :443 with no certificate behind it")
+    try expect(!config.contains("8080"), "forwarded :80 with no order to answer")
+    return "4000 → 51236"
 }
 
 print("\n\(checks - failures)/\(checks) passed")

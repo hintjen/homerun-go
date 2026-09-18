@@ -29,4 +29,14 @@
     <string name="hosting_running_one">Online · 1 player</string>
     <string name="hosting_running_many">Online · %1$d players</string>
     <string name="hosting_backing_up">Backing up your world — don\'t close Homerun Go</string>
+
+    <!--
+      Shown by Play itself, in the confirmation it raises before downloading
+      the Java 21 module over mobile data. The player has just pressed start
+      on a modded server, so it names what they are waiting for rather than
+      the module.
+    -->
+    <string name="jre17_module_title">Java 17 runtime</string>
+    <string name="jre21_module_title">Java 21 runtime</string>
+    <string name="jre25_module_title">Java 25 runtime</string>
 </resources>

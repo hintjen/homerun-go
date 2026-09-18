@@ -19,8 +19,8 @@ npm run test:core-node
 
 Both build release binaries for `x86_64-pc-windows-msvc` into `dist/desktop/`.
 The runner is `homerun-game.exe`, built with the static CRT and without linking
-Pumpkin. The addon is `homerun_core.node`. Its existing target is unchanged
-apart from source identity injection. Keep the addon smoke test in the Windows
+Pumpkin. The addon is `homerun_core.node`, also built with the static CRT as on
+main. Both builds verify their Windows imports. Keep the addon smoke test in the Windows
 release job: a Rust compilation alone does not prove Node can load it.
 
 ## `scripts/publish-desktop-artifacts.js`: sign, hash, publish
@@ -52,7 +52,9 @@ S3 base: `s3://fractal-homerun/homerun-desktop`. Public base:
 
 The runner adds `version` (Cargo package version) and `protocol: 1`. The addon
 adds `version`, `abi`, and `sourceBuild`, read from the actual locally built
-addon. Pumpkin retains its existing `rev` field and URL layout. The script
+addon. Pumpkin retains its existing `rev` field and URL layout, plus
+`minecraftVersion` and `protocol` queried from the built engine using
+`--minecraft-version`. The script
 also prints a compatibility copy to `assets/homerun_core.node` for older
 desktop build scripts. New clients should resolve the immutable addon URL and
 verify its SHA-256, rather than treating that mutable alias as a pinned input.

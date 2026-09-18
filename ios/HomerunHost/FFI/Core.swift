@@ -267,7 +267,20 @@ enum Core {
             // consequence rather than the provenance. Getting it backwards is
             // not a warning — the header lands where a ClientHello is expected
             // and every handshake fails.
-            expectsProxyProtocol: (object["gateway_v2"] as? Bool) != true)
+            expectsProxyProtocol: (object["gateway_v2"] as? Bool) != true,
+            // Compared to the one word that means it, so anything else — or a
+            // key this build does not know — is device mode, which is the
+            // core's own reading rule too.
+            gatewayTls: (object["tls_mode"] as? String) == "gateway",
+            wsUrl: (object["ws_url"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    /// The body of `POST /api/device/<id>/link_up/`.
+    ///
+    /// Defined in the core so both phones ask for the same thing: today, that
+    /// this build *can* run with the gateway terminating TLS. The API decides.
+    static func deviceWsLinkUpRequest() throws -> [String: Any] {
+        try object("deviceWs.linkUpRequest", [:])
     }
 
     /// What `POST /api/device/<id>/link_up/` provisioned.
@@ -280,6 +293,17 @@ enum Core {
         /// that carries traffic but cannot be reached by name.
         let fqdn: String?
         let expectsProxyProtocol: Bool
+        /// True when the **gateway** terminates TLS for this link, which the
+        /// API decides per `link_up` and the core reads — downgrade-only, so an
+        /// API too old to say reads as false. Then this device orders no
+        /// certificate, binds no challenge listener, and the tunnel forwards
+        /// the gateway's relay at the *plaintext* socket
+        /// (`deviceWsGatewayTunnelConfig`) instead of `:443` at the TLS one.
+        let gatewayTls: Bool
+        /// The `wss://` address the dashboard is given for this device. In
+        /// gateway mode it is on the gateway's hostname, not `fqdn`. Logged,
+        /// and nothing here dials it.
+        let wsUrl: String?
     }
 
     /// The wireproxy config for the device websocket's own tunnel.
@@ -293,6 +317,17 @@ enum Core {
         var args: [String: Any] = ["link": link, "httpsTarget": httpsTarget]
         if let httpTarget { args["httpTarget"] = httpTarget }
         return try string("deviceWs.tunnelConfig", args)
+    }
+
+    /// The wireproxy config when the **gateway** terminates TLS: one forward,
+    /// its relay port at `wsTarget`.
+    ///
+    /// `wsTarget` is the **plaintext** port — the reverse of
+    /// `deviceWsTunnelConfig`'s warning. What arrives is a websocket upgrade
+    /// the gateway already decrypted; the TLS listener has no certificate in
+    /// this mode and drops every connection, which the dashboard sees as a 503.
+    static func deviceWsGatewayTunnelConfig(link: [String: Any], wsTarget: Int) throws -> String {
+        try string("deviceWs.tunnelConfig", ["link": link, "wsTarget": wsTarget])
     }
 
     /// False when these are the dead credentials from the previous session.
@@ -387,6 +422,36 @@ enum Core {
             ])
         guard let refusal = reply as? [String: Any] else { return nil }
         return refusal["message"] as? String
+    }
+
+    /// What a Pumpkin launch writes back as the server's `VERSION`, and the
+    /// console line that says so.
+    struct VersionPin {
+        let version: String
+        let line: String
+    }
+
+    /// Whether to pin a server's `VERSION` to the Minecraft version its
+    /// Pumpkin engine serves. `saved` is the API's value; `served` is what the
+    /// engine says about itself (``pumpkinServes()``). Nil when they already
+    /// agree, or the engine could not be asked — nothing to write.
+    static func pinVersion(saved: String?, served: String?) throws -> VersionPin? {
+        var args: [String: Any] = [:]
+        if let saved { args["saved"] = saved }
+        if let served { args["served"] = served }
+        guard let pin = try call("minecraft.hosting.pinVersion", args) as? [String: Any],
+            let version = pin["version"] as? String,
+            let line = pin["line"] as? String
+        else { return nil }
+        return VersionPin(version: version, line: line)
+    }
+
+    /// Which Minecraft the linked Pumpkin engine serves, or nil from a build
+    /// that links none. A constant of the build, answered by the FFI crate
+    /// rather than the core because only the engine's own crate knows it.
+    static func pumpkinServes() throws -> String? {
+        guard let reply = try call("engine.pumpkinServes") as? [String: Any] else { return nil }
+        return (reply["minecraftVersion"] as? String).flatMap { $0.isEmpty ? nil : $0 }
     }
 
     // MARK: - Who owns a server right now
@@ -962,11 +1027,21 @@ enum Core {
             recovery: reply["recovery"] as? String ?? "report")
     }
 
-    static func crashReport(serverId: String, deviceId: String, lines: [String]) -> Request? {
-        Request.from(
-            try? call(
-                "reporting.crash.report",
-                ["serverId": serverId, "deviceId": deviceId, "lines": lines]))
+    /// Build the crash report.
+    ///
+    /// `context` is what this app knows about itself — `AppErrors.context()`
+    /// plus the device — and it is what turns a console that explains nothing
+    /// into a report that does. The core adds the ABI version, the engines it
+    /// was compiled with and the tail of this process's log (through the
+    /// provider `DeviceWebsocket` registers), and sends all of it as the API's
+    /// `device_logs`. Nil sends the console alone, which is what every report
+    /// was before.
+    static func crashReport(
+        serverId: String, deviceId: String, lines: [String], context: [String: Any]? = nil
+    ) -> Request? {
+        var args: [String: Any] = ["serverId": serverId, "deviceId": deviceId, "lines": lines]
+        if let context { args["context"] = context }
+        return Request.from(try? call("reporting.crash.report", args))
     }
 
     /// Build a stats report. The core's argument is `serviceId`, not

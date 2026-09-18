@@ -149,14 +149,17 @@ core has no clock — that is what keeps it deterministic and testable.
 | `link.fromServerBody` | `body` | `PolledLink` or `null` when the gateway has not provisioned yet |
 | `link.isUsable` | `polled`, `before?` | bool — false when these are the dead credentials from last session |
 | `deviceWs.fromLinkUpBody` | `body` | `DeviceLink` or `null` while the `link_up` task is still running |
-| `deviceWs.tunnelConfig` | `link`, `httpsTarget`, `httpTarget?` | the config INI for the device websocket's own tunnel |
+| `deviceWs.linkUpRequest` | — | the body both hosts `POST` to `link_up` — today `{ "ws_tls": "gateway" }` |
+| `deviceWs.tunnelConfig` | `link`, and either `wsTarget` (gateway mode) or `httpsTarget`, `httpTarget?` (device mode) | the config INI for the device websocket's own tunnel. Both kinds of target at once is refused |
 
-The two `deviceWs` methods carry the **device** link, not a server's. It arrives
+The `deviceWs` methods carry the **device** link, not a server's. It arrives
 flat from `POST`/`GET /api/device/<id>/link_up/` rather than nested under
 `config.links[]`, which is why it has its own parser instead of a mode flag on
 `link.fromServerBody`. `null` means the task has not finished — normal for the
 first seconds, and not a failure to report. Omitting `httpTarget` drops the ACME
 challenge forward, which is what a device serving without a certificate does.
+`DeviceLink.tls_mode` is `"gateway"` or `"device"` and decides which kind of
+target a host passes — see [`device-websocket-tls.md`](./device-websocket-tls.md).
 `DeviceLink` also answers `can_serve_tls` and `expects_proxy_protocol`; see
 `plans/device-websocket.md`.
 
@@ -286,6 +289,35 @@ rather than promoted.
 | `minecraft.crossplay.floodgate` | `gameType`, `loader` | `{ metaUrl, flavour }`, or `null` when Modrinth already has Floodgate |
 | `minecraft.crossplay.floodgateBuild` | `meta`, `flavour` | `{ url, fileName, sha256, subDir }` |
 | `minecraft.crossplay.config` | `gameType`, `loader` | a `FileWrite` for Geyser, or `null` |
+| `minecraft.hosting.refuse` | `host?`, `server` | a `Refusal` `{ code, message }`, or `null` to go ahead |
+| `minecraft.hosting.serves` | `host?`, `server` | `{ engine: "jvm" \| "pumpkin" \| "bedrock", refusal: null }` or `{ engine: null, refusal }` |
+| `minecraft.hosting.needsJvm` | `gameType` | bool — does a launch have a jar to fetch |
+| `minecraft.hosting.isNukkit` | `gameType` | bool |
+| `minecraft.hosting.pinVersion` | `saved?`, `served?` | `{ version, line }` to PATCH into `VERSION` and say in the console, or `null` |
+| `engine.pumpkinServes` | — | `{ minecraftVersion, protocol }` from a build that links Pumpkin, else `null` — see below |
+
+#### Pinning a Pumpkin server's version
+
+Pumpkin implements one Minecraft version per build and ignores `VERSION`, but
+every launcher reads `VERSION` to pick a client — on the hosting device and on
+any other. A server created with the latest release, or one whose engine has
+since moved, hands players a client the server turns away. Homerun Desktop
+corrects the server at launch (`pinPumpkinVersion`); `pinVersion` is the same
+rule for both phones, so all three leave the same value behind.
+
+`served` is the engine's own answer. iOS links the engine and asks
+`engine.pumpkinServes`, which is answered in `host_dispatch.rs` rather than the
+core because only `pumpkin_data` knows it; Android spawns the engine and runs
+`libpumpkin.so --minecraft-version`, which prints the same shape from the same
+function. Both reach the bridge through `ServerBackend.servedVersion()`, so the
+start handler never asks which engine it has. A backend that serves what it is
+asked for — the JVM — answers `null`, and `null` is "nothing to correct" all
+the way down: it never refuses a launch.
+
+The PATCH itself stays in the bridge, because it needs the user token and a
+backend never sees one. The console line rides in on `ServerConfig.launchNotes`
+rather than being written directly, because every backend clears the console
+as the first thing `start` does.
 
 #### Crossplay
 

@@ -32,8 +32,19 @@ import java.net.ServerSocket
  * supervisor's, because that is where the console buffer and the command path
  * already are — see `plans/device-websocket.md`.
  *
- * Two ports, both forwarded by the tunnel. The gateway's `:443` reaches the
- * websocket; its `:80` reaches the ACME challenge listener, and that forward is
+ * # Who terminates TLS
+ *
+ * The API decides per `link_up` and the core reads its answer
+ * ([Core.DeviceLink.gatewayTls]).
+ *
+ * **Gateway mode:** the gateway holds the certificate and relays a decrypted
+ * websocket to the *plaintext* socket — one forward, no certificate ordered
+ * here, no challenge listener, nothing on this phone reachable except through
+ * the gateway.
+ *
+ * **Device mode**, which is every link the API does not say otherwise about:
+ * two ports, both forwarded by the tunnel. The gateway's `:443` reaches the TLS
+ * listener; its `:80` reaches the ACME challenge listener, and that forward is
  * omitted when there is no hostname to prove, because a forward at a listener
  * that never starts looks like the device answered.
  *
@@ -71,6 +82,17 @@ object DeviceWebsocket {
      * because the dashboard asks the API for this account's device and gets an
      * fqdn no phone is answering. Compared on every [ensure] so the switch is
      * caught there, rather than waiting for a backgrounding to clear it.
+     *
+     * **This only works if [ensure] runs *after* the registration it is meant
+     * to notice.** It reads [DeviceRegistry.currentDeviceId] synchronously, so
+     * called alongside a registration still in flight it compares the old id
+     * with itself, finds no change, and then returns early because the tunnel
+     * is still up. Nothing calls [ensure] again afterwards -- a resume does not
+     * -- so the link stays bound to the abandoned row until the process
+     * restarts, and the only symptom is a dashboard console that spins for
+     * ever: no crash, no error frame, no failed request, because the page never
+     * gets an address to dial at all. The login handler in `BridgeRouter`
+     * sequences the two for this reason; keep them sequenced.
      */
     private var linkedDeviceId: String? = null
 
@@ -127,25 +149,36 @@ object DeviceWebsocket {
         // the tunnel has to be forwarding at it by then. This one is chosen
         // here rather than by the OS for that reason — the order and the
         // forward have to agree, and the order happens first.
-        val challengePort = freePort()
+        //
+        // None in gateway mode: there is no order, so there is nothing to
+        // listen for, and a port reserved for it would only be a port to leak.
+        val challengePort = if (link.gatewayTls) null else freePort()
 
         // The socket next, then the tunnel that points at it. Asking it to bind
         // 0 rather than picking a number removes the window where something
         // else takes the port between choosing and binding.
         expectsProxyProtocol = link.expectsProxyProtocol
-        val bound = startSocket(apiUrl, deviceId, link.fqdn, challengePort) ?: return
+        val bound = startSocket(apiUrl, deviceId, link.fqdn, challengePort, link.gatewayTls)
+            ?: return
 
-        val config = Core.deviceWsTunnelConfig(
-            link = link.link,
-            // The **TLS** port, not the plaintext one. The gateway sends a
-            // ClientHello; forwarding it at the loopback socket the app's own
-            // UI uses would fail every handshake.
-            httpsTarget = bound.tls,
-            // Only when there is a hostname to prove. Without one no order can
-            // run, and a forward at a listener that never starts looks like the
-            // device answered.
-            httpTarget = if (link.fqdn != null) challengePort else null,
-        )
+        val config = if (link.gatewayTls) {
+            // The **plaintext** port. The gateway already terminated TLS; what
+            // arrives is a websocket upgrade, and the TLS listener has no
+            // certificate in this mode and would drop it.
+            Core.deviceWsGatewayTunnelConfig(link = link.link, wsTarget = bound.plaintext)
+        } else {
+            Core.deviceWsTunnelConfig(
+                link = link.link,
+                // The **TLS** port, not the plaintext one. The gateway sends a
+                // ClientHello; forwarding it at the loopback socket the app's
+                // own UI uses would fail every handshake.
+                httpsTarget = bound.tls,
+                // Only when there is a hostname to prove. Without one no order
+                // can run, and a forward at a listener that never starts looks
+                // like the device answered.
+                httpTarget = if (link.fqdn != null) challengePort else null,
+            )
+        }
 
         val proxy = WireProxy(appContext, scope ?: return)
         val dir = File(appContext.filesDir, DIRECTORY).apply { mkdirs() }
@@ -170,7 +203,8 @@ object DeviceWebsocket {
         }
         Log.i(
             TAG,
-            "device link up: fqdn=${link.fqdn ?: "(unnamed)"} " +
+            "device link up: tlsMode=${if (link.gatewayTls) "gateway" else "device"} " +
+                "public=${link.wsUrl ?: link.fqdn?.let { "wss://$it" } ?: "(unnamed)"} " +
                 "ws=:${bound.plaintext} tls=:${bound.tls} " +
                 "proxyProtocol=${link.expectsProxyProtocol}",
         )
@@ -211,7 +245,8 @@ object DeviceWebsocket {
         apiUrl: String,
         deviceId: String,
         fqdn: String?,
-        challengePort: Int,
+        challengePort: Int?,
+        gatewayTls: Boolean,
     ): Bound? {
         val config = buildJsonObject {
             put("port", 0)
@@ -220,7 +255,12 @@ object DeviceWebsocket {
             put("deviceId", deviceId)
             fqdn?.let { put("fqdn", it) }
             put("storageDir", File(appContext.filesDir, "$DIRECTORY/tls").absolutePath)
-            put("challengePort", challengePort)
+            challengePort?.let { put("challengePort", it) }
+            // The gateway terminates TLS for this link, so the supervisor
+            // orders nothing — whatever else is in this config. It checks this
+            // rather than trusting the absence of a challenge port, which for a
+            // *named* device it would otherwise report as a misconfiguration.
+            put("gatewayTls", gatewayTls)
             // Whether the plane in front of us writes a PROXY header. The core
             // answered this off the link; getting it wrong fails every TLS
             // handshake with a message about neither.

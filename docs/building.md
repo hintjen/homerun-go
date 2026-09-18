@@ -241,7 +241,7 @@ Three checks enforce it, and each has caught something real:
 
 | Where | Covers |
 |---|---|
-| `stage-jre.py` | every `.so` staged into each `assets/jre-<major>/`, checked per runtime; refuses to stage otherwise |
+| `stage-jre.py` | every `.so` staged into each `jre-<major>/`, checked per runtime; refuses to stage otherwise. On-demand majors stage into their feature module (`android/jre21/`), not the app — see `ON_DEMAND_JAVA` |
 | `build-restic.js`, `build-wireproxy.js` | the binary just built |
 | `third_party/libandroid-spawn/` | Termux publishes only a 4 KB build of a library `libjvm.so` has a hard `DT_NEEDED` on, so it is compiled from source here |
 

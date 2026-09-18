@@ -80,7 +80,7 @@ npm run rust:java-launcher    # libjavabin.so   - the exec'able launcher
 npm run rust:pumpkin-bin      # libpumpkin.so
 npm run wireproxy:android     # libwireproxy.so - no tunnel without it
 npm run restic:android        # librestic.so    - no backups without it
-npm run jre:android           # assets/jre-25   - no Java server without it
+npm run jre:android           # jre-25 in the app, jre-21 in :jre21
 node scripts/android-app.js install
 ```
 
@@ -92,7 +92,8 @@ looking:
 
 | Missing | What you actually see |
 |---|---|
-| `assets/jre-*` | **every Java server runs on Pumpkin.** `JavaRuntime.isAvailable` is false, so the host declares `jvm=false`, and `homerun-core::minecraft::hosting::serves` serves a plain Java server with Pumpkin whenever a device has no JVM. That arm is correct on iOS and here it is a silent substitution: a vanilla server the player created runs different server software |
+| `jre-25` (or both) | **every Java server runs on Pumpkin.** `JavaRuntime.isAvailable` is false, so the host declares `jvm=false`, and `homerun-core::minecraft::hosting::serves` serves a plain Java server with Pumpkin whenever a device has no JVM. That arm is correct on iOS and here it is a silent substitution: a vanilla server the player created runs different server software |
+| `jre-21` only | modded servers alone fail, and only once one is started. Java 21 lives in the `:jre21` feature module, so a build that staged it into `app/src/main/assets` by habit stages it where nothing looks — `verifyReleaseRuntimes` catches that for a release, and a debug build does not |
 | `librestic.so` | backups quietly no-op |
 | `libwireproxy.so` | the launch fails at the tunnel, reported as a network error |
 | `libpumpkin.so` | a Pumpkin server refuses with "This build cannot host this kind of server." |
@@ -121,8 +122,9 @@ cannot ship.
 
 ### Building from a git worktree
 
-Everything staged into the app — `jniLibs/`, `assets/web`, `assets/jre-*` — is
-gitignored, so it is **per-worktree and starts empty**. A worktree that builds
+Everything staged into the app — `jniLibs/`, `assets/web`, `assets/jre-25`
+and `jre21/src/main/assets/jre-21` — is gitignored, so it is **per-worktree and
+starts empty**. A worktree that builds
 and installs from the main checkout's habits will fail at `verifyNativePayload`,
 or quietly ship one ABI's libraries to a phone of the other kind. Stage the full
 set for the ABI you are installing to; `build:android:release` names it.

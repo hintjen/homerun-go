@@ -138,7 +138,17 @@ object ServerHost {
         // and "which engine is this app" has no answer for it.
         if (JavaRuntime.isAvailable(appContext)) java = JavaServerBackend(appContext, scope)
         if (PumpkinBackend.isAvailable(appContext)) pumpkin = PumpkinBackend(appContext, scope)
-        Log.i(TAG, "engines: jvm=${java != null} pumpkin=${pumpkin != null}")
+        // The runtimes by name, not just `jvm=true`. Java 21 is delivered on
+        // demand, so "this build can host on 21" and "21 is on this phone"
+        // are different states now, and a launch that picks 21 behaves very
+        // differently from one that picks 25. Without the list, a build that
+        // staged one runtime and a build that staged both log the same line.
+        val runtimes = JavaRuntime.available(appContext)
+        Log.i(
+            TAG,
+            "engines: jvm=${java != null} pumpkin=${pumpkin != null} " +
+                "java=${runtimes.joinToString(",").ifEmpty { "none" }}",
+        )
 
         listOfNotNull(java, pumpkin).forEach { it.wire() }
     }
@@ -388,6 +398,17 @@ object ServerHost {
     private fun snapshot(): Hosting =
         Hosting(hostingId, hostingName, hostingState, hostingBackup, null, hostingStarting)
             .also { lastHosting = it }
+
+    /**
+     * The server this device is hosting, or null when idle.
+     *
+     * Lock-free, from the same cached snapshot [hostingSummary] reads, and for
+     * the same reason: [AppErrors] asks from a crash handler, where taking
+     * this monitor could turn a crash into a hang. Slightly stale is the
+     * right trade — it names the launch an error happened during, which is
+     * what the API joins an app error to a crash report on.
+     */
+    fun hostedServerId(): String? = lastHosting.serverId
 
     /** What this device was doing, in a few words, for that handler's log. */
     fun hostingSummary(): String = lastHosting.let {

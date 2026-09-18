@@ -68,3 +68,37 @@ test("runner can be prepared without building Pumpkin and targets Windows with s
   assert.equal(TARGETS["game-runner"].staticCrt, true);
   assert.equal(TARGETS["game-runner"].artifact, "homerun-game.exe");
 });
+
+test("Pumpkin publication still asks the built engine for its Minecraft version", (t) => {
+  const root = fixture(t);
+  const dir = path.join(root, "dist", "desktop");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.copyFileSync(path.join(root, LAYOUT.pumpkin.file), path.join(dir, LAYOUT.pumpkin.file));
+  const crate = path.join(root, "rust", "homerun-pumpkin-bin");
+  fs.mkdirSync(crate, { recursive: true });
+  fs.writeFileSync(path.join(crate, "Cargo.toml"), 'rev = "123456789abcdef"');
+  const entry = { exports: {} };
+  let queries = 0;
+  function imports(name) {
+    if (name === "./targets") return { ROOT: root };
+    if (name === "child_process") return { execFileSync(file, args, options) {
+      assert.equal(file, path.join(dir, LAYOUT.pumpkin.file));
+      assert.equal(args.join(" "), "--minecraft-version");
+      assert.notEqual(options.cwd, root);
+      queries++;
+      return '{"minecraftVersion":"1.21.11","protocol":774}\n';
+    } };
+    return require(name);
+  }
+  imports.main = entry;
+  const processStub = { argv: ["node", "publish", "--only", "pumpkin"], exitCode: 0 };
+  require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "publish-desktop-artifacts.js"), "utf8"), {
+    require: imports, module: entry, process: processStub, console: { log() {}, error() {} },
+  });
+  assert.equal(processStub.exitCode, 0);
+  assert.equal(queries, 1, "publication must query the actual Pumpkin binary");
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT.pumpkin.manifest)));
+  assert.equal(manifest.minecraftVersion, "1.21.11", "the desktop must retain the version used to choose a compatible client");
+  assert.equal(manifest.protocol, 774);
+  assert.equal(manifest.rev, "123456789abcdef");
+});

@@ -20,6 +20,9 @@ homerun-core = { path = "../homerun-core" }
 # separation homerun-supervisor has for the C ABI.
 napi = { version = "2", default-features = false }
 napi-derive = "2"
+# Renders the bundle verdict the same way `homerun-supervisor` does. Already
+# in the graph through homerun-core, so this adds a name, not a download.
+serde_json = "1"
 
 [build-dependencies]
 napi-build = "2"

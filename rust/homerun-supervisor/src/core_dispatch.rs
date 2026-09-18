@@ -100,6 +100,46 @@ fn context_arg(value: &Value, method: &str) -> Result<app_error::Context, String
         .map_err(|e| format!("\"{method}\" got a context it could not read: {e}"))
 }
 
+/// The host's half of a crash report's context, completed with the half only
+/// this crate can answer.
+///
+/// A host sends what it knows — its version, its bundle, the device — and
+/// this fills in the ABI version, which engines were compiled in, and the
+/// app's own log. Those three are deliberately not asked of the host: the
+/// report that prompted this was about a build whose *core* could not spawn a
+/// process, and a host that had to describe its core's abilities would have
+/// described the ones it assumed it had.
+///
+/// The log read is one `logcat -d` on Android, or the provider the host
+/// registered — milliseconds, on the thread the host reports from, which is
+/// never the main one. Absent `context`, nothing is read and the report is
+/// the console alone.
+fn crash_host_context(args: &Value, method: &str) -> Result<Option<crash::HostContext>, String> {
+    let Some(value) = args.get("context") else {
+        return Ok(None);
+    };
+    let mut host: crash::HostContext = serde_json::from_value(value.clone())
+        .map_err(|e| format!("\"{method}\" got a context it could not read: {e}"))?;
+    host.abi_version = Some(crate::FFI_ABI_VERSION);
+    host.engines = compiled_engines();
+    if host.app_log.is_none() {
+        host.app_log = Some(crate::app_logs::collect().0);
+    }
+    Ok(Some(host))
+}
+
+/// What this library can run, as its features say — not as a host believes.
+fn compiled_engines() -> Vec<String> {
+    let mut engines = Vec::new();
+    if cfg!(feature = "process-engine") {
+        engines.push("process".to_string());
+    }
+    if cfg!(feature = "pumpkin-engine") {
+        engines.push("pumpkin".to_string());
+    }
+    engines
+}
+
 /// Read the caller's [`app_error::Occurrence`].
 fn occurrence_arg(value: &Value, method: &str) -> Result<app_error::Occurrence, String> {
     serde_json::from_value(value.clone())
@@ -1031,6 +1071,21 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             Ok(Value::Bool(hosting::is_nukkit(&text("gameType")?)))
         }
 
+        // Whether a Pumpkin launch should write the server's `VERSION` back
+        // as the Minecraft version the engine serves, and the console line
+        // that says so. `saved` is the API's value, `served` the engine's own
+        // answer (`engine.pumpkinServes`, or the binary's
+        // `--minecraft-version`); either may be absent. Answers `null` when
+        // there is nothing to correct, so a host branches on presence — the
+        // same shape as `refuse`.
+        "minecraft.hosting.pinVersion" => Ok(hosting::pin_version(
+            optional_text("saved").as_deref(),
+            optional_text("served").as_deref(),
+        )
+        .map(|pin| serde_json::to_value(pin).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or(Value::Null)),
+
         // The PowerNukkitX release to run. `blessed` is the API's pin, which is
         // what makes a bad release stoppable without a store update — see
         // `nukkit::release`.
@@ -1243,16 +1298,39 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             None => Value::Null,
         }),
 
-        // `httpTarget` absent or null omits the ACME forward — the shape a
-        // device serving without a certificate takes.
+        // What both hosts POST to `link_up`. One definition, so Kotlin and
+        // Swift cannot come to ask for different things.
+        "deviceWs.linkUpRequest" => Ok(device_ws::link_up_request()),
+
+        // Two shapes, chosen by which target the host passes — and the host
+        // chooses by the `tls_mode` the core itself read off the link:
+        //
+        //   wsTarget                  gateway mode: one forward, the gateway's
+        //                             relay port to the *plaintext* socket.
+        //   httpsTarget, httpTarget?  device mode: `:443` to the TLS listener
+        //                             and, when there is a name to prove, `:80`
+        //                             to the ACME challenge listener.
+        //
+        // Both at once is refused rather than resolved: a host that sends both
+        // has a bug about which mode it is in, and picking for it would hide it
+        // behind a tunnel that comes up and carries nothing.
         "deviceWs.tunnelConfig" => {
             let link: tunnel::Link = serde_json::from_value(field("link")?.clone())
                 .map_err(|e| format!("bad link: {e}"))?;
             let port = |name: &str| args.get(name).and_then(|v| v.as_u64()).map(|p| p as u16);
-            let https = port("httpsTarget").ok_or("httpsTarget is required")?;
-            Ok(Value::String(
-                device_ws::tunnel_config(link, https, port("httpTarget")).render(),
-            ))
+            match (port("wsTarget"), port("httpsTarget")) {
+                (Some(_), Some(_)) => Err(
+                    "pass wsTarget (gateway mode) or httpsTarget (device mode), not both"
+                        .to_string(),
+                ),
+                (Some(ws), None) => Ok(Value::String(
+                    device_ws::gateway_tunnel_config(link, ws).render(),
+                )),
+                (None, Some(https)) => Ok(Value::String(
+                    device_ws::tunnel_config(link, https, port("httpTarget")).render(),
+                )),
+                (None, None) => Err("httpsTarget or wsTarget is required".to_string()),
+            }
         }
 
         // --- over-the-air UI bundles ---------------------------------------
@@ -1458,12 +1536,16 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             serde_json::to_value(crash::diagnose(&lines, used)).map_err(|e| e.to_string())
         }
 
-        "reporting.crash.report" => serde_json::to_value(crash::report(
-            &text("serverId")?,
-            &text("deviceId")?,
-            &console_lines(&args, method)?,
-        ))
-        .map_err(|e| e.to_string()),
+        "reporting.crash.report" => {
+            let host = crash_host_context(&args, method)?;
+            serde_json::to_value(crash::report(
+                &text("serverId")?,
+                &text("deviceId")?,
+                &console_lines(&args, method)?,
+                host.as_ref(),
+            ))
+            .map_err(|e| e.to_string())
+        }
 
         // -- app error reporting --------------------------------------------
         //
@@ -2461,6 +2543,69 @@ mod tests {
         assert!(text.contains("ListenPort = 8080\nTarget = 127.0.0.1:8081"));
     }
 
+    #[test]
+    fn a_device_link_says_who_terminates_tls() {
+        let body = |extra: Value| {
+            let mut b = json!({
+                "fqdn": "d.example.com",
+                "native_config": {
+                    "client_privkey": "K", "gateway_pubkey": "P", "link_address": "gw:51820"
+                }
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                b[k.as_str()] = v.clone();
+            }
+            json!({ "body": b })
+        };
+        let gateway = ok(
+            "deviceWs.fromLinkUpBody",
+            body(json!({ "ws_tls": "gateway", "ws_url": "wss://ws.example.com/d/abc" })),
+        );
+        assert_eq!(gateway["tls_mode"], "gateway");
+        assert_eq!(gateway["ws_url"], "wss://ws.example.com/d/abc");
+
+        // An API older than the field: the hosts must read a plain "device".
+        let older = ok("deviceWs.fromLinkUpBody", body(json!({})));
+        assert_eq!(older["tls_mode"], "device");
+        assert_eq!(older["ws_url"], Value::Null);
+    }
+
+    #[test]
+    fn both_hosts_are_handed_the_same_link_up_body() {
+        assert_eq!(ok("deviceWs.linkUpRequest", json!({})), json!({ "ws_tls": "gateway" }));
+    }
+
+    #[test]
+    fn a_gateway_mode_tunnel_is_one_forward_to_the_plaintext_socket() {
+        let config = ok(
+            "deviceWs.tunnelConfig",
+            json!({
+                "link": {
+                    "client_privkey": "K", "gateway_pubkey": "P", "link_address": "gw:51820"
+                },
+                "wsTarget": 41873
+            }),
+        );
+        let text = config.as_str().unwrap();
+        assert!(text.contains("ListenPort = 4000\nTarget = 127.0.0.1:41873"));
+        assert!(!text.contains("ListenPort = 8443"));
+        assert!(!text.contains("ListenPort = 8080"));
+    }
+
+    /// A host sending both targets does not know which mode it is in. Guessing
+    /// for it would bring up a tunnel that carries nothing.
+    #[test]
+    fn a_tunnel_config_with_both_kinds_of_target_is_refused() {
+        let link = json!({ "client_privkey": "K", "gateway_pubkey": "P", "link_address": "gw:51820" });
+        let both = err(
+            "deviceWs.tunnelConfig",
+            json!({ "link": link, "wsTarget": 4001, "httpsTarget": 8444 }),
+        );
+        assert!(both.contains("not both"), "unhelpful refusal: {both}");
+        let neither = err("deviceWs.tunnelConfig", json!({ "link": link }));
+        assert!(neither.contains("required"), "unhelpful refusal: {neither}");
+    }
+
     /// Serving without a certificate is a real state, and it must not leave a
     /// forward pointing at a listener that was never started.
     #[test]
@@ -2983,6 +3128,39 @@ geyser"
 
         // The server is required — guessing it would defeat the check.
         assert!(err("minecraft.hosting.refuse", json!({ "host": ios })).contains("server"));
+    }
+
+    /// What a Pumpkin launch asks once it knows what its engine serves. Null
+    /// is "nothing to write", so a host branches on presence.
+    #[test]
+    fn a_host_can_ask_whether_to_pin_a_pumpkin_servers_version() {
+        let pin = ok(
+            "minecraft.hosting.pinVersion",
+            json!({ "saved": "26.3", "served": "26.2" }),
+        );
+        assert_eq!(pin["version"], "26.2");
+        assert_eq!(
+            pin["line"],
+            "[Homerun] This Pumpkin engine serves Minecraft 26.2; updating the server from 26.3."
+        );
+
+        let same = ok(
+            "minecraft.hosting.pinVersion",
+            json!({ "saved": "26.2", "served": "26.2" }),
+        );
+        assert!(same.is_null(), "a matching version is left alone: {same}");
+
+        // Both arguments are optional: no saved version is still corrected,
+        // and no served version corrects nothing.
+        let unversioned = ok("minecraft.hosting.pinVersion", json!({ "served": "26.2" }));
+        assert_eq!(unversioned["version"], "26.2");
+        let unasked = ok("minecraft.hosting.pinVersion", json!({ "saved": "26.3" }));
+        assert!(unasked.is_null(), "{unasked}");
+        let null = ok(
+            "minecraft.hosting.pinVersion",
+            json!({ "saved": "26.3", "served": Value::Null }),
+        );
+        assert!(null.is_null(), "{null}");
     }
 
     /// The loop a host implements, on the wire: ask, read, record, read back.
@@ -3779,4 +3957,48 @@ geyser"
         assert_eq!(meaning["joined"], "Ada");
     }
 
+    // --- the crash report's host context ------------------------------------
+
+    /// The build's own facts are stamped here, over anything the host sent:
+    /// a host describing its core's abilities describes the ones it assumed.
+    #[test]
+    fn a_crash_report_carries_what_only_this_crate_knows_about_the_build() {
+        let reply = ok(
+            "reporting.crash.report",
+            json!({
+                "serverId": "srv-1",
+                "deviceId": "dev-9",
+                "lines": ["[Homerun] Minecraft 26.2 ready."],
+                "context": {
+                    "platform": "android",
+                    "appVersion": "0.4.2",
+                    "abiVersion": 1,
+                    "engines": ["a lie"],
+                },
+            }),
+        );
+        let logs = reply["body"]["device_logs"].as_str().expect("device_logs");
+
+        assert!(logs.contains(&format!("ffi abi {}", crate::FFI_ABI_VERSION)), "{logs}");
+        let expected = match compiled_engines().as_slice() {
+            [] => "engines: none".to_string(),
+            some => format!("engines: {}", some.join(", ")),
+        };
+        assert!(logs.contains(&expected), "{logs}");
+        assert!(!logs.contains("a lie"), "the host's claim was kept: {logs}");
+        // Whatever this machine answers for its own log, the section exists:
+        // an empty log would read as "nothing happened".
+        assert!(logs.contains("\n\n"), "no app log section: {logs}");
+    }
+
+    /// Both hosts sent the console alone before this existed, and the arm
+    /// must go on accepting exactly that.
+    #[test]
+    fn a_crash_report_without_a_context_is_the_console_alone() {
+        let reply = ok(
+            "reporting.crash.report",
+            json!({ "serverId": "srv-1", "deviceId": "dev-9", "lines": ["x"] }),
+        );
+        assert!(reply["body"].get("device_logs").is_none(), "{reply}");
+    }
 }

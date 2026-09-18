@@ -82,6 +82,17 @@ pub mod pumpkin_settings;
 #[cfg(feature = "game-engine")]
 pub mod rcon;
 
+/// How the linked engine is handed work from a thread that may already be
+/// inside a runtime.
+///
+/// Compiled in test builds whatever the features say, because the rule it
+/// encodes is the one that shipped broken and the crate's own tests are the
+/// only place it can be exercised without a device: `pumpkin-engine` needs the
+/// real server, and the suite deliberately runs without it. `tokio` is a
+/// dev-dependency for exactly this.
+#[cfg(any(all(feature = "pumpkin-engine", unix), test))]
+mod runtime_dispatch;
+
 pub mod server;
 pub mod state;
 
@@ -272,13 +283,30 @@ fn out(s: String) -> *mut c_char {
 
 /// Run `f`, converting a panic into a JSON error rather than unwinding into
 /// Swift/Kotlin (which would be undefined behaviour).
+///
+/// The error a panic produces is **read by a player**: it comes back over the
+/// bridge and the UI shows it. So the panic's own text does not go there. It
+/// used to, and a Tokio panic reached someone's phone as
+/// "Cannot start a runtime from within a runtime. This happens because a
+/// function (like `block_on`) attempted to block the current thread…", which
+/// tells a player nothing and reads like the app is broken beyond use.
+///
+/// Nothing is lost by keeping it back: [`crash`]'s hook has already written
+/// the payload, the location and a backtrace to the crash directory, and
+/// `errors::drain` sends that on the next launch. It is logged here too, so a
+/// device websocket session or logcat shows it without waiting for a drain.
 fn guarded<F: FnOnce() -> String>(f: F) -> *mut c_char {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(json) => out(json),
         Err(_) => {
             let detail =
                 crash::take_last_panic().unwrap_or_else(|| "internal server panic".to_string());
-            out(json!({ "ok": false, "error": detail }).to_string())
+            log::error!("a panic was caught at the C ABI: {detail}");
+            out(json!({
+                "ok": false,
+                "error": "Something went wrong inside Homerun Go and that could not be finished. It has been reported.",
+            })
+            .to_string())
         }
     }
 }
@@ -382,7 +410,7 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
     guarded(move || {
         let request = match request.as_deref().map(parse_start_request) {
             Some(Ok(request)) => request,
-            Some(Err(message)) => return err(message),
+            Some(Err(message)) => return refused_start(message),
             None => return err("the start request must be a valid UTF-8 string"),
         };
 
@@ -392,7 +420,7 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
         };
         let engine = match engine {
             Ok(engine) => engine,
-            Err(message) => return err(message),
+            Err(message) => return refused_start(message),
         };
 
         match server::host().start(
@@ -406,6 +434,25 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
             Err(message) => err(message),
         }
     })
+}
+
+/// A launch refused here, before the supervisor ran.
+///
+/// The refusal goes into the console as well as into the reply, because the
+/// reply is the one place nobody looks. Android reads only `ok` from it and
+/// moves on to the exit path; the crash report that follows is built from the
+/// console; and a player looking at a server that "stopped" sees the console
+/// too. Every refusal the supervisor makes for itself — a taken port, a second
+/// server — already writes a line for the same reason. This one did not, and
+/// a build that could not spawn a process shipped and reported nothing but
+/// its own download progress for every launch it refused.
+///
+/// Only for refusals made *here*. `ServerHost::start`'s own errors include
+/// "already running", and writing that into the console of the server that is
+/// running would confuse the one person reading it.
+fn refused_start(message: String) -> String {
+    server::host().push_log(format!("[Homerun] The server could not start: {message}"));
+    err(message)
 }
 
 /// Build a child-process engine from a host's invocation.
@@ -640,7 +687,7 @@ pub extern "C" fn homerun_set_app_logs_provider(
 /// Serve `wss://<device-fqdn>` on a loopback port the tunnel forwards to.
 ///
 /// `config` is `{ port, apiUrl, jwksUrl, deviceId, fqdn?, storageDir?,
-/// challengePort?, expectProxyProtocol?, acmeStaging? }`. A `port` of 0 asks
+/// challengePort?, expectProxyProtocol?, acmeStaging?, gatewayTls? }`. A `port` of 0 asks
 /// the OS to choose, and the answer carries **both** ports —
 /// `{ ok: true, port, tlsPort }`. A host needs each for a different thing: its
 /// own UI dials `port` over loopback, and the tunnel forwards the gateway's
@@ -651,6 +698,11 @@ pub extern "C" fn homerun_set_app_logs_provider(
 /// obtain: the socket still serves, reachable through the tunnel and not by a
 /// browser. `expectProxyProtocol` follows the gateway generation and defaults
 /// to the legacy plane.
+///
+/// `gatewayTls: true` is the mode where the gateway terminates TLS: nothing is
+/// ordered whatever else is passed, and the tunnel forwards the gateway's relay
+/// to `port` — the **plaintext** one — not to `tlsPort`. Absent is false, which
+/// is every host built before the field existed.
 ///
 /// Builds without the `device-ws` feature answer that they cannot serve one,
 /// rather than pretending to. Both phone targets have it; a host build does
@@ -724,6 +776,12 @@ pub unsafe extern "C" fn homerun_device_ws_start(config: *const c_char) -> *mut 
                     .unwrap_or(true),
                 acme_staging: parsed
                     .get("acmeStaging")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                // Absent is false: a host that predates gateway mode gets
+                // exactly the behaviour it always had.
+                gateway_tls: parsed
+                    .get("gatewayTls")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 // Optional, and silently absent when a host has not wired it
@@ -1088,5 +1146,23 @@ mod tests {
                 "player-facing error leaked {jargon:?}: {message}"
             );
         }
+    }
+
+    /// A refusal made before the supervisor runs is written into the console,
+    /// because the reply it also goes into is read by nobody: Android checks
+    /// `ok` and moves on, and the crash report is built from the console.
+    #[test]
+    fn a_launch_refused_here_explains_itself_in_the_console() {
+        let reason = "This build cannot run a server as a separate process (test).";
+        let reply: Value = serde_json::from_str(&refused_start(reason.to_string())).unwrap();
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], reason);
+
+        let console = server::host().logs_since(0).lines.join("
+");
+        assert!(
+            console.contains(&format!("[Homerun] The server could not start: {reason}")),
+            "{console}"
+        );
     }
 }

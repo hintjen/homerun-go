@@ -363,6 +363,46 @@ pub fn is_nukkit(game_type: &str) -> bool {
     matches!(game_type, "powernukkitx" | "native-powernukkitx")
 }
 
+/// What a launch writes back when a Pumpkin server's `VERSION` is not the
+/// Minecraft version its engine serves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionPin {
+    /// The value to PATCH into the server's `VERSION`.
+    pub version: String,
+    /// The console line that says so, already badged.
+    pub line: String,
+}
+
+/// Whether a Pumpkin launch should correct the server's `VERSION`, and to what.
+///
+/// Pumpkin implements one Minecraft version per build and ignores `VERSION`,
+/// but every launcher reads `VERSION` to pick a client — on the hosting device
+/// and on any other. A server created with the latest release, or one whose
+/// engine has since moved, would otherwise hand players a client the server
+/// turns away as incompatible. Homerun Desktop writes the same correction
+/// (`pinPumpkinVersion`); this is the rule both phones apply, so a launch on
+/// any of the three leaves the same value behind.
+///
+/// `served` is what the engine reports about itself — nothing when the host
+/// could not ask, which is not a reason to touch anything. `saved` is the
+/// server's `VERSION` as the API holds it; absent and blank both mean "none",
+/// and are corrected, because "latest" is exactly the value that goes stale.
+pub fn pin_version(saved: Option<&str>, served: Option<&str>) -> Option<VersionPin> {
+    let served = served.map(str::trim).filter(|v| !v.is_empty())?;
+    let saved = saved.map(str::trim).filter(|v| !v.is_empty());
+    if saved == Some(served) {
+        return None;
+    }
+    Some(VersionPin {
+        version: served.to_string(),
+        line: format!(
+            "[Homerun] This Pumpkin engine serves Minecraft {served}; updating the server from {}.",
+            saved.unwrap_or("no version"),
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,4 +768,55 @@ mod tests {
         );
     }
 
+    // ─── Pinning VERSION to the engine ──────────────────────────────────────
+
+    /// The case that shipped: created as the latest release, served by an
+    /// older engine, and the client the launcher picked was turned away.
+    #[test]
+    fn a_stale_version_is_pinned_to_what_the_engine_serves() {
+        let pin = pin_version(Some("26.3"), Some("26.2")).unwrap();
+        assert_eq!(pin.version, "26.2");
+        assert_eq!(
+            pin.line,
+            "[Homerun] This Pumpkin engine serves Minecraft 26.2; updating the server from 26.3."
+        );
+    }
+
+    #[test]
+    fn a_matching_version_is_left_alone() {
+        assert_eq!(pin_version(Some("26.2"), Some("26.2")), None);
+        // Whitespace is not a difference.
+        assert_eq!(pin_version(Some(" 26.2 "), Some("26.2")), None);
+    }
+
+    /// "Latest" is exactly the value that goes stale, so a server with no
+    /// version is corrected too — and the line says what it had.
+    #[test]
+    fn no_saved_version_is_pinned_as_well() {
+        for saved in [None, Some(""), Some("  ")] {
+            let pin = pin_version(saved, Some("26.2")).unwrap();
+            assert_eq!(pin.version, "26.2");
+            assert!(
+                pin.line.ends_with("updating the server from no version."),
+                "{}",
+                pin.line
+            );
+        }
+    }
+
+    /// A host that could not ask its engine has nothing to correct with.
+    #[test]
+    fn nothing_served_means_nothing_pinned() {
+        assert_eq!(pin_version(Some("26.3"), None), None);
+        assert_eq!(pin_version(Some("26.3"), Some("")), None);
+        assert_eq!(pin_version(None, None), None);
+    }
+
+    /// The wire shape both hosts read and the desktop already writes.
+    #[test]
+    fn the_pin_serialises_as_version_and_line() {
+        let pin = serde_json::to_value(pin_version(None, Some("26.2")).unwrap()).unwrap();
+        assert_eq!(pin["version"], "26.2");
+        assert!(pin["line"].as_str().unwrap().starts_with("[Homerun] "));
+    }
 }

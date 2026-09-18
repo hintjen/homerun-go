@@ -715,6 +715,17 @@ class BridgeRouter(
     var requestPushPermission: (suspend () -> String)? = null
 
     /**
+     * Set by [MainActivity], because Play's review flow launches over an
+     * Activity and the router does not hold one. Suspends until the flow has
+     * been handed to Play (not until a card is answered — Play resolves the
+     * launch as soon as it has decided, shown or not, and never says which).
+     * Returns whether the request was made. Null while no activity is
+     * attached, in which case `app-review:request` answers `false`.
+     */
+    @Volatile
+    var requestAppReview: (suspend () -> Boolean)? = null
+
+    /**
      * The OS notification-permission state, in the contract's vocabulary.
      *
      * Below API 33 there is no runtime permission: notifications are on
@@ -1091,11 +1102,31 @@ class BridgeRouter(
                 // server it is hosting. See [ServerHost.keepAlive].
                 scope.launch(
                     Dispatchers.IO + ServerHost.keepAlive(TAG, "registering this device"),
-                ) { DeviceRegistry.ensure(apiUrl(), userToken()) }
-                // The device's own link, which the dashboard dials to reach
-                // this device's console. Provisioning polls for up to a
-                // minute, so like registration it is started and not awaited.
-                DeviceWebsocket.ensure(apiUrl(), userToken())
+                ) {
+                    // Failing to register must not skip the link: `bringUp`
+                    // calls `DeviceRegistry.ensure` again and would retry there.
+                    runCatching { DeviceRegistry.ensure(apiUrl(), userToken()) }
+                        .onFailure { Log.w(TAG, "could not register before linking: ${it.message}") }
+
+                    // The device's own link, which the dashboard dials to reach
+                    // this device's console. Provisioning polls for up to a
+                    // minute, so like registration it is started and not awaited.
+                    //
+                    // **After** registration, inside the same launch, and that
+                    // ordering is the whole point. A different account signing
+                    // in makes [DeviceRegistry] register a *new* device row, and
+                    // [DeviceWebsocket.ensure]'s stale-link guard catches that
+                    // by comparing the row it linked against the current one.
+                    // Called beside the registration instead of after it, the
+                    // guard read the id that was about to be replaced, found it
+                    // unchanged, and then returned early because the tunnel was
+                    // still up -- so the link stayed bound to the abandoned row
+                    // for the life of the process. Nothing calls `ensure` again
+                    // (a resume does not), so the dashboard was left dialling a
+                    // device the API no longer knows, which it reports as a
+                    // console that spins for ever with no error anywhere.
+                    DeviceWebsocket.ensure(apiUrl(), userToken())
+                }
 
                 emit("credentials-set")
             }
@@ -1227,6 +1258,12 @@ class BridgeRouter(
             prefs.edit().putString(KEY_CLIENT_NONCE, params?.jsonPrimitive?.content).apply()
             null
         },
+
+        // Accepted and discarded: only the desktop Squirrel uninstall hook reads
+        // what this stores, and the channel is core so the shared UI can call
+        // it everywhere without a gate. Answering is what keeps the UI's
+        // promise from hanging (PROTOCOL.md §5).
+        "set-uninstall-survey-url" to { _ -> null },
 
         /*
          * Run an OAuth redirect in a real browser and hand back where it
@@ -1389,6 +1426,20 @@ class BridgeRouter(
                 val token = PushMessaging.currentToken()
                 if (token != null) put("token", token) else put("token", JsonNull)
             }
+        },
+
+        // ─── app store review ────────────────────────────────────────────
+
+        // The shared UI picked the moment (minutes into the first session
+        // with a player — its lib/appReview.ts);
+        // this host only asks. Play's policy leaves no other prompt to make,
+        // and the card is Play's to show or withhold. `requested` means the
+        // call was made, never that a card appeared: nothing reports that.
+        "app-review:request" to { params ->
+            val moment = (params as? JsonObject)?.get("moment")?.jsonPrimitive?.contentOrNull
+            val requested = requestAppReview?.invoke() ?: false
+            Log.i(TAG, "app-review:request moment=$moment requested=$requested")
+            buildJsonObject { put("requested", requested) }
         },
 
         // ─── files ───────────────────────────────────────────────────────
@@ -1555,16 +1606,48 @@ class BridgeRouter(
                                     throw ServerBackendException.Engine(it)
                                 }
                             }
+                            // Pumpkin serves one Minecraft version whatever `VERSION`
+                            // says, and every launcher reads `VERSION` to pick a
+                            // client — so the server is corrected to what the engine
+                            // serves before it starts, the same write-back the desktop
+                            // does. Here rather than in the backend because the PATCH
+                            // needs the user token, which never reaches a backend.
+                            // Only with settings in hand: with none there is no saved
+                            // value to compare, and no token that could write one.
+                            // Best effort — a launch on a stale version beats no launch.
+                            var version = settings?.version
+                            var settingsEnv = settings?.env
+                            val launchNotes = mutableListOf<String>()
+                            if (settings != null) {
+                                val pin = runCatching { Core.pinVersion(settings.version, engine.servedVersion()) }
+                                    .onFailure { Log.w(TAG, "$serverId: could not decide a version pin: ${it.message}") }
+                                    .getOrNull()
+                                if (pin != null) {
+                                    launchNotes += pin.line
+                                    val failure = HomerunApi.pinVersion(api, serverId, pin.version, token)
+                                    if (failure == null) {
+                                        version = pin.version
+                                        settingsEnv = buildJsonObject {
+                                            settings.env.forEach { (key, value) -> put(key, value) }
+                                            put("VERSION", pin.version)
+                                        }
+                                    } else {
+                                        launchNotes += "[Homerun] Could not update the server's Minecraft version: $failure"
+                                    }
+                                }
+                            }
+
                             engine.start(
                                 serverId,
                                 ServerConfig(
                                     name = config?.get("name")?.jsonPrimitive?.contentOrNull ?: serverId,
                                     memoryMb = config?.get("memoryMb")?.jsonPrimitive?.intOrNull ?: 1024,
-                                    version = settings?.version,
+                                    version = version,
                                     loader = settings?.loader ?: "vanilla",
                                     // Read and written to files by the backend, never
                                     // forwarded into the server's environment.
-                                    settingsEnv = settings?.env,
+                                    settingsEnv = settingsEnv,
+                                    launchNotes = launchNotes,
                                     gameType = settings?.rawGameType ?: "java",
                                     // Null when the server has no repository, backups are
                                     // off for it, this device is not registered, or it is
@@ -2084,7 +2167,7 @@ class BridgeRouter(
          * two and fails the build if you do one without the other — the same
          * discipline as `FFI_ABI_VERSION`, one layer up.
          */
-        const val HOST_REVISION = 12
+        const val HOST_REVISION = 13
 
         /**
          * Auth callbacks come home on this prefix rather than one of the

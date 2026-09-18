@@ -454,10 +454,37 @@ function apkPath() {
   return apk;
 }
 
+/**
+ * The feature-module APKs that belong beside the base one.
+ *
+ * `:jre21` is a Play Feature Delivery module, so the Java 21 runtime is a
+ * *split* and is not inside `app-debug.apk`. `adb install` takes one file and
+ * would leave it off the device entirely — and this is the one loop where Play
+ * cannot deliver it afterwards either, because a sideloaded build is not a
+ * build Play knows about. The failure surfaces only when a server selects
+ * Java 21, which is to say on modded servers, long after the install looked
+ * fine. `install-multiple` is what Play does at install time.
+ */
+function featureApks() {
+  return fs
+    .readdirSync(ANDROID_DIR, { withFileTypes: true })
+    .filter((e) => e.isDirectory() && e.name !== "app")
+    .map((e) =>
+      path.join(ANDROID_DIR, e.name, "build", "outputs", "apk", "debug", `${e.name}-debug.apk`)
+    )
+    .filter((p) => fs.existsSync(p));
+}
+
 function install() {
   const serial = requireDevice();
+  const splits = featureApks();
   console.log(`Installing on ${serial} ...`);
-  adb(["install", "-r", "-t", apkPath()], { stdio: "inherit" });
+  if (splits.length === 0) {
+    adb(["install", "-r", "-t", apkPath()], { stdio: "inherit" });
+    return;
+  }
+  for (const apk of splits) console.log(`  + ${path.basename(apk)}`);
+  adb(["install-multiple", "-r", "-t", apkPath(), ...splits], { stdio: "inherit" });
 }
 
 function launch() {

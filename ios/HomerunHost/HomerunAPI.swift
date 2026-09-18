@@ -35,11 +35,11 @@ enum HomerunAPI {
         var errorDescription: String? {
             switch self {
             case .notAuthenticated:
-                return "Homerun is not signed in on this device."
+                return "Homerun Go is not signed in on this device."
             case .http(let status, let body):
-                return "The Homerun service returned \(status). \(body)"
+                return "The Homerun Go service returned \(status). \(body)"
             case .malformed:
-                return "The Homerun service sent a reply Homerun could not read."
+                return "The Homerun Go service sent a reply the app could not read."
             }
         }
     }
@@ -155,6 +155,36 @@ enum HomerunAPI {
             HostLog.host.error(
                 "state report (\(state, privacy: .public)) failed: \(error.localizedDescription, privacy: .public)"
             )
+        }
+    }
+
+    /// Write the Minecraft version a Pumpkin server actually serves into its
+    /// `VERSION`, so every launcher — here and on any other device — picks a
+    /// client the server will let in. The same PATCH Homerun Desktop sends
+    /// (`pinPumpkinVersion`), with the **user** token: it changes what the
+    /// server *is*, not what it is doing.
+    ///
+    /// Returns the failure for the console rather than swallowing it: the
+    /// server starts either way, but a player whose friends cannot join
+    /// deserves to read why. Nil means it was written.
+    static func pinVersion(
+        apiURL: String,
+        serverId: String,
+        version: String,
+        userToken: String
+    ) async -> String? {
+        guard !userToken.isEmpty else { return "no user token" }
+        do {
+            _ = try await patch(
+                apiURL: apiURL, path: "/api/server/\(serverId)/",
+                body: ["environment_variables": ["VERSION": version]],
+                token: userToken)
+            return nil
+        } catch {
+            HostLog.host.error(
+                "could not pin \(serverId, privacy: .public) to \(version, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return error.localizedDescription
         }
     }
 
@@ -454,7 +484,13 @@ enum HomerunAPI {
 
         let path = "/api/device/\(deviceId)/link_up/"
         guard
-            let started = try? await post(apiURL: apiURL, path: path, body: [:], token: token),
+            // Not an empty body: it says this build can run with the gateway
+            // terminating TLS. The core words it so both phones ask alike, and
+            // if the core cannot be reached an empty body is what every build
+            // before this one sent — device mode, which still works.
+            let started = try? await post(
+                apiURL: apiURL, path: path,
+                body: (try? Core.deviceWsLinkUpRequest()) ?? [:], token: token),
             let task = started["task"] as? String, !task.isEmpty
         else {
             HostLog.device.error("link_up did not start")

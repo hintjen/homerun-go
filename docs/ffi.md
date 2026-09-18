@@ -69,7 +69,7 @@ shrink to library-mode patches only and eventually disappear upstream.
 | `jni_bridge.rs` | The JNI adapter around the C surface itself (Android only). Calls the same C functions rather than reaching past them. |
 | `host_dispatch.rs` | The shared decisions that need one effect — a socket, a file — on the same wire as the pure ones. |
 | `device_ws/` | The websocket the dashboard connects to: listener, TLS, ACME, JWKS. Behind `device-ws`, on for both phone targets. See `plans/device-websocket.md`. |
-| `app_logs.rs` | This app's own logs, for `get-app-logs`: logcat on Android, a host-registered provider everywhere else. Always compiled. |
+| `app_logs.rs` | This app's own logs, for `get-app-logs`: logcat on Android, a host-registered provider everywhere else. Redaction is not here: the core scrubs the frame as it builds it (`device_ws::protocol::outgoing`), so no driver can send the log raw. Always compiled. |
 | `host_log.rs` | Where this crate's diagnostics go when the platform captures neither stdout nor stderr. Android wires logcat itself; iOS registers a sink. Always compiled. |
 | `backup_job.rs` | Progress, cancellation and the one-at-a-time guard for a backup. Built everywhere. |
 | `backup_engine.rs` | The linked backup engine. iOS only, behind `backup-engine`. |
@@ -167,6 +167,17 @@ harmless one.** Omitting it starts the server on the engine's own
 configuration, which for Pumpkin includes `online_mode = true`. That is what a
 host which has not been taught to send settings does — Android's Pumpkin
 backend today — so the console says so rather than leaving it silent.
+
+A refusal made **in this call, before the supervisor runs** — an invocation
+the library cannot honour, a request it cannot parse — is written into the
+console as `[Homerun] The server could not start: …` as well as returned. The
+reply is the one place nobody looks: Android reads `ok` from it and moves to
+the exit path, and the crash report that follows is built from the console.
+A build compiled without `process-engine` refused every launch this way and
+reported nothing but its own download progress until this existed. The
+supervisor's own refusals (a taken port) already wrote their line;
+`ServerHost::start`'s "already running" deliberately does not, because it
+would land in the console of the server that *is* running.
 
 `homerun_server_settings_preview` takes the same request and reports what would
 be applied, without starting anything:
@@ -298,6 +309,13 @@ Two more things worth knowing:
 - **Every `extern "C"` function wraps its body in `catch_unwind`.** A panic
   crossing the FFI boundary is undefined behaviour, not a crash you can
   debug.
+- **The error a caught panic returns is read by a player.** It comes back over
+  the bridge and the UI shows it, so `guarded` answers with a sentence written
+  for a person and logs the payload instead of passing it through. It used to
+  pass it through, and a phone displayed "Cannot start a runtime from within a
+  runtime. This happens because a function (like `block_on`)…" to whoever was
+  holding it. Nothing is lost: the hook has already written the payload, its
+  location and a backtrace, and `errors::drain` sends them on the next launch.
 - **The last-panic slot is cleared at the start of every run.** Without
   that, a panic from anywhere earlier in the process leaks into the *next*
   crash's message and blames the wrong thing. That was a real bug, caught by
@@ -305,7 +323,10 @@ Two more things worth knowing:
 
 ### Reporting a crash off the device — `errors.rs`
 
-Four arms carry app errors, beside `reporting.crash.report`:
+`reporting.crash.report` takes an optional `context` — the host's description
+of itself — and completes it with what only this crate knows: the ABI version,
+the engines compiled in, and the app's own log through `app_logs::collect`.
+See `crash_host_context`. Four arms carry app errors beside it:
 
 | Arm | Does |
 |---|---|
@@ -417,6 +438,37 @@ stdout from before the redirect for exactly this reason.
 ANSI colour escapes are stripped on the way in. The engine's logger assumes a
 terminal; the console it actually feeds is a WebView, which renders the
 escapes as literal `[2m` garbage in front of every line.
+
+### Sending it a command — and who is allowed to wait
+
+`PumpkinEngine::command` hands the dispatch to the engine's runtime as a task,
+because that is how the engine runs its own console input and a command that
+reaches for runtime-worker-only machinery would otherwise panic in this one
+place and nowhere else. Whether the caller then **waits** for that task is
+`runtime_dispatch::dispatch`'s decision, and it is not a detail:
+
+| The command came from | The calling thread | What happens |
+|---|---|---|
+| The app, over the C ABI | a host thread, no runtime | waits, and a panicking command comes back as an error |
+| The dashboard, as `Request::Rcon` | a **device websocket task** | returns as soon as the work is queued |
+
+`Handle::block_on` panics — *"Cannot start a runtime from within a runtime"* —
+when the calling thread is already driving async tasks, and this crate runs two
+runtimes: the engine's and the device websocket's. The second path assumed the
+first one's thread and shipped: on an iPhone hosting a Pumpkin server, **every**
+command typed into the dashboard's console panicked before reaching the server,
+was caught at the ABI, and was shown to the player as Tokio's own sentence.
+
+Android cannot hit it — `ProcessEngine::command` writes to the child's stdin
+and there is no runtime to nest. That asymmetry is why it survived: nothing in
+the device-free suite runs a linked engine, and `ios/wsprobe/` proves the
+socket, not what the socket asks the engine to do.
+
+Not waiting costs nothing real. A command's reply is a console line either way,
+which both the app and the dashboard read from the log rather than from this
+return value — so `Ok` means "queued on a live runtime", and `Err` still means
+"it ran and panicked". `runtime_dispatch`'s tests cover both callers without a
+device, which is the only reason they run at all.
 
 ### Readiness
 

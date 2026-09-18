@@ -20,7 +20,7 @@ app, so it was built and proven on a device before anything could deliver one.
 ## The number that has to move first
 
 `BRIDGE_HOST_REVISION` — `BridgeRouter.HOST_REVISION` on Android,
-`BridgeRouter.hostRevision` on iOS, both currently **6**.
+`BridgeRouter.hostRevision` on iOS, both currently **13**.
 
 They do not have to move together, and mostly have not: the ledger's entries 2
 through 5 are one host at a time catching up with the other. Revision 6 is the
@@ -122,6 +122,16 @@ for seven API levels and then writing it again in Swift.
 SHA-256 stays in the host — the archive is streamed and every platform has a
 correct implementation — but the *comparison* is `bundle.digestMatches`, so it
 cannot be written three subtly different ways.
+
+**Homerun Desktop verifies through the same code**, not a TypeScript port of it.
+The Node addon built from `rust/homerun-core-node` (`npm run rust:core-node`,
+shipped as `homerun_core.node`) exports `bundleEvaluate(manifest, publicKey,
+installed)` — one call, returning the same `{manifest, verdict, reason,
+install}` as a JSON string and throwing the same sentence on a refusal — and
+`bundleDigestMatches(expected, actual)`. The desktop reports its platform as
+`windows`; the core keeps no list of platforms, so that needs nothing here
+beyond manifests signed for it. `npm run test:core-node` runs every verdict
+and both refusals through the built addon, starting from the pinned vector.
 
 ### The key
 
@@ -428,8 +438,8 @@ interface from a CDN.
 
 ## The endpoint that answers
 
-Built, on branch `api/ota-ui-bundles` in the `homerun` repo —
-`api/docs/ota-ui-bundles.md` is the server side in full. `UiBundle` is one row
+Built, on branch `api/ota-ui-bundles` in the `homerun` repo — the API
+documents the server side in full. `UiBundle` is one row
 per release per platform; the newest row a device qualifies for resolves.
 
 Two things it does that matter here:

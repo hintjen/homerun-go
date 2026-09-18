@@ -8,7 +8,7 @@
 // no VPN profile, no user prompt — the same property Android's WireProxy.kt
 // calls the most important one in the design.
 //
-// The tunnel is ingress-only. The Homerun gateway is the client:
+// The tunnel is ingress-only. The gateway is the client:
 //
 //	player → gateway → WireGuard → <phone wg IP>:25565
 //	                 → [TCPServerTunnel] → 127.0.0.1:<minecraft port>

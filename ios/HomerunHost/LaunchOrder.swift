@@ -56,7 +56,7 @@ struct LaunchOrder {
             // its steps in a different order is not doing the same thing they
             // are, however well it appears to work.
             throw ServerBackendError.engine(
-                "Homerun tried to \(name) out of order while starting the server.")
+                "Homerun Go tried to \(name) out of order while starting the server.")
         }
         index = position + 1
 

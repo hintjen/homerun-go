@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 /** Prepare manifests from final, signed bytes. Print upload commands; never upload. */
+const { execFileSync } = require("child_process");
+const os = require("os");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
@@ -41,6 +43,48 @@ function prepareArtifacts(dir, selected, metadata = {}) {
   return artifacts;
 }
 
+// Ask the built engine, not source: the desktop pins clients to this version.
+// Isolate a build lacking the flag, which might otherwise start in the checkout.
+function engineMinecraftVersion(file) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pumpkin-version-"));
+  let out;
+  try {
+    out = execFileSync(file, ["--minecraft-version"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+  } catch (error) {
+    console.error(
+      `\nCould not ask ${path.relative(ROOT, file)} for its Minecraft version: ${error.message}\n` +
+        "  It has to run here, so publish from Windows, and from a build that has\n" +
+        "  the --minecraft-version flag.\n"
+    );
+    process.exit(1);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(out.trim().split(/\r?\n/).pop());
+  } catch {
+    parsed = null;
+  }
+  const minecraftVersion = parsed?.minecraftVersion;
+  const protocol = parsed?.protocol;
+  if (
+    typeof minecraftVersion !== "string" ||
+    !/^\d+(\.\d+){1,2}$/.test(minecraftVersion) ||
+    !Number.isInteger(protocol) ||
+    protocol <= 0
+  ) {
+    console.error(`\nThe engine answered --minecraft-version with something else:\n  ${out.trim()}\n`);
+    process.exit(1);
+  }
+  return { minecraftVersion, protocol };
+}
+
 function main(args) {
   let selected = Object.keys(LAYOUT);
   if (args.length) {
@@ -59,7 +103,7 @@ function main(args) {
       const crate = kind === "pumpkin" ? "homerun-pumpkin-bin" : "homerun-game-cli";
       const cargo = fs.readFileSync(path.join(ROOT, "rust", crate, "Cargo.toml"), "utf8");
       metadata[kind] = kind === "pumpkin"
-        ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1] }
+        ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1], ...engineMinecraftVersion(path.join(dir, LAYOUT.pumpkin.file)) }
         : { version: cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1], protocol: 1 };
     }
   }

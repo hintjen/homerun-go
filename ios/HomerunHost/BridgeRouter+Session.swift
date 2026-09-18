@@ -81,7 +81,7 @@ extension BridgeRouter {
         } else {
             events?.emit(
                 "system-check-failed",
-                ["Homerun could not set up storage on this device. Free up some space and reopen the app."]
+                ["Homerun Go could not set up storage on this device. Free up some space and reopen the app."]
             )
         }
         return nil

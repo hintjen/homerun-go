@@ -179,6 +179,11 @@ object AppErrors {
         put("appVersion", BuildConfig.VERSION_NAME)
         put("bundle", runCatching { BundleStore.active() }.getOrNull())
         put("hostRevision", BridgeRouter.HOST_REVISION)
+        // The launch this error happened during, if one was in progress. It is
+        // what lets the API put a Rust panic or a Kotlin exception beside the
+        // crash report of the server it took down — without it the two are
+        // rows in different tables with nothing but a timestamp in common.
+        runCatching { ServerHost.hostedServerId() }.getOrNull()?.let { put("serverId", it) }
         // The core reads this to decide production from staging. It is never
         // sent verbatim, and deriving the deployment from it in one place is
         // what stops three platforms disagreeing about which one they are on.

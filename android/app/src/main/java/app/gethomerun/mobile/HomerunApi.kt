@@ -278,7 +278,9 @@ object HomerunApi {
 
         val path = "/api/device/$deviceId/link_up/"
         val task = runCatching {
-            post(apiUrl, path, buildJsonObject { }, token)
+            // Not an empty body: it says this build can run with the gateway
+            // terminating TLS. The core words it so both phones ask alike.
+            post(apiUrl, path, Core.deviceWsLinkUpRequest(), token)
                 ?.get("task")?.jsonPrimitive?.contentOrNull
         }.onFailure { Log.w(TAG, "link_up failed: ${it.message}") }.getOrNull()
             ?: return@withContext null
@@ -298,7 +300,11 @@ object HomerunApi {
                 .getOrNull()
                 ?: return@repeat
 
-            Log.i(TAG, "device link ready after ${attempt + 1} attempts (fqdn=${link.fqdn})")
+            Log.i(
+                TAG,
+                "device link ready after ${attempt + 1} attempts " +
+                    "(fqdn=${link.fqdn}, tls=${if (link.gatewayTls) "gateway" else "device"})",
+            )
             return@withContext link
         }
         Log.w(TAG, "no device link after $attempts attempts")
@@ -468,6 +474,36 @@ object HomerunApi {
         runCatching { patch(apiUrl, "/api/server/$serverId/", body, userToken) }
             .onFailure { Log.w(TAG, "could not record the stop of $serverId: ${it.message}") }
             .isSuccess
+    }
+
+    /**
+     * Write the Minecraft version a Pumpkin server actually serves into its
+     * `VERSION`, so every launcher — here and on any other device — picks a
+     * client the server will let in. The same PATCH Homerun Desktop sends
+     * (`pinPumpkinVersion`), with the **user** token: it changes what the
+     * server *is*, not what it is doing.
+     *
+     * Returns the failure for the console rather than swallowing it: the
+     * server starts either way, but a player whose friends cannot join
+     * deserves to read why. Null means it was written.
+     */
+    suspend fun pinVersion(
+        apiUrl: String,
+        serverId: String,
+        version: String,
+        userToken: String,
+    ): String? = withContext(Dispatchers.IO) {
+        if (userToken.isBlank()) return@withContext "no user token"
+        val body = buildJsonObject {
+            put("environment_variables", buildJsonObject { put("VERSION", version) })
+        }
+        runCatching { patch(apiUrl, "/api/server/$serverId/", body, userToken) }
+            .onFailure { Log.w(TAG, "could not pin $serverId to $version: ${it.message}") }
+            .fold(
+                onSuccess = { null },
+                // A failure with no message is still a failure; null here means "written".
+                onFailure = { it.message ?: "the request failed" },
+            )
     }
 
     /**

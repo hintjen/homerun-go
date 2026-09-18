@@ -9,6 +9,9 @@
 # directory per major (`jre-21`, `jre-25`), never committed
 /android/app/src/main/assets/jre-*/
 /android/app/src/main/assets/jre/
+# Both runtimes are delivered on demand, so each stages into its own feature
+# module instead. Same runtimes, same size, same reason not to commit them.
+/android/jre*/src/main/assets/jre-*/
 /.jre-cache/
 
 # Go
@@ -30,7 +33,9 @@ xcuserdata/
 # Android
 /android/.gradle/
 /android/build/
-/android/app/build/
+# Every Gradle module under android/, so a new one (a Play Feature
+# Delivery module, say) does not arrive with its build output.
+/android/*/build/
 /android/local.properties
 /android/.idea/
 *.iml

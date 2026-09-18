@@ -13,7 +13,9 @@ this tree — see *The UI bundle* below.
 **Licence:** the code in this repository is [GPL-3.0-only](LICENSE). The UI
 bundle is a separate, proprietary work; the GPL covers the host, not the
 bundle it downloads. Contributions are accepted under the [CLA](CLA.md),
-which a bot will ask you to sign on your first pull request.
+which a bot will ask you to sign on your first pull request. Commit with an
+email address linked to your GitHub account, or the bot cannot tell who to
+ask.
 
 **Releases** (App Store, Google Play, and over-the-air UI updates) are built
 from tags of this repository by a private release pipeline that holds the
@@ -27,7 +29,7 @@ homerun-go/
 ├── android/   Kotlin host — WebView, bridge router, Pumpkin + JVM backends
 ├── rust/      homerun-core (decisions) + homerun-supervisor (the supervisor)
 ├── go/        wireproxy-ios — the tunnel, built as a library for iOS
-├── shared/    the vendored bridge contract + conformance checker
+├── shared/    the bridge spec, the vendored channel manifest + the checker
 ├── scripts/   the build system — staging the UI, cross-compiling, the gates
 └── docs/      one file per subsystem, indexed from docs/README.md
 ```
@@ -77,8 +79,10 @@ tree with `HOMERUN_UI_DIR`. `scripts/check-ui-bundle.js` proves every one of
 those guards still refuses a bad input; it runs in CI on every push.
 
 The bundle's *source* is not in this repository and is not open source. The
-bridge contract it speaks is vendored in `shared/conformance/`, so the
-conformance gates run with no UI checkout at all.
+bridge contract it speaks lives in `shared/conformance/` — `PROTOCOL.md` is
+the spec, written and maintained here, and `bridge-v1.json` is the channel
+manifest, generated in the UI repo and vendored by `scripts/sync-contract.js`.
+Both are in-tree, so the conformance gates run with no UI checkout at all.
 
 ## Building and testing
 

@@ -25,6 +25,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.File
 import java.time.Instant
+import java.util.concurrent.TimeUnit
 
 /**
  * [ServerBackend] running Pumpkin as a **child process**.
@@ -81,6 +82,13 @@ class PumpkinBackend(
 
     private var currentServerId: String? = null
     private var currentPort: Int? = null
+
+    /**
+     * What the binary said it serves, once asked. A constant of the APK, so
+     * one spawn per process is plenty; `lazy` would not do, because a probe
+     * that fails should be retried on the next launch rather than remembered.
+     */
+    private var servedVersionCache: String? = null
 
     /**
      * The last state announced to the UI, not a second opinion about what the
@@ -183,6 +191,9 @@ class PumpkinBackend(
         // did.
         runCatching { NativeServer.nativeConsoleBegin() }
             .onFailure { Log.w(TAG, "the console was not cleared for this launch: ${it.message}") }
+        // Only now: anything the bridge worked out before handing over — a
+        // VERSION it corrected — would have been wiped by the line above.
+        config.launchNotes.forEach { note(serverId, it) }
 
         // The core routes a Java server here only when the device has no JVM.
         // That is ordinary on iOS, which cannot spawn one; on Android it means
@@ -337,6 +348,63 @@ class PumpkinBackend(
         }
         // The run ended before it ever reported running.
         throw ServerBackendException.Engine("The server stopped before it finished starting.")
+    }
+
+    /**
+     * Ask the binary which Minecraft it serves.
+     *
+     * The same `--minecraft-version` the desktop publish script asks, and
+     * the shape the linked engine answers iOS with over `engine.pumpkinServes`
+     * — see `host_dispatch::pumpkin_serves`. It prints and exits before the
+     * config is read, so the working directory is untouched; the cache
+     * directory is used anyway, so a binary that ignores the flag (one that
+     * predates it) starts a server *there* rather than in a world, and the
+     * timeout kills it.
+     *
+     * Null on any failure, which [Core.pinVersion] reads as "nothing to
+     * correct": a launcher picking a stale client is the bug this fixes, and
+     * refusing to start the server over it would be a worse one.
+     */
+    override suspend fun servedVersion(): String? {
+        servedVersionCache?.let { return it }
+        val binary = binary(context) ?: return null
+        val probed = withContext(Dispatchers.IO) {
+            runCatching {
+                val process = ProcessBuilder(binary.absolutePath, MINECRAFT_VERSION_FLAG)
+                    .directory(context.cacheDir)
+                    .redirectErrorStream(true)
+                    .start()
+                try {
+                    // Wait before reading: a read blocks until the pipe closes,
+                    // and a binary that started a server never closes it. One
+                    // JSON line cannot fill the pipe, so the wait is safe the
+                    // other way round.
+                    if (!process.waitFor(VERSION_PROBE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                        throw IllegalStateException("did not exit within ${VERSION_PROBE_TIMEOUT_MS}ms")
+                    }
+                    if (process.exitValue() != 0) {
+                        throw IllegalStateException("exit code ${process.exitValue()}")
+                    }
+                    val output = process.inputStream.bufferedReader().use { it.readText() }
+                    // One JSON line; anything else is a build that started a
+                    // server instead, and its banner is not a version.
+                    val line = output.lineSequence().firstOrNull { it.trimStart().startsWith("{") }
+                        ?: throw IllegalStateException("no version in: ${output.take(200)}")
+                    json.parseToJsonElement(line).jsonObject["minecraftVersion"]
+                        ?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+                        ?: throw IllegalStateException("no minecraftVersion in: $line")
+                } finally {
+                    if (process.isAlive) process.destroyForcibly()
+                }
+            }.onFailure {
+                Log.w(TAG, "could not ask $BINARY which Minecraft it serves: ${it.message}")
+            }.getOrNull()
+        }
+        if (probed != null) {
+            Log.i(TAG, "$BINARY serves Minecraft $probed")
+            servedVersionCache = probed
+        }
+        return probed
     }
 
     /**
@@ -639,6 +707,18 @@ class PumpkinBackend(
          * The other half is `rust/homerun-pumpkin-bin/src/main.rs`.
          */
         private const val SETTINGS_FILE = "homerun-settings.json"
+
+        /**
+         * Prints `{"minecraftVersion","protocol"}` and exits. Declared in
+         * `rust/homerun-pumpkin-bin/src/main.rs`, which is the other half.
+         */
+        private const val MINECRAFT_VERSION_FLAG = "--minecraft-version"
+
+        /**
+         * Generous for a process that prints one line: the point is to kill a
+         * binary that predates the flag and is starting a server instead.
+         */
+        private const val VERSION_PROBE_TIMEOUT_MS = 10_000L
 
         /**
          * The server, staged as a library so Android will ship and exec it.

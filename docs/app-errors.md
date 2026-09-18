@@ -144,6 +144,22 @@ error passes through `react-dom`, every Android death through `RuntimeInit`.
 The marker list spans JavaScript, the JVM, Apple, Rust and the Android natives.
 If dropping leaves nothing, the top frame is kept and allowed to be noisy.
 
+There is a second, stricter category: a frame that identifies **nothing at
+all**, which is dropped before that rescue rather than after it. It exists
+because of iOS. The staticlib is built with `strip = true`, so the app carries
+no symbol table for any Rust code and `dladdr` answers every frame with
+`__mh_execute_header`, the Mach-O image base. What survives is whatever happens
+to be exported — in practice `___isPlatformVersionAtLeast`, a compiler-rt
+availability check sitting in the same place in every backtrace on the platform
+*because* nothing around it resolved.
+
+So every native panic iOS reports arrives with a byte-identical stack, and the
+"keep the top frame" rescue is worse than useless here: it would preserve a
+frame that is the same for every bug. `identifies_nothing` drops all of them,
+the stack ends up empty, and the signature falls through to location plus
+message — which does discriminate, because the panic hook writes
+`(at file:line)` and `Occurrence::location` now carries it.
+
 The JVM also **wraps**: an exception from a broadcast receiver arrives as a
 `RuntimeException` whose own frames are all framework, with the real fault
 under `Caused by:`. The **last** `Caused by:` is what gets fingerprinted.
@@ -164,6 +180,24 @@ under `Caused by:`. The **last** `Caused by:` is what gets fingerprinted.
   and taking a basename of one would leave the literal `[id]`.
 - **Native offsets.** A tombstone frame's `+164` moves whenever the library is
   recompiled, so it is stripped.
+- **A stripped iOS image put every Rust panic in one group.** All frames
+  resolve to the image base, so the signature was the same string for every
+  one. Found the only way it could be: a Tokio panic from the dashboard's
+  console arrived under a fingerprint that already had unrelated reports in it.
+  Two fixes, both tested — the useless frames are dropped, and the panic's
+  `(at file:line)` is lifted into `location` instead of sitting in the message
+  as prose.
+
+> **Still open: a native panic's backtrace is unreadable.** Grouping works
+> again, but nobody can read *where* an iOS panic came from beyond the one
+> `file:line` the hook records. The frames are gone, not merely unsymbolicated
+> in the report — the symbol table is not in the binary, so there is nothing to
+> resolve against after the fact either. Fixing it properly means capturing
+> frame addresses plus the image base and symbolicating offline against the
+> dSYM, which needs a dependency this crate does not have and a step the
+> dashboard does not do. Flipping `strip` alone does not do it: Xcode strips
+> the app binary again on the way out. Until then, `location` is the whole
+> answer, which is why it is worth keeping accurate.
 
 ## Volume, and the four loops that had to be cut
 
@@ -222,6 +256,24 @@ dropping the others' counts, and "20 sends per session" would quietly become
 It is **session-scoped and never persisted**. A persisted ledger silences a
 first-launch crash loop on the second launch — precisely when the report
 matters most — and would mean file I/O on a path a panic can reach.
+
+## An error during a launch names its server
+
+`Context.server_id` had existed since the wire format was designed and
+neither host filled it. Both do now: Android from `ServerHost.hostedServerId()`,
+iOS from `Reporting.hostedServerId()`. Each is a lock-free read of state the
+host already keeps — `AppErrors.context()` is called from a crash handler,
+and taking a monitor there can turn a crash into a hang — so the answer may
+be a state change stale, which is the right trade.
+
+It is the join key. A Rust panic or a Kotlin exception during a launch used to
+be a row in one table and the server's crash report a row in another, with
+nothing but a timestamp in common. With `server` set, the API can put the two
+beside each other; what it does with that is the API's to document. The
+crash report itself
+carries the app's log too — see [`android-reporting.md`](./android-reporting.md)
+§ *What travels with a crash* — so the two reports describe the same minutes
+from both sides.
 
 ## FFI surface
 
@@ -340,7 +392,7 @@ feature has five truncation sites.
 | Deliberate failures, for verifying | `HomerunApplication.kt` + `MainActivity.kt` (broadcasts), `DebugTriggers.swift` (env var) |
 
 The page half lives in `homerun-app-ui` — see `docs/error-reporting.md` there.
-The endpoint lives in `hintjen/homerun` — see `api/docs/app-errors.md`.
+The endpoint lives with the API, which documents its own half.
 
 ## Verifying it
 

@@ -216,4 +216,4 @@ anything here, the form wins.
 | `ios/HomerunHost/FFI/Core.swift` | iOS: the `minecraft.account.*` core wrappers |
 | `homerun-app-ui/hooks/useMinecraftAccount.ts` | `credentials`, `linkedAccount`, `account`, `canSignIn` |
 | `homerun-app-ui/docs/minecraft-account-mobile.md` | The cross-repo brief this was built from |
-| `api/docs/minigame-stats.md` | `MicrosoftAccount`, and what linking inherits |
+| the API's minigame-stats doc | `MicrosoftAccount`, and what linking inherits |

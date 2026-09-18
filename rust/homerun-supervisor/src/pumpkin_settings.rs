@@ -37,12 +37,13 @@ use std::num::NonZeroU8;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::PoisonError;
 
 use pumpkin::data::banlist_serializer::BannedPlayerEntry;
 use pumpkin::data::{SaveJSONConfiguration, VanillaData};
 use pumpkin_config::op::Op;
 use pumpkin_config::whitelist::WhitelistEntry;
-use pumpkin_config::{LoadConfiguration, PumpkinConfig};
+use pumpkin_config::{LoadConfiguration, PumpkinConfig, TelemetryConfig};
 use pumpkin_util::world_seed::Seed;
 use pumpkin_util::GameMode;
 use uuid::Uuid;
@@ -85,6 +86,28 @@ pub fn load_data(warn: &dyn Fn(String)) -> VanillaData {
             whitelist_config: Default::default(),
         }
     })
+}
+
+/// The telemetry a Homerun server runs with: none.
+///
+/// Upstream Pumpkin sends an anonymous heartbeat to `market.pumpkinmc.org`
+/// every five minutes, on by default: the host's OS, CPU model, core count and
+/// RAM, the player count and cap, the plugin list, under an identity key it
+/// persists beside the world. That is a reasonable default for someone who
+/// downloaded a server to run on their own machine. It is not one for a player
+/// whose phone or PC is running a server because they tapped "Start" in our
+/// app, who was never asked, and whose device we otherwise take care not to
+/// describe to anyone -- so it is off.
+///
+/// Applied at the call to `PumpkinServer::new` rather than in [`apply`],
+/// because `apply` only runs when the host supplied settings, and a launch
+/// without them must not be the one that starts reporting. A `pumpkin.toml`
+/// that says `enabled = true` is overridden for the same reason: that file can
+/// arrive from another device through a backup restore.
+pub fn host_telemetry(mut telemetry: TelemetryConfig) -> TelemetryConfig {
+    telemetry.enabled = false;
+    telemetry.public = false;
+    telemetry
 }
 
 /// Override the settings this app manages, leaving the rest of the file alone.
@@ -162,7 +185,17 @@ pub fn apply(settings: &EngineSettings, config: &mut PumpkinConfig) {
 pub fn apply_lists(settings: &EngineSettings, config: &PumpkinConfig, data: &mut VanillaData) {
     let level = config.basic.op_permission_level;
 
-    data.operator_config.get_mut().ops = settings
+    // The lists are `std::sync::RwLock`s, and `&mut VanillaData` means nothing
+    // else can hold them, so the only thing `get_mut` can report is poison: a
+    // thread that panicked holding one, before this launch. Take the value
+    // anyway. Operators and the whitelist are about to be replaced outright,
+    // and a ban list is still worth appending to -- refusing here would start
+    // the server with whatever the panic left rather than with the settings.
+    let operators = data.operator_config.get_mut().unwrap_or_else(PoisonError::into_inner);
+    let whitelist = data.whitelist_config.get_mut().unwrap_or_else(PoisonError::into_inner);
+    let bans = data.banned_player_list.get_mut().unwrap_or_else(PoisonError::into_inner);
+
+    operators.ops = settings
         .ops
         .iter()
         .filter_map(|player| {
@@ -178,13 +211,12 @@ pub fn apply_lists(settings: &EngineSettings, config: &PumpkinConfig, data: &mut
         })
         .collect();
 
-    data.whitelist_config.get_mut().whitelist = settings
+    whitelist.whitelist = settings
         .whitelisted
         .iter()
         .filter_map(|player| Some(WhitelistEntry::new(uuid_of(player)?, player.name.clone())))
         .collect();
 
-    let bans = data.banned_player_list.get_mut();
     for player in &settings.banned {
         let Some(uuid) = uuid_of(player) else {
             continue;
@@ -218,9 +250,9 @@ pub fn apply_lists(settings: &EngineSettings, config: &PumpkinConfig, data: &mut
     // The engine's own types do the writing, so the file is by construction
     // the shape its loader expects — which is exactly what writing the core's
     // `ops.json` here would not have been.
-    data.operator_config.get_mut().save();
-    data.whitelist_config.get_mut().save();
-    data.banned_player_list.get_mut().save();
+    operators.save();
+    whitelist.save();
+    bans.save();
 }
 
 /// A distance Pumpkin will accept. `engine_settings` clamps to `2..=64`; this
@@ -389,6 +421,22 @@ mod tests {
     }
 
     #[test]
+    fn a_homerun_server_reports_nothing_to_pumpkins_telemetry() {
+        // Upstream's default is on, and a restored pumpkin.toml can say so too.
+        let asked = TelemetryConfig {
+            enabled: true,
+            public: true,
+            server_name: Some("A player's world".into()),
+            ..TelemetryConfig::default()
+        };
+        assert!(TelemetryConfig::default().enabled, "upstream's default moved; revisit host_telemetry");
+
+        let ran_with = host_telemetry(asked);
+        assert!(!ran_with.enabled);
+        assert!(!ran_with.public);
+    }
+
+    #[test]
     fn an_empty_seed_leaves_the_worlds_own_alone() {
         let mut config = PumpkinConfig::default();
         let before = config.basic.seed.0;
@@ -403,13 +451,13 @@ mod tests {
     fn operators_and_the_whitelist_are_replaced_not_merged() {
         let _cwd = InTempDir::enter();
         let mut data = data();
-        data.operator_config.get_mut().ops = vec![Op::new(
+        data.operator_config.get_mut().unwrap().ops = vec![Op::new(
             Uuid::from_u128(1),
             "WasAnOp".into(),
             Default::default(),
             false,
         )];
-        data.whitelist_config.get_mut().whitelist =
+        data.whitelist_config.get_mut().unwrap().whitelist =
             vec![WhitelistEntry::new(Uuid::from_u128(2), "WasAllowed".into())];
 
         let config = PumpkinConfig::default();
@@ -421,13 +469,13 @@ mod tests {
         }));
         apply_lists(&settings, &config, &mut data);
 
-        let ops = &data.operator_config.get_mut().ops;
+        let ops = &data.operator_config.get_mut().unwrap().ops;
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].name, "Notch");
         // A de-opped player must actually lose it on the next start.
         assert!(!ops.iter().any(|op| op.name == "WasAnOp"));
 
-        let list = &data.whitelist_config.get_mut().whitelist;
+        let list = &data.whitelist_config.get_mut().unwrap().whitelist;
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "jeb_");
     }
@@ -439,6 +487,7 @@ mod tests {
         let local = Uuid::from_u128(7);
         data.banned_player_list
             .get_mut()
+            .unwrap()
             .banned_players
             .push(BannedPlayerEntry {
                 uuid: local,
@@ -453,14 +502,14 @@ mod tests {
         let settings = settings(json!({ "ONLINE_MODE": "false", "BANNED": "Notch" }));
         apply_lists(&settings, &config, &mut data);
 
-        let bans = &data.banned_player_list.get_mut().banned_players;
+        let bans = &data.banned_player_list.get_mut().unwrap().banned_players;
         assert_eq!(bans.len(), 2);
         assert!(bans.iter().any(|entry| entry.uuid == local));
         assert!(bans.iter().any(|entry| entry.name == "Notch"));
 
         // And applying the same settings twice does not duplicate anyone.
         apply_lists(&settings, &config, &mut data);
-        assert_eq!(data.banned_player_list.get_mut().banned_players.len(), 2);
+        assert_eq!(data.banned_player_list.get_mut().unwrap().banned_players.len(), 2);
     }
 
     /// Pumpkin's deserializer requires `+00:00`; core's ban writer emits
@@ -478,7 +527,7 @@ mod tests {
         );
 
         let json =
-            serde_json::to_string(&data.banned_player_list.get_mut().banned_players).unwrap();
+            serde_json::to_string(&data.banned_player_list.get_mut().unwrap().banned_players).unwrap();
         let round_tripped: Vec<BannedPlayerEntry> = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.len(), 1);
     }
@@ -518,8 +567,8 @@ mod tests {
         // does not recognise, so this failing here is the alternative to a
         // server that will not start.
         let reloaded = load_data(&|line| panic!("{line}"));
-        assert_eq!(reloaded.operator_config.blocking_read().ops.len(), 1);
-        assert_eq!(reloaded.whitelist_config.blocking_read().whitelist.len(), 1);
+        assert_eq!(reloaded.operator_config.read().unwrap().ops.len(), 1);
+        assert_eq!(reloaded.whitelist_config.read().unwrap().whitelist.len(), 1);
     }
 
     /// An online-mode name nobody could resolve has no UUID to write, and that
@@ -530,6 +579,6 @@ mod tests {
         let mut data = data();
         let config = PumpkinConfig::default();
         apply_lists(&settings(json!({ "OPS": "Ghost" })), &config, &mut data);
-        assert!(data.operator_config.get_mut().ops.is_empty());
+        assert!(data.operator_config.get_mut().unwrap().ops.is_empty());
     }
 }

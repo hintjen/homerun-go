@@ -11,7 +11,8 @@ import UIKit
 /// permanently empty — not broken, just structurally unable to show anybody
 /// their own numbers. Most people are covered without any of this, because the
 /// API can report an account they linked from the desktop app; this is for
-/// somebody whose only Homerun device is the phone in their hand.
+/// somebody whose only device is the phone in their hand, with no Homerun
+/// Desktop to link from.
 ///
 /// # Device code, and why not a redirect
 ///

@@ -87,7 +87,7 @@ final class PumpkinBackend: ServerBackend {
         }
     }
 
-    /// A line from Homerun rather than from the engine.
+    /// A line from Homerun Go rather than from the engine.
     ///
     /// Emitted for whoever is watching *and* written into the engine's console
     /// buffer, so a player who opens the console after a slow launch still sees
@@ -97,7 +97,7 @@ final class PumpkinBackend: ServerBackend {
     ///
     /// The first note of a launch also clears the previous run's console. That
     /// rule is the core's, so nothing here has to sequence it.
-    /// Put a line of Homerun's *own* into a server's console — what the app
+    /// Put a line of Homerun Go's *own* into a server's console — what the app
     /// worked out and the server did not say — on the stream the player is
     /// already looking at.
     ///
@@ -141,6 +141,23 @@ final class PumpkinBackend: ServerBackend {
         }
     }
 
+    /// The engine is linked, so this is a constant of the build, read straight
+    /// out of it (`engine.pumpkinServes`). Android asks its binary the same
+    /// question with `--minecraft-version`; both print the one shape.
+    ///
+    /// Nil on any failure, which `Core.pinVersion` reads as "nothing to
+    /// correct": a launcher picking a stale client is the bug this fixes, and
+    /// refusing to start the server over it would be a worse one.
+    func servedVersion() async -> String? {
+        do {
+            return try Core.pumpkinServes()
+        } catch {
+            HostLog.host.error(
+                "could not ask the engine which Minecraft it serves: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
     /// Run one launch, in the order `homerun-core` gives.
     ///
     /// The order used to be written out longhand here and it drifted from the
@@ -166,6 +183,9 @@ final class PumpkinBackend: ServerBackend {
         // between the two — a world restoring, a gateway being waited on —
         // is written into it through `note`.
         HomerunFFI.beginConsole()
+        // Only now: anything the bridge worked out before handing over — a
+        // `VERSION` it corrected — would have been wiped by the line above.
+        for line in config.launchNotes { note(serverId: serverId, line: line) }
         // A graph covers one session. This also drops the rate anchor, which
         // is what stops the first point of this run being measured against the
         // last run's CPU counter — a fabricated spike the old `CPUSampler`,

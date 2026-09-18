@@ -49,7 +49,16 @@
 //!
 //! **The working directory.** Pumpkin reads `pumpkin.toml` and `data/` from the
 //! process CWD, and `ProcessEngine` sets that to the server's own directory. No
-//! path is passed and none is parsed; there are no arguments at all.
+//! path is passed and none is parsed.
+//!
+//! **One argument.** [`MINECRAFT_VERSION_FLAG`] prints the Minecraft version
+//! this build serves and exits without touching the directory. Two things ask:
+//! the desktop publish script, which records it in the manifest so a launcher
+//! knows which client can join, and the Android host at launch, which pins the
+//! server's `VERSION` to it (`minecraft.hosting.pinVersion`). The shape is
+//! `host_dispatch::pumpkin_serves`, the same answer the linked engine gives
+//! iOS, so the two cannot drift. Only a build that has the flag may be asked:
+//! an older one ignores its arguments and starts a server.
 
 use std::{
     backtrace::{Backtrace, BacktraceStatus},
@@ -82,10 +91,20 @@ use homerun_supervisor::{engine_settings, pumpkin_settings};
 /// not an error.
 const SETTINGS_FILE: &str = "homerun-settings.json";
 
+/// Print `{"minecraftVersion", "protocol"}` and exit. See the module docs.
+const MINECRAFT_VERSION_FLAG: &str = "--minecraft-version";
+
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
 
 #[tokio::main]
 async fn main() {
+    // First, before the config is read: `PumpkinConfig::load` writes a default
+    // `pumpkin.toml` into the CWD, and a version query must leave no trace.
+    if std::env::args().skip(1).any(|arg| arg == MINECRAFT_VERSION_FLAG) {
+        println!("{}", homerun_pumpkin_ffi::host_dispatch::pumpkin_serves());
+        return;
+    }
+
     MAIN_THREAD
         .set(thread::current().id())
         .expect("the main thread id is set once, here");
@@ -129,7 +148,14 @@ async fn main() {
 
     // The bind decision is ours here, unlike in the linked engine: a taken port
     // should end this process, and only this process.
-    let server = match PumpkinServer::new(config.basic, config.advanced, vanilla_data).await {
+    let server = match PumpkinServer::new(
+        config.basic,
+        config.advanced,
+        pumpkin_settings::host_telemetry(config.telemetry),
+        vanilla_data,
+    )
+    .await
+    {
         Ok(server) => server,
         Err(err) => {
             tracing::error!("The server could not start: {err}");

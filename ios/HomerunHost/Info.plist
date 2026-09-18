@@ -80,7 +80,16 @@
 
 	<!-- Shown when the app first reports the LAN address friends connect to. -->
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Homerun shows your phone's Wi-Fi address so friends on the same network can join your Minecraft server.</string>
+	<string>Homerun Go shows your phone's Wi-Fi address so friends on the same network can join your Minecraft server.</string>
+
+	<!-- The server icon picker is a plain <input type="file"> in the web UI, so
+	     iOS offers "Take Photo" alongside the photo library. That path opens the
+	     camera in-process and iOS terminates an app that reaches it without this
+	     key — the library path goes through PHPicker out-of-process and needs
+	     nothing, which is why only "Take Photo" ever crashed. Images only
+	     (ICON_ACCEPT), so no microphone key belongs with it. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Homerun Go uses your camera when you take a photo to use as your Minecraft server's icon.</string>
 
 	<!-- Lets the dev loop point at http://localhost:3000 and permits plain-HTTP
 	     LAN reachability checks. Public traffic still requires TLS.
