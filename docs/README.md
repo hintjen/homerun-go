@@ -40,6 +40,32 @@ error.
 
 ---
 
+### 🎮 [The game engine](./game-engine.md)
+
+Running a game server from its `game.json` — the decisions half, pure and in
+`homerun-core`. One implementation for the probe, a developer's local launch,
+`game verify` and the desktop.
+
+**Contains**:
+- Why this is a sibling of `game::Game` rather than an implementation of it
+  (the trait is frozen and excludes artifact resolution on purpose)
+- **The three safety rules**: single-pass substitution so a server named
+  `{secret:rcon}` cannot publish its own password; a person accepts each
+  game's terms and nothing infers it; steamcmd anonymous only
+- The descriptor types, and why every field defaults and unknown keys are
+  ignored
+- Settings: everything arrives as a string, and `""` is unset for every type
+- Templating, and exactly when an unset setting takes its flag with it
+- The three port numbers, and which two are never the same
+- Readiness as a substring, and why that is not laziness
+- The exported JSON Schema and its drift alarm
+- The `engine.*` bridge namespace
+
+**Read this for**: Adding a game, writing or debugging a `game.json`, or
+working out why a descriptor-driven server started wrong.
+
+---
+
 ### 🦀 [Pumpkin FFI](./ffi.md)
 
 The Rust library both hosts link — server lifecycle, console buffering,
