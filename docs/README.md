@@ -58,8 +58,12 @@ Running a game server from its `game.json` — the decisions half, pure and in
 - Templating, and exactly when an unset setting takes its flag with it
 - The three port numbers, and which two are never the same
 - Readiness as a substring, and why that is not laziness
-- The exported JSON Schema and its drift alarm
+- The exported JSON Schema and its two alarms
 - The `engine.*` bridge namespace
+- **The effects half**, behind the default-off `game-engine` feature: the
+  fetcher (resume, verify, unpack, steamcmd — anonymous, and never agreeing
+  to terms for anyone), the two RCON dialects, the platform adapter, and
+  descriptor-driven readiness, roster, console and stop in `ProcessEngine`
 
 **Read this for**: Adding a game, writing or debugging a `game.json`, or
 working out why a descriptor-driven server started wrong.

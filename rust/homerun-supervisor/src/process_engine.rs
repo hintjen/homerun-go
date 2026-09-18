@@ -17,6 +17,30 @@
 //! platform work: which `libjvm.so` to load, what `LD_LIBRARY_PATH` a
 //! Termux-built runtime needs, where a temp directory may live. This engine
 //! takes it as data and never composes one.
+//!
+//! # Two kinds of server, one supervisor
+//!
+//! Until descriptor-driven games existed, everything this engine knew about a
+//! server was Minecraft's: `console::is_ready` decided when it was up, the
+//! roster was built from Minecraft's join and leave lines, and the stop verb
+//! was the literal `stop` written to stdin.
+//!
+//! None of that is true of a game described by a `game.json`. Its ready line
+//! is a substring the descriptor names, its console may be RCON on a loopback
+//! port rather than stdin, and its stop verb is whatever the vendor chose.
+//!
+//! So those three answers moved out of the code and into [`Supervision`],
+//! which the host supplies alongside the invocation. [`ProcessEngine::new`]
+//! still means "a Minecraft server", so nothing that already used this engine
+//! changed; [`ProcessEngine::supervised`] is the descriptor-driven door.
+//!
+//! The stop ladder is the part worth watching. Both callers produce one —
+//! `minecraft::jvm::stop_ladder` and `homerun_core::engine::control::stop_ladder`
+//! — and this file has its own [`Rung`] that both convert into, rather than
+//! one of the two winning. That is not indirection for its own sake: the core
+//! is not allowed to depend on its own Minecraft module, so there is no shared
+//! type up there to use, and a supervisor that walked two different ladder
+//! types would be two stop paths pretending to be one.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -28,6 +52,7 @@ use homerun_core::minecraft::{console, jvm};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{Engine, PlayerEntry, Roster, RunOutcome, RunRequest, StopSignal};
+use crate::platform;
 
 /// Everything needed to start the server, decided by the host.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -45,17 +70,134 @@ pub struct Invocation {
     pub env: BTreeMap<String, String>,
 }
 
-/// A Minecraft server running as a child process.
+/// How to tell this particular server is up, talk to it, and stop it.
+///
+/// Everything here used to be Minecraft's, hard-coded. See the module header.
+pub struct Supervision {
+    pub readiness: Readiness,
+    pub presence: Presence,
+    pub console: ConsoleRoute,
+    /// Walked in order when a stop is requested. Always ends somewhere it
+    /// cannot be ignored — both producers guarantee it, and
+    /// [`ProcessEngine::supervised`] does not check, because a ladder that
+    /// ended early would leave a process running rather than fail visibly.
+    pub ladder: Vec<Rung>,
+}
+
+/// What makes a line mean "the server is accepting connections".
+pub enum Readiness {
+    /// Minecraft's own console rules, across its three engines.
+    Minecraft,
+    /// A substring a descriptor named.
+    ///
+    /// Not a regex, and `engine::control` has the argument for why: four
+    /// console defects in one PowerNukkitX bring-up came from parsers being
+    /// cleverer than the stream deserved.
+    Marker(String),
+}
+
+/// Where the player count comes from.
+pub enum Presence {
+    /// Minecraft's join and leave lines, and its player ceiling.
+    Minecraft,
+    /// Substrings a descriptor named. Counts only; these lines carry no name
+    /// this engine can trust to be a player's.
+    Markers { join: String, leave: String },
+    /// Nothing in the log says. The roster stays empty, which is honest —
+    /// inventing a count is how a server reported zero players for ever.
+    None,
+}
+
+/// Where a console command goes.
+pub enum ConsoleRoute {
+    /// A line on the process's stdin, as every Minecraft server takes it.
+    Stdin,
+    /// RCON on a loopback port. Built by the host once it knows which port
+    /// the server was told to bind.
+    #[cfg(feature = "game-engine")]
+    Rcon(crate::rcon::Target),
+    /// This server takes no commands. `stop` still works; it just starts
+    /// lower on the ladder.
+    None,
+}
+
+/// One rung of a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rung {
+    pub action: Action,
+    /// How long to wait for the server to go before the next rung.
+    pub wait_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Send this verb over whatever [`ConsoleRoute`] says. The rung that
+    /// flushes a world.
+    Console(String),
+    /// A console control event. Unsupported on Windows, and
+    /// [`platform::graceful_interrupt`] says so rather than pretending.
+    Interrupt,
+    /// Ask the process to exit.
+    Terminate,
+    /// The rung that cannot be refused.
+    Kill,
+}
+
+impl From<&jvm::Rung> for Rung {
+    /// Minecraft's ladder, in this file's terms. `Action::Console` there
+    /// carries no verb because there has only ever been one.
+    fn from(rung: &jvm::Rung) -> Self {
+        Rung {
+            action: match rung.action {
+                jvm::Action::Console => Action::Console(jvm::STOP_COMMAND.to_string()),
+                jvm::Action::Terminate => Action::Terminate,
+                jvm::Action::Kill => Action::Kill,
+            },
+            wait_ms: rung.wait_ms,
+        }
+    }
+}
+
+impl From<&homerun_core::engine::control::Rung> for Rung {
+    fn from(rung: &homerun_core::engine::control::Rung) -> Self {
+        use homerun_core::engine::control::Action as Core;
+        Rung {
+            action: match &rung.action {
+                Core::Console { command } => Action::Console(command.clone()),
+                Core::Interrupt => Action::Interrupt,
+                Core::Terminate => Action::Terminate,
+                Core::Kill => Action::Kill,
+            },
+            wait_ms: rung.wait_ms,
+        }
+    }
+}
+
+impl Supervision {
+    /// A Minecraft server, which is what this engine meant before descriptors
+    /// existed.
+    pub fn minecraft() -> Self {
+        Self {
+            readiness: Readiness::Minecraft,
+            presence: Presence::Minecraft,
+            console: ConsoleRoute::Stdin,
+            ladder: jvm::stop_ladder(true).iter().map(Rung::from).collect(),
+        }
+    }
+}
+
+/// A game server running as a child process.
 pub struct ProcessEngine {
     invocation: Invocation,
     /// The live run. Held so `command` can reach stdin and `players` can read
     /// the roster the console pump is building.
     run: Arc<Mutex<Option<Live>>>,
-    /// How to climb out of a stop. Always the core's in production — the
-    /// override exists so the tests do not sit through the real 30-second
-    /// save grace on every `cargo test`, which would be thirty seconds added
-    /// to a suite that otherwise finishes in under one.
-    ladder: Vec<jvm::Rung>,
+    /// How to tell this server is up, talk to it, and stop it. Always the
+    /// core's answer in production — the tests supply a shorter ladder so
+    /// they do not sit through the real 30-second save grace on every
+    /// `cargo test`, which would be thirty seconds added to a suite that
+    /// otherwise finishes in under one.
+    supervision: Supervision,
 }
 
 struct Live {
@@ -73,22 +215,69 @@ struct RosterState {
 }
 
 impl ProcessEngine {
+    /// A Minecraft server. Unchanged from before descriptors existed, and
+    /// every existing caller means this one.
     pub fn new(invocation: Invocation) -> Self {
+        Self::supervised(invocation, Supervision::minecraft())
+    }
+
+    /// A server whose readiness, console and stop come from its descriptor.
+    pub fn supervised(invocation: Invocation, supervision: Supervision) -> Self {
         Self {
             invocation,
             run: Arc::new(Mutex::new(None)),
-            ladder: jvm::stop_ladder(true),
+            supervision,
         }
     }
 
     /// The same engine on a ladder of your choosing. Tests only: a production
     /// host must not get to shorten the window a world save is given.
     #[cfg(test)]
-    fn with_ladder(invocation: Invocation, ladder: Vec<jvm::Rung>) -> Self {
-        Self {
+    fn with_ladder(invocation: Invocation, ladder: Vec<Rung>) -> Self {
+        Self::supervised(
             invocation,
-            run: Arc::new(Mutex::new(None)),
-            ladder,
+            Supervision {
+                ladder,
+                ..Supervision::minecraft()
+            },
+        )
+    }
+
+    /// Whether a line means this server has finished starting.
+    fn is_ready(&self, line: &str) -> bool {
+        match &self.supervision.readiness {
+            Readiness::Minecraft => console::is_ready(line),
+            // An empty marker never matches. A descriptor with none is
+            // refused by `engine::validate`; this is what happens if one
+            // reaches a running system anyway, and "never ready" fails
+            // visibly at the start timeout rather than reporting a server
+            // that is not up as up.
+            Readiness::Marker(marker) => !marker.is_empty() && line.contains(marker),
+        }
+    }
+
+    /// Send a command wherever this server takes one.
+    fn say(&self, command: &str) -> Result<(), String> {
+        match &self.supervision.console {
+            ConsoleRoute::Stdin => {
+                let mut live = self.live();
+                let stdin = live
+                    .as_mut()
+                    .and_then(|run| run.stdin.as_mut())
+                    .ok_or_else(|| jvm::Refusal::NotAcceptingCommands.text().to_string())?;
+                writeln!(stdin, "{command}")
+                    .and_then(|_| stdin.flush())
+                    .map_err(|_| jvm::Refusal::NotAcceptingCommands.text().to_string())
+            }
+            #[cfg(feature = "game-engine")]
+            ConsoleRoute::Rcon(target) => {
+                // The reply is discarded here: `Engine::command` returns
+                // nothing, and a Minecraft server's reply has always arrived
+                // as console output rather than as a return value. A caller
+                // that wants the text asks `crate::rcon` directly.
+                crate::rcon::command(target, command).map(|_| ())
+            }
+            ConsoleRoute::None => Err(jvm::Refusal::NotAcceptingCommands.text().to_string()),
         }
     }
 
@@ -96,6 +285,35 @@ impl ProcessEngine {
     /// should not make the app permanently unable to report who is online.
     fn live(&self) -> std::sync::MutexGuard<'_, Option<Live>> {
         self.run.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A way for the stop watcher to say the stop verb, without a borrow of
+    /// `self` it cannot hold.
+    fn console_sender(&self) -> ConsoleSender {
+        match &self.supervision.console {
+            ConsoleRoute::Stdin => {
+                let run = Arc::clone(&self.run);
+                Box::new(move |verb: &str| {
+                    let mut live = run.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(stdin) = live.as_mut().and_then(|r| r.stdin.as_mut()) {
+                        // A broken pipe means it is already on its way out,
+                        // which the next rung handles harmlessly.
+                        let _ = writeln!(stdin, "{verb}");
+                        let _ = stdin.flush();
+                    }
+                })
+            }
+            #[cfg(feature = "game-engine")]
+            ConsoleRoute::Rcon(target) => {
+                let target = target.clone();
+                Box::new(move |verb: &str| {
+                    // Same reasoning: an unreachable console on the way down
+                    // is what the next rung is for.
+                    let _ = crate::rcon::command(&target, verb);
+                })
+            }
+            ConsoleRoute::None => Box::new(|_verb: &str| {}),
+        }
     }
 }
 
@@ -159,8 +377,8 @@ impl Engine for ProcessEngine {
         let watcher = spawn_stop_watcher(
             &child,
             stop.clone(),
-            self.ladder.clone(),
-            Arc::clone(&self.run),
+            self.supervision.ladder.clone(),
+            self.console_sender(),
         );
 
         let mut ready = false;
@@ -168,15 +386,15 @@ impl Engine for ProcessEngine {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(err) = stderr.as_ref() {
                     for line in err.try_iter() {
-                        observe(&line, &roster);
+                        observe(&line, &roster, &self.supervision.presence);
                         on_line(line);
                     }
                 }
 
-                observe(&line, &roster);
+                observe(&line, &roster, &self.supervision.presence);
                 // The console saying it is accepting connections is the only
                 // honest signal for this; the process existing is not one.
-                if !ready && console::is_ready(&line) {
+                if !ready && self.is_ready(&line) {
                     ready = true;
                     on_ready();
                 }
@@ -210,15 +428,14 @@ impl Engine for ProcessEngine {
     }
 
     fn command(&self, command: &str) -> Result<(), String> {
-        let mut live = self.live();
-        let stdin = live
-            .as_mut()
-            .and_then(|run| run.stdin.as_mut())
-            .ok_or_else(|| jvm::Refusal::NotAcceptingCommands.text().to_string())?;
-
-        writeln!(stdin, "{command}")
-            .and_then(|_| stdin.flush())
-            .map_err(|_| jvm::Refusal::NotAcceptingCommands.text().to_string())
+        // A command before the process exists is a refusal whatever the
+        // route: RCON would otherwise try to open a socket to a port nothing
+        // has bound and report that as the console being unreachable, which
+        // is true and unhelpful.
+        if self.live().is_none() {
+            return Err(jvm::Refusal::NotAcceptingCommands.text().to_string());
+        }
+        self.say(command)
     }
 
     fn pid(&self) -> Option<u32> {
@@ -226,8 +443,8 @@ impl Engine for ProcessEngine {
     }
 
     fn usage(&self) -> Option<(u64, f64)> {
-        let pid = self.pid()?;
-        Some((resident_kb(pid)?, cpu_seconds(pid)?))
+        let stats = platform::process_stats(self.pid()?)?;
+        Some((stats.rss_kb, stats.cpu_seconds))
     }
 
     fn players(&self) -> Option<Roster> {
@@ -245,71 +462,39 @@ impl Engine for ProcessEngine {
     }
 }
 
-/// Resident memory in KiB, from `/proc/<pid>/status`.
-///
-/// `status` rather than `statm` because it is already in KiB and labelled,
-/// where `statm` is in pages and needs the page size and a field index to be
-/// right.
-#[cfg(unix)]
-fn resident_kb(pid: u32) -> Option<u64> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    text.lines()
-        .find(|line| line.starts_with("VmRSS:"))
-        .and_then(|line| {
-            line.chars()
-                .filter(char::is_ascii_digit)
-                .collect::<String>()
-                .parse()
-                .ok()
-        })
-}
-
-/// Cumulative CPU seconds, user plus system, from `/proc/<pid>/stat`.
-#[cfg(unix)]
-fn cpu_seconds(pid: u32) -> Option<f64> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Field 2 is the executable name in parentheses and may contain both
-    // spaces and parentheses, so splitting the whole line is the classic bug
-    // here. Everything after the *last* `)` is unambiguous.
-    let fields: Vec<&str> = text.rsplit(')').next()?.split_whitespace().collect();
-    // `state` is field 3 and lands at index 0, so field N is at N - 3.
-    let utime: u64 = fields.get(11)?.parse().ok()?;
-    let stime: u64 = fields.get(12)?.parse().ok()?;
-
-    // The divisor is a property of the kernel rather than a constant. It is
-    // 100 everywhere seen so far, which is exactly why it is read: hard-coding
-    // it would be right until it silently was not.
-    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-    let ticks = if ticks > 0 { ticks as f64 } else { 100.0 };
-    Some((utime + stime) as f64 / ticks)
-}
-
-#[cfg(not(unix))]
-fn resident_kb(_pid: u32) -> Option<u64> {
-    None
-}
-
-#[cfg(not(unix))]
-fn cpu_seconds(_pid: u32) -> Option<f64> {
-    None
-}
-
 /// Fold one console line into the roster.
-fn observe(line: &str, roster: &Arc<Mutex<RosterState>>) {
+fn observe(line: &str, roster: &Arc<Mutex<RosterState>>, presence: &Presence) {
     let Ok(mut roster) = roster.lock() else {
         return;
     };
 
-    if let Some(name) = console::joined(line) {
-        if !roster.players.iter().any(|p| p == name) {
-            roster.players.push(name.to_string());
+    match presence {
+        Presence::Minecraft => {
+            if let Some(name) = console::joined(line) {
+                if !roster.players.iter().any(|p| p == name) {
+                    roster.players.push(name.to_string());
+                }
+            }
+            if let Some(name) = console::left(line) {
+                roster.players.retain(|p| p != name);
+            }
+            if let Some(max) = console::max_players(line) {
+                roster.max = Some(max);
+            }
         }
-    }
-    if let Some(name) = console::left(line) {
-        roster.players.retain(|p| p != name);
-    }
-    if let Some(max) = console::max_players(line) {
-        roster.max = Some(max);
+        // A descriptor's markers say *that* somebody joined, not who. Naming
+        // them would mean parsing a name out of a line whose shape we have
+        // only ever seen in one vendor's log, and a wrong name is worse than
+        // no name: it reaches the API as a player.
+        Presence::Markers { join, leave } => {
+            if !join.is_empty() && line.contains(join.as_str()) {
+                roster.players.push(String::new());
+            }
+            if !leave.is_empty() && line.contains(leave.as_str()) {
+                roster.players.pop();
+            }
+        }
+        Presence::None => {}
     }
 }
 
@@ -330,11 +515,18 @@ impl StopWatcher {
     }
 }
 
+/// How the stop watcher says something to the server.
+///
+/// A boxed closure rather than a borrow of the engine: the watcher outlives
+/// the call that made it and runs on its own thread, and `ProcessEngine` is
+/// not `'static`.
+type ConsoleSender = Box<dyn Fn(&str) + Send + 'static>;
+
 fn spawn_stop_watcher(
     child: &Child,
     stop: StopSignal,
-    ladder: Vec<jvm::Rung>,
-    run: Arc<Mutex<Option<Live>>>,
+    ladder: Vec<Rung>,
+    say: ConsoleSender,
 ) -> StopWatcher {
     let pid = child.id();
     let done = Arc::new(StopSignal::default());
@@ -355,7 +547,7 @@ fn spawn_stop_watcher(
             if finished.should_stop() {
                 return;
             }
-            match rung.action {
+            match &rung.action {
                 // **This rung has to be carried out here.** It was briefly a
                 // no-op, on the theory that the host would write `stop`
                 // through `Engine::command` — which was true only while the
@@ -364,17 +556,18 @@ fn spawn_stop_watcher(
                 // all, and every stop sat through the full save grace in
                 // silence and then took a SIGTERM. The rung that exists to
                 // save the world was the one being skipped.
-                jvm::Action::Console => {
-                    let mut live = run.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(stdin) = live.as_mut().and_then(|r| r.stdin.as_mut()) {
-                        // A broken pipe means it is already on its way out,
-                        // which the next rung handles harmlessly.
-                        let _ = writeln!(stdin, "{}", jvm::STOP_COMMAND);
-                        let _ = stdin.flush();
+                Action::Console(verb) => say(verb),
+                // A failure here is not fatal to the stop: the next rung
+                // handles it, and on Windows this rung always fails because
+                // the platform cannot do it. Saying so on the diagnostics
+                // stream and carrying on is the whole behaviour.
+                Action::Interrupt => {
+                    if let Err(why) = platform::graceful_interrupt(pid) {
+                        log::warn!("{why}");
                     }
                 }
-                jvm::Action::Terminate => terminate(pid),
-                jvm::Action::Kill => kill(pid),
+                Action::Terminate => terminate(pid),
+                Action::Kill => kill(pid),
             }
 
             let deadline = Instant::now() + Duration::from_millis(rung.wait_ms);
@@ -430,6 +623,7 @@ fn kill(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use homerun_core::engine::GameDescriptor;
 
     /// A stand-in Minecraft server: this test binary, re-invoked.
     ///
@@ -474,6 +668,24 @@ mod tests {
                 let _ = std::io::stdin().read_line(&mut line);
                 println!("[12:00:03] [Server thread/INFO]: Stopping server");
             }
+            // A game described by a `game.json`: nothing about its console
+            // looks like Minecraft's.
+            "game" => {
+                println!("18:22:00 Loading world");
+                println!("18:22:01 Server startup complete");
+                println!("18:22:02 Craig has entered the world");
+                // Waits for the descriptor's own verb, not `stop`.
+                loop {
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line.trim() == "quit" {
+                        println!("18:22:09 Saving and shutting down");
+                        break;
+                    }
+                }
+            }
             "crash" => {
                 println!("[12:00:00] [main/INFO]: loading");
                 eprintln!("something went badly wrong");
@@ -490,6 +702,342 @@ mod tests {
         // console output.
         std::io::stdout().flush().ok();
         std::process::exit(0);
+    }
+
+    // ─── a server described by a game.json ──────────────────────────────────
+    //
+    // The same supervisor, told different answers. These exist because the
+    // three things that moved into `Supervision` are exactly the three that
+    // used to be Minecraft's by assumption, and an assumption that moved into
+    // a field can still be read from the wrong place.
+
+    /// A descriptor-driven game's supervision, with a ladder short enough for
+    /// a test.
+    #[cfg(feature = "game-engine")]
+    fn descriptor_supervision(console: ConsoleRoute) -> Supervision {
+        Supervision {
+            readiness: Readiness::Marker("Server startup complete".into()),
+            presence: Presence::Markers {
+                join: "has entered the world".into(),
+                leave: "has left the world".into(),
+            },
+            console,
+            ladder: vec![
+                Rung {
+                    action: Action::Console("quit".into()),
+                    wait_ms: 3_000,
+                },
+                Rung {
+                    action: Action::Terminate,
+                    wait_ms: 2_000,
+                },
+                Rung {
+                    action: Action::Kill,
+                    wait_ms: 0,
+                },
+            ],
+        }
+    }
+
+    #[cfg(feature = "game-engine")]
+    fn drive_supervised(
+        script: &str,
+        supervision: Supervision,
+        on_running: impl FnOnce(&ProcessEngine, &StopSignal),
+    ) -> RunOutcome {
+        let engine = Arc::new(ProcessEngine::supervised(fake_server(script), supervision));
+        let stop = StopSignal::default();
+        let request = RunRequest {
+            server_id: "s1".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            java_port: 28015,
+            settings: None,
+        };
+
+        let ready = Arc::new(Mutex::new(false));
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        std::thread::scope(|scope| {
+            let engine_for_run = Arc::clone(&engine);
+            let ready_for_run = Arc::clone(&ready);
+            let lines_for_run = Arc::clone(&lines);
+            let stop_for_run = stop.clone();
+
+            let run = scope.spawn(move || {
+                engine_for_run.run(
+                    &request,
+                    stop_for_run,
+                    &|line| lines_for_run.lock().unwrap().push(line),
+                    &|| *ready_for_run.lock().unwrap() = true,
+                )
+            });
+
+            // Wait for the ready callback rather than sleeping a fixed time,
+            // so a slow machine does not make this flaky.
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline && !*ready.lock().unwrap() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+
+            on_running(&engine, &stop);
+            run.join().expect("the run thread must not panic")
+        })
+    }
+
+    /// The descriptor's marker is what makes this server ready — and
+    /// Minecraft's would not have.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_descriptor_game_becomes_ready_on_its_own_marker() {
+        let engine = ProcessEngine::supervised(
+            fake_server("game"),
+            descriptor_supervision(ConsoleRoute::Stdin),
+        );
+
+        assert!(engine.is_ready("18:22:01 Server startup complete"));
+        assert!(!engine.is_ready("18:22:00 Loading world"));
+        // The line that would have started a Minecraft server means nothing
+        // here, which is the whole point of the field.
+        assert!(!engine
+            .is_ready("[12:00:01] [Server thread/INFO]: Done (1.234s)! For help, type \"help\""));
+    }
+
+    /// And the reverse: a Minecraft server is unmoved by a descriptor's
+    /// marker.
+    #[test]
+    fn a_minecraft_server_is_unmoved_by_another_games_marker() {
+        let engine = ProcessEngine::new(fake_server("ready"));
+        assert!(engine
+            .is_ready("[12:00:01] [Server thread/INFO]: Done (1.234s)! For help, type \"help\""));
+        assert!(!engine.is_ready("Server startup complete"));
+    }
+
+    /// End to end on a real child process: the descriptor's marker brings it
+    /// up, and the descriptor's verb — not `stop` — takes it down.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_descriptor_game_starts_on_its_marker_and_stops_on_its_own_verb() {
+        let started = Instant::now();
+        let outcome = drive_supervised(
+            "game",
+            descriptor_supervision(ConsoleRoute::Stdin),
+            |_engine, stop| stop.request_stop(),
+        );
+
+        assert_eq!(outcome, RunOutcome::Stopped);
+        // The polite rung did it. Reaching `Terminate` would have taken the
+        // three-second grace first, so finishing well inside that is the
+        // assertion that `quit` was what worked.
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the console rung did not stop it; the ladder had to escalate ({:?})",
+            started.elapsed()
+        );
+    }
+
+    /// An empty marker must never look like a server that is instantly up.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_game_with_no_marker_never_reports_ready() {
+        let engine = ProcessEngine::supervised(
+            fake_server("game"),
+            Supervision {
+                readiness: Readiness::Marker(String::new()),
+                ..descriptor_supervision(ConsoleRoute::Stdin)
+            },
+        );
+        assert!(!engine.is_ready(""));
+        assert!(!engine.is_ready("Server startup complete"));
+        assert!(!engine.is_ready("anything at all"));
+    }
+
+    /// A console command goes wherever the route says, and for a game with no
+    /// stdin console that is a socket.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_command_for_an_rcon_game_goes_over_rcon_rather_than_stdin() {
+        use std::sync::mpsc;
+
+        // A stand-in Source RCON server: enough of the protocol to prove the
+        // command arrived.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let address = listener.local_addr().unwrap().to_string();
+        let (tx, rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            loop {
+                let mut header = [0u8; 4];
+                if std::io::Read::read_exact(&mut stream, &mut header).is_err() {
+                    return;
+                }
+                let size = i32::from_le_bytes(header) as usize;
+                let mut rest = vec![0u8; size];
+                if std::io::Read::read_exact(&mut stream, &mut rest).is_err() {
+                    return;
+                }
+                let id = i32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+                let kind = i32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]);
+                let body = &rest[8..];
+                let end = body.iter().position(|b| *b == 0).unwrap_or(body.len());
+                let text = String::from_utf8_lossy(&body[..end]).into_owned();
+
+                let (answer_id, answer_kind): (i32, i32) =
+                    if kind == 3 { (id, 2) } else { (id, 0) };
+                if kind == 2 && !text.is_empty() {
+                    let _ = tx.send(text);
+                }
+                let size: i32 = 4 + 4 + 2;
+                let mut packet = Vec::new();
+                packet.extend_from_slice(&size.to_le_bytes());
+                packet.extend_from_slice(&answer_id.to_le_bytes());
+                packet.extend_from_slice(&answer_kind.to_le_bytes());
+                packet.extend_from_slice(&[0, 0]);
+                if std::io::Write::write_all(&mut stream, &packet).is_err() {
+                    return;
+                }
+            }
+        });
+
+        let route = ConsoleRoute::Rcon(crate::rcon::Target {
+            protocol: homerun_core::engine::descriptor::RconProtocol::Source,
+            address,
+            password: "hunter2".into(),
+        });
+
+        drive_supervised("game", descriptor_supervision(route), |engine, stop| {
+            engine
+                .command("playerlist")
+                .expect("an RCON console must accept a command");
+            stop.request_stop();
+        });
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "playerlist",
+            "the command did not arrive over RCON"
+        );
+    }
+
+    /// Before the process exists there is nothing to talk to, whatever the
+    /// route. Without this an RCON game would open a socket to a port nothing
+    /// has bound and report *that* — true, and useless to a player.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_command_before_the_server_starts_is_refused_without_reaching_for_a_socket() {
+        let engine = ProcessEngine::supervised(
+            fake_server("game"),
+            descriptor_supervision(ConsoleRoute::Rcon(crate::rcon::Target {
+                protocol: homerun_core::engine::descriptor::RconProtocol::Source,
+                // Nothing is listening here, and nothing should try.
+                address: "127.0.0.1:1".into(),
+                password: "x".into(),
+            })),
+        );
+        let started = Instant::now();
+        assert!(engine.command("status").is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "it went to the network before checking there was a server"
+        );
+    }
+
+    /// A game whose descriptor gives no console still stops — it just starts
+    /// lower on the ladder.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_game_with_no_console_refuses_commands_and_still_stops() {
+        // The `game` script, which becomes ready and then waits on a stdin
+        // verb it will never be sent -- so the ladder below is what ends it.
+        // Using the `deaf` script here instead would mean this test sat out
+        // the whole ready deadline before it began.
+        let outcome = drive_supervised(
+            "game",
+            Supervision {
+                console: ConsoleRoute::None,
+                ladder: vec![
+                    Rung {
+                        action: Action::Terminate,
+                        wait_ms: 2_000,
+                    },
+                    Rung {
+                        action: Action::Kill,
+                        wait_ms: 0,
+                    },
+                ],
+                ..descriptor_supervision(ConsoleRoute::None)
+            },
+            |engine, stop| {
+                assert!(engine.command("anything").is_err());
+                stop.request_stop();
+            },
+        );
+        assert_eq!(outcome, RunOutcome::Stopped);
+    }
+
+    /// The presence markers count, and deliberately do not name anyone: a
+    /// name parsed out of a line whose shape we have seen in one vendor's log
+    /// would reach the API as a player.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn descriptor_presence_counts_players_without_inventing_names() {
+        let roster = Arc::new(Mutex::new(RosterState::default()));
+        let presence = Presence::Markers {
+            join: "has entered the world".into(),
+            leave: "has left the world".into(),
+        };
+
+        observe("Craig has entered the world", &roster, &presence);
+        observe("Dana has entered the world", &roster, &presence);
+        assert_eq!(roster.lock().unwrap().players.len(), 2);
+
+        observe("Craig has left the world", &roster, &presence);
+        assert_eq!(roster.lock().unwrap().players.len(), 1);
+
+        // Nothing invented a name.
+        assert!(roster.lock().unwrap().players.iter().all(String::is_empty));
+
+        // And a line that is neither changes nothing.
+        observe("Dana said hello", &roster, &presence);
+        assert_eq!(roster.lock().unwrap().players.len(), 1);
+    }
+
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_game_that_reports_no_presence_keeps_an_empty_roster() {
+        let roster = Arc::new(Mutex::new(RosterState::default()));
+        observe("Notch joined the game", &roster, &Presence::None);
+        observe("Craig has entered the world", &roster, &Presence::None);
+        assert!(roster.lock().unwrap().players.is_empty());
+    }
+
+    /// Both ladders end somewhere they cannot be ignored, and this is the
+    /// conversion that has to preserve that.
+    #[test]
+    fn both_kinds_of_ladder_convert_with_their_last_rung_intact() {
+        let minecraft: Vec<Rung> = jvm::stop_ladder(true).iter().map(Rung::from).collect();
+        assert_eq!(minecraft.last().unwrap().action, Action::Kill);
+        assert_eq!(
+            minecraft.first().unwrap().action,
+            Action::Console(jvm::STOP_COMMAND.to_string()),
+            "Minecraft's console rung has no verb of its own and gains one here"
+        );
+
+        let descriptor: GameDescriptor = serde_json::from_str(
+            r#"{ "id": "g", "console": { "via": "stdin" },
+                 "stop": { "via": "console", "command": "quit", "graceMs": 1000 } }"#,
+        )
+        .unwrap();
+        let converted: Vec<Rung> = homerun_core::engine::control::stop_ladder(&descriptor)
+            .iter()
+            .map(Rung::from)
+            .collect();
+        assert_eq!(
+            converted.first().unwrap().action,
+            Action::Console("quit".to_string())
+        );
+        assert_eq!(converted.last().unwrap().action, Action::Kill);
     }
 
     fn drive(script: &str, on_running: impl FnOnce(&ProcessEngine, &StopSignal)) -> RunOutcome {
@@ -639,16 +1187,16 @@ mod tests {
         let engine = ProcessEngine::with_ladder(
             fake_server("deaf"),
             vec![
-                jvm::Rung {
-                    action: jvm::Action::Console,
+                Rung {
+                    action: Action::Console(jvm::STOP_COMMAND.to_string()),
                     wait_ms: 300,
                 },
-                jvm::Rung {
-                    action: jvm::Action::Terminate,
+                Rung {
+                    action: Action::Terminate,
                     wait_ms: 2_000,
                 },
-                jvm::Rung {
-                    action: jvm::Action::Kill,
+                Rung {
+                    action: Action::Kill,
                     wait_ms: 0,
                 },
             ],

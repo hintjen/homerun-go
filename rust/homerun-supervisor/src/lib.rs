@@ -44,7 +44,19 @@ pub mod host_log;
 pub mod device_ws;
 pub mod engine;
 pub mod errors;
+/// Getting a game's server onto this machine: a pinned URL, or steamcmd —
+/// always from the vendor, never mirrored by us, and never agreeing to a
+/// licence on anyone's behalf.
+#[cfg(feature = "game-engine")]
+pub mod fetcher;
 pub mod log_buffer;
+/// Every OS assumption in this crate, in one place, so that everything else
+/// here builds and tests on any machine. Gated with the process engine rather
+/// than with `game-engine`, because the process engine is the other caller:
+/// its memory and CPU sampling used to be two `#[cfg(unix)]` functions at the
+/// bottom of that file.
+#[cfg(feature = "process-engine")]
+pub mod platform;
 pub mod preflight;
 /// Supervising a server that runs as a child process. Not iOS, which cannot.
 #[cfg(feature = "process-engine")]
@@ -65,6 +77,10 @@ pub mod process_engine;
 pub mod pumpkin_engine;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_settings;
+/// The console for a game that does not read one off stdin: Valve's binary
+/// RCON, and Facepunch's WebSocket dialect.
+#[cfg(feature = "game-engine")]
+pub mod rcon;
 
 pub mod server;
 pub mod state;

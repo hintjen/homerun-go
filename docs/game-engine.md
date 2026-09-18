@@ -7,11 +7,16 @@ observe, stop a game server", driven entirely by a `game.json`. Adding a game
 is a descriptor and a docs page; it is not code. A game the schema cannot
 express grows the schema, once, and every later game gets the growth.
 
-Everything in this module is pure, like the rest of `homerun-core`: no
-sockets, no processes, no filesystem, no clock. The effects live in
-`homerun-supervisor`, and the two are joined by the `engine.*` bridge
-namespace. That is what lets the whole engine be tested with no game
-installed — the suite below runs in milliseconds on any machine.
+It comes in two halves. **The decisions** are pure, like the rest of
+`homerun-core`: no sockets, no processes, no filesystem, no clock. **The
+effects** — fetching a runtime, unpacking it, driving steamcmd, speaking
+RCON, asking the operating system which ports a process bound — live in
+`homerun-supervisor` behind a default-off `game-engine` feature. The two are
+joined by the `engine.*` bridge namespace.
+
+That split is what lets the whole engine be tested with no game installed:
+the decisions run in milliseconds on any machine, and the effects are tested
+against real sockets, real child processes and real archives on loopback.
 
 Source: `rust/homerun-core/src/engine/`.
 
@@ -250,6 +255,188 @@ outside its own bounds, a port an argument names but the descriptor does not
 declare, a secret in the join URL — is beyond what JSON Schema can say. A
 descriptor that validates against the document can still be refused.
 
+## The effects half — `homerun-supervisor`, behind `game-engine`
+
+Everything above is pure. The things a descriptor-driven game needs that a
+pure crate cannot do — fetching a runtime, unpacking it, driving steamcmd,
+speaking RCON, asking the operating system which ports a process bound — live
+in the supervisor crate behind a **default-off** feature called
+`game-engine`.
+
+Off by default for the same reason every other heavy thing here is: this
+crate builds and tests host-native on any machine in seconds, and that is
+what makes it worth having. `game-engine` is the second heaviest feature
+after `device-ws` — an HTTP client, a zip reader and a websocket.
+`npm run test:rust` turns it on, because its tests are the only coverage the
+fetcher and the console transports have and they need no device and no game.
+
+It implies `process-engine`: a descriptor-driven game is a child process, so
+there is nothing here without one.
+
+| Feature | Tests | Time |
+|---|---|---|
+| `process-engine` | 197 | ~4s |
+| `game-engine` | 230 | ~6s |
+
+### Fetching — `fetcher.rs`
+
+**We are not a mirror.** Every byte comes from the vendor. Homerun downloads
+a game's server onto the player's own machine after that player has accepted
+the game's terms; it does not host, repackage or redistribute one. `steamcmd`
+is fetched from Valve at first use for the same reason — shipping a copy
+inside our installer would be redistributing Valve's client.
+
+**Nothing here agrees to anything on anyone's behalf.** `steamcmd` is driven
+with `+login anonymous` and nothing else, its stdin is `/dev/null` so a
+prompt gets end-of-file rather than an answer, and its output is scanned line
+by line for the shapes an agreement prompt takes. Finding one kills the
+process and ends the fetch with a message telling the person to run steamcmd
+themselves and read what it asks. `prompt_detected` is deliberately broad: a
+false positive costs one puzzled look, a false negative means a program
+agreed to a licence for someone.
+
+A direct download is streamed to a `.part` file, **resumed** with a `Range`
+header when one is already there, and renamed only after its sha256 matches.
+Three details are load-bearing:
+
+- A file that **fails** its digest is deleted, not kept. Keeping it invites
+  the next run to resume *into* it and fail for ever — the desktop's Pumpkin
+  runtime learned this as "delete-on-corrupt".
+- A server that **ignored** the `Range` header answers `200` rather than
+  `206`; appending to the part would then corrupt it in a way the digest
+  catches only after the whole transfer. The status is checked.
+- The digest is computed **after** the download, in one pass over the file,
+  because a resumed transfer has no running hash to continue from.
+
+A runtime directory records what it holds in a `.homerun-build` stamp. A
+directory with files and no stamp is *not* a runtime — that is what an
+interrupted download leaves behind, and treating it as finished is how a
+server starts against half an install.
+
+**Unpacking is careful even though the archive is pinned.** The sha256 pins
+the *bytes*, which says nothing about the *paths inside them*: a vendor
+archive nobody has audited entry-by-entry can still contain
+`../../windows/system32/…`, and a pinned digest would be a pinned digest of a
+malicious layout. So extraction refuses absolute paths, drive letters and
+anything that climbs out — the same rule `scripts/ui-bundle.js` applies to a
+UI bundle. What is deliberately *not* imposed is an entry-count or size
+ceiling: a game runtime genuinely is tens of thousands of files and many
+gigabytes, and a ceiling tuned for a UI bundle would refuse every real game.
+
+`HOMERUN_STEAMCMD` names an existing `steamcmd` — which is how a Linux or
+macOS session uses one, since only Windows can bootstrap it.
+
+### The console — `rcon.rs`
+
+Two dialects: **Source RCON** (Valve's binary protocol over TCP) and
+**WebSocket RCON** (Facepunch's JSON dialect, which is what Rust uses with
+`+rcon.web 1`).
+
+Both are **synchronous**, using `tungstenite` rather than the
+`tokio-tungstenite` already here behind `device-ws`. A console command is one
+request and one reply on loopback; routing it through an async runtime would
+mean this crate owned a runtime in a build that otherwise needs none.
+
+**One connection per command.** There is no session to lose, no reconnect
+loop, no half-authenticated state, and no background thread whose failure is
+invisible. A console that silently stopped working is a far worse failure
+than one that is a few milliseconds slower.
+
+The cost is named rather than hidden: a WebSocket RCON console **does not
+stream the server's own output**, because a client that connects per command
+sees only what arrives while it is waiting. The server's stdout is captured
+separately by the process engine, so the console *log* loses nothing; what is
+lost is chat and command output originating elsewhere. If that matters, a
+held connection belongs in this module, not in its callers.
+
+Two details of Source RCON that a careless implementation gets wrong and a
+short test would never catch:
+
+- A long reply arrives as **several** packets with no length prefix and no
+  terminator. The only portable way to know it has ended is to send a second,
+  empty command and read until *its* reply comes back. A reader that stopped
+  at the first packet would look entirely plausible and truncate every long
+  reply — the test server deliberately splits its answer in two.
+- A wrong password is an auth response with an id of `-1`, and servers
+  commonly send an empty `RESPONSE_VALUE` *before* it. Anything that is not
+  an auth response is ignored.
+
+No TLS, and none wanted: `wss://` would mean the console had left the
+machine, which is what the device websocket is for.
+
+### The platform adapter — `platform.rs`
+
+Windows is the only host for descriptor-driven games, and not just for now:
+iOS cannot spawn a process and Android can only exec files shipped inside the
+APK, so a *downloaded* server binary is unrunnable on both.
+
+That would be an argument for writing Windows code inline. The reason not to
+is the suite — a `#[cfg(windows)]` sprinkled through the fetcher and the
+engine would mean half this crate could only be *read* on Linux. So the OS
+assumptions live in one module behind functions with one meaning each.
+
+| Function | Windows | Linux | macOS |
+|---|---|---|---|
+| `listening_ports(pid)` | `netstat -ano` | `/proc/net/*` joined to `/proc/<pid>/fd` by inode | `lsof` |
+| `process_stats(pid)` | `Get-Process` | `/proc/<pid>/{status,stat}` | `ps` |
+| `graceful_interrupt(pid)` | **refuses** | `SIGINT` | `SIGINT` |
+| `user_data_roots()` | `%APPDATA%` and friends | `~/.config`, `~/.local/share` | + `~/Library/Application Support` |
+| `executable(dir, name)` | adds `.exe` | as given | as given |
+
+`graceful_interrupt` failing on Windows is a **platform fact, not a gap**. A
+console control event can only be sent to a process group attached to a
+console, and a server spawned with piped stdio has neither;
+`GenerateConsoleCtrlEvent` would signal *this* process's group, which
+includes the app. That is why `engine::validate` warns about
+`stop.via: interrupt` rather than accepting it quietly, and why the stop
+ladder treats a failed interrupt rung as something to log and climb past.
+
+Two parsing traps are worth knowing, because both produce a plausible wrong
+answer:
+
+- `netstat` columns **differ per protocol** — a TCP row has a state column
+  and a UDP row does not — so reading the pid as "the fifth field" works for
+  TCP and silently reads `*:*` for UDP. The pid is taken as the *last* field.
+- Only `LISTENING` TCP rows count. An `ESTABLISHED` row is a connection the
+  server *made*, and forwarding one would publish an outbound socket.
+
+The module never guesses. A port list that omits a port the server bound is
+recoverable — the caller polls again — while a port list containing one it
+did not bind produces a tunnel that connects, loads cleanly and carries
+nothing.
+
+### Descriptor-driven supervision — `process_engine.rs`
+
+Until descriptor-driven games existed, everything this engine knew about a
+server was Minecraft's: `console::is_ready` decided when it was up, the
+roster came from Minecraft's join and leave lines, and the stop verb was the
+literal `stop` on stdin.
+
+Those three answers moved into a `Supervision` the host supplies.
+`ProcessEngine::new` still means "a Minecraft server", so nothing that
+already used this engine changed; `ProcessEngine::supervised` is the
+descriptor-driven door.
+
+| | Minecraft | From a descriptor |
+|---|---|---|
+| Ready | `console::is_ready` | a substring the descriptor names |
+| Roster | join/leave lines, with names | join/leave substrings, **counts only** |
+| Console | a line on stdin | stdin, or RCON on a loopback port |
+| Stop | `stop`, then terminate, then kill | the descriptor's verb, then the same |
+
+The roster difference is deliberate. A descriptor's presence markers say
+*that* somebody joined, not who; parsing a name out of a line whose shape we
+have seen in exactly one vendor's log would be a guess, and a wrong name is
+worse than no name because it reaches the API as a player.
+
+The **stop ladder** is the part worth watching. Both callers produce one —
+`minecraft::jvm::stop_ladder` and `engine::control::stop_ladder` — and this
+file has its own `Rung` that both convert into, rather than one of the two
+winning. That is not indirection for its own sake: the core is not allowed to
+depend on its own Minecraft module, so there is no shared type up there to
+use, and a supervisor walking two different ladder types would be two stop
+paths pretending to be one.
+
 ## The bridge — `engine.*`
 
 A namespace of its own in `homerun-supervisor/src/core_dispatch.rs`, for the
@@ -296,6 +483,15 @@ test.
 | `doctor.rs` | the verdict for one machine |
 | `schema.rs` | the exported JSON Schema, and its two alarms |
 | `../../schema/game.v0.json` | the generated schema, committed for the monorepo to pin |
+
+And in `homerun-supervisor`, behind `game-engine`:
+
+| File | Holds |
+|---|---|
+| `fetcher.rs` | download, resume, verify, unpack; steamcmd, anonymous only |
+| `rcon.rs` | Valve's binary RCON and Facepunch's WebSocket dialect |
+| `platform.rs` | every OS assumption in the crate, in one place |
+| `process_engine.rs` | `Supervision` — readiness, roster, console and stop, per game |
 | `testdata/rust.json` | the pilot's descriptor, used as a fixture throughout |
 
 ## Triage
@@ -324,6 +520,31 @@ key, or the reverse, is the usual one — it means the file was half-edited.
 The exceptions are a `schema` number above this build's, and an unknown
 `runtime.source`; both are refused in words that say updating Homerun should
 fix it.
+
+**A download keeps failing at the same point.** Check for a `.download.part`
+that is larger than the file should be, or a server that answers `200` to a
+`Range` request. Both are handled, and both are what a half-written resume
+looks like when it is not.
+
+**steamcmd stops with "Steam is asking someone to agree".** That is the rule
+working, not a bug. Run steamcmd yourself once, read what it asks, and answer
+it — nothing in Homerun will answer it for you.
+
+**A descriptor-driven server never reports ready.** Its marker is a
+substring, matched literally against each console line. Put the real line in
+front of it: `engine.classify` with that exact line answers in one call, and
+`game verify` is what re-checks the marker against the real binary.
+
+**A game that will not stop cleanly on Windows.** If its descriptor says
+`stop.via: interrupt`, that is unsupported on the only platform that ships —
+`platform::graceful_interrupt` refuses, the ladder climbs past it, and the
+save is whatever the game managed before the terminate. `engine::validate`
+warns about it at authoring time.
+
+**The console works for Minecraft and not for a new game.** The route is in
+`Supervision::console`, not in the engine. A game whose descriptor says
+`console.via: rcon` needs a `ConsoleRoute::Rcon` built with the port the
+server was *told* to bind.
 
 **The schema and the types disagree.** Two different alarms.
 `the_committed_schema_is_not_stale` means the checked-in file is behind the
