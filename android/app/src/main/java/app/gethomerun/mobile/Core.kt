@@ -901,6 +901,21 @@ object Core {
          * expected and every handshake fails rather than one warning appearing.
          */
         val expectsProxyProtocol: Boolean,
+        /**
+         * True when the **gateway** terminates TLS for this link, which the API
+         * decides per `link_up` and the core reads — downgrade-only, so an API
+         * too old to say reads as false. Then this device orders no
+         * certificate, binds no challenge listener, and the tunnel forwards the
+         * gateway's relay at the *plaintext* socket
+         * ([deviceWsGatewayTunnelConfig]) instead of `:443` at the TLS one.
+         */
+        val gatewayTls: Boolean,
+        /**
+         * The `wss://` address the dashboard is given for this device. In
+         * gateway mode it is on the gateway's hostname, not [fqdn]. Logged, and
+         * nothing here dials it.
+         */
+        val wsUrl: String?,
     )
 
     /**
@@ -920,8 +935,22 @@ object Core {
             // The core answers `gateway_v2`; this host cares about the
             // consequence rather than the provenance.
             expectsProxyProtocol = obj["gateway_v2"]?.jsonPrimitive?.booleanOrNull != true,
+            // Compared to the one word that means it, so a core that says
+            // anything else — or a key this build does not know — is device
+            // mode, which is what the core's own reading rule is too.
+            gatewayTls = obj["tls_mode"]?.jsonPrimitive?.contentOrNull == "gateway",
+            wsUrl = obj["ws_url"]?.jsonPrimitive?.contentOrNull,
         )
     }
+
+    /**
+     * The body of `POST /api/device/<id>/link_up/`.
+     *
+     * Defined in the core so both phones ask for the same thing: today, that
+     * this build *can* run with the gateway terminating TLS. The API decides.
+     */
+    fun deviceWsLinkUpRequest(): JsonObject =
+        call("deviceWs.linkUpRequest", buildJsonObject { }).jsonObject
 
     /**
      * The wireproxy config for the device websocket's own tunnel.
@@ -935,6 +964,21 @@ object Core {
             put("link", link)
             put("httpsTarget", httpsTarget)
             httpTarget?.let { put("httpTarget", it) }
+        }).jsonPrimitive.content
+
+    /**
+     * The wireproxy config when the **gateway** terminates TLS: one forward,
+     * its relay port at [wsTarget].
+     *
+     * [wsTarget] is the **plaintext** port — the reverse of
+     * [deviceWsTunnelConfig]'s warning. What arrives is a websocket upgrade the
+     * gateway already decrypted; the TLS listener has no certificate in this
+     * mode and drops every connection, which the dashboard sees as a 503.
+     */
+    fun deviceWsGatewayTunnelConfig(link: JsonObject, wsTarget: Int): String =
+        call("deviceWs.tunnelConfig", buildJsonObject {
+            put("link", link)
+            put("wsTarget", wsTarget)
         }).jsonPrimitive.content
 
     // -----------------------------------------------------------------------
