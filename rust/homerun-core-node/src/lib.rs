@@ -46,6 +46,25 @@ use napi_derive::napi;
 
 use homerun_core::minecraft::console;
 
+/// Node addon contract version, distinct from the mobile C FFI ABI.
+pub const CORE_NODE_ABI_VERSION: u32 = 1;
+
+#[napi]
+pub fn core_abi_version() -> u32 {
+    CORE_NODE_ABI_VERSION
+}
+
+#[napi]
+pub fn core_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+/// Source provenance; the manifest separately identifies the signed bytes.
+#[napi]
+pub fn core_build_id() -> String {
+    env!("HOMERUN_CORE_BUILD_ID").to_owned()
+}
+
 /// Strip ANSI colour codes, which Paper writes into join and leave lines.
 ///
 /// Exposed rather than kept private because the desktop shows raw console

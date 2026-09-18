@@ -154,6 +154,20 @@ if (target.kind === "ndk") {
     ...engineArgs,
   ]);
 } else {
+  const buildEnv = { ...process.env };
+  if (target.deploymentTarget) buildEnv.IPHONEOS_DEPLOYMENT_TARGET = target.deploymentTarget;
+  if (target.staticCrt) {
+    if (buildEnv.CARGO_ENCODED_RUSTFLAGS !== undefined) {
+      buildEnv.CARGO_ENCODED_RUSTFLAGS = [buildEnv.CARGO_ENCODED_RUSTFLAGS, "-C", "target-feature=+crt-static"].filter(Boolean).join("\x1f");
+    } else {
+      buildEnv.RUSTFLAGS = `${buildEnv.RUSTFLAGS || ""} -C target-feature=+crt-static`.trim();
+    }
+  }
+  if (name === "core-node" && !buildEnv.HOMERUN_CORE_BUILD_ID) {
+    const revision = capture("git", ["rev-parse", "HEAD"])?.trim() || "unknown";
+    const dirty = capture("git", ["status", "--porcelain"])?.trim();
+    buildEnv.HOMERUN_CORE_BUILD_ID = revision + (dirty ? "-dirty" : "");
+  }
   run(
     "cargo",
     ["build", ...profileArgs, ...engineArgs, "--target", target.triple],
@@ -163,9 +177,7 @@ if (target.kind === "ndk") {
     // link with undefined symbols and no mention of a deployment target
     // anywhere. Must match ios/project.yml, or the app links C built against
     // a different floor than the Swift beside it.
-    target.deploymentTarget
-      ? { env: { ...process.env, IPHONEOS_DEPLOYMENT_TARGET: target.deploymentTarget } }
-      : {}
+    { env: buildEnv }
   );
 }
 

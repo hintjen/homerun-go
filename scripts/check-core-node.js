@@ -42,6 +42,11 @@ if (!fs.existsSync(addon)) {
 
 // eslint-disable-next-line import/no-dynamic-require
 const core = require(addon);
+if (core.coreAbiVersion?.() !== 1 ||
+    !/^\d+\.\d+\.\d+/.test(core.coreVersion?.() || "") ||
+    !core.coreBuildId?.()) {
+  throw new Error("The addon must identify its ABI, version and source build.");
+}
 
 /** The exact console output each engine produces, not a paraphrase of it. */
 const PUMPKIN_READY =

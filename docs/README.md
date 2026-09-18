@@ -12,10 +12,20 @@ change falls on.
 
 ## Documentation Index
 
+### [Multi-game continuation handoff](./multi-game-engine-handoff.md)
+
+Remote branches, completed engine work, Windows validation, and remaining
+desktop integration and real-game onboarding work.
+
 ### [The desktop game runner](./game-runner.md)
 
 The standalone CLI and Electron's NDJSON supervisor: ownership, cancellation,
 readiness, protocol events, fixture tests and the limits of probe evidence.
+
+### [Desktop engine artifacts](./desktop-game-artifacts.md)
+
+Windows runner and Node addon builds, signing order, immutable download paths,
+manifest fields and the release workflow integration still needed in Homerun.
 
 ### 🔨 [Building](./building.md)
 

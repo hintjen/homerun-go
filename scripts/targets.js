@@ -210,6 +210,16 @@ const TARGETS = {
     outDir: path.join(ROOT, "dist", "desktop"),
     requiresWindows: true,
   },
+  "game-runner": {
+    label: "Descriptor game runner, Windows x64 (Homerun Desktop)",
+    kind: "cargo",
+    crate: path.join(ROOT, "rust", "homerun-game-cli"),
+    triple: "x86_64-pc-windows-msvc",
+    requiresWindows: true,
+    staticCrt: true,
+    artifact: "homerun-game.exe",
+    outDir: path.join(ROOT, "dist", "desktop"),
+  },
   host: {
     label: "this machine (tests only)",
     kind: "host",

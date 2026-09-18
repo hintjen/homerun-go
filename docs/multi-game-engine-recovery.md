@@ -1,7 +1,8 @@
 # Multi-game engine session recovery
 
-> Historical checkpoint. The same branch now continues implementation; read
-> `docs/game-runner.md` for its current behavior and validation limits.
+> Historical checkpoint, describing recovery commit `5aa9490`, not the current
+> implementation. Read [the continuation handoff](./multi-game-engine-handoff.md)
+> and [runner documentation](./game-runner.md) for current behavior and limits.
 
 ## Overview
 
