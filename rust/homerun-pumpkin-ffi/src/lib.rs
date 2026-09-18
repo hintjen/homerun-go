@@ -66,6 +66,17 @@ pub mod pumpkin_engine;
 #[cfg(feature = "pumpkin-engine")]
 pub mod pumpkin_settings;
 
+/// How the linked engine is handed work from a thread that may already be
+/// inside a runtime.
+///
+/// Compiled in test builds whatever the features say, because the rule it
+/// encodes is the one that shipped broken and the crate's own tests are the
+/// only place it can be exercised without a device: `pumpkin-engine` needs the
+/// real server, and the suite deliberately runs without it. `tokio` is a
+/// dev-dependency for exactly this.
+#[cfg(any(all(feature = "pumpkin-engine", unix), test))]
+mod runtime_dispatch;
+
 pub mod server;
 pub mod state;
 
@@ -256,13 +267,30 @@ fn out(s: String) -> *mut c_char {
 
 /// Run `f`, converting a panic into a JSON error rather than unwinding into
 /// Swift/Kotlin (which would be undefined behaviour).
+///
+/// The error a panic produces is **read by a player**: it comes back over the
+/// bridge and the UI shows it. So the panic's own text does not go there. It
+/// used to, and a Tokio panic reached someone's phone as
+/// "Cannot start a runtime from within a runtime. This happens because a
+/// function (like `block_on`) attempted to block the current thread…", which
+/// tells a player nothing and reads like the app is broken beyond use.
+///
+/// Nothing is lost by keeping it back: [`crash`]'s hook has already written
+/// the payload, the location and a backtrace to the crash directory, and
+/// `errors::drain` sends that on the next launch. It is logged here too, so a
+/// device websocket session or logcat shows it without waiting for a drain.
 fn guarded<F: FnOnce() -> String>(f: F) -> *mut c_char {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(json) => out(json),
         Err(_) => {
             let detail =
                 crash::take_last_panic().unwrap_or_else(|| "internal server panic".to_string());
-            out(json!({ "ok": false, "error": detail }).to_string())
+            log::error!("a panic was caught at the C ABI: {detail}");
+            out(json!({
+                "ok": false,
+                "error": "Something went wrong inside Homerun Go and that could not be finished. It has been reported.",
+            })
+            .to_string())
         }
     }
 }

@@ -144,6 +144,22 @@ error passes through `react-dom`, every Android death through `RuntimeInit`.
 The marker list spans JavaScript, the JVM, Apple, Rust and the Android natives.
 If dropping leaves nothing, the top frame is kept and allowed to be noisy.
 
+There is a second, stricter category: a frame that identifies **nothing at
+all**, which is dropped before that rescue rather than after it. It exists
+because of iOS. The staticlib is built with `strip = true`, so the app carries
+no symbol table for any Rust code and `dladdr` answers every frame with
+`__mh_execute_header`, the Mach-O image base. What survives is whatever happens
+to be exported — in practice `___isPlatformVersionAtLeast`, a compiler-rt
+availability check sitting in the same place in every backtrace on the platform
+*because* nothing around it resolved.
+
+So every native panic iOS reports arrives with a byte-identical stack, and the
+"keep the top frame" rescue is worse than useless here: it would preserve a
+frame that is the same for every bug. `identifies_nothing` drops all of them,
+the stack ends up empty, and the signature falls through to location plus
+message — which does discriminate, because the panic hook writes
+`(at file:line)` and `Occurrence::location` now carries it.
+
 The JVM also **wraps**: an exception from a broadcast receiver arrives as a
 `RuntimeException` whose own frames are all framework, with the real fault
 under `Caused by:`. The **last** `Caused by:` is what gets fingerprinted.
@@ -164,6 +180,24 @@ under `Caused by:`. The **last** `Caused by:` is what gets fingerprinted.
   and taking a basename of one would leave the literal `[id]`.
 - **Native offsets.** A tombstone frame's `+164` moves whenever the library is
   recompiled, so it is stripped.
+- **A stripped iOS image put every Rust panic in one group.** All frames
+  resolve to the image base, so the signature was the same string for every
+  one. Found the only way it could be: a Tokio panic from the dashboard's
+  console arrived under a fingerprint that already had unrelated reports in it.
+  Two fixes, both tested — the useless frames are dropped, and the panic's
+  `(at file:line)` is lifted into `location` instead of sitting in the message
+  as prose.
+
+> **Still open: a native panic's backtrace is unreadable.** Grouping works
+> again, but nobody can read *where* an iOS panic came from beyond the one
+> `file:line` the hook records. The frames are gone, not merely unsymbolicated
+> in the report — the symbol table is not in the binary, so there is nothing to
+> resolve against after the fact either. Fixing it properly means capturing
+> frame addresses plus the image base and symbolicating offline against the
+> dSYM, which needs a dependency this crate does not have and a step the
+> dashboard does not do. Flipping `strip` alone does not do it: Xcode strips
+> the app binary again on the way out. Until then, `location` is the whole
+> answer, which is why it is worth keeping accurate.
 
 ## Volume, and the four loops that had to be cut
 
