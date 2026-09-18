@@ -1,0 +1,45 @@
+[package]
+name = "homerun-game-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+description = "The runner: the headless CLI for descriptor-driven game servers, and the supervisor process Homerun Desktop speaks to"
+
+# The binary is `homerun-game`, not `homerun-game-cli`. A person types this,
+# and the crate name carries the `-cli` only because a crate cannot be named
+# the same as a sibling it might one day sit beside.
+[[bin]]
+name = "homerun-game"
+path = "src/main.rs"
+
+[dependencies]
+# **Deliberately no `pumpkin-engine`.** Keeping this crate out of Pumpkin's
+# crate graph is a hard requirement, not a preference: the publish workflow's
+# floor is LTO re-linking our own crates, a warm run is about half an hour,
+# and a third artifact that pulled in the engine would add another engine
+# build to every release. It also has no use for one -- a descriptor-driven
+# game is a child process, and the engine Pumpkin links is for the platform
+# that cannot spawn one.
+#
+# `game-engine` implies `process-engine`, which is everything this needs.
+homerun-supervisor = { package = "homerun-supervisor", path = "../homerun-supervisor", features = [
+    "game-engine",
+] }
+homerun-core = { path = "../homerun-core" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ctrlc = "3.4"
+
+# Cargo only honours a profile at a workspace root and there is no workspace
+# here on purpose, so every crate restates its own. See homerun-core's
+# Cargo.toml for the argument.
+[profile.release]
+# Not `z`. This one is a developer's tool and a player's supervisor rather
+# than something squeezed onto a phone, and the two things it does that take
+# any time -- hashing a nine-gigabyte download and unpacking it -- are hot
+# loops where `z` costs real minutes.
+opt-level = 3
+lto = true
+strip = true

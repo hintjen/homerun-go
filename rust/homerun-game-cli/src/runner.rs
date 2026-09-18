@@ -1,0 +1,619 @@
+//! A single owned server; stdin remains responsive while fetching or running.
+use crate::{
+    prepare::{self, fail, Result},
+    protocol::{codes, Command, Event, Player, ServerStatus, PROTOCOL},
+};
+use homerun_core::engine::{self, descriptor::PlayersVia};
+use homerun_supervisor::{
+    engine::{Engine, RunOutcome, RunRequest, StopSignal},
+    fetcher, platform,
+    process_engine::ProcessEngine,
+    rcon,
+};
+use std::{
+    collections::VecDeque,
+    io::{BufRead, Write},
+    process::{Child, Command as Process, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+#[derive(Clone)]
+pub struct Output(Arc<dyn Fn(Event) + Send + Sync>);
+impl Output {
+    pub fn new(f: impl Fn(Event) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+    pub fn send(&self, event: Event) {
+        (self.0)(event)
+    }
+    pub fn error(&self, id: Option<&str>, failure: prepare::Failure) {
+        self.send(Event::Error {
+            server_id: id.map(str::to_owned),
+            code: failure.0.into(),
+            message: failure.1,
+        });
+    }
+}
+
+struct Live {
+    state: String,
+    engine: Option<Arc<ProcessEngine>>,
+    console: Option<rcon::Target>,
+}
+struct Job {
+    id: String,
+    stop: StopSignal,
+    live: Arc<Mutex<Live>>,
+    task: JoinHandle<()>,
+}
+pub struct Runner {
+    out: Output,
+    job: Option<Job>,
+    tunnel: Option<(String, Child)>,
+    console_tasks: Vec<JoinHandle<()>>,
+    build: String,
+}
+
+impl Runner {
+    pub fn new(out: Output) -> std::result::Result<Self, String> {
+        let exe = std::env::current_exe()
+            .map_err(|_| "The runner cannot identify its build.".to_string())?;
+        let digest = fetcher::digest_of(&exe)?;
+        Ok(Self {
+            out,
+            job: None,
+            tunnel: None,
+            console_tasks: vec![],
+            build: digest[..12].into(),
+        })
+    }
+    pub fn ready(&self) {
+        self.out.send(Event::Ready {
+            protocol: PROTOCOL,
+            version: env!("CARGO_PKG_VERSION").into(),
+            build: self.build.clone(),
+        });
+    }
+    pub fn idle(&self) -> bool {
+        self.job.as_ref().is_none_or(|j| j.task.is_finished())
+    }
+    pub fn tick(&mut self) {
+        self.console_tasks.retain(|t| !t.is_finished());
+        if self.idle() {
+            self.stop_tunnel();
+        }
+        if let Some((id, child)) = &mut self.tunnel {
+            if child.try_wait().ok().flatten().is_some() {
+                self.out.send(Event::TunnelFailed {
+                    server_id: id.clone(),
+                    message: "The connection to the gateway stopped.".into(),
+                });
+                self.tunnel = None;
+            }
+        }
+    }
+    fn stop_tunnel(&mut self) {
+        if let Some((_, mut child)) = self.tunnel.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+    pub fn shutdown(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.stop.request_stop();
+            let _ = job.task.join();
+        }
+        self.stop_tunnel();
+        for task in self.console_tasks.drain(..) {
+            let _ = task.join();
+        }
+        self.out.send(Event::ShutdownComplete);
+    }
+    pub fn command(&mut self, command: Command) -> bool {
+        self.tick();
+        match command {
+            Command::Hello { protocol } => {
+                if protocol == PROTOCOL {
+                    self.ready();
+                } else {
+                    eprintln!("Unsupported runner protocol {protocol}; expected {PROTOCOL}.");
+                    return false;
+                }
+            }
+            Command::Unknown => eprintln!("Ignoring a command this runner does not recognize."),
+            Command::Shutdown => return false,
+            Command::Status => self.out.send(Event::Status {
+                servers: self
+                    .job
+                    .iter()
+                    .map(|j| ServerStatus {
+                        server_id: j.id.clone(),
+                        state: j.live.lock().unwrap().state.clone(),
+                    })
+                    .collect(),
+            }),
+            Command::Stop { server_id } => {
+                if let Some(job) = self
+                    .job
+                    .as_ref()
+                    .filter(|j| j.id == server_id && !j.task.is_finished())
+                {
+                    job.live.lock().unwrap().state = "stopping".into();
+                    job.stop.request_stop();
+                } else {
+                    self.out.send(Event::ServerStopped {
+                        server_id,
+                        code: None,
+                    });
+                }
+            }
+            Command::Console {
+                server_id,
+                command,
+                req_id,
+            } => {
+                let live = self
+                    .job
+                    .as_ref()
+                    .filter(|j| j.id == server_id && !j.task.is_finished())
+                    .map(|j| j.live.clone());
+                if let Some(live) = live {
+                    if self.console_tasks.len() >= 8 {
+                        self.out.send(Event::ConsoleResponse {
+                            server_id,
+                            req_id,
+                            response: "The server is still answering earlier console commands."
+                                .into(),
+                        });
+                    } else {
+                        let out = self.out.clone();
+                        self.console_tasks.push(thread::spawn(move || {
+                            let (engine, target) = {
+                                let l = live.lock().unwrap();
+                                (l.engine.clone(), l.console.clone())
+                            };
+                            let result = match (engine, target) {
+                                (Some(_), Some(target)) => rcon::command(&target, &command),
+                                (Some(engine), None) => {
+                                    engine.command(&command).map(|_| String::new())
+                                }
+                                _ => Err("The server is not accepting commands yet.".into()),
+                            };
+                            // The v1 error event has no reqId. Complete the request even
+                            // on refusal so a desktop promise is never stranded.
+                            let response = result.unwrap_or_else(|e| e);
+                            out.send(Event::ConsoleResponse {
+                                server_id,
+                                req_id,
+                                response,
+                            });
+                        }));
+                    }
+                } else {
+                    self.out.send(Event::ConsoleResponse {
+                        server_id,
+                        req_id,
+                        response: "The server is not running.".into(),
+                    });
+                }
+            }
+            Command::StartTunnel {
+                server_id,
+                bin_path,
+                conf_path,
+            } => {
+                let running = self.job.as_ref().is_some_and(|j| {
+                    j.id == server_id && j.live.lock().unwrap().state == "running"
+                });
+                if !running || self.tunnel.is_some() {
+                    self.out.send(Event::TunnelFailed { server_id, message: "Start the server before opening its gateway connection, and open only one connection.".into() });
+                } else {
+                    match Process::new(bin_path)
+                        .args(["-c", &conf_path])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                    {
+                        Ok(child) => {
+                            self.tunnel = Some((server_id.clone(), child));
+                            self.out.send(Event::TunnelStarted { server_id });
+                        }
+                        Err(_) => self.out.send(Event::TunnelFailed {
+                            server_id,
+                            message: "The gateway connection could not be started.".into(),
+                        }),
+                    }
+                }
+            }
+            command @ (Command::Fetch { .. } | Command::Start { .. }) => self.begin(command),
+        }
+        true
+    }
+    fn begin(&mut self, command: Command) {
+        let (id, value, accepted) = match &command {
+            Command::Fetch {
+                server_id,
+                descriptor,
+                licence_accepted,
+                ..
+            }
+            | Command::Start {
+                server_id,
+                descriptor,
+                licence_accepted,
+                ..
+            } => (server_id.clone(), descriptor.clone(), *licence_accepted),
+            _ => unreachable!(),
+        };
+        let d = match prepare::descriptor(value, accepted) {
+            Ok(d) => d,
+            Err(e) => {
+                self.out.error(Some(&id), e);
+                return;
+            }
+        };
+        if !self.idle() {
+            self.out.error(
+                Some(&id),
+                fail(
+                    codes::BUSY,
+                    "This runner is already fetching or running a server.",
+                ),
+            );
+            return;
+        }
+        if let Some(old) = self.job.take() {
+            let _ = old.task.join();
+        }
+        let stop = StopSignal::default();
+        let live = Arc::new(Mutex::new(Live {
+            state: "starting".into(),
+            engine: None,
+            console: None,
+        }));
+        let (s, l, out, server_id) = (stop.clone(), live.clone(), self.out.clone(), id.clone());
+        let task = thread::Builder::new()
+            .name("game-lifecycle".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let result = run(command, &d, &s, &l, &out);
+                if let Err(e) = result {
+                    if s.should_stop() {
+                        l.lock().unwrap().state = "stopped".into();
+                        out.send(Event::ServerStopped {
+                            server_id: server_id.clone(),
+                            code: None,
+                        });
+                    } else {
+                        out.error(Some(&server_id), e);
+                        l.lock().unwrap().state = "crashed".into();
+                    }
+                }
+                l.lock().unwrap().engine = None;
+            });
+        match task {
+            Ok(task) => {
+                self.job = Some(Job {
+                    id,
+                    stop,
+                    live,
+                    task,
+                })
+            }
+            Err(_) => self.out.error(
+                Some(&id),
+                fail(
+                    codes::SPAWN_FAILED,
+                    "This computer could not start a server worker.",
+                ),
+            ),
+        }
+    }
+}
+
+fn run(
+    command: Command,
+    d: &engine::GameDescriptor,
+    stop: &StopSignal,
+    live: &Arc<Mutex<Live>>,
+    out: &Output,
+) -> Result<()> {
+    let (id, root) = match &command {
+        Command::Fetch {
+            server_id,
+            runtime_root,
+            ..
+        }
+        | Command::Start {
+            server_id,
+            runtime_root,
+            ..
+        } => (server_id.clone(), prepare::absolute(runtime_root)?),
+        _ => unreachable!(),
+    };
+    let runtime = prepare::fetch(d, &root, &id, out, stop)?;
+    let Command::Start {
+        server_dir,
+        server_name,
+        settings,
+        secrets,
+        bind_address,
+        ..
+    } = command
+    else {
+        live.lock().unwrap().state = "stopped".into();
+        return Ok(());
+    };
+    if stop.should_stop() {
+        live.lock().unwrap().state = "stopped".into();
+        out.send(Event::ServerStopped {
+            server_id: id,
+            code: None,
+        });
+        return Ok(());
+    }
+    let p = prepare::launch(
+        d,
+        &runtime,
+        &prepare::absolute(&server_dir)?,
+        &server_name,
+        &settings,
+        &secrets,
+        bind_address.as_deref(),
+    )?;
+    let engine = Arc::new(p.engine);
+    {
+        let mut l = live.lock().unwrap();
+        l.engine = Some(engine.clone());
+        l.console = p.console.clone();
+    }
+    let ready = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicBool::new(false));
+    let tail = Mutex::new(VecDeque::new());
+    let monitor = {
+        let (ready, done, timed_out, started) = (
+            ready.clone(),
+            done.clone(),
+            timed_out.clone(),
+            started.clone(),
+        );
+        let (engine, stop, out, id, live, d) = (
+            engine.clone(),
+            stop.clone(),
+            out.clone(),
+            id.clone(),
+            live.clone(),
+            d.clone(),
+        );
+        thread::spawn(move || {
+            let begin = Instant::now();
+            let mut sampled = Instant::now();
+            while !done.load(Ordering::SeqCst) {
+                if !stop.should_stop()
+                    && ready.load(Ordering::SeqCst)
+                    && !started.load(Ordering::SeqCst)
+                {
+                    let observed = engine
+                        .pid()
+                        .map(platform::listening_ports)
+                        .unwrap_or_default();
+                    if d.ports.iter().all(|p| {
+                        observed
+                            .iter()
+                            .any(|o| o.port == p.port && o.protocol == p.proto)
+                    }) {
+                        // Serialize stop/readiness transitions: a late marker must
+                        // not move a cancelled launch back to running.
+                        let mut l = live.lock().unwrap();
+                        if !stop.should_stop() && !done.load(Ordering::SeqCst) {
+                            out.send(Event::ServerPorts {
+                                server_id: id.clone(),
+                                ports: p.ports.clone(),
+                            });
+                            l.state = "running".into();
+                            started.store(true, Ordering::SeqCst);
+                            out.send(Event::ServerStarted {
+                                server_id: id.clone(),
+                            });
+                        }
+                    }
+                }
+                if !started.load(Ordering::SeqCst)
+                    && !stop.should_stop()
+                    && begin.elapsed()
+                        >= Duration::from_millis(engine::control::ready_timeout_ms(&d))
+                {
+                    timed_out.store(true, Ordering::SeqCst);
+                    out.error(
+                        Some(&id),
+                        fail(
+                            codes::READY_TIMEOUT,
+                            "The game did not become ready on its declared ports in time.",
+                        ),
+                    );
+                    stop.request_stop();
+                }
+                if started.load(Ordering::SeqCst)
+                    && !stop.should_stop()
+                    && sampled.elapsed() >= Duration::from_secs(2)
+                {
+                    if let Some((rss_kb, cpu_seconds)) = engine.usage() {
+                        out.send(Event::Stats {
+                            server_id: id.clone(),
+                            rss_kb,
+                            cpu_seconds,
+                        });
+                    }
+                    if matches!(d.observe.players, PlayersVia::LogRegex) {
+                        if let Some((players, max)) = engine.players() {
+                            out.send(Event::Players {
+                                server_id: id.clone(),
+                                count: players.len() as u32,
+                                max,
+                                players: vec![],
+                            });
+                        }
+                    } else if matches!(d.observe.players, PlayersVia::Rcon) {
+                        if let (Some(target), Some(command)) =
+                            (&p.console, &d.observe.players_command)
+                        {
+                            if let Ok(reply) =
+                                rcon::command_with_timeout(target, command, Duration::from_secs(2))
+                            {
+                                if let Some(players) = player_list(&reply) {
+                                    out.send(Event::Players {
+                                        server_id: id.clone(),
+                                        count: players.len() as u32,
+                                        max: None,
+                                        players,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    sampled = Instant::now();
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+    let outcome = engine.run_streamed(
+        &RunRequest {
+            server_id: id.clone(),
+            data_dir: p.cwd.to_string_lossy().into(),
+            java_port: 0,
+            settings: None,
+        },
+        stop.clone(),
+        &|line, stream| {
+            let mut lines = tail.lock().unwrap();
+            // Do not publish secrets a vendor echoes with its launch arguments.
+            let mut line = line;
+            for secret in secrets.values().filter(|s| !s.is_empty()) {
+                line = line.replace(secret, "[redacted]");
+            }
+            if lines.len() == 100 {
+                lines.pop_front();
+            }
+            lines.push_back(line.clone());
+            out.send(Event::ServerLog {
+                server_id: id.clone(),
+                line,
+                stream: stream.into(),
+            });
+        },
+        &|| ready.store(true, Ordering::SeqCst),
+    );
+    done.store(true, Ordering::SeqCst);
+    let _ = monitor.join();
+    let requested = stop.should_stop() && !timed_out.load(Ordering::SeqCst);
+    if requested || (started.load(Ordering::SeqCst) && matches!(outcome, RunOutcome::Stopped)) {
+        live.lock().unwrap().state = "stopped".into();
+        out.send(Event::ServerStopped {
+            server_id: id,
+            code: None,
+        });
+    } else {
+        live.lock().unwrap().state = "crashed".into();
+        if !ready.load(Ordering::SeqCst) && !timed_out.load(Ordering::SeqCst) {
+            out.error(
+                Some(&id),
+                fail(
+                    codes::SPAWN_FAILED,
+                    "The game exited before it became ready. Check its last console lines.",
+                ),
+            );
+        }
+        out.send(Event::ServerCrashed {
+            server_id: id,
+            code: None,
+            tail: tail.into_inner().unwrap().into_iter().collect(),
+        });
+    }
+    Ok(())
+}
+
+/// Only report a roster when the reply has an explicit supported shape.
+/// No UUID fabrication; unknown vendor formats remain unknown.
+fn player_list(reply: &str) -> Option<Vec<Player>> {
+    let values: Vec<serde_json::Value> = serde_json::from_str(reply).ok()?;
+    values
+        .iter()
+        .map(|v| {
+            Some(Player {
+                name: v
+                    .get("DisplayName")
+                    .or_else(|| v.get("name"))?
+                    .as_str()?
+                    .into(),
+                platform_id: v
+                    .get("SteamID")
+                    .or_else(|| v.get("platformId"))
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .or_else(|| v.as_u64().map(|n| n.to_string()))
+                    }),
+                platform: v.get("SteamID").map(|_| "steam".into()).or_else(|| {
+                    v.get("platform")
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                }),
+            })
+        })
+        .collect()
+}
+
+pub fn supervise() -> std::result::Result<(), String> {
+    let output = Arc::new(Mutex::new(std::io::stdout()));
+    let out = Output::new(move |event| {
+        let mut w = output.lock().unwrap();
+        let _ = w.write_all(event.line().as_bytes());
+        let _ = w.flush();
+    });
+    let mut runner = Runner::new(out)?;
+    let (tx, rx) = mpsc::sync_channel(32);
+    thread::spawn(move || {
+        let mut input = std::io::stdin().lock();
+        loop {
+            let mut line = Vec::new();
+            // A bounded line prevents a broken host exhausting the runner.
+            match std::io::Read::take(&mut input, 1024 * 1024 + 1).read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if line.len() > 1024 * 1024 => {
+                    eprintln!("Runner command exceeds one MiB.");
+                    break;
+                }
+                Ok(_) => match serde_json::from_slice::<Command>(&line) {
+                    Ok(command) => {
+                        if tx.send(command).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => eprintln!("Ignoring a malformed runner command."),
+                },
+            }
+        }
+    });
+    runner.ready();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(command) => {
+                if !runner.command(command) {
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => runner.tick(),
+        }
+    }
+    runner.shutdown();
+    Ok(())
+}

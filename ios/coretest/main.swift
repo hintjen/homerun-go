@@ -21,7 +21,7 @@
 //         ios/HomerunHost/HostLog.swift ios/HomerunHost/DeviceMetrics.swift \
 //         ios/HomerunHost/ServerBackendError.swift ios/HomerunHost/LaunchOrder.swift \
 //         ios/coretest/main.swift \
-//         rust/homerun-pumpkin-ffi/target/release/libhomerun_pumpkin_ffi.a \
+//         rust/homerun-supervisor/target/release/libhomerun_pumpkin_ffi.a \
 //         -o /tmp/coretest && /tmp/coretest
 //
 // Deliberately short. Everything on that list is a leaf — decisions, an error

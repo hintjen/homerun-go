@@ -4,7 +4,7 @@ How `native-server-*` becomes a real server running inside the app.
 
 Source: `android/.../ServerHost.kt`, `JavaServerBackend.kt`, `JavaRuntime.kt`,
 `PumpkinBackend.kt`, `NativeServer.kt`, and
-`rust/homerun-pumpkin-ffi/src/jni_bridge.rs`.
+`rust/homerun-supervisor/src/jni_bridge.rs`.
 
 ## Overview
 
@@ -611,7 +611,7 @@ the other:
 
 Two ways a composed invocation is used, and they are not interchangeable:
 
-- **A server** goes to the supervisor in `homerun-pumpkin-ffi` as JSON. It owns
+- **A server** goes to `homerun-supervisor` as JSON. It owns
   the console, the stop ladder and what an exit meant — the same state machine
   that runs the linked engine on iOS.
 - **Everything else** goes to `JavaProcess.run`, which executes it to

@@ -132,7 +132,7 @@ const crate = target.crate || CRATE;
   them apart in `<crate>/target`. A single shared CARGO_TARGET_DIR is what
   collapses them into one, and that collapse is not cosmetic.
 
-  `homerun-pumpkin-ffi` is crate-type = ["staticlib", "cdylib", "rlib"], and
+  `homerun-supervisor` is crate-type = ["staticlib", "cdylib", "rlib"], and
   `homerun-pumpkin-bin` depends on it with features = ["pumpkin-engine"]. So
   building the binary also builds that cdylib, with different features, into
   the same `<triple>/<profile>/libhomerun_pumpkin_ffi.so` the `android` target
@@ -177,9 +177,11 @@ const cargoEnv = { ...process.env, CARGO_TARGET_DIR: targetRoot };
   this is a full one, LTO link included.
 */
 if (target.staticCrt) {
-  cargoEnv.RUSTFLAGS = [process.env.RUSTFLAGS, "-C target-feature=+crt-static"]
-    .filter(Boolean)
-    .join(" ");
+  if (cargoEnv.CARGO_ENCODED_RUSTFLAGS !== undefined) {
+    cargoEnv.CARGO_ENCODED_RUSTFLAGS = [cargoEnv.CARGO_ENCODED_RUSTFLAGS, "-C", "target-feature=+crt-static"].filter(Boolean).join("\x1f");
+  } else {
+    cargoEnv.RUSTFLAGS = `${cargoEnv.RUSTFLAGS || ""} -C target-feature=+crt-static`.trim();
+  }
 }
 
 // --- build ----------------------------------------------------------------
@@ -220,6 +222,13 @@ if (target.kind === "ndk") {
     ...engineArgs,
   ], { env: cargoEnv });
 } else {
+  const buildEnv = { ...cargoEnv };
+  if (target.deploymentTarget) buildEnv.IPHONEOS_DEPLOYMENT_TARGET = target.deploymentTarget;
+  if (name === "core-node" && !buildEnv.HOMERUN_CORE_BUILD_ID) {
+    const revision = capture("git", ["rev-parse", "HEAD"])?.trim() || "unknown";
+    const dirty = capture("git", ["status", "--porcelain"])?.trim();
+    buildEnv.HOMERUN_CORE_BUILD_ID = revision + (dirty ? "-dirty" : "");
+  }
   run(
     "cargo",
     ["build", ...profileArgs, ...engineArgs, "--target", target.triple],
@@ -229,9 +238,7 @@ if (target.kind === "ndk") {
     // link with undefined symbols and no mention of a deployment target
     // anywhere. Must match ios/project.yml, or the app links C built against
     // a different floor than the Swift beside it.
-    target.deploymentTarget
-      ? { env: { ...cargoEnv, IPHONEOS_DEPLOYMENT_TARGET: target.deploymentTarget } }
-      : { env: cargoEnv }
+    { env: buildEnv }
   );
 }
 

@@ -79,7 +79,7 @@ threshold someone will want to tune after launch may belong in the UI even
 when the core could hold it — decide that deliberately rather than by habit.
 See `docs/ota-bundles.md`.
 
-`homerun-pumpkin-ffi` is the other half: the **supervisor**. It owns the
+`homerun-supervisor` is the other half: the **supervisor**. It owns the
 running server — the state machine, the console buffer, the stop ladder, the
 crash capture, the sampling — for a linked engine and a child process alike.
 Hosts wire it up; they do not reimplement it. `docs/shared-core.md` and

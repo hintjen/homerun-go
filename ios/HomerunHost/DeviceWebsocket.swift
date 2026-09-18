@@ -100,7 +100,7 @@ final class DeviceWebsocket {
         // a first launch logged the registrar's "no credentials" and then
         // nothing at all from here, which reads identically to a link that
         // was attempted and failed. Silence is the failure mode this whole
-        // subsystem is worst at — see `homerun-pumpkin-ffi`'s `host_log`.
+        // subsystem is worst at — see `homerun-supervisor`'s `host_log`.
         guard let apiURL = HostStore.apiURL, !apiURL.isEmpty else {
             HostLog.device.info("no API URL yet — not linking")
             return

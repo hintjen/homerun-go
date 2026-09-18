@@ -1,12 +1,34 @@
 [package]
-name = "homerun-pumpkin-ffi"
+name = "homerun-supervisor"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-only"
 publish = false
-description = "C ABI around the Pumpkin server for the Homerun iOS and Android hosts"
+description = "The supervisor: owns a running server — state machine, console, stop ladder, crash capture, sampling — for a linked engine and a child process alike, behind a C ABI"
 
 [lib]
+# The **package** is `homerun-supervisor`; this lib target deliberately is not.
+#
+# The file name is load-bearing in three places that this rename must not
+# touch, because none of them is rebuilt from this manifest:
+#
+#   - Android calls `System.loadLibrary("homerun_pumpkin_ffi")` and the APK
+#     packages `libhomerun_pumpkin_ffi.so` by that name
+#   - iOS links `-lhomerun_pumpkin_ffi` against `libhomerun_pumpkin_ffi.a`
+#   - a crash backtrace off a device names frames
+#     `homerun_pumpkin_ffi::…` inside `libhomerun_pumpkin_ffi.so`, which is
+#     what `homerun-core::reporting::app_error::fingerprint` groups on — so
+#     moving it would split every existing report's fingerprint in two
+#
+# `[lib] name` is what decides all three, so it stays put and the rename stops
+# at the package. Moving the artifact is a separate, separately-verified
+# change (it needs the Android and iOS builds, not just this crate's suite) —
+# or never; the name costs nothing where it is.
+#
+# Dependents do not inherit the old spelling: each renames this back to
+# `homerun_supervisor` with an explicit `package =` key, so Rust source says
+# the name the package has. See `rust/homerun-pumpkin-bin/Cargo.toml`.
+name = "homerun_pumpkin_ffi"
 # staticlib -> iOS links libhomerun_pumpkin_ffi.a
 # cdylib    -> Android loads libhomerun_pumpkin_ffi.so
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -38,6 +60,27 @@ backup-engine = ["dep:rustic_core", "dep:rustic_backend", "dep:jiff"]
 # enables it, because its tests are the only coverage process supervision has
 # ever had and they need no device.
 process-engine = ["dep:libc"]
+
+# Everything a *descriptor-driven* game needs that `homerun-core::engine`
+# deliberately cannot do: fetch a runtime, verify and unpack it, drive
+# steamcmd, and speak RCON to a server that has no stdin worth talking to.
+#
+# Off by default like the rest, and for the same reason: it is the second
+# heaviest thing here after `device-ws` -- an HTTP client, a zip reader and a
+# websocket -- and the fast suite is what makes this crate testable on any
+# machine in seconds. `npm run test:rust` turns it on, because its tests are
+# the only coverage the fetcher and the console transports have.
+#
+# Implies `process-engine`: a descriptor-driven game is a child process, so
+# there is nothing here without one.
+game-engine = [
+    "process-engine",
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:tungstenite",
+    "dep:sha2",
+    "dep:zip",
+]
 
 # Serves `wss://<device-fqdn>` so the dashboard can reach this device's console
 # and RCON directly. Off by default and by some distance the heaviest feature
@@ -106,9 +149,16 @@ futures-util = { version = "0.3", default-features = false, features = [
 ], optional = true }
 # rustls rather than the platform's TLS: one behaviour on both platforms,
 # no OpenSSL to cross-compile, and D3 needs rustls anyway to terminate TLS.
+# `blocking` is for the fetcher, which is not an async program and should not
+# become one: it runs inside the supervisor's own thread, its progress is
+# reported by callback, and the only thing it waits on is one socket. reqwest
+# stands up a small runtime for the blocking client itself, which is a cost
+# paid once per download rather than a runtime this crate has to own.
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
+    "blocking",
+    "stream",
 ], optional = true }
 jsonwebtoken = { version = "9", default-features = false, optional = true }
 # Terminating TLS ourselves, because the gateway is SNI passthrough — see
@@ -144,6 +194,35 @@ bytes = { version = "1", optional = true }
 # copies and the types would not be the same type.
 uuid = { version = "1.24", optional = true }
 time = { version = "0.3", optional = true }
+
+# The console transports for descriptor-driven games. **Synchronous on
+# purpose**: `tungstenite` rather than the `tokio-tungstenite` already here
+# behind `device-ws`, because a console command is one request and one reply on
+# loopback, and routing it through an async runtime would mean this crate owns
+# a runtime in a build that otherwise needs none. Same version family as the
+# async one, so there is one websocket implementation in the tree.
+#
+# No TLS feature: WebSocket RCON is plain `ws://` to a port on this machine
+# that is bound to loopback and never published. A `wss://` here would mean the
+# console had left the machine, which is what the device websocket is for.
+# `handshake` is the client half; without it this is only a frame codec.
+tungstenite = { version = "0.24", default-features = false, features = [
+    "handshake",
+], optional = true }
+
+# Verifying a download. Hand-rolling it would be the same mistake `bundle.rs`
+# argues against for signatures: this is the only thing standing between a
+# vendor's CDN and an executable we hand to a player. Already in the tree
+# through `ed25519-dalek`, so it adds nothing that was not compiled anyway.
+sha2 = { version = "0.10", optional = true }
+
+# Unpacking a runtime. `default-features = false` plus `deflate` keeps out
+# bzip2, zstd and the AES stack -- a game server archive is deflate, and each
+# of those is a decompressor that would be reachable from a vendor's bytes for
+# no reason.
+zip = { version = "2", default-features = false, features = [
+    "deflate",
+], optional = true }
 
 serde_json = "1"
 # Derive, for the one struct worth deriving: `EngineSettings` has fifteen

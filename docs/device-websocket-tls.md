@@ -57,7 +57,7 @@ the core so Kotlin and Swift cannot disagree:
 `gateway_tunnel_config` renders the one forward, byte-exact against the
 desktop's.
 
-## The socket — `rust/homerun-pumpkin-ffi/src/device_ws/mod.rs`
+## The socket — `rust/homerun-supervisor/src/device_ws/mod.rs`
 
 `Config.gateway_tls` (`gatewayTls` in the JSON a host passes) switches the
 supervisor's socket:
@@ -111,9 +111,9 @@ export changed either — `gatewayTls` is a field in a JSON argument — so
 | File | Role |
 |---|---|
 | `rust/homerun-core/src/device_ws/mod.rs` | `TlsMode`, `link_up_request`, `needs_certificate`, `LISTEN_WS`, `gateway_tunnel_config` |
-| `rust/homerun-pumpkin-ffi/src/core_dispatch.rs` | `deviceWs.linkUpRequest`; `deviceWs.tunnelConfig` choosing a shape by target |
-| `rust/homerun-pumpkin-ffi/src/device_ws/mod.rs` | `Config.gateway_tls`: no order, no misconfiguration report |
-| `rust/homerun-pumpkin-ffi/src/lib.rs` | reads `gatewayTls` off the host's JSON |
+| `rust/homerun-supervisor/src/core_dispatch.rs` | `deviceWs.linkUpRequest`; `deviceWs.tunnelConfig` choosing a shape by target |
+| `rust/homerun-supervisor/src/device_ws/mod.rs` | `Config.gateway_tls`: no order, no misconfiguration report |
+| `rust/homerun-supervisor/src/lib.rs` | reads `gatewayTls` off the host's JSON |
 | `android/…/Core.kt`, `ios/…/FFI/Core.swift` | `DeviceLink.gatewayTls` / `wsUrl`, the two new wrappers |
 | `android/…/DeviceWebsocket.kt`, `ios/…/DeviceWebsocket.swift` | the branch in `bringUp` |
 | `android/…/HomerunApi.kt`, `ios/…/HomerunAPI.swift` | the `link_up` body |

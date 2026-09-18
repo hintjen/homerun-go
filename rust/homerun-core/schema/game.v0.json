@@ -1,0 +1,501 @@
+{
+  "$id": "https://gethomerun.app/schemas/game.v0.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One hostable game. Generated from homerun-core::engine::descriptor -- those types are the source of truth. Unknown properties are allowed on purpose: a descriptor written for a newer Homerun must degrade rather than fail.",
+  "properties": {
+    "catalog": {
+      "properties": {
+        "accent": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "art": {
+          "type": "string"
+        },
+        "blurb": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "client": {
+      "properties": {
+        "joinUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "srv": {
+          "description": "Set only when the game's client resolves SRV records.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "config": {
+      "items": {
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "properties",
+              "ini",
+              "json",
+              "toml",
+              "xml"
+            ]
+          },
+          "keys": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "console": {
+      "properties": {
+        "rcon": {
+          "properties": {
+            "port": {
+              "description": "The name of a declared port, not a number.",
+              "type": "string"
+            },
+            "protocol": {
+              "enum": [
+                "source",
+                "webrcon"
+              ]
+            },
+            "secret": {
+              "description": "The name of a generated secret, never a literal.",
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "via": {
+          "enum": [
+            "stdin",
+            "rcon",
+            "none"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "hosts": {
+      "description": "Declared, never inferred. Every entry needs a matching `platforms` key.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "id": {
+      "description": "Slug, and the games/<id>/ directory name.",
+      "pattern": "^[a-z0-9-]+$",
+      "type": "string"
+    },
+    "licence": {
+      "properties": {
+        "acceptVia": {
+          "properties": {
+            "contents": {
+              "type": "string"
+            },
+            "file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file",
+            "contents"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "limits": {
+      "description": "Reserved for per-game ceilings. Nothing reads it yet."
+    },
+    "mods": {
+      "properties": {
+        "supported": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "name": {
+      "type": "string"
+    },
+    "observe": {
+      "properties": {
+        "ping": {
+          "enum": [
+            "a2s",
+            "tcp",
+            "none"
+          ]
+        },
+        "players": {
+          "enum": [
+            "a2s",
+            "rcon",
+            "log-regex",
+            "none"
+          ]
+        },
+        "playersCommand": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "presence": {
+          "properties": {
+            "join": {
+              "type": "string"
+            },
+            "leave": {
+              "type": "string"
+            }
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "platforms": {
+      "additionalProperties": {
+        "properties": {
+          "launch": {
+            "properties": {
+              "args": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "cwd": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "env": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "exe": {
+                "description": "Relative to the runtime directory, without a platform suffix. Never templated.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "exe"
+            ],
+            "type": "object"
+          },
+          "runtime": {
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "source": {
+                      "const": "direct"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "url",
+                    "sha256"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "source": {
+                      "const": "steamcmd"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "appId"
+                  ]
+                }
+              }
+            ],
+            "properties": {
+              "appId": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "buildId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "extract": {
+                "enum": [
+                  "none",
+                  "zip",
+                  null
+                ]
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "size": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "sizeMb": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "source": {
+                "enum": [
+                  "direct",
+                  "steamcmd"
+                ]
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "description": "Keyed by host platform, e.g. win32-x64.",
+      "type": "object"
+    },
+    "ports": {
+      "items": {
+        "properties": {
+          "expose": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "description": "What the server binds AND the gateway dest port. Never the public port, which the allocator assigns.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "proto": {
+            "enum": [
+              "tcp",
+              "udp"
+            ]
+          },
+          "service": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "port"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ready": {
+      "properties": {
+        "marker": {
+          "description": "A substring of one console line. Not a regex.",
+          "type": "string"
+        },
+        "timeoutMs": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "requires": {
+      "properties": {
+        "cpuCores": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "diskMb": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ramMb": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "saves": {
+      "properties": {
+        "excludes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "schema": {
+      "description": "Schema version. A higher number is refused.",
+      "maximum": 0,
+      "type": "integer"
+    },
+    "settings": {
+      "items": {
+        "properties": {
+          "default": {
+            "description": "May be null, which drops the setting's flag from the launch line. A string default may contain {serverName} and no other placeholder."
+          },
+          "key": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "max": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "min": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "options": {
+            "type": "array"
+          },
+          "type": {
+            "enum": [
+              "string",
+              "int",
+              "bool"
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "stop": {
+      "properties": {
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "graceMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "via": {
+          "enum": [
+            "console",
+            "interrupt"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "hosts"
+  ],
+  "title": "Homerun game descriptor",
+  "type": "object"
+}

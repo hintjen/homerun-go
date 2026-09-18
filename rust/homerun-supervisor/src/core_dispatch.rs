@@ -32,6 +32,8 @@
 //! inside `catch_unwind`, so a panic becomes an ordinary error envelope naming
 //! the method. Seeing one means a bug in this crate, not bad input.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
@@ -41,7 +43,8 @@ use homerun_core::minecraft::{
 };
 use homerun_core::reporting::{app_error, crash, minigame, stats};
 use homerun_core::{
-    backup, bundle, device_ws, game, launch, lifecycle, link, metrics, properties, state, tunnel,
+    backup, bundle, device_ws, engine, game, launch, lifecycle, link, metrics, properties, state,
+    tunnel,
 };
 
 /// Dispatch one call and render the reply envelope.
@@ -141,6 +144,61 @@ fn compiled_engines() -> Vec<String> {
 fn occurrence_arg(value: &Value, method: &str) -> Result<app_error::Occurrence, String> {
     serde_json::from_value(value.clone())
         .map_err(|e| format!("\"{method}\" got an occurrence it could not read: {e}"))
+}
+
+/// Read the caller's descriptor.
+///
+/// Accepts the object or the file's text, because both callers exist: the
+/// desktop has already parsed its bundled copy, and the CLI has just read one
+/// off disk. Parsing it here rather than making each host do it is the point
+/// of the namespace.
+fn descriptor_arg(args: &Value, method: &str) -> Result<engine::GameDescriptor, String> {
+    let raw = args
+        .get("descriptor")
+        .ok_or_else(|| format!("\"{method}\" needs a descriptor"))?;
+    match raw {
+        Value::String(text) => engine::GameDescriptor::parse(text).map_err(|e| e.to_string()),
+        other => serde_json::from_value(other.clone())
+            .map_err(|e| format!("\"{method}\" got a descriptor it could not read: {e}")),
+    }
+}
+
+/// A `{ name: "value" }` argument, or nothing.
+fn string_map(args: &Value, key: &str) -> BTreeMap<String, String> {
+    args.get(key)
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A `{ name: 28015 }` argument -- the ports the server actually bound, which
+/// are not always the ports it asked for.
+fn port_map(args: &Value, key: &str) -> BTreeMap<String, u16> {
+    args.get(key)
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(k, v)| {
+                    v.as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .map(|n| (k.clone(), n))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the host found in the runtime directory, or nothing.
+fn present_arg(args: &Value, method: &str) -> Result<engine::fetch::Present, String> {
+    match args.get("present") {
+        Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+            .map_err(|e| format!("\"{method}\" got a runtime it could not read: {e}")),
+        _ => Ok(engine::fetch::Present::default()),
+    }
 }
 
 /// Fold `extra`'s keys into `into`. Both are always objects here — the callers
@@ -1701,6 +1759,166 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         .map(Value::from)
         .unwrap_or(Value::Null)),
 
+        // --- descriptor-driven games -------------------------------------
+        //
+        // A namespace of its own rather than more `game.*` arms. `Game` is
+        // frozen at `game/v1` and deliberately excludes artifact resolution,
+        // which is the first thing a descriptor-driven game needs; widening it
+        // would break both hosts at once and silently, since the bridge
+        // resolves methods by string. See `homerun_core::engine`.
+        "engine.validate" => {
+            let report = engine::validate::report(&descriptor_arg(&args, method)?);
+            Ok(json!({
+                "ok": report.ok(),
+                "problems": report.problems,
+                "warnings": report.warnings,
+            }))
+        }
+
+        "engine.schema" => Ok(engine::schema::schema()),
+
+        // What the host has to generate before a launch. Secrets are declared
+        // nowhere, so the descriptor's own use of them is the only list.
+        "engine.secrets" => Ok(Value::Array(
+            engine::validate::required_secrets(&descriptor_arg(&args, method)?)
+                .into_iter()
+                .map(Value::from)
+                .collect(),
+        )),
+
+        // Never infers acceptance -- `accepted` is the host's record of a
+        // person's decision, and absent is false. See `engine::licence`.
+        "engine.licence" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let accepted = args
+                .get("accepted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let terms =
+                serde_json::to_value(engine::licence::terms(&descriptor)).unwrap_or(Value::Null);
+            match engine::licence::gate(&descriptor, accepted) {
+                Ok(files) => Ok(json!({
+                    "accepted": true,
+                    "terms": terms,
+                    "write": serde_json::to_value(files).map_err(|e| e.to_string())?,
+                })),
+                Err(refusal) => Ok(json!({
+                    "accepted": false,
+                    "terms": terms,
+                    "code": engine::licence::REFUSED_CODE,
+                    "message": refusal.to_string(),
+                })),
+            }
+        }
+
+        "engine.doctor" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let machine: engine::doctor::Machine =
+                serde_json::from_value(field("machine")?.clone())
+                    .map_err(|e| format!("\"{method}\" got a machine it could not read: {e}"))?;
+            let present = present_arg(&args, method)?;
+            let accepted = args
+                .get("licenceAccepted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            serde_json::to_value(engine::doctor::doctor(
+                &descriptor,
+                &machine,
+                &present,
+                accepted,
+            ))
+            .map_err(|e| e.to_string())
+        }
+
+        "engine.fetchPlan" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let present = present_arg(&args, method)?;
+            engine::fetch::plan(&descriptor, &text("host")?, &text("runtimeRoot")?, &present)
+                .map_err(|e| e.to_string())
+                .and_then(|plan| serde_json::to_value(plan).map_err(|e| e.to_string()))
+        }
+
+        // The API stores every setting as a string; this is where that stops
+        // being true. See `engine::settings`.
+        "engine.settings" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let provided = match args.get("settings") {
+                Some(Value::Object(map)) => map.clone(),
+                _ => serde_json::Map::new(),
+            };
+            let resolved = engine::settings::resolve(
+                &descriptor,
+                &provided,
+                &optional_text("serverName").unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
+            serde_json::to_value(resolved).map_err(|e| e.to_string())
+        }
+
+        "engine.invocation" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let settings: engine::settings::Resolved = match args.get("resolvedSettings") {
+                Some(v) if !v.is_null() => serde_json::from_value(v.clone())
+                    .map_err(|e| format!("\"{method}\" got settings it could not read: {e}"))?,
+                _ => Default::default(),
+            };
+            let ports = port_map(&args, "ports");
+            let secrets = string_map(&args, "secrets");
+            let server_name = optional_text("serverName").unwrap_or_default();
+            let server_dir = optional_text("serverDir").unwrap_or_default();
+            let invocation = engine::invocation::compose(
+                &descriptor,
+                &text("host")?,
+                &engine::template::Bindings {
+                    settings: &settings,
+                    ports: &ports,
+                    secrets: &secrets,
+                    server_name: &server_name,
+                    server_dir: &server_dir,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            serde_json::to_value(invocation).map_err(|e| e.to_string())
+        }
+
+        // The busiest arm by far -- one call per console line during world
+        // generation. Kept to a substring test for exactly that reason, and
+        // because a cleverer parser is what four PowerNukkitX console defects
+        // came out of.
+        "engine.classify" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let line = text("line")?;
+            let presence = engine::control::presence(&descriptor, &line);
+            Ok(json!({
+                "ready": engine::control::is_ready(&descriptor, &line),
+                "joined": presence.joined,
+                "left": presence.left,
+            }))
+        }
+
+        "engine.console" => serde_json::to_value(
+            engine::control::console(&descriptor_arg(&args, method)?).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string()),
+
+        "engine.stopLadder" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            serde_json::to_value(engine::control::stop_ladder(&descriptor))
+                .map_err(|e| e.to_string())
+        }
+
+        "engine.readyTimeoutMs" => Ok(Value::from(engine::control::ready_timeout_ms(
+            &descriptor_arg(&args, method)?,
+        ))),
+
+        "engine.forwards" => {
+            let descriptor = descriptor_arg(&args, method)?;
+            let bound = port_map(&args, "ports");
+            let forwards =
+                engine::ports::forwards(&descriptor.ports, &bound).map_err(|e| e.to_string())?;
+            serde_json::to_value(forwards).map_err(|e| e.to_string())
+        }
+
         // Proves the panic guard in `call` is real rather than asserted.
         // Compiled only under test, so it cannot be reached in a shipped build.
         #[cfg(test)]
@@ -1748,6 +1966,258 @@ mod tests {
         let reply: Value = serde_json::from_str(&raw).expect("replies are always JSON");
         assert_eq!(reply["ok"], false, "{method} unexpectedly succeeded: {raw}");
         reply["error"].as_str().unwrap().to_string()
+    }
+
+    // ─── descriptor-driven games ────────────────────────────────────────────
+    //
+    // The decisions themselves are tested in `homerun_core::engine`. What is
+    // tested here is the seam: that each arm reaches the right function, reads
+    // the arguments a host actually sends, and renders a reply a host can
+    // parse. A renamed argument compiles cleanly and fails on a device.
+
+    /// The pilot's descriptor, reached the way a host reaches it.
+    fn rust_descriptor() -> Value {
+        serde_json::from_str(include_str!(
+            "../../homerun-core/src/engine/testdata/rust.json"
+        ))
+        .expect("the pilot descriptor parses")
+    }
+
+    #[test]
+    fn a_descriptor_is_accepted_as_an_object_or_as_its_text() {
+        let as_object = ok(
+            "engine.validate",
+            json!({ "descriptor": rust_descriptor() }),
+        );
+        assert_eq!(as_object["ok"], true, "{as_object}");
+
+        let as_text = ok(
+            "engine.validate",
+            json!({ "descriptor": rust_descriptor().to_string() }),
+        );
+        assert_eq!(as_text, as_object, "both spellings must agree");
+    }
+
+    #[test]
+    fn validating_a_broken_descriptor_names_what_is_wrong_rather_than_failing() {
+        let value = ok("engine.validate", json!({ "descriptor": { "id": "x" } }));
+        assert_eq!(value["ok"], false);
+        assert!(!value["problems"].as_array().unwrap().is_empty(), "{value}");
+    }
+
+    #[test]
+    fn the_schema_is_served_from_the_types() {
+        let schema = ok("engine.schema", json!({}));
+        assert_eq!(schema["$id"], engine::schema::SCHEMA_ID);
+        assert!(schema["properties"]["ports"].is_object(), "{schema}");
+    }
+
+    #[test]
+    fn a_host_is_told_which_secrets_to_generate() {
+        let secrets = ok("engine.secrets", json!({ "descriptor": rust_descriptor() }));
+        assert_eq!(secrets, json!(["rcon"]));
+    }
+
+    /// Absent means not accepted. The one default in this file that must
+    /// never be the permissive one.
+    #[test]
+    fn a_licence_nobody_mentioned_is_not_accepted() {
+        let value = ok("engine.licence", json!({ "descriptor": rust_descriptor() }));
+        assert_eq!(value["accepted"], false, "{value}");
+        assert_eq!(value["code"], "licence_not_accepted");
+        assert!(value["terms"]["url"].is_string(), "{value}");
+
+        let accepted = ok(
+            "engine.licence",
+            json!({ "descriptor": rust_descriptor(), "accepted": true }),
+        );
+        assert_eq!(accepted["accepted"], true, "{accepted}");
+    }
+
+    #[test]
+    fn the_doctor_answers_for_the_machine_it_is_given() {
+        let value = ok(
+            "engine.doctor",
+            json!({
+                "descriptor": rust_descriptor(),
+                "machine": { "host": "win32-x64", "ramMb": 32768, "diskMb": 400000,
+                             "cpuCores": 16 },
+                "licenceAccepted": true,
+            }),
+        );
+        assert_eq!(value["ok"], true, "{value}");
+
+        let thin = ok(
+            "engine.doctor",
+            json!({
+                "descriptor": rust_descriptor(),
+                "machine": { "host": "win32-x64", "ramMb": 4096, "diskMb": 400000 },
+                "licenceAccepted": true,
+            }),
+        );
+        assert_eq!(thin["ok"], false, "{thin}");
+    }
+
+    #[test]
+    fn a_fetch_plan_names_the_steam_application_and_where_it_lands() {
+        let value = ok(
+            "engine.fetchPlan",
+            json!({
+                "descriptor": rust_descriptor(),
+                "host": "win32-x64",
+                "runtimeRoot": "C:\\rt",
+            }),
+        );
+        assert_eq!(value["kind"], "steamCmd");
+        assert_eq!(value["appId"], 258550);
+        assert_eq!(value["dir"], "C:\\rt\\rust");
+    }
+
+    /// The API's strings come back typed, which is the whole reason this arm
+    /// exists rather than each host coercing for itself.
+    #[test]
+    fn settings_arrive_as_strings_and_leave_as_values() {
+        let value = ok(
+            "engine.settings",
+            json!({
+                "descriptor": rust_descriptor(),
+                "settings": { "maxPlayers": "50", "pve": "true", "seed": "" },
+                "serverName": "Justin's server",
+            }),
+        );
+        assert_eq!(value["maxPlayers"], 50);
+        assert_eq!(value["pve"], true);
+        assert!(value["seed"].is_null(), "an empty string is unset: {value}");
+        assert_eq!(value["hostname"], "Justin's server");
+    }
+
+    #[test]
+    fn a_setting_out_of_range_comes_back_as_a_sentence() {
+        let message = err(
+            "engine.settings",
+            json!({
+                "descriptor": rust_descriptor(),
+                "settings": { "maxPlayers": "9000" },
+                "serverName": "s",
+            }),
+        );
+        assert!(
+            message.contains("Max players") && message.contains("200"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_invocation_follows_the_ports_the_server_actually_bound() {
+        let value = ok(
+            "engine.invocation",
+            json!({
+                "descriptor": rust_descriptor(),
+                "host": "win32-x64",
+                "resolvedSettings": { "hostname": "Keep", "maxPlayers": 25,
+                                      "worldSize": 3000, "pve": false, "seed": null },
+                "ports": { "game": 28015, "query": 30017, "rcon": 30016 },
+                "secrets": { "rcon": "s3cret" },
+                "serverName": "Keep",
+                "serverDir": "C:\\servers\\abc",
+            }),
+        );
+        assert_eq!(value["exe"], "RustDedicated.exe");
+        let args: Vec<String> = serde_json::from_value(value["args"].clone()).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("+server.queryport 30017"), "{joined}");
+        assert!(joined.contains("+rcon.password s3cret"), "{joined}");
+        assert!(
+            !joined.contains("+server.seed"),
+            "an unset seed drops its flag: {joined}"
+        );
+    }
+
+    #[test]
+    fn a_console_line_is_classified_in_one_call() {
+        let ready = ok(
+            "engine.classify",
+            json!({ "descriptor": rust_descriptor(), "line": "Server startup complete" }),
+        );
+        assert_eq!(ready["ready"], true);
+        assert_eq!(ready["joined"], false);
+
+        let noise = ok(
+            "engine.classify",
+            json!({ "descriptor": rust_descriptor(), "line": "Loading world" }),
+        );
+        assert_eq!(noise["ready"], false);
+    }
+
+    #[test]
+    fn the_console_and_the_stop_ladder_come_back_in_the_shapes_a_host_reads() {
+        let console = ok("engine.console", json!({ "descriptor": rust_descriptor() }));
+        assert_eq!(console["kind"], "rcon");
+        assert_eq!(console["protocol"], "webrcon");
+        assert_eq!(console["port"], "rcon");
+
+        let ladder = ok(
+            "engine.stopLadder",
+            json!({ "descriptor": rust_descriptor() }),
+        );
+        let rungs = ladder.as_array().unwrap();
+        assert_eq!(rungs[0]["action"], "console");
+        assert_eq!(rungs[0]["command"], "quit");
+        assert_eq!(rungs.last().unwrap()["action"], "kill");
+
+        let timeout = ok(
+            "engine.readyTimeoutMs",
+            json!({ "descriptor": rust_descriptor() }),
+        );
+        assert_eq!(timeout, 900_000);
+    }
+
+    #[test]
+    fn forwards_carry_the_exposed_ports_and_leave_the_console_at_home() {
+        let value = ok(
+            "engine.forwards",
+            json!({
+                "descriptor": rust_descriptor(),
+                "ports": { "game": 28015, "query": 30017, "rcon": 30016 },
+            }),
+        );
+        let forwards = value.as_array().unwrap();
+        assert_eq!(forwards.len(), 2, "{value}");
+        assert!(
+            forwards.iter().all(|f| f["target_port"] != 30016),
+            "the administrative console must not be published: {value}"
+        );
+    }
+
+    #[test]
+    fn a_call_with_no_descriptor_says_so_rather_than_defaulting_to_one() {
+        let message = err("engine.validate", json!({}));
+        assert!(message.contains("descriptor"), "{message}");
+    }
+
+    /// Every arm in this namespace has to survive a descriptor that is not
+    /// one, without panicking through the boundary.
+    #[test]
+    fn nonsense_in_the_descriptor_is_an_error_envelope_and_never_a_panic() {
+        for method in [
+            "engine.validate",
+            "engine.secrets",
+            "engine.licence",
+            "engine.console",
+            "engine.stopLadder",
+            "engine.classify",
+        ] {
+            let raw = call(method, &json!({ "descriptor": 7, "line": "x" }).to_string());
+            let reply: Value = serde_json::from_str(&raw).expect("replies are always JSON");
+            assert!(
+                reply["ok"] == false || reply["ok"] == true,
+                "{method} produced no envelope: {raw}"
+            );
+            assert!(
+                !raw.contains("panicked"),
+                "{method} let a panic through: {raw}"
+            );
+        }
     }
 
     // ─── app error reporting ────────────────────────────────────────────────

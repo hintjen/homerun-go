@@ -1,0 +1,74 @@
+{
+  "schema": 0,
+  "id": "rust",
+  "name": "Rust",
+  "hosts": ["win32-x64"],
+
+  "catalog": {
+    "blurb": "Survive, build, raid. A demanding server for a demanding game.",
+    "accent": "#CD412B",
+    "art": "art/card.png"
+  },
+  "licence": {
+    "name": "Facepunch / Steam Subscriber Agreement",
+    "url": "https://store.steampowered.com/subscriber_agreement/",
+    "acceptVia": null
+  },
+  "client": {
+    "joinUrl": "steam://connect/{host}:{port:game}",
+    "srv": null
+  },
+  "settings": [
+    { "key": "hostname", "type": "string", "label": "Server name", "default": "{serverName}" },
+    { "key": "maxPlayers", "type": "int", "label": "Max players", "default": 10, "min": 1, "max": 200 },
+    { "key": "worldSize", "type": "int", "label": "Map size", "default": 3000, "min": 1000, "max": 6000 },
+    { "key": "seed", "type": "int", "label": "Seed", "default": null },
+    { "key": "pve", "type": "bool", "label": "PvE", "default": false }
+  ],
+
+  "requires": { "ramMb": 8192, "diskMb": 16000 },
+  "platforms": {
+    "win32-x64": {
+      "runtime": { "source": "steamcmd", "appId": 258550, "buildId": null, "sizeMb": 9000 },
+      "launch": {
+        "exe": "RustDedicated.exe",
+        "args": [
+          "-batchmode", "-nographics",
+          "+server.port", "{port:game}",
+          "+server.queryport", "{port:query}",
+          "+rcon.port", "{port:rcon}",
+          "+rcon.password", "{secret:rcon}",
+          "+rcon.web", "1",
+          "+server.identity", "homerun",
+          "+server.hostname", "{setting:hostname}",
+          "+server.maxplayers", "{setting:maxPlayers}",
+          "+server.worldsize", "{setting:worldSize}",
+          "+server.seed", "{setting:seed}"
+        ],
+        "env": {},
+        "cwd": "."
+      }
+    }
+  },
+  "ready": { "marker": "Server startup complete", "timeoutMs": 900000 },
+  "console": {
+    "via": "rcon",
+    "rcon": { "protocol": "webrcon", "port": "rcon", "secret": "rcon" }
+  },
+  "stop": { "via": "console", "command": "quit", "graceMs": 60000 },
+  "ports": [
+    { "name": "game", "proto": "udp", "port": 28015, "expose": true, "service": "game" },
+    { "name": "query", "proto": "udp", "port": 28017, "expose": true, "service": "game" },
+    { "name": "rcon", "proto": "tcp", "port": 28016, "expose": false }
+  ],
+  "config": [],
+  "saves": { "paths": ["server/homerun"], "excludes": ["server/homerun/*.log"] },
+  "observe": {
+    "players": "rcon",
+    "playersCommand": "playerlist",
+    "presence": null,
+    "ping": "a2s"
+  },
+  "mods": { "supported": false },
+  "limits": {}
+}

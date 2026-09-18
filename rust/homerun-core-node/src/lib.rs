@@ -48,7 +48,7 @@
 //!
 //! Structured answers — so far only [`bundle_evaluate`] — cross as a JSON
 //! *string*, not a JavaScript object. That is the shape the phones already
-//! receive from `homerun-pumpkin-ffi`, so the field names and the tagged
+//! receive from `homerun-supervisor`, so the field names and the tagged
 //! verdict are defined once, by serde, and not a second time by hand-built
 //! napi objects that could quietly spell `minHost` differently.
 //!
@@ -61,7 +61,7 @@
 //! functions call into `serde_json` and `ed25519-dalek`, and `bundle::verify`
 //! holds two `expect`s that are unreachable today — "unreachable today" being
 //! a claim about someone else's code — so they run inside `catch_unwind`, the
-//! way `homerun-pumpkin-ffi` does for the C ABI, and a panic becomes a thrown
+//! way `homerun-supervisor` does for the C ABI, and a panic becomes a thrown
 //! error naming the function. Anything added later that could panic does the
 //! same.
 
@@ -73,6 +73,25 @@ use napi_derive::napi;
 
 use homerun_core::bundle;
 use homerun_core::minecraft::console;
+
+/// Node addon contract version, distinct from the mobile C FFI ABI.
+pub const CORE_NODE_ABI_VERSION: u32 = 1;
+
+#[napi]
+pub fn core_abi_version() -> u32 {
+    CORE_NODE_ABI_VERSION
+}
+
+#[napi]
+pub fn core_version() -> String {
+    env!("CARGO_PKG_VERSION").to_owned()
+}
+
+/// Source provenance; the manifest separately identifies the signed bytes.
+#[napi]
+pub fn core_build_id() -> String {
+    env!("HOMERUN_CORE_BUILD_ID").to_owned()
+}
 
 /// Strip ANSI colour codes, which Paper writes into join and leave lines.
 ///
@@ -142,7 +161,7 @@ pub fn bedrock_version(line: String) -> Option<String> {
 /// manifest does not verify.
 ///
 /// One call on purpose, and the same one the phones make (`bundle.evaluate` in
-/// `homerun-pumpkin-ffi`). Two would let the desktop judge a manifest it had
+/// `homerun-supervisor`). Two would let the desktop judge a manifest it had
 /// not verified, and that mistake has no symptom: everything keeps working,
 /// against any manifest anyone serves. The only way to get a manifest's
 /// fields out of this addon is to have had them verified.

@@ -1,90 +1,50 @@
 #!/usr/bin/env node
-/**
- * Prepare the artifacts Homerun Desktop downloads, and the manifest it reads.
- *
- * The desktop packages neither of these. The Pumpkin engine is fetched at
- * launch — the same arrangement Bedrock Dedicated Server has had all along —
- * so a new engine reaches players without a desktop release, and ~114 MB stays
- * out of the installer for everyone who never makes a Pumpkin server. The Node
- * addon is fetched at build time by `download-assets.js`, because it is code
- * the main process loads at startup rather than a server it spawns.
- *
- * # Why the build id is the digest
- *
- * Pumpkin publishes no version number, and inventing one here would be a second
- * source of truth about which engine a world has met. The digest cannot
- * disagree with the file: rebuild the same source and the id is unchanged, so
- * nobody re-downloads 114 MB to arrive where they already were. The fork
- * revision rides along as `rev` for people, not for comparison.
- *
- * # The Minecraft version
- *
- * `minecraftVersion` and `protocol` are the client a build accepts, and they
- * are asked of the built engine itself (`--minecraft-version`) rather than read
- * from source here, so they cannot describe a different build than the one being
- * published. The desktop pins a server's `VERSION` to it, which is what lets a
- * launcher on any device start a client that can join. So this has to run on a
- * machine that can execute the engine — the Windows runner — and a manifest
- * without it is refused rather than written.
- *
- * # What this does not do
- *
- * It does not upload. The digests and the manifest are computed here and the
- * exact commands are printed, so the credentials stay in CI where they belong
- * and a local run cannot publish by accident.
- *
- * Usage:
- *   npm run rust:pumpkin-bin-windows && npm run rust:core-node
- *   node scripts/publish-desktop-artifacts.js
- */
+/** Prepare manifests from final, signed bytes. Print upload commands; never upload. */
 const { execFileSync } = require("child_process");
+const os = require("os");
 const crypto = require("crypto");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
+const { ROOT } = require("./targets");
 
-const { ROOT, TARGETS } = require("./targets");
-
-/** Where CI puts them. Mirrored in the desktop's PUMPKIN_MANIFEST_URL. */
-const S3_BUCKET = "s3://fractal-homerun/homerun-desktop";
+const S3_BASE = "s3://fractal-homerun/homerun-desktop";
 const PUBLIC_BASE = "https://fractal-homerun.s3.amazonaws.com/homerun-desktop";
+const LAYOUT = {
+  pumpkin: { file: "homerun-desktop-minecraft-pumpkin.exe", prefix: "pumpkin", stem: "homerun-desktop-minecraft-pumpkin", ext: "exe", manifest: "pumpkin-latest.json" },
+  "game-runner": { file: "homerun-game.exe", prefix: "game-runner", stem: "homerun-game", ext: "exe", manifest: "game-runner-latest.json" },
+  "core-node": { file: "homerun_core.node", prefix: "core", stem: "homerun-core", ext: "node", manifest: "core-latest.json" },
+};
 
-const DIST = path.join(ROOT, "dist", "desktop");
-
-function sha256(file) {
-  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-}
-
-function requireArtifact(targetName) {
-  const target = TARGETS[targetName];
-  const file = path.join(target.outDir, target.outName || target.artifact);
-  if (!fs.existsSync(file)) {
-    console.error(
-      `\nMissing ${path.relative(ROOT, file)}\n` +
-        `  Build it first: npm run rust:${targetName}\n`
-    );
-    process.exit(1);
+function prepareArtifacts(dir, selected, metadata = {}) {
+  // Validate every input before replacing any existing manifest.
+  const artifacts = selected.map((kind) => {
+    const layout = LAYOUT[kind];
+    if (!layout) throw new Error(`Unknown artifact: ${kind}`);
+    const file = path.join(dir, layout.file);
+    const bytes = fs.readFileSync(file);
+    if (!bytes.length) throw new Error(`Empty artifact: ${file}`);
+    const info = metadata[kind] || {};
+    if (kind !== "pumpkin" && !info.version) throw new Error(`Missing version for ${kind}`);
+    if (kind === "core-node" && (!Number.isInteger(info.abi) || info.abi < 1 || !info.sourceBuild)) {
+      throw new Error("Core addon must export its ABI and source build identity");
+    }
+    const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+    const build = sha256.slice(0, 12);
+    const objectKey = `${layout.prefix}/${layout.stem}-${build}.${layout.ext}`;
+    return {
+      kind, file, objectKey, manifestPath: path.join(dir, layout.manifest),
+      manifestKey: `${layout.prefix}/latest.json`,
+      manifest: { ...info, build, url: `${PUBLIC_BASE}/${objectKey}`, sha256, size: bytes.length },
+    };
+  });
+  for (const artifact of artifacts) {
+    fs.writeFileSync(artifact.manifestPath, `${JSON.stringify(artifact.manifest, null, 2)}\n`);
   }
-  return file;
+  return artifacts;
 }
 
-/** The fork revision the engine was built from, for the manifest's `rev`. */
-function pumpkinRev() {
-  const cargo = fs.readFileSync(
-    path.join(ROOT, "rust", "homerun-pumpkin-bin", "Cargo.toml"),
-    "utf8"
-  );
-  const match = cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/);
-  return match ? match[1] : null;
-}
-
-/**
- * The Minecraft version the built engine serves, from the engine.
- *
- * Run in an empty temp directory with a timeout: an engine built without the
- * flag ignores it and starts a server in its CWD, and that must neither litter
- * the checkout nor hang the publish.
- */
+// Ask the built engine, not source: the desktop pins clients to this version.
+// Isolate a build lacking the flag, which might otherwise start in the checkout.
 function engineMinecraftVersion(file) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pumpkin-version-"));
   let out;
@@ -125,55 +85,45 @@ function engineMinecraftVersion(file) {
   return { minecraftVersion, protocol };
 }
 
-const engine = requireArtifact("pumpkin-bin-windows");
-const addon = requireArtifact("core-node");
+function main(args) {
+  let selected = Object.keys(LAYOUT);
+  if (args.length) {
+    if (args.length !== 2 || args[0] !== "--only" || !Object.hasOwn(LAYOUT, args[1])) {
+      throw new Error("Usage: node scripts/publish-desktop-artifacts.js [--only pumpkin|game-runner|core-node]");
+    }
+    selected = [args[1]];
+  }
+  const dir = path.join(ROOT, "dist", "desktop");
+  const metadata = {};
+  for (const kind of selected) {
+    if (kind === "core-node") {
+      const addon = require(path.join(dir, LAYOUT[kind].file));
+      metadata[kind] = { version: addon.coreVersion(), abi: addon.coreAbiVersion(), sourceBuild: addon.coreBuildId() };
+    } else {
+      const crate = kind === "pumpkin" ? "homerun-pumpkin-bin" : "homerun-game-cli";
+      const cargo = fs.readFileSync(path.join(ROOT, "rust", crate, "Cargo.toml"), "utf8");
+      metadata[kind] = kind === "pumpkin"
+        ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1], ...engineMinecraftVersion(path.join(dir, LAYOUT.pumpkin.file)) }
+        : { version: cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1], protocol: 1 };
+    }
+  }
+  const artifacts = prepareArtifacts(dir, selected, metadata);
+  console.log("Manifests prepared. Sign artifacts BEFORE this step; regenerate after any byte changes.\n");
+  for (const artifact of artifacts) {
+    console.log(`${artifact.kind}: ${artifact.manifest.build}, ${artifact.manifest.size} bytes, SHA-256 ${artifact.manifest.sha256}`);
+  }
+  console.log("\nUpload all immutable binaries before updating any latest.json:");
+  for (const artifact of artifacts) console.log(`aws s3 cp "${artifact.file}" ${S3_BASE}/${artifact.objectKey}`);
+  for (const artifact of artifacts) console.log(`aws s3 cp "${artifact.manifestPath}" ${S3_BASE}/${artifact.manifestKey} --cache-control no-cache`);
+  const addon = artifacts.find((artifact) => artifact.kind === "core-node");
+  if (addon) {
+    console.log("\nCompatibility alias for existing desktop builds (new builds should pin the manifest SHA-256):");
+    console.log(`aws s3 cp "${addon.file}" ${S3_BASE}/assets/homerun_core.node`);
+  }
+}
 
-const engineDigest = sha256(engine);
-const engineSize = fs.statSync(engine).size;
-// Twelve hex characters: enough that a collision is not a thing that happens,
-// short enough to be a directory name a person can read in a log line.
-const build = engineDigest.slice(0, 12);
-const engineName = `homerun-desktop-minecraft-pumpkin-${build}.exe`;
-const { minecraftVersion, protocol } = engineMinecraftVersion(engine);
-
-const manifest = {
-  build,
-  url: `${PUBLIC_BASE}/pumpkin/${engineName}`,
-  sha256: engineDigest,
-  size: engineSize,
-  rev: pumpkinRev() || undefined,
-  minecraftVersion,
-  protocol,
-};
-
-const manifestPath = path.join(DIST, "pumpkin-latest.json");
-fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-const addonDigest = sha256(addon);
-
-console.log(`\nPumpkin engine   ${path.relative(ROOT, engine)}`);
-console.log(`  build          ${build}`);
-console.log(`  sha256         ${engineDigest}`);
-console.log(`  size           ${(engineSize / 1024 / 1024).toFixed(1)} MB`);
-console.log(`  rev            ${manifest.rev ?? "(unknown)"}`);
-console.log(`  minecraft      ${minecraftVersion} (protocol ${protocol})`);
-console.log(`\nNode addon       ${path.relative(ROOT, addon)}`);
-console.log(`  sha256         ${addonDigest}`);
-console.log(`\nManifest         ${path.relative(ROOT, manifestPath)}`);
-
-console.log(`
-To publish (CI, or a maintainer with credentials):
-
-  # The engine first. The manifest must never name a file that is not there
-  # yet, or a launch between the two uploads downloads a 404.
-  aws s3 cp "${engine}" ${S3_BUCKET}/pumpkin/${engineName}
-  aws s3 cp "${manifestPath}" ${S3_BUCKET}/pumpkin/latest.json --cache-control no-cache
-
-  # The addon is pulled at desktop build time, not at launch, so it has no
-  # manifest and is simply replaced.
-  aws s3 cp "${addon}" ${S3_BUCKET}/assets/homerun_core.node
-
-Sign both before uploading if the signing account is available: they arrive on
-a player's disk unannounced and are executed, and unlike BDS and the Zulu JREs
-they carry nobody else's signature.
-`);
+if (require.main === module) {
+  try { main(process.argv.slice(2)); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
+}
+module.exports = { prepareArtifacts, LAYOUT, PUBLIC_BASE };

@@ -48,6 +48,11 @@
 pub mod backup;
 pub mod bundle;
 pub mod device_ws;
+// Running a game server from its descriptor. A sibling of `game`, not an
+// implementation of it: `Game` is frozen and deliberately excludes artifact
+// resolution, which is the first thing a descriptor-driven game needs. See
+// the module header.
+pub mod engine;
 pub mod game;
 pub mod launch;
 pub mod lifecycle;

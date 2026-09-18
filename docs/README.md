@@ -12,6 +12,21 @@ change falls on.
 
 ## Documentation Index
 
+### [Multi-game continuation handoff](./multi-game-engine-handoff.md)
+
+Remote branches, completed engine work, Windows validation, and remaining
+desktop integration and real-game onboarding work.
+
+### [The desktop game runner](./game-runner.md)
+
+The standalone CLI and Electron's NDJSON supervisor: ownership, cancellation,
+readiness, protocol events, fixture tests and the limits of probe evidence.
+
+### [Desktop engine artifacts](./desktop-game-artifacts.md)
+
+Windows runner and Node addon builds, signing order, immutable download paths,
+manifest fields and the release workflow integration still needed in Homerun.
+
 ### 🔨 [Building](./building.md)
 
 How to produce what Xcode and Gradle need: the shared UI bundle staged into
@@ -37,6 +52,36 @@ each platform's assets, and the Rust FFI compiled for its targets.
 
 **Read this for**: Setting up a machine, wiring CI, or decoding a toolchain
 error.
+
+---
+
+### 🎮 [The game engine](./game-engine.md)
+
+Running a game server from its `game.json` — the decisions half, pure and in
+`homerun-core`. One implementation for the probe, a developer's local launch,
+`game verify` and the desktop.
+
+**Contains**:
+- Why this is a sibling of `game::Game` rather than an implementation of it
+  (the trait is frozen and excludes artifact resolution on purpose)
+- **The three safety rules**: single-pass substitution so a server named
+  `{secret:rcon}` cannot publish its own password; a person accepts each
+  game's terms and nothing infers it; steamcmd anonymous only
+- The descriptor types, and why every field defaults and unknown keys are
+  ignored
+- Settings: everything arrives as a string, and `""` is unset for every type
+- Templating, and exactly when an unset setting takes its flag with it
+- The three port numbers, and which two are never the same
+- Readiness as a substring, and why that is not laziness
+- The exported JSON Schema and its two alarms
+- The `engine.*` bridge namespace
+- **The effects half**, behind the default-off `game-engine` feature: the
+  fetcher (resume, verify, unpack, steamcmd — anonymous, and never agreeing
+  to terms for anyone), the two RCON dialects, the platform adapter, and
+  descriptor-driven readiness, roster, console and stop in `ProcessEngine`
+
+**Read this for**: Adding a game, writing or debugging a `game.json`, or
+working out why a descriptor-driven server started wrong.
 
 ---
 

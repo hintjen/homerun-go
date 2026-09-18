@@ -25,8 +25,8 @@ const fs = require("fs");
 /**
  * feature -> what the build says when that feature is missing.
  *
- * Only `homerun-pumpkin-ffi` has these. Keep them byte-identical to the
- * `#[cfg(not(feature = ...))]` arms in `rust/homerun-pumpkin-ffi/src/lib.rs`:
+ * Only `homerun-supervisor` has these. Keep them byte-identical to the
+ * `#[cfg(not(feature = ...))]` arms in `rust/homerun-supervisor/src/lib.rs`:
  * a marker that no longer matches its source reads as "feature present" in the
  * absent direction, which is why both directions are checked below.
  */

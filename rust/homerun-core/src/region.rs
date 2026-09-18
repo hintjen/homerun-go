@@ -30,10 +30,10 @@
 //! # What this module does not do
 //!
 //! It opens no socket. Parsing is the part that two platforms can disagree
-//! about; the connect is in [`homerun-pumpkin-ffi`'s `host_dispatch`], where
+//! about; the connect is in [`homerun-supervisor`'s `host_dispatch`], where
 //! the effects live, and there is exactly one of it.
 //!
-//! [`homerun-pumpkin-ffi`'s `host_dispatch`]: ../../homerun_pumpkin_ffi/host_dispatch/index.html
+//! [`homerun-supervisor`'s `host_dispatch`]: ../../homerun_pumpkin_ffi/host_dispatch/index.html
 
 use serde::{Deserialize, Serialize};
 
