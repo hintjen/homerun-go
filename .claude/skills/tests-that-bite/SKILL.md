@@ -87,6 +87,24 @@ the on-stop backup wiped the run it belongs to: ["[Backup] Backing up the world�
 
 That names the behaviour, the victim, and shows the evidence.
 
+## Build the fixture out of the real artifact
+
+When a device, a crash report or a log gave you the evidence, paste **that**
+into the test — not a cleaned-up version of it. The junk in real data is load
+bearing.
+
+A grouping fix for iOS panic reports was written against a stack of repeated
+`__mh_execute_header` frames, which is what the report mostly is. The real
+report also had one line that resolved: `___isPlatformVersionAtLeast`, an
+exported builtin sitting in the same position in every backtrace on the
+platform. The tidied fixture would have passed on the first try. The real one
+failed, because that single frame became the whole signature and grouped every
+panic together exactly as before.
+
+So when a new test fails the first time you run it, before touching either
+side: work out whether it is telling you the **fix** is incomplete. That is the
+more common answer, and it is the whole reason the test was worth writing.
+
 ## How to break things safely
 
 ```bash
@@ -110,6 +128,15 @@ regression in the same area is equally invisible. Usually one of:
 - it asserted the mechanism, which still held
 - nothing covered the second run, where state carried over from the first
 - an error was swallowed, so the failure never became an observable
+- **the code does not compile in the suite at all.** `pumpkin-engine`,
+  `device-ws` and `backup-engine` are off by default, so anything inside them
+  is unreachable by `npm test` — not weakly covered, *absent*. A console
+  command dispatched from the device websocket panicked on every iPhone for
+  weeks with 185 FFI tests green, because the two halves of that path live in
+  two features the suite never turns on. The fix is not a feature-gated test
+  nobody runs: move the **rule** into a module the suite does compile, leave
+  only the glue behind the feature, and add the dev-dependency that lets the
+  rule be exercised (a `tokio` runtime is cheap; a Minecraft server is not).
 
 Then add the test that would have caught it, and break the fix to prove it does.
 

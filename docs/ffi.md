@@ -278,6 +278,13 @@ Two more things worth knowing:
 - **Every `extern "C"` function wraps its body in `catch_unwind`.** A panic
   crossing the FFI boundary is undefined behaviour, not a crash you can
   debug.
+- **The error a caught panic returns is read by a player.** It comes back over
+  the bridge and the UI shows it, so `guarded` answers with a sentence written
+  for a person and logs the payload instead of passing it through. It used to
+  pass it through, and a phone displayed "Cannot start a runtime from within a
+  runtime. This happens because a function (like `block_on`)…" to whoever was
+  holding it. Nothing is lost: the hook has already written the payload, its
+  location and a backtrace, and `errors::drain` sends them on the next launch.
 - **The last-panic slot is cleared at the start of every run.** Without
   that, a panic from anywhere earlier in the process leaks into the *next*
   crash's message and blames the wrong thing. That was a real bug, caught by
@@ -400,6 +407,37 @@ stdout from before the redirect for exactly this reason.
 ANSI colour escapes are stripped on the way in. The engine's logger assumes a
 terminal; the console it actually feeds is a WebView, which renders the
 escapes as literal `[2m` garbage in front of every line.
+
+### Sending it a command — and who is allowed to wait
+
+`PumpkinEngine::command` hands the dispatch to the engine's runtime as a task,
+because that is how the engine runs its own console input and a command that
+reaches for runtime-worker-only machinery would otherwise panic in this one
+place and nowhere else. Whether the caller then **waits** for that task is
+`runtime_dispatch::dispatch`'s decision, and it is not a detail:
+
+| The command came from | The calling thread | What happens |
+|---|---|---|
+| The app, over the C ABI | a host thread, no runtime | waits, and a panicking command comes back as an error |
+| The dashboard, as `Request::Rcon` | a **device websocket task** | returns as soon as the work is queued |
+
+`Handle::block_on` panics — *"Cannot start a runtime from within a runtime"* —
+when the calling thread is already driving async tasks, and this crate runs two
+runtimes: the engine's and the device websocket's. The second path assumed the
+first one's thread and shipped: on an iPhone hosting a Pumpkin server, **every**
+command typed into the dashboard's console panicked before reaching the server,
+was caught at the ABI, and was shown to the player as Tokio's own sentence.
+
+Android cannot hit it — `ProcessEngine::command` writes to the child's stdin
+and there is no runtime to nest. That asymmetry is why it survived: nothing in
+the device-free suite runs a linked engine, and `ios/wsprobe/` proves the
+socket, not what the socket asks the engine to do.
+
+Not waiting costs nothing real. A command's reply is a console line either way,
+which both the app and the dashboard read from the log rather than from this
+return value — so `Ok` means "queued on a live runtime", and `Err` still means
+"it ran and panicked". `runtime_dispatch`'s tests cover both callers without a
+device, which is the only reason they run at all.
 
 ### Readiness
 

@@ -243,6 +243,13 @@ name = "boot_engine"
 required-features = ["pumpkin-engine"]
 
 [dev-dependencies]
+# Tests only. `runtime_dispatch` decides whether the caller may block before
+# handing work to the engine's runtime, and that rule shipped wrong — a command
+# typed into the dashboard's console arrived on a device websocket task and
+# panicked. Reproducing it needs a runtime and nothing else, so the test runs
+# in the ordinary suite rather than behind `pumpkin-engine`, which would need
+# the real server and a device. Dev-dependencies do not ship.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 # Tests only, and only to *sign* — the crate under test does the verifying.
 # Pinning a pre-signed manifest as a constant instead would hide any change to
 # the signed payload behind a hex blob nobody can diff. Already in the tree via
