@@ -278,7 +278,9 @@ object HomerunApi {
 
         val path = "/api/device/$deviceId/link_up/"
         val task = runCatching {
-            post(apiUrl, path, buildJsonObject { }, token)
+            // Not an empty body: it says this build can run with the gateway
+            // terminating TLS. The core words it so both phones ask alike.
+            post(apiUrl, path, Core.deviceWsLinkUpRequest(), token)
                 ?.get("task")?.jsonPrimitive?.contentOrNull
         }.onFailure { Log.w(TAG, "link_up failed: ${it.message}") }.getOrNull()
             ?: return@withContext null
@@ -298,7 +300,11 @@ object HomerunApi {
                 .getOrNull()
                 ?: return@repeat
 
-            Log.i(TAG, "device link ready after ${attempt + 1} attempts (fqdn=${link.fqdn})")
+            Log.i(
+                TAG,
+                "device link ready after ${attempt + 1} attempts " +
+                    "(fqdn=${link.fqdn}, tls=${if (link.gatewayTls) "gateway" else "device"})",
+            )
             return@withContext link
         }
         Log.w(TAG, "no device link after $attempts attempts")

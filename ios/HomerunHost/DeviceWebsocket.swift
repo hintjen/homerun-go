@@ -195,9 +195,16 @@ final class DeviceWebsocket {
         // the tunnel has to be forwarding at it by then. This one is chosen
         // here rather than by the OS for that reason — the order and the
         // forward have to agree, and the order happens first.
-        guard let challengePort = Self.freePort() else {
-            HostLog.device.error("no free port for the ACME challenge listener")
-            return
+        //
+        // None in gateway mode: the gateway terminates TLS, so there is no
+        // order, nothing to listen for, and no port worth reserving.
+        var challengePort: UInt16?
+        if !link.gatewayTls {
+            guard let chosen = Self.freePort() else {
+                HostLog.device.error("no free port for the ACME challenge listener")
+                return
+            }
+            challengePort = chosen
         }
 
         guard let bound = startSocket(apiURL: apiURL, deviceId: deviceId, link: link,
@@ -205,16 +212,25 @@ final class DeviceWebsocket {
         else { return }
 
         do {
-            let config = try Core.deviceWsTunnelConfig(
-                link: link.link,
-                // The **TLS** port, not the plaintext one. The gateway sends a
-                // ClientHello; forwarding it at the loopback socket the app's
-                // own UI uses would fail every handshake.
-                httpsTarget: bound.tls,
-                // Only when there is a hostname to prove. Without one no order
-                // can run, and a forward at a listener that never starts looks
-                // like the device answered.
-                httpTarget: link.fqdn == nil ? nil : Int(challengePort))
+            let config: String
+            if link.gatewayTls {
+                // The **plaintext** port. The gateway already terminated TLS;
+                // what arrives is a websocket upgrade, and the TLS listener has
+                // no certificate in this mode and would drop it.
+                config = try Core.deviceWsGatewayTunnelConfig(
+                    link: link.link, wsTarget: bound.plaintext)
+            } else {
+                config = try Core.deviceWsTunnelConfig(
+                    link: link.link,
+                    // The **TLS** port, not the plaintext one. The gateway
+                    // sends a ClientHello; forwarding it at the loopback socket
+                    // the app's own UI uses would fail every handshake.
+                    httpsTarget: bound.tls,
+                    // Only when there is a hostname to prove. Without one no
+                    // order can run, and a forward at a listener that never
+                    // starts looks like the device answered.
+                    httpTarget: link.fqdn == nil ? nil : challengePort.map { Int($0) })
+            }
 
             let proxy = WireProxy()
             proxy.onHandshakeFailed = {
@@ -225,7 +241,9 @@ final class DeviceWebsocket {
             }
             try proxy.startRendered(
                 config,
-                describedAs: "device: https=127.0.0.1:\(bound.tls) http=127.0.0.1:\(challengePort)")
+                describedAs: link.gatewayTls
+                    ? "device: ws=127.0.0.1:\(bound.plaintext) (the gateway terminates TLS)"
+                    : "device: https=127.0.0.1:\(bound.tls) http=127.0.0.1:\(challengePort.map { String($0) } ?? "none")")
             tunnel = proxy
         } catch {
             HostLog.device.error(
@@ -241,8 +259,10 @@ final class DeviceWebsocket {
 
         port = bound.plaintext
         fqdn = link.fqdn
+        let tlsMode = link.gatewayTls ? "gateway" : "device"
+        let publicAddress = link.wsUrl ?? link.fqdn.map { "wss://" + $0 } ?? "(unnamed)"
         HostLog.device.info(
-            "device link up: fqdn=\(link.fqdn ?? "(unnamed)", privacy: .public) ws=:\(bound.plaintext, privacy: .public) tls=:\(bound.tls, privacy: .public) proxyProtocol=\(link.expectsProxyProtocol, privacy: .public)"
+            "device link up: tlsMode=\(tlsMode, privacy: .public) public=\(publicAddress, privacy: .public) ws=:\(bound.plaintext, privacy: .public) tls=:\(bound.tls, privacy: .public) proxyProtocol=\(link.expectsProxyProtocol, privacy: .public)"
         )
     }
 
@@ -258,7 +278,7 @@ final class DeviceWebsocket {
     /// between picking a number and binding it in which something else could
     /// take it, and the failure would land on the tunnel rather than here.
     private func startSocket(
-        apiURL: String, deviceId: String, link: Core.DeviceLink, challengePort: UInt16
+        apiURL: String, deviceId: String, link: Core.DeviceLink, challengePort: UInt16?
     ) -> Bound? {
         var config: [String: Any] = [
             "port": 0,
@@ -266,7 +286,11 @@ final class DeviceWebsocket {
             "jwksUrl": Self.jwksURL,
             "deviceId": deviceId,
             "storageDir": Self.certificateDirectory().path,
-            "challengePort": Int(challengePort),
+            // The gateway terminates TLS for this link, so the supervisor
+            // orders nothing — whatever else is in this config. It checks this
+            // rather than trusting the absence of a challenge port, which for
+            // a *named* device it would otherwise report as a misconfiguration.
+            "gatewayTls": link.gatewayTls,
             // Whether the plane in front of us writes a PROXY header. The core
             // answered this off the link; getting it wrong fails every TLS
             // handshake with a message about neither.
@@ -277,6 +301,7 @@ final class DeviceWebsocket {
             "acmeStaging": Self.acmeStaging,
         ]
         if let fqdn = link.fqdn { config["fqdn"] = fqdn }
+        if let challengePort { config["challengePort"] = Int(challengePort) }
 
         guard let json = try? JSONSerialization.data(withJSONObject: config),
             let text = String(data: json, encoding: .utf8)

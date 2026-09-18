@@ -267,7 +267,20 @@ enum Core {
             // consequence rather than the provenance. Getting it backwards is
             // not a warning — the header lands where a ClientHello is expected
             // and every handshake fails.
-            expectsProxyProtocol: (object["gateway_v2"] as? Bool) != true)
+            expectsProxyProtocol: (object["gateway_v2"] as? Bool) != true,
+            // Compared to the one word that means it, so anything else — or a
+            // key this build does not know — is device mode, which is the
+            // core's own reading rule too.
+            gatewayTls: (object["tls_mode"] as? String) == "gateway",
+            wsUrl: (object["ws_url"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    /// The body of `POST /api/device/<id>/link_up/`.
+    ///
+    /// Defined in the core so both phones ask for the same thing: today, that
+    /// this build *can* run with the gateway terminating TLS. The API decides.
+    static func deviceWsLinkUpRequest() throws -> [String: Any] {
+        try object("deviceWs.linkUpRequest", [:])
     }
 
     /// What `POST /api/device/<id>/link_up/` provisioned.
@@ -280,6 +293,17 @@ enum Core {
         /// that carries traffic but cannot be reached by name.
         let fqdn: String?
         let expectsProxyProtocol: Bool
+        /// True when the **gateway** terminates TLS for this link, which the
+        /// API decides per `link_up` and the core reads — downgrade-only, so an
+        /// API too old to say reads as false. Then this device orders no
+        /// certificate, binds no challenge listener, and the tunnel forwards
+        /// the gateway's relay at the *plaintext* socket
+        /// (`deviceWsGatewayTunnelConfig`) instead of `:443` at the TLS one.
+        let gatewayTls: Bool
+        /// The `wss://` address the dashboard is given for this device. In
+        /// gateway mode it is on the gateway's hostname, not `fqdn`. Logged,
+        /// and nothing here dials it.
+        let wsUrl: String?
     }
 
     /// The wireproxy config for the device websocket's own tunnel.
@@ -293,6 +317,17 @@ enum Core {
         var args: [String: Any] = ["link": link, "httpsTarget": httpsTarget]
         if let httpTarget { args["httpTarget"] = httpTarget }
         return try string("deviceWs.tunnelConfig", args)
+    }
+
+    /// The wireproxy config when the **gateway** terminates TLS: one forward,
+    /// its relay port at `wsTarget`.
+    ///
+    /// `wsTarget` is the **plaintext** port — the reverse of
+    /// `deviceWsTunnelConfig`'s warning. What arrives is a websocket upgrade
+    /// the gateway already decrypted; the TLS listener has no certificate in
+    /// this mode and drops every connection, which the dashboard sees as a 503.
+    static func deviceWsGatewayTunnelConfig(link: [String: Any], wsTarget: Int) throws -> String {
+        try string("deviceWs.tunnelConfig", ["link": link, "wsTarget": wsTarget])
     }
 
     /// False when these are the dead credentials from the previous session.

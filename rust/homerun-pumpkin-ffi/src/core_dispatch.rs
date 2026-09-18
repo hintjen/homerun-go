@@ -1240,16 +1240,39 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             None => Value::Null,
         }),
 
-        // `httpTarget` absent or null omits the ACME forward — the shape a
-        // device serving without a certificate takes.
+        // What both hosts POST to `link_up`. One definition, so Kotlin and
+        // Swift cannot come to ask for different things.
+        "deviceWs.linkUpRequest" => Ok(device_ws::link_up_request()),
+
+        // Two shapes, chosen by which target the host passes — and the host
+        // chooses by the `tls_mode` the core itself read off the link:
+        //
+        //   wsTarget                  gateway mode: one forward, the gateway's
+        //                             relay port to the *plaintext* socket.
+        //   httpsTarget, httpTarget?  device mode: `:443` to the TLS listener
+        //                             and, when there is a name to prove, `:80`
+        //                             to the ACME challenge listener.
+        //
+        // Both at once is refused rather than resolved: a host that sends both
+        // has a bug about which mode it is in, and picking for it would hide it
+        // behind a tunnel that comes up and carries nothing.
         "deviceWs.tunnelConfig" => {
             let link: tunnel::Link = serde_json::from_value(field("link")?.clone())
                 .map_err(|e| format!("bad link: {e}"))?;
             let port = |name: &str| args.get(name).and_then(|v| v.as_u64()).map(|p| p as u16);
-            let https = port("httpsTarget").ok_or("httpsTarget is required")?;
-            Ok(Value::String(
-                device_ws::tunnel_config(link, https, port("httpTarget")).render(),
-            ))
+            match (port("wsTarget"), port("httpsTarget")) {
+                (Some(_), Some(_)) => Err(
+                    "pass wsTarget (gateway mode) or httpsTarget (device mode), not both"
+                        .to_string(),
+                ),
+                (Some(ws), None) => Ok(Value::String(
+                    device_ws::gateway_tunnel_config(link, ws).render(),
+                )),
+                (None, Some(https)) => Ok(Value::String(
+                    device_ws::tunnel_config(link, https, port("httpTarget")).render(),
+                )),
+                (None, None) => Err("httpsTarget or wsTarget is required".to_string()),
+            }
         }
 
         // --- over-the-air UI bundles ---------------------------------------
@@ -2048,6 +2071,69 @@ mod tests {
         let text = config.as_str().unwrap();
         assert!(text.contains("ListenPort = 8443\nTarget = 127.0.0.1:8444"));
         assert!(text.contains("ListenPort = 8080\nTarget = 127.0.0.1:8081"));
+    }
+
+    #[test]
+    fn a_device_link_says_who_terminates_tls() {
+        let body = |extra: Value| {
+            let mut b = json!({
+                "fqdn": "d.example.com",
+                "native_config": {
+                    "client_privkey": "K", "gateway_pubkey": "P", "link_address": "gw:51820"
+                }
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                b[k.as_str()] = v.clone();
+            }
+            json!({ "body": b })
+        };
+        let gateway = ok(
+            "deviceWs.fromLinkUpBody",
+            body(json!({ "ws_tls": "gateway", "ws_url": "wss://ws.example.com/d/abc" })),
+        );
+        assert_eq!(gateway["tls_mode"], "gateway");
+        assert_eq!(gateway["ws_url"], "wss://ws.example.com/d/abc");
+
+        // An API older than the field: the hosts must read a plain "device".
+        let older = ok("deviceWs.fromLinkUpBody", body(json!({})));
+        assert_eq!(older["tls_mode"], "device");
+        assert_eq!(older["ws_url"], Value::Null);
+    }
+
+    #[test]
+    fn both_hosts_are_handed_the_same_link_up_body() {
+        assert_eq!(ok("deviceWs.linkUpRequest", json!({})), json!({ "ws_tls": "gateway" }));
+    }
+
+    #[test]
+    fn a_gateway_mode_tunnel_is_one_forward_to_the_plaintext_socket() {
+        let config = ok(
+            "deviceWs.tunnelConfig",
+            json!({
+                "link": {
+                    "client_privkey": "K", "gateway_pubkey": "P", "link_address": "gw:51820"
+                },
+                "wsTarget": 41873
+            }),
+        );
+        let text = config.as_str().unwrap();
+        assert!(text.contains("ListenPort = 4000\nTarget = 127.0.0.1:41873"));
+        assert!(!text.contains("ListenPort = 8443"));
+        assert!(!text.contains("ListenPort = 8080"));
+    }
+
+    /// A host sending both targets does not know which mode it is in. Guessing
+    /// for it would bring up a tunnel that carries nothing.
+    #[test]
+    fn a_tunnel_config_with_both_kinds_of_target_is_refused() {
+        let link = json!({ "client_privkey": "K", "gateway_pubkey": "P", "link_address": "gw:51820" });
+        let both = err(
+            "deviceWs.tunnelConfig",
+            json!({ "link": link, "wsTarget": 4001, "httpsTarget": 8444 }),
+        );
+        assert!(both.contains("not both"), "unhelpful refusal: {both}");
+        let neither = err("deviceWs.tunnelConfig", json!({ "link": link }));
+        assert!(neither.contains("required"), "unhelpful refusal: {neither}");
     }
 
     /// Serving without a certificate is a real state, and it must not leave a

@@ -643,7 +643,7 @@ pub extern "C" fn homerun_set_app_logs_provider(
 /// Serve `wss://<device-fqdn>` on a loopback port the tunnel forwards to.
 ///
 /// `config` is `{ port, apiUrl, jwksUrl, deviceId, fqdn?, storageDir?,
-/// challengePort?, expectProxyProtocol?, acmeStaging? }`. A `port` of 0 asks
+/// challengePort?, expectProxyProtocol?, acmeStaging?, gatewayTls? }`. A `port` of 0 asks
 /// the OS to choose, and the answer carries **both** ports —
 /// `{ ok: true, port, tlsPort }`. A host needs each for a different thing: its
 /// own UI dials `port` over loopback, and the tunnel forwards the gateway's
@@ -654,6 +654,11 @@ pub extern "C" fn homerun_set_app_logs_provider(
 /// obtain: the socket still serves, reachable through the tunnel and not by a
 /// browser. `expectProxyProtocol` follows the gateway generation and defaults
 /// to the legacy plane.
+///
+/// `gatewayTls: true` is the mode where the gateway terminates TLS: nothing is
+/// ordered whatever else is passed, and the tunnel forwards the gateway's relay
+/// to `port` — the **plaintext** one — not to `tlsPort`. Absent is false, which
+/// is every host built before the field existed.
 ///
 /// Builds without the `device-ws` feature answer that they cannot serve one,
 /// rather than pretending to. Both phone targets have it; a host build does
@@ -727,6 +732,12 @@ pub unsafe extern "C" fn homerun_device_ws_start(config: *const c_char) -> *mut 
                     .unwrap_or(true),
                 acme_staging: parsed
                     .get("acmeStaging")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                // Absent is false: a host that predates gateway mode gets
+                // exactly the behaviour it always had.
+                gateway_tls: parsed
+                    .get("gatewayTls")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 // Optional, and silently absent when a host has not wired it

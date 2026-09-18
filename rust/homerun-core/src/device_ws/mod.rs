@@ -20,11 +20,23 @@
 //!
 //! # The numbers that must not change
 //!
-//! [`LISTEN_HTTPS`] and [`LISTEN_HTTP`] are **the gateway's**, not ours. It
-//! DNATs public `:443` and `:80` onto those ports on the WireGuard interface,
+//! [`LISTEN_HTTPS`], [`LISTEN_HTTP`] and [`LISTEN_WS`] are **the gateway's**,
+//! not ours. It sends traffic to those ports on the WireGuard interface,
 //! whatever the device happens to bind locally — exactly the rule
 //! [`crate::tunnel`] documents for a server's ports, and it fails the same way
 //! if "corrected": a config that loads, connects, and is unreachable.
+//!
+//! # Who terminates TLS
+//!
+//! Two answers, negotiated per `link_up` and decided by the API — see
+//! [`TlsMode`]. The device asks for the gateway to do it
+//! ([`link_up_request`]); the API says which one this link got; the device only
+//! ever *downgrades* to terminating TLS itself. The reason the gateway mode
+//! exists at all is a rate limit: a certificate per device, all under one
+//! registered domain, ran into Let's Encrypt's fifty new certificates a week,
+//! and a device past the cap has no `wss://` and nothing on screen to say so.
+//! The design is `api/docs/plans/device-websocket-gateway-tls.md` in the
+//! `homerun` repo; the desktop's half is `deviceWebsocket/wsTlsMode.ts`.
 
 /// The frames themselves, and the order they are allowed in.
 pub mod protocol;
@@ -44,6 +56,63 @@ pub const LISTEN_HTTPS: u16 = 8443;
 /// nothing else should ever be served on it.
 pub const LISTEN_HTTP: u16 = 8080;
 
+/// The gateway's relay — a **plaintext** websocket, already decrypted.
+///
+/// In [`TlsMode::Gateway`] the gateway terminates TLS with its own certificate
+/// and forwards what is inside to this port on the WireGuard interface. It is
+/// the `svc_port` the API registers for the device's `ws_route` service
+/// (`gateway_provision.DEVICE_WS_PORT`), and the desktop's
+/// `DEVICE_WS_TUNNEL_PORT`. Three places, one number.
+pub const LISTEN_WS: u16 = 4000;
+
+/// Who terminates TLS for this device's websocket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    /// The gateway holds the certificate — one per gateway, for its own
+    /// hostname — and relays the decrypted websocket to [`LISTEN_WS`]. The
+    /// device obtains no certificate, answers no ACME challenge, and has
+    /// nothing reachable from the internet except through the gateway.
+    Gateway,
+    /// The device holds its own Let's Encrypt certificate behind the gateway's
+    /// SNI passthrough: [`LISTEN_HTTPS`] and [`LISTEN_HTTP`]. What every link
+    /// was before the gateway learned to terminate, and still what a link is
+    /// whenever the API says anything other than `"gateway"`.
+    Device,
+}
+
+impl TlsMode {
+    /// Read the API's answer. **Downgrade-only.**
+    ///
+    /// Exactly `"gateway"` is gateway mode. `"device"`, a value this build has
+    /// never heard of, a non-string, and no field at all — which is what an API
+    /// older than the feature sends — are all device mode. There is no way to
+    /// be talked *into* gateway mode by anything but the API saying so, because
+    /// the gateway only routes to [`LISTEN_WS`] if the API provisioned that
+    /// route; a device that assumed it would bring up a tunnel nothing sends to.
+    pub fn from_reported(value: Option<&serde_json::Value>) -> Self {
+        match value.and_then(|v| v.as_str()) {
+            Some("gateway") => TlsMode::Gateway,
+            _ => TlsMode::Device,
+        }
+    }
+}
+
+/// What a host sends as the body of `POST /api/device/<id>/link_up/`.
+///
+/// `ws_tls: "gateway"` says this build *can* run with the gateway terminating
+/// TLS. It is a capability, not a demand: the API decides per link-up, gated on
+/// its own kill switch and on the region's gateway being opted in, and answers
+/// in the result ([`DeviceLink::tls_mode`]). An API that predates the field
+/// ignores it.
+///
+/// Here rather than in each host so that Kotlin and Swift cannot come to send
+/// different things — one of them asking and the other not is a phone that
+/// silently keeps ordering certificates.
+pub fn link_up_request() -> serde_json::Value {
+    serde_json::json!({ "ws_tls": "gateway" })
+}
+
 /// What `GET /api/device/<id>/link_up/?result=<task>` returned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceLink {
@@ -55,6 +124,12 @@ pub struct DeviceLink {
     pub fqdn: Option<String>,
     /// True when the consolidated gateway provisioned this link.
     pub gateway_v2: bool,
+    /// Who terminates TLS — the API's answer, read by [`TlsMode::from_reported`].
+    pub tls_mode: TlsMode,
+    /// The `wss://` address the dashboard is given for this device, when the
+    /// API says. In gateway mode it is on the gateway's hostname with an opaque
+    /// path token, **not** [`Self::fqdn`]. Informational: nothing here dials it.
+    pub ws_url: Option<String>,
 }
 
 impl DeviceLink {
@@ -64,6 +139,18 @@ impl DeviceLink {
     /// and can serve plaintext, which is what the desktop degrades to.
     pub fn can_serve_tls(&self) -> bool {
         self.fqdn.is_some()
+    }
+
+    /// Whether **this device** should obtain a certificate and answer the ACME
+    /// challenge.
+    ///
+    /// Only in device mode, and only with a hostname to prove. In gateway mode
+    /// the answer is no even though the link still has an `fqdn`: nothing
+    /// routes that name to this device any more, so an order for it could not
+    /// validate, and every attempt would spend a slot of the rate limit this
+    /// mode exists to stop spending.
+    pub fn needs_certificate(&self) -> bool {
+        self.tls_mode == TlsMode::Device && self.can_serve_tls()
     }
 
     /// Whether connections on [`LISTEN_HTTPS`] arrive behind a PROXY v1 header.
@@ -117,6 +204,13 @@ pub fn from_link_up_body(body: &serde_json::Value) -> Option<DeviceLink> {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string),
+        tls_mode: TlsMode::from_reported(body.get("ws_tls")),
+        ws_url: body
+            .get("ws_url")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -135,6 +229,24 @@ pub fn tunnel_config(link: Link, https_target: u16, http_target: Option<u16>) ->
         forwards.push(Forward::tcp(LISTEN_HTTP, target));
     }
     Config { link, forwards }
+}
+
+/// The tunnel config for a device whose TLS the **gateway** terminates.
+///
+/// One forward: the gateway's relay port to the plaintext websocket. No
+/// [`LISTEN_HTTPS`], because no ClientHello will ever arrive; no
+/// [`LISTEN_HTTP`], because there is no certificate to prove a name for.
+///
+/// `ws_target` is the **plaintext** listener — the same one the app's own UI
+/// dials over loopback. Pointing this at the TLS listener instead is the
+/// mirror image of the mistake [`tunnel_config`]'s callers are warned about:
+/// the gateway sends a websocket upgrade, the TLS listener has no certificate
+/// in this mode and drops every connection, and the dashboard sees a 503.
+pub fn gateway_tunnel_config(link: Link, ws_target: u16) -> Config {
+    Config {
+        link,
+        forwards: vec![Forward::tcp(LISTEN_WS, ws_target)],
+    }
 }
 
 #[cfg(test)]
@@ -331,5 +443,119 @@ mod tests {
             !rendered.contains("10.0.0.2/24"),
             "the legacy fallback must not survive alongside an allocated address"
         );
+    }
+
+    // --- who terminates TLS ------------------------------------------------
+
+    fn linked(extra: serde_json::Value) -> DeviceLink {
+        let mut body = json!({ "fqdn": "d.example.com", "native_config": native() });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k.as_str()] = v.clone();
+        }
+        from_link_up_body(&body).unwrap()
+    }
+
+    #[test]
+    fn the_api_saying_gateway_is_the_only_way_into_gateway_mode() {
+        assert_eq!(linked(json!({ "ws_tls": "gateway" })).tls_mode, TlsMode::Gateway);
+    }
+
+    /// Every one of these is a real state: an explicit refusal, an API older
+    /// than the field, and the values a future or confused API might send. A
+    /// device that read any of them as gateway mode would bring up a tunnel on a
+    /// port nothing is sent to and serve no console at all.
+    #[test]
+    fn anything_else_is_device_mode() {
+        assert_eq!(linked(json!({})).tls_mode, TlsMode::Device, "an older API sends no field");
+        for other in [json!("device"), json!("GATEWAY"), json!("wildcard"), json!(""), json!(2), json!(true), json!(null)] {
+            assert_eq!(
+                linked(json!({ "ws_tls": other })).tls_mode,
+                TlsMode::Device,
+                "{other} must not be read as gateway mode"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gateway_mode_device_orders_no_certificate_even_though_it_has_a_name() {
+        let device = linked(json!({ "ws_tls": "gateway" }));
+        assert!(device.can_serve_tls(), "the link still carries its fqdn");
+        assert!(
+            !device.needs_certificate(),
+            "nothing routes that name here any more, so an order cannot validate — and each \
+             attempt spends the rate limit this mode exists to stop spending"
+        );
+        assert!(linked(json!({})).needs_certificate());
+        assert!(linked(json!({ "ws_tls": "device" })).needs_certificate());
+    }
+
+    #[test]
+    fn device_mode_without_a_name_still_needs_no_certificate() {
+        let unnamed = from_link_up_body(&json!({ "native_config": native() })).unwrap();
+        assert_eq!(unnamed.tls_mode, TlsMode::Device);
+        assert!(!unnamed.needs_certificate());
+    }
+
+    #[test]
+    fn the_public_address_is_carried_but_blank_is_absent() {
+        let url = "wss://ws-us-east-2.example.com/d/0f8fad5b-d9cb-469f-a165-70867728950e";
+        assert_eq!(
+            linked(json!({ "ws_tls": "gateway", "ws_url": format!(" {url} ") })).ws_url.as_deref(),
+            Some(url)
+        );
+        assert_eq!(linked(json!({ "ws_url": "  " })).ws_url, None);
+        assert_eq!(linked(json!({})).ws_url, None);
+    }
+
+    #[test]
+    fn the_mode_crosses_the_boundary_as_a_lowercase_word() {
+        // Hosts read this key out of JSON. A rename here that the hosts do not
+        // follow is a phone that reads "absent" and runs device mode for ever.
+        let value = serde_json::to_value(linked(json!({ "ws_tls": "gateway" }))).unwrap();
+        assert_eq!(value["tls_mode"], "gateway");
+        assert_eq!(serde_json::to_value(linked(json!({}))).unwrap()["tls_mode"], "device");
+    }
+
+    #[test]
+    fn both_hosts_ask_for_the_same_thing() {
+        assert_eq!(link_up_request(), json!({ "ws_tls": "gateway" }));
+    }
+
+    /// Byte-exact against `generateDeviceWireproxyConfig` with
+    /// `{ kind: "gateway" }` in the desktop's `deviceWebsocket/wireproxy.ts`,
+    /// and the port against the API's `gateway_provision.DEVICE_WS_PORT`.
+    #[test]
+    fn gateway_mode_renders_one_forward_to_the_plaintext_socket() {
+        let link = linked(json!({ "ws_tls": "gateway" })).link;
+        assert_eq!(
+            gateway_tunnel_config(link, 41873).render(),
+            "[Interface]\n\
+             PrivateKey = PRIV\n\
+             Address = 10.0.0.2/24\n\
+             MTU = 1280\n\
+             \n\
+             [Peer]\n\
+             PublicKey = PUB\n\
+             Endpoint = gw.example.com:51820\n\
+             AllowedIPs = 10.0.0.1/32\n\
+             PersistentKeepalive = 30\n\
+             \n\
+             [TCPServerTunnel]\n\
+             ListenPort = 4000\n\
+             Target = 127.0.0.1:41873\n"
+        );
+    }
+
+    #[test]
+    fn gateway_mode_never_forwards_the_tls_or_challenge_ports() {
+        let rendered = gateway_tunnel_config(linked(json!({ "ws_tls": "gateway" })).link, 4000).render();
+        assert!(!rendered.contains("ListenPort = 8443"));
+        assert!(!rendered.contains("ListenPort = 8080"));
+        assert_eq!(rendered.matches("[TCPServerTunnel]").count(), 1);
+    }
+
+    #[test]
+    fn the_relay_port_is_the_one_the_api_registers() {
+        assert_eq!(LISTEN_WS, 4000);
     }
 }

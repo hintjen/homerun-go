@@ -484,7 +484,13 @@ enum HomerunAPI {
 
         let path = "/api/device/\(deviceId)/link_up/"
         guard
-            let started = try? await post(apiURL: apiURL, path: path, body: [:], token: token),
+            // Not an empty body: it says this build can run with the gateway
+            // terminating TLS. The core words it so both phones ask alike, and
+            // if the core cannot be reached an empty body is what every build
+            // before this one sent — device mode, which still works.
+            let started = try? await post(
+                apiURL: apiURL, path: path,
+                body: (try? Core.deviceWsLinkUpRequest()) ?? [:], token: token),
             let task = started["task"] as? String, !task.isEmpty
         else {
             HostLog.device.error("link_up did not start")
