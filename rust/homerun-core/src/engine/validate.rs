@@ -242,7 +242,43 @@ fn check_settings(d: &GameDescriptor, r: &mut Report) {
             ));
         }
 
+        check_options(setting, r);
         check_default(setting, r);
+    }
+}
+
+/// A closed set is a `string` setting with a non-empty list of strings, and
+/// there is no other kind.
+///
+/// The API, the UI and this crate all had to agree on one spelling for "pick
+/// one of these", and they now do: `type: "string"` plus `options`, with no
+/// `enum` type anywhere. This is the half of that agreement core is
+/// responsible for, and it is a refusal rather than a warning because the
+/// alternative is a player being offered choices the launch line cannot carry.
+///
+/// An `int` or `bool` with options is the shape someone reaches for when they
+/// want a small set of numbers; the answer is a `string` setting whose options
+/// are `"1"`, `"2"`, `"4"`, because that is what reaches argv either way.
+///
+/// An empty list is not an error: it is indistinguishable from no list at
+/// all, and every reader here already treats it that way.
+fn check_options(setting: &Setting, r: &mut Report) {
+    if setting.options.is_empty() {
+        return;
+    }
+    if setting.kind != SettingKind::String {
+        r.problems.push(format!(
+            "the setting \"{}\" offers a fixed set of choices, which only a text \
+             setting can do. Declare it as text and write its choices as text.",
+            setting.key
+        ));
+    }
+    if let Some(odd) = setting.options.iter().find(|o| !o.is_string()) {
+        r.problems.push(format!(
+            "the setting \"{}\" offers {odd} as one of its choices, and every choice \
+             has to be text.",
+            setting.key
+        ));
     }
 }
 
@@ -919,6 +955,63 @@ mod tests {
             r.warnings.iter().any(|w| w.contains("save may be lost")),
             "{:#?}",
             r.warnings
+        );
+    }
+
+    // ─── one spelling for a closed set ─────────────────────────────────────
+
+    /// The API, the UI and this crate agreed on `type: "string"` plus
+    /// `options`, and on there being no second way to say it. A numeric
+    /// setting with choices is the shape that would have been that second
+    /// way, so core refuses it rather than offering a player choices the
+    /// launch line cannot carry.
+    #[test]
+    fn a_closed_set_on_a_number_or_a_yes_or_no_is_refused() {
+        for kind in ["int", "bool"] {
+            let problems = problems_of(json!({ "settings": [
+                { "key": "tickRate", "type": kind, "label": "Tick rate",
+                  "default": 30, "options": [30, 60] }
+            ]}));
+            assert!(
+                says(&problems, "only a text setting"),
+                "for {kind}: {problems:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_choice_that_is_not_text_is_refused() {
+        let problems = problems_of(json!({ "settings": [
+            { "key": "difficulty", "type": "string", "label": "Difficulty",
+              "default": "normal", "options": ["normal", 3] }
+        ]}));
+        assert!(says(&problems, "has to be text"), "{problems:#?}");
+    }
+
+    /// An empty list is how "no closed set" arrives from a generator that
+    /// always writes the key. It is not a fault, and every reader here
+    /// already treats it as absent.
+    #[test]
+    fn an_empty_list_of_choices_is_the_same_as_no_list() {
+        let problems = problems_of(json!({ "settings": [
+            { "key": "hostname", "type": "string", "label": "Name",
+              "default": "x", "options": [] }
+        ]}));
+        assert!(!says(&problems, "choices"), "{problems:#?}");
+    }
+
+    /// Bounds on anything but a number are ignored rather than refused —
+    /// a descriptor that carries them still runs — but silently ignoring
+    /// them is how someone believes a limit is being enforced.
+    #[test]
+    fn bounds_on_something_that_is_not_a_number_are_warned_about() {
+        let warnings = warnings_of(json!({ "settings": [
+            { "key": "hostname", "type": "string", "label": "Name",
+              "default": "x", "min": 1, "max": 10 }
+        ]}));
+        assert!(
+            warnings.iter().any(|w| w.contains("not a number")),
+            "{warnings:#?}"
         );
     }
 

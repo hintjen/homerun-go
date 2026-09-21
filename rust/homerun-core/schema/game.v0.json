@@ -439,18 +439,24 @@
             "type": "string"
           },
           "max": {
+            "description": "Inclusive, and only meaningful for an int setting. Ignored on any other type.",
             "type": [
               "integer",
               "null"
             ]
           },
           "min": {
+            "description": "Inclusive, and only meaningful for an int setting. Ignored on any other type.",
             "type": [
               "integer",
               "null"
             ]
           },
           "options": {
+            "description": "A closed set of choices, for a string setting only. A non-empty list is the only way to say \"pick one of these\" -- there is no enum type. An empty list means the same as no list.",
+            "items": {
+              "type": "string"
+            },
             "type": "array"
           },
           "type": {

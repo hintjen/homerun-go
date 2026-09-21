@@ -154,6 +154,15 @@ door was used is not a backstop.
 Unlike `validate`, it stops at the first problem: its audience is a player who
 set one thing wrong, and the protocol carries one `error.message`.
 
+**A closed set has exactly one spelling**, agreed across three repositories:
+`type: "string"` with a non-empty `options` of strings. There is no `enum`
+type and there is no second way to say it, so `validate` refuses `options` on
+an `int` or a `bool` and refuses a choice that is not text. A small set of
+numbers is a string setting whose options are `"1"`, `"2"`, `"4"` — which is
+what reaches argv either way. `min`/`max` are `int`-only and ignored
+elsewhere, which earns a warning rather than a refusal; an integer that does
+not fit an `i64` is refused. An empty `options` list means the same as none.
+
 ## Templating — `template.rs`
 
 `{setting:<key>}`, `{port:<name>}`, `{secret:<name>}`, `{serverName}`,

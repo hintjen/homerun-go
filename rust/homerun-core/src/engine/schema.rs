@@ -129,9 +129,27 @@ pub fn schema() -> Value {
                                  launch line. A string default may contain {serverName} \
                                  and no other placeholder."
                         },
-                        "min": { "type": ["integer", "null"] },
-                        "max": { "type": ["integer", "null"] },
-                        "options": { "type": "array" }
+                        "min": {
+                            "type": ["integer", "null"],
+                            "description":
+                                "Inclusive, and only meaningful for an int setting. \
+                                 Ignored on any other type."
+                        },
+                        "max": {
+                            "type": ["integer", "null"],
+                            "description":
+                                "Inclusive, and only meaningful for an int setting. \
+                                 Ignored on any other type."
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description":
+                                "A closed set of choices, for a string setting only. \
+                                 A non-empty list is the only way to say \"pick one of \
+                                 these\" -- there is no enum type. An empty list means \
+                                 the same as no list."
+                        }
                     }
                 }
             },
@@ -352,7 +370,7 @@ mod tests {
                 default: serde_json::json!(10),
                 min: Some(1),
                 max: Some(200),
-                options: vec![serde_json::json!(10)],
+                options: vec![serde_json::json!("10")],
             }],
             requires: Requires {
                 ram_mb: 8192,
