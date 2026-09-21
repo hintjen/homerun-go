@@ -239,9 +239,9 @@ pub fn lan_bind(exposed: bool, port: u16) -> napi::Result<String> {
 /// bytes are the core's so that the desktop and Android send the same thing
 /// Pumpkin's own broadcaster does.
 #[napi]
-pub fn lan_beacon(motd: String, port: u16) -> napi::Result<String> {
-    guarded("lanBeacon", move || {
-        serde_json::to_string(&lan::beacon(&motd, port)).map_err(|e| napi::Error::from_reason(e.to_string()))
+pub fn lan_announce(motd: String, port: u16) -> napi::Result<String> {
+    guarded("lanAnnounce", move || {
+        serde_json::to_string(&lan::announcement(&motd, port)).map_err(|e| napi::Error::from_reason(e.to_string()))
     })
 }
 

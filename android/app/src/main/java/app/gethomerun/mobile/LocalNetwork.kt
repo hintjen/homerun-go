@@ -14,7 +14,7 @@ import java.net.DatagramSocket
 import java.net.InetAddress
 
 /**
- * Being found on the local network: the toggle, and the beacon that puts a
+ * Being found on the local network: the toggle, and the announcement that puts a
  * server in Minecraft's "local network" list.
  *
  * # One switch, two effects
@@ -39,7 +39,7 @@ import java.net.InetAddress
  * multicast group `224.0.2.60:4445` and lists whatever shouts at it. Only the
  * client's own integrated server ("Open to LAN") ever does — a dedicated
  * Paper or vanilla server never announces itself — so this host sends the
- * beacon on the JVM's behalf. The bytes are the core's (`minecraft.lan.beacon`),
+ * announcement on the JVM's behalf. The bytes are the core's (`minecraft.lan.announce`),
  * the same ones Pumpkin's own broadcaster sends, so the two cannot drift.
  * Pumpkin sends its own when the flag is on; PowerNukkitX needs none, because
  * a Bedrock client does the shouting and the server merely answers.
@@ -75,7 +75,7 @@ object LocalNetwork {
         File(context.filesDir, "servers/${requireValidServerId(serverId)}")
 
     /**
-     * The beacon for one running server: what the JVM cannot say for itself.
+     * The announcement for one running server: what the JVM cannot say for itself.
      *
      * Sends the core's datagram every `intervalMs` from a socket bound to any
      * port — the client cares about the *contents*, which carry the game
@@ -83,14 +83,14 @@ object LocalNetwork {
      * idempotent; a launch that never got as far as running has nothing to
      * stop.
      */
-    class Beacon(private val context: Context, private val scope: CoroutineScope) {
+    class Announcer(private val context: Context, private val scope: CoroutineScope) {
         private var job: Job? = null
         private var lock: WifiManager.MulticastLock? = null
 
         fun start(serverId: String, motd: String, port: Int) {
             stop()
-            val beacon = runCatching { Core.lanBeacon(motd, port) }
-                .onFailure { Log.w(TAG, "$serverId: no beacon: ${it.message}") }
+            val announcement = runCatching { Core.lanAnnounce(motd, port) }
+                .onFailure { Log.w(TAG, "$serverId: no announcement: ${it.message}") }
                 .getOrNull() ?: return
 
             lock = runCatching {
@@ -100,15 +100,15 @@ object LocalNetwork {
             }.onFailure { Log.w(TAG, "$serverId: no multicast lock: ${it.message}") }.getOrNull()
 
             job = scope.launch(Dispatchers.IO) {
-                val group = InetAddress.getByName(beacon.group)
-                val bytes = beacon.payload.toByteArray(Charsets.UTF_8)
+                val group = InetAddress.getByName(announcement.group)
+                val bytes = announcement.payload.toByteArray(Charsets.UTF_8)
                 DatagramSocket().use { socket ->
                     socket.broadcast = true
-                    Log.i(TAG, "$serverId: announcing on ${beacon.group}:${beacon.port} every ${beacon.intervalMs} ms")
+                    Log.i(TAG, "$serverId: announcing on ${announcement.group}:${announcement.port} every ${announcement.intervalMs} ms")
                     while (true) {
-                        runCatching { socket.send(DatagramPacket(bytes, bytes.size, group, beacon.port)) }
-                            .onFailure { Log.w(TAG, "$serverId: beacon not sent: ${it.message}") }
-                        delay(beacon.intervalMs)
+                        runCatching { socket.send(DatagramPacket(bytes, bytes.size, group, announcement.port)) }
+                            .onFailure { Log.w(TAG, "$serverId: announcement not sent: ${it.message}") }
+                        delay(announcement.intervalMs)
                     }
                 }
             }

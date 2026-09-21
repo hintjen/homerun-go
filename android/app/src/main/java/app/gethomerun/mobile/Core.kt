@@ -2150,15 +2150,15 @@ object Core {
     }
 
     /** The datagram a Java client lists a server from, and where to send it. */
-    data class LanBeacon(val payload: String, val group: String, val port: Int, val intervalMs: Long)
+    data class LanAnnouncement(val payload: String, val group: String, val port: Int, val intervalMs: Long)
 
-    /** `minecraft.lan.beacon`: the bytes Pumpkin's own broadcaster sends, for the JVM. */
-    fun lanBeacon(motd: String, port: Int): LanBeacon {
-        val reply = call("minecraft.lan.beacon", buildJsonObject {
+    /** `minecraft.lan.announce`: the bytes Pumpkin's own broadcaster sends, for the JVM. */
+    fun lanAnnounce(motd: String, port: Int): LanAnnouncement {
+        val reply = call("minecraft.lan.announce", buildJsonObject {
             put("motd", motd)
             put("port", port)
         }).jsonObject
-        return LanBeacon(
+        return LanAnnouncement(
             payload = reply["payload"]!!.jsonPrimitive.content,
             group = reply["group"]!!.jsonPrimitive.content,
             port = reply["port"]!!.jsonPrimitive.int,

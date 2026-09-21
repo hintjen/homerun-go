@@ -77,12 +77,12 @@ class JavaServerBackend(
     private val launchGate = Mutex()
 
     /**
-     * The LAN beacon for the running server, when it is exposed. Started at
+     * The LAN announcement for the running server, when it is exposed. Started at
      * `announceRunning`, stopped when the process is gone. Not for
      * PowerNukkitX, whose Bedrock clients do their own discovery and would
      * otherwise list a server they cannot join.
      */
-    private val beacon = LocalNetwork.Beacon(context, scope)
+    private val announcer = LocalNetwork.Announcer(context, scope)
 
     /** Where this host has read the supervisor's console up to. */
     private var engineCursor = 0L
@@ -773,7 +773,7 @@ class JavaServerBackend(
             val motd = config.settingsEnv
                 ?.let { Core.resolvedMotd(it, config.gameType, prepared.loader) }
                 ?: config.name
-            beacon.start(serverId, motd, port)
+            announcer.start(serverId, motd, port)
         }
 
         // A stop that landed while the JVM was booting: the console exists
@@ -1085,7 +1085,7 @@ class JavaServerBackend(
      */
     private suspend fun serverExited(serverId: String, result: String) {
         // Nothing to announce any more, whatever the exit meant.
-        beacon.stop()
+        announcer.stop()
 
         // The last of the console, including whatever it said on the way down.
         // The pump keeps running past this: an on-stop backup writes `[Backup]`

@@ -1736,7 +1736,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
 
         // --- the local network ---------------------------------------------
         //
-        // One switch, two effects: where a server binds, and the beacon that
+        // One switch, two effects: where a server binds, and the announcement that
         // puts it in Minecraft's LAN list. The core owns both decisions; the
         // host owns the socket. See `minecraft::lan`.
         "minecraft.lan.bind" => {
@@ -1745,10 +1745,10 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             serde_json::to_value(lan::bind(exposed, port)).map_err(|e| e.to_string())
         }
 
-        "minecraft.lan.beacon" => {
+        "minecraft.lan.announce" => {
             let motd = optional_text("motd").unwrap_or_default();
             let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(25565) as u16;
-            serde_json::to_value(lan::beacon(&motd, port)).map_err(|e| e.to_string())
+            serde_json::to_value(lan::announcement(&motd, port)).map_err(|e| e.to_string())
         }
 
         "minecraft.settings.properties" => {

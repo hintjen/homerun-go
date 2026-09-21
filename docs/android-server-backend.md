@@ -830,13 +830,13 @@ otherwise nothing rewrites the file and a toggle turned off would leave the
 last launch's `0.0.0.0`. **Announce**: a Java client "scanning for games on
 your local network" listens on `224.0.2.60:4445` for
 `[MOTD]…[/MOTD][AD]port[/AD]` every 1.5 s, and only the client's own
-integrated server ever sends it — so `LocalNetwork.Beacon` sends the core's
-datagram (`minecraft.lan.beacon`, the same bytes Pumpkin's own broadcaster
+integrated server ever sends it — so `LocalNetwork.Announcer` sends the core's
+datagram (`minecraft.lan.announce`, the same bytes Pumpkin's own broadcaster
 formats) for the JVM from console-ready until the process exits. Pumpkin
 sends its own; PowerNukkitX needs none, because a Bedrock client broadcasts
 the ping and the server answers it.
 
-The beacon holds a `WifiManager.MulticastLock`
+The announcement holds a `WifiManager.MulticastLock`
 (`CHANGE_WIFI_MULTICAST_STATE`, no prompt) while it runs: the Wi-Fi driver
 drops multicast and broadcast frames nobody asked for, device-wide, which is
 what would otherwise silence a Bedrock client's ping before PowerNukkitX ever

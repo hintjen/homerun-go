@@ -1,4 +1,4 @@
-//! Being found on the local network: the bind and the beacon.
+//! Being found on the local network: the bind and the announcement.
 //!
 //! # Two discoveries, one switch
 //!
@@ -7,7 +7,7 @@
 //! the multicast group `224.0.2.60:4445` for `[MOTD]…[/MOTD][AD]port[/AD]`,
 //! sent every 1.5 s. Only the client's own integrated server ("Open to LAN")
 //! ever sends that — a dedicated Paper or vanilla server never announces
-//! itself, so a host that wants its server listed has to send the beacon on
+//! itself, so a host that wants its server listed has to send the announcement on
 //! the server's behalf. Bedrock works the other way round: the client
 //! broadcasts RakNet pings and lists whoever answers, which PowerNukkitX does
 //! natively as soon as it is reachable.
@@ -16,8 +16,8 @@
 //! default and the desktop's without its toggle. So "expose to the local
 //! network" means two things at once — bind every interface, and announce —
 //! and this module is the shared half of both: which address to bind, what to
-//! print about it, and the exact bytes of the beacon. Three hosts had the
-//! console line spelled three ways before this; the beacon format is the kind
+//! print about it, and the exact bytes of the announcement. Three hosts had the
+//! console line spelled three ways before this; the announcement format is the kind
 //! of thing that is right on the first host and subtly wrong on the second.
 //!
 //! The *sending* is a host effect and stays there: a `dgram` socket on the
@@ -72,10 +72,10 @@ pub fn bind(exposed: bool, port: u16) -> Bind {
     }
 }
 
-/// What a beacon sender needs: the bytes, where to send them, and how often.
+/// What an announcement sender needs: the bytes, where to send them, and how often.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Beacon {
+pub struct Announcement {
     /// `[MOTD]name[/MOTD][AD]port[/AD]`, as the client parses it.
     pub payload: String,
     pub group: String,
@@ -83,7 +83,7 @@ pub struct Beacon {
     pub interval_ms: u64,
 }
 
-/// The beacon for a server, from its MOTD and the port it bound.
+/// The announcement for a server, from its MOTD and the port it bound.
 ///
 /// The client takes the text between `[MOTD]` and the first `[/MOTD]` and
 /// draws it as one line through its ordinary text renderer — so the classic
@@ -95,8 +95,8 @@ pub struct Beacon {
 /// closing tags are removed from the text so a joker's MOTD cannot end the
 /// name early or forge the port. Nothing visible falls back to the words
 /// vanilla shows for an unnamed server.
-pub fn beacon(motd: &str, port: u16) -> Beacon {
-    Beacon {
+pub fn announcement(motd: &str, port: u16) -> Announcement {
+    Announcement {
         payload: format!("[MOTD]{}[/MOTD][AD]{port}[/AD]", list_name(motd)),
         group: MULTICAST_GROUP.into(),
         port: MULTICAST_PORT,
@@ -157,8 +157,8 @@ mod tests {
     /// The exact bytes a Java client lists. Pumpkin formats the same string
     /// in `net/lan_broadcast.rs`; a host sending this for a JVM must match.
     #[test]
-    fn the_beacon_is_what_the_client_parses() {
-        let b = beacon("Player's Minecraft Server", 25565);
+    fn the_announcement_is_what_the_client_parses() {
+        let b = announcement("Player's Minecraft Server", 25565);
         assert_eq!(
             b.payload,
             "[MOTD]Player's Minecraft Server[/MOTD][AD]25565[/AD]"
@@ -207,7 +207,7 @@ mod tests {
     /// own choosing.
     #[test]
     fn a_motd_cannot_forge_the_port() {
-        let b = beacon("evil[/MOTD][AD]1337[/AD]", 25565);
+        let b = announcement("evil[/MOTD][AD]1337[/AD]", 25565);
         assert_eq!(b.payload, "[MOTD]evil[AD]1337[/MOTD][AD]25565[/AD]");
         assert_eq!(b.payload.matches("[/AD]").count(), 1);
     }

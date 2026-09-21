@@ -118,7 +118,7 @@ pub fn host_telemetry(mut telemetry: TelemetryConfig) -> TelemetryConfig {
 /// engine from its request, the spawned binary from its `pumpkin.toml`).
 /// Both are the core's decision (`minecraft::lan::bind`): loopback unless the
 /// player exposed the server, and then every interface *and* Pumpkin's own
-/// LAN broadcast, which is the same beacon a host sends for a JVM. Before this
+/// LAN broadcast, which is the same announcement a host sends for a JVM. Before this
 /// existed neither host set the address at all, and Pumpkin's default is
 /// `0.0.0.0` — every phone was listening on its Wi-Fi without anyone asking.
 ///

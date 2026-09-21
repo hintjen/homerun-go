@@ -276,7 +276,7 @@ rather than promoted.
 | `minecraft.jar.satisfies` | `onDisk`, `artifact` | bool — is the jar on disk exactly this artifact |
 | `minecraft.jar.couldSatisfy` | `onDisk`, `version?`, `loader?` | bool — the looser offline fallback |
 | `minecraft.lan.bind` | `exposed`, `port` | `{address, line?}` — `0.0.0.0` and a console line when exposed to the local network, `127.0.0.1` and no line otherwise |
-| `minecraft.lan.beacon` | `motd`, `port` | `{payload, group, port, intervalMs}` — the `[MOTD]…[/MOTD][AD]port[/AD]` datagram a Java client lists, and where and how often to send it |
+| `minecraft.lan.announce` | `motd`, `port` | `{payload, group, port, intervalMs}` — the `[MOTD]…[/MOTD][AD]port[/AD]` datagram a Java client lists, and where and how often to send it |
 | `minecraft.settings.fromEnv` | `env`, `gameType?`, `loader?`, `fallbackMotd?` | resolved `Settings` |
 | `minecraft.settings.properties` | `settings`, `runtime` | `[[key, value], …]` for `properties.merge` |
 | `minecraft.settings.offlineUuid` | `name` | the UUID an offline server derives |
