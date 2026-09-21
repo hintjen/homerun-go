@@ -222,7 +222,10 @@ mod tests {
         }
     }
 
-    const NOTHING: fetch::Present = fetch::Present { build_id: None };
+    const NOTHING: fetch::Present = fetch::Present {
+        build_id: None,
+        suspect: false,
+    };
 
     #[test]
     fn a_capable_machine_with_accepted_terms_is_cleared() {
@@ -335,6 +338,7 @@ mod tests {
         assert!(!fresh.ok, "a fresh install needs the space");
 
         let present = fetch::Present {
+            suspect: false,
             build_id: Some("1928".into()),
         };
         let again = doctor(&pinned, &cramped, &present, true);

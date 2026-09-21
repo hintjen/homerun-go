@@ -412,6 +412,20 @@ directory with files and no stamp is *not* a runtime — that is what an
 interrupted download leaves behind, and treating it as finished is how a
 server starts against half an install.
 
+**Updating and verifying are different questions, and steamcmd charges very
+differently for them.** `app_update` asks Steam what changed and fetches
+that; `validate` rereads and checksums every file. Running both on every
+start made the second the whole cost: the Rust pilot measured a full
+re-verify of 5,869,171,402 bytes, minutes per start, on a runtime that was
+already complete and already current. So an update check still runs every
+time an unpinned runtime is launched — that is what a force-updating game
+requires — and a verify runs only when there is a reason to doubt what is on
+disk: no stamp (a first install, or one interrupted before it could stamp),
+or a host that sets `Present::suspect`. `engine::fetch` makes that decision
+and `fetcher::steamcmd_args` carries it. The risk accepted is a runtime that
+is quietly corrupt in a way Steam believes is current, which costs one slow
+repair rather than every start.
+
 **Unpacking is careful even though the archive is pinned.** The sha256 pins
 the *bytes*, which says nothing about the *paths inside them*: a vendor
 archive nobody has audited entry-by-entry can still contain

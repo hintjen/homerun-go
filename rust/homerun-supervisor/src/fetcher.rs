@@ -85,6 +85,11 @@ pub fn present(dir: &Path) -> Present {
             .ok()
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty()),
+        // Nothing here can see a *reason* to doubt the install -- that is a
+        // fact about the last launch, or about a person asking for a repair,
+        // and it belongs to whoever knows it. A caller that has one sets this
+        // on the value this returns.
+        suspect: false,
     }
 }
 
@@ -116,7 +121,8 @@ pub fn fetch(plan: &Plan, ctx: &Context) -> Result<Fetched, String> {
             dir,
             app_id,
             build_id,
-        } => steamcmd(Path::new(dir), *app_id, build_id.as_deref(), ctx),
+            verify,
+        } => steamcmd(Path::new(dir), *app_id, build_id.as_deref(), *verify, ctx),
     }
 }
 
@@ -399,6 +405,7 @@ fn steamcmd(
     dir: &Path,
     app_id: u32,
     build_id: Option<&str>,
+    verify: bool,
     ctx: &Context,
 ) -> Result<Fetched, String> {
     let binary = steamcmd_binary(ctx)?;
@@ -406,30 +413,14 @@ fn steamcmd(
 
     (ctx.on_progress)(Progress::Note {
         phase: "steamcmd",
-        message: "asking Steam for the server files".to_string(),
+        message: if verify {
+            "checking every file of this game's server".to_string()
+        } else {
+            "asking Steam for the server files".to_string()
+        },
     });
 
-    // `+force_install_dir` before `+login` is not stylistic: steamcmd applies
-    // it to the app_update that follows, and putting it after the login makes
-    // it silently install to its own default directory instead.
-    let mut args = vec![
-        "+force_install_dir".to_string(),
-        dir.to_string_lossy().into_owned(),
-        "+login".to_string(),
-        "anonymous".to_string(),
-        "+app_update".to_string(),
-        app_id.to_string(),
-    ];
-    // A pinned build needs the beta branch machinery; without a pin, take
-    // whatever is current, which is what a force-updating game requires
-    // anyway.
-    if let Some(build) = build_id {
-        args.push("-beta".to_string());
-        args.push(build.to_string());
-    }
-    args.push("validate".to_string());
-    args.push("+quit".to_string());
-
+    let args = steamcmd_args(dir, app_id, build_id, verify);
     let output = run_streaming(&binary, &args, "steamcmd", ctx)?;
 
     if prompt_detected(&output) {
@@ -462,6 +453,41 @@ fn steamcmd(
         dir: dir.to_path_buf(),
         build_id: stamped,
     })
+}
+
+/// What steamcmd is told to do, and nothing else.
+///
+/// Separated from the run so the argument list is testable without Valve's
+/// client on the machine: every rule below is invisible in its effect and
+/// expensive when it is wrong.
+fn steamcmd_args(dir: &Path, app_id: u32, build_id: Option<&str>, verify: bool) -> Vec<String> {
+    // `+force_install_dir` before `+login` is not stylistic: steamcmd applies
+    // it to the app_update that follows, and putting it after the login makes
+    // it silently install to its own default directory instead.
+    let mut args = vec![
+        "+force_install_dir".to_string(),
+        dir.to_string_lossy().into_owned(),
+        "+login".to_string(),
+        "anonymous".to_string(),
+        "+app_update".to_string(),
+        app_id.to_string(),
+    ];
+    // A pinned build needs the beta branch machinery; without a pin, take
+    // whatever is current, which is what a force-updating game requires
+    // anyway.
+    if let Some(build) = build_id {
+        args.push("-beta".to_string());
+        args.push(build.to_string());
+    }
+    // `validate` re-reads and checksums every file, which the Rust pilot
+    // measured at 5,869,171,402 bytes and minutes per start on a runtime that
+    // was already complete and already current. `engine::fetch` decides when
+    // that is worth doing; an ordinary update is not one of those times.
+    if verify {
+        args.push("validate".to_string());
+    }
+    args.push("+quit".to_string());
+    args
 }
 
 /// The `steamcmd` to drive: one a person named, one already cached, or one
@@ -1057,6 +1083,49 @@ mod tests {
         ] {
             assert!(!prompt_detected(ordinary), "false alarm: {ordinary:?}");
         }
+    }
+
+    // ─── update and verify are different questions ─────────────────────────
+
+    fn args_of(build_id: Option<&str>, verify: bool) -> Vec<String> {
+        steamcmd_args(Path::new("C:\rt\rust"), 258550, build_id, verify)
+    }
+
+    /// The measured cost: the Rust pilot re-verified 5,869,171,402 bytes on
+    /// every start, minutes at a time, on a runtime that was already complete
+    /// and already current. `validate` is what did that.
+    #[test]
+    fn an_ordinary_update_does_not_ask_for_every_file_to_be_read_again() {
+        let args = args_of(None, false);
+        assert!(
+            !args.iter().any(|a| a == "validate"),
+            "an ordinary update must not re-verify: {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "+app_update"),
+            "it must still ask Steam what changed: {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_verify_asks_for_exactly_that_and_still_updates() {
+        let args = args_of(None, true);
+        assert!(args.iter().any(|a| a == "validate"), "{args:?}");
+        assert!(args.iter().any(|a| a == "+app_update"), "{args:?}");
+    }
+
+    /// The order steamcmd actually requires, which is invisible when wrong:
+    /// `+force_install_dir` after `+login` installs to steamcmd's own default
+    /// directory instead, silently.
+    #[test]
+    fn the_install_directory_is_named_before_the_login() {
+        let args = args_of(Some("1928"), true);
+        let at = |needle: &str| args.iter().position(|a| a == needle).unwrap();
+        assert!(at("+force_install_dir") < at("+login"), "{args:?}");
+        assert!(at("+app_update") < at("validate"), "{args:?}");
+        // A pin is a beta branch to steamcmd, and it belongs to the update.
+        assert_eq!(args[at("-beta") + 1], "1928", "{args:?}");
+        assert_eq!(args.last().unwrap(), "+quit", "{args:?}");
     }
 
     #[test]
