@@ -31,6 +31,7 @@
     "test:desktop-artifacts": "node --test scripts/desktop-artifacts.test.js",
     "rust:pumpkin-bin-windows": "node scripts/build-rust.js pumpkin-bin-windows",
     "publish:desktop": "node scripts/publish-desktop-artifacts.js",
+    "verify:desktop": "node scripts/publish-desktop-artifacts.js --verify",
     "build:ios": "npm run ui:ios && npm run rust:ios",
     "build:android": "npm run ui:android && npm run rust:android && npm run rust:pumpkin-bin && npm run wireproxy:android",
     "build:android:release": "npm run ui:android && npm run rust:android && npm run rust:java-launcher && npm run rust:pumpkin-bin && npm run wireproxy:android && npm run restic:android && npm run jre:android",
