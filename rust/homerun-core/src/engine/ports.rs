@@ -218,3 +218,81 @@ mod tests {
         assert!(fits_one_service(&d.ports).is_none());
     }
 }
+
+/// Classify a bound endpoint independently of platform observation mechanics.
+/// Public declared ports may bind wildcard; private ports must remain loopback.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Binding {
+    Declared,
+    PrivateExposed(String),
+    Undeclared,
+}
+
+pub fn classify_binding(
+    d: &super::GameDescriptor,
+    protocol: crate::tunnel::Protocol,
+    port: u16,
+    address: std::net::IpAddr,
+) -> Binding {
+    match d
+        .ports
+        .iter()
+        .find(|p| p.proto == protocol && p.port == port)
+    {
+        Some(p) if !p.expose && !is_loopback(address) => Binding::PrivateExposed(p.name.clone()),
+        Some(_) => Binding::Declared,
+        None => Binding::Undeclared,
+    }
+}
+
+pub fn is_loopback(address: std::net::IpAddr) -> bool {
+    match address {
+        std::net::IpAddr::V4(a) => a.is_loopback(),
+        std::net::IpAddr::V6(a) => a
+            .to_ipv4_mapped()
+            .map_or(a.is_loopback(), |v| v.is_loopback()),
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+    use crate::{engine::GameDescriptor, tunnel::Protocol};
+    #[test]
+    fn binding_policy_preserves_protocol_and_private_address_boundary() {
+        let d: GameDescriptor = serde_json::from_value(serde_json::json!({"id":"g","ports":[
+            {"name":"admin","proto":"tcp","port":1234,"expose":false},
+            {"name":"game","proto":"udp","port":1234,"expose":true}
+        ]}))
+        .unwrap();
+        for address in ["127.0.0.1", "127.3.2.1", "::1", "::ffff:127.0.0.1"] {
+            assert_eq!(
+                classify_binding(&d, Protocol::Tcp, 1234, address.parse().unwrap()),
+                Binding::Declared,
+                "loopback refused: {address}"
+            );
+        }
+        for address in [
+            "0.0.0.0",
+            "192.168.1.2",
+            "::",
+            "fe80::1",
+            "::ffff:192.168.1.2",
+        ] {
+            assert_eq!(
+                classify_binding(&d, Protocol::Tcp, 1234, address.parse().unwrap()),
+                Binding::PrivateExposed("admin".into()),
+                "private listener escaped: {address}"
+            );
+            assert_eq!(
+                classify_binding(&d, Protocol::Udp, 1234, address.parse().unwrap()),
+                Binding::Declared,
+                "public UDP confused with private TCP"
+            );
+        }
+        assert_eq!(
+            classify_binding(&d, Protocol::Tcp, 4321, "127.0.0.1".parse().unwrap()),
+            Binding::Undeclared
+        );
+    }
+}

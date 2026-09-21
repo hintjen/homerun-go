@@ -238,6 +238,45 @@ impl ProcessEngine {
         self.required_job = Some(job);
     }
 
+    /// Windows inspects the required Job even before spawn and after root exit.
+    /// Development adapters return None when their root PID is absent.
+    pub fn network_snapshot(&self) -> Result<Option<Vec<(u32, platform::Listening)>>, String> {
+        #[cfg(not(windows))]
+        {
+            let Some(pid) = self.pid() else {
+                return Ok(None);
+            };
+            return platform::checked_listening_ports(&[pid]).map(Some);
+        }
+        #[cfg(windows)]
+        {
+            let job = self
+                .required_job
+                .as_ref()
+                .ok_or("The game process tree is not owned.")?;
+            platform::checked_listening_ports(&job.process_ids()?).map(Some)
+        }
+    }
+
+    /// A network refusal must not leave an exposed listener alive for the save grace.
+    pub fn terminate_owned_tree(&self) -> Result<(), String> {
+        #[cfg(not(windows))]
+        {
+            if let Some(pid) = self.pid() {
+                kill(pid);
+            }
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let job = self
+                .required_job
+                .as_ref()
+                .ok_or("The game process tree is not owned.")?;
+            job.terminate_and_wait()
+        }
+    }
+
     /// The same engine on a ladder of your choosing. Tests only: a production
     /// host must not get to shorten the window a world save is given.
     #[cfg(test)]
@@ -1042,6 +1081,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 0,
+            local_network: false,
             settings: None,
         };
 

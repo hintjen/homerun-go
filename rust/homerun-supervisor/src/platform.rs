@@ -89,13 +89,7 @@ impl Listening {
     /// a dual-stack listener on loopback appears in some tables — so a
     /// v4-mapped address is unwrapped before the question is asked.
     pub fn is_confined(&self) -> bool {
-        match self.address {
-            IpAddr::V4(v4) => v4.is_loopback(),
-            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => v4.is_loopback(),
-                None => v6.is_loopback(),
-            },
-        }
+        homerun_core::engine::ports::is_loopback(self.address)
     }
 }
 
@@ -124,6 +118,40 @@ pub fn listening_ports(pid: u32) -> Vec<Listening> {
     found.sort_unstable_by_key(|l| (l.protocol == Protocol::Udp, l.port, l.address));
     found.dedup();
     found
+}
+
+/// Checked network snapshot for the owned process tree. Errors are not empty snapshots.
+#[cfg(windows)]
+#[path = "network_windows.rs"]
+mod network_windows;
+
+pub fn checked_listening_ports(pids: &[u32]) -> Result<Vec<(u32, Listening)>, String> {
+    #[cfg(windows)]
+    {
+        network_windows::snapshot(pids)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Preserve the development adapter's PID scope, but surface read failures.
+        for name in ["tcp", "tcp6", "udp", "udp6"] {
+            std::fs::read_to_string(format!("/proc/net/{name}"))
+                .map_err(|e| format!("Cannot inspect network sockets: {e}"))?;
+        }
+        let mut rows = Vec::new();
+        for pid in pids {
+            match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+                Ok(_) => rows.extend(listening_ports(*pid).into_iter().map(|l| (*pid, l))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("Cannot inspect game sockets: {e}")),
+            }
+        }
+        Ok(rows)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = pids;
+        Err("Checked network inspection is unavailable on this platform.".into())
+    }
 }
 
 /// Resident memory and cumulative CPU for a process.

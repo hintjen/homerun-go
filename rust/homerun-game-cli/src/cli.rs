@@ -257,6 +257,7 @@ pub fn run() -> std::result::Result<(), String> {
     ctrlc::set_handler(move || interrupt.store(true, Ordering::SeqCst))
         .map_err(|_| "The runner could not install its shutdown handler.".to_string())?;
     let mut runner = Runner::new(output)?;
+    runner.network.strict = probing;
     let _owner = if verb != "fetch" {
         Some(Owner::claim(Path::new(&dir))?)
     } else {
@@ -332,6 +333,7 @@ pub fn run() -> std::result::Result<(), String> {
             .map_err(|_| "The evidence folder could not be created.".to_string())?;
         let report = json!({ "host": platform::HOST, "game": d.id, "ready": ready, "stopped": stopped,
             "ok": ready && stopped && !error_seen.load(Ordering::SeqCst), "events": *events,
+            "network": runner.network.report(),
             "unverified": ["world persistence after restart", "writes outside the server directory", "gateway reachability", "unsupported player-query formats"] });
         fs::write(
             evidence.join("probe.json"),
