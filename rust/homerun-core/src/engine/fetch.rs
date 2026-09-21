@@ -96,7 +96,7 @@ pub enum Plan {
         /// Re-read and checksum every file, rather than only fetching what
         /// changed. Minutes on a large game, so it is asked for rather than
         /// assumed — see the module header.
-        #[serde(default)]
+        #[serde(default = "verify_by_default")]
         verify: bool,
     },
 }
@@ -110,6 +110,11 @@ impl Plan {
             | Plan::SteamCmd { dir, .. } => dir,
         }
     }
+}
+
+// Plans serialized before this field existed always verified Steam installs.
+fn verify_by_default() -> bool {
+    true
 }
 
 /// The build id a direct download is known by.
@@ -179,7 +184,7 @@ pub fn plan(
                 .app_id
                 .ok_or_else(|| missing(descriptor, "a Steam application id"))?;
             if let Some(pinned) = &runtime.build_id {
-                if present.build_id.as_deref() == Some(pinned.as_str()) {
+                if present.build_id.as_deref() == Some(pinned.as_str()) && !present.suspect {
                     return Ok(Plan::AlreadyPresent {
                         dir,
                         build_id: pinned.clone(),
@@ -265,6 +270,34 @@ mod tests {
                 // verified as well as fetched.
                 verify: true
             }
+        );
+    }
+
+    #[test]
+    fn old_serialized_steam_plans_keep_verifying() {
+        let old: Plan =
+            serde_json::from_value(json!({"kind":"steamCmd","dir":"C:/rt/rust","appId":258550}))
+                .unwrap();
+        assert!(
+            matches!(old, Plan::SteamCmd { verify: true, .. }),
+            "omitting the new field must preserve the old verification behavior"
+        );
+    }
+
+    #[test]
+    fn a_suspect_pinned_steam_runtime_is_not_skipped() {
+        let mut d = rust();
+        d.platforms.get_mut("win32-x64").unwrap().runtime.build_id = Some("pinned".into());
+        let present = Present {
+            build_id: Some("pinned".into()),
+            suspect: true,
+        };
+        assert!(
+            matches!(
+                plan(&d, "win32-x64", "C:/rt", &present).unwrap(),
+                Plan::SteamCmd { verify: true, .. }
+            ),
+            "a matching stamp must not hide the host's corruption observation"
         );
     }
 
