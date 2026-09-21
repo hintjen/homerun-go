@@ -271,7 +271,7 @@ const CHECKS = [
   }],
   ["the LAN beacon is what a Java client lists", () => {
     const beacon = JSON.parse(core.lanBeacon("§aMy\nServer", 25566));
-    return (beacon.payload === "[MOTD]My Server[/MOTD][AD]25566[/AD]" &&
+    return (beacon.payload === "[MOTD]§aMy Server[/MOTD][AD]25566[/AD]" &&
       beacon.group === "224.0.2.60" && beacon.port === 4445 && beacon.intervalMs === 1500) ||
       JSON.stringify(beacon);
   }],

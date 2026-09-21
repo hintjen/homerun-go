@@ -86,11 +86,15 @@ pub struct Beacon {
 /// The beacon for a server, from its MOTD and the port it bound.
 ///
 /// The client takes the text between `[MOTD]` and the first `[/MOTD]` and
-/// shows it as one line, so the MOTD is flattened: `§` codes stripped (the
-/// list renders none of them), line breaks folded, and the two closing tags
-/// removed from the text so a joker's MOTD cannot end the name early or
-/// forge the port. Empty falls back to the same words vanilla shows for an
-/// unnamed server.
+/// draws it as one line through its ordinary text renderer — so the classic
+/// `§a`-style colours and `§l`/`§o` styles a player put in their MOTD show in
+/// the list exactly as they do in the server list, and are kept. What the
+/// line cannot show is folded or dropped: line breaks become spaces, and the
+/// `§x§r§r§g§g§b§b` hex form (RGB, and the gradients built from it) is
+/// removed, because the legacy parser reads it as six stray codes. The two
+/// closing tags are removed from the text so a joker's MOTD cannot end the
+/// name early or forge the port. Nothing visible falls back to the words
+/// vanilla shows for an unnamed server.
 pub fn beacon(motd: &str, port: u16) -> Beacon {
     Beacon {
         payload: format!("[MOTD]{}[/MOTD][AD]{port}[/AD]", list_name(motd)),
@@ -100,26 +104,50 @@ pub fn beacon(motd: &str, port: u16) -> Beacon {
     }
 }
 
-/// The MOTD as one line the LAN list can show.
+/// The MOTD as one line the LAN list can show, formatting kept.
 pub fn list_name(motd: &str) -> String {
+    let chars: Vec<char> = motd.chars().collect();
     let mut out = String::with_capacity(motd.len());
-    let mut chars = motd.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // `§x` introduces a hex colour as six more `§?` pairs — fourteen
+        // characters the LAN line would render as garbage.
+        if c == '§'
+            && i + 13 < chars.len()
+            && matches!(chars[i + 1], 'x' | 'X')
+            && (1..=6).all(|n| chars[i + 2 * n] == '§')
+        {
+            i += 14;
+            continue;
+        }
         match c {
-            '§' => {
-                chars.next();
-            }
             '\n' | '\r' => out.push(' '),
             _ => out.push(c),
         }
+        i += 1;
     }
     let flat = out.replace("[/MOTD]", "").replace("[/AD]", "");
     let trimmed = flat.split_whitespace().collect::<Vec<_>>().join(" ");
-    if trimmed.is_empty() {
+    if visible_text(&trimmed).is_empty() {
         "A Minecraft Server".into()
     } else {
         trimmed
     }
+}
+
+/// The text with every `§?` code removed — what a player actually sees.
+fn visible_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '§' {
+            chars.next();
+        } else {
+            out.push(c);
+        }
+    }
+    out.trim().to_string()
 }
 
 #[cfg(test)]
@@ -140,16 +168,39 @@ mod tests {
         assert_eq!(b.interval_ms, 1500);
     }
 
-    /// The list shows one plain line, whatever the MOTD was.
+    /// The list shows one line, coloured and styled as the player wrote it —
+    /// the same look as the server list, as near as a LAN entry can get.
     #[test]
-    fn the_name_is_flattened_for_the_list() {
+    fn the_name_keeps_its_colours_on_one_line() {
         assert_eq!(
             list_name("§aHomerun §fserver\nline two"),
-            "Homerun server line two"
+            "§aHomerun §fserver line two"
         );
+        assert_eq!(list_name("§l§6Bold gold§r plain"), "§l§6Bold gold§r plain");
         assert_eq!(list_name("  spaced   out  "), "spaced out");
+    }
+
+    /// What the line cannot render is dropped rather than shown as garbage:
+    /// the hex form, alone or as a gradient. A lone `§x` with no hex pairs
+    /// behind it is just a stray code, and stays.
+    #[test]
+    fn hex_colours_are_dropped_and_classic_ones_kept() {
+        assert_eq!(list_name("§x§f§f§0§0§0§0Red §atext"), "Red §atext");
+        assert_eq!(
+            list_name("§x§a§b§c§d§e§fA§x§1§2§3§4§5§6B"),
+            "AB",
+            "a gradient is one hex code per letter"
+        );
+        assert_eq!(list_name("§xnot hex"), "§xnot hex");
+    }
+
+    /// Nothing visible — empty, or codes with no text — falls back to the
+    /// words vanilla shows for an unnamed server.
+    #[test]
+    fn nothing_visible_gets_the_default_name() {
         assert_eq!(list_name(""), "A Minecraft Server");
         assert_eq!(list_name("§a§l"), "A Minecraft Server");
+        assert_eq!(list_name("§x§f§f§0§0§0§0"), "A Minecraft Server");
     }
 
     /// A MOTD cannot close the tag early and hand the client a port of its
