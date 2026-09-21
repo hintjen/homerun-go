@@ -28,6 +28,11 @@ This record distinguishes fixes from findings still requiring investigation.
 
 ## Before a real game: unresolved high-risk findings
 
+**Hard gate:** no real-game onboarding or operation until bind enforcement,
+the argument-value policy, Job Object ownership with process-tree killing,
+lossy UTF-8 log decoding and the null-drop fix below are implemented and
+verified. Merging the engine PR does not waive this gate.
+
 - H3: bindAddress is restricted to loopback but not passed into invocation;
   observed ports omit the local address. Private/admin sockets can therefore
   bind more widely than intended. Implement and verify actual bind enforcement.

@@ -272,8 +272,10 @@ mod imp {
             // A TCP socket that is not listening is a connection this server
             // opened, and publishing one would be publishing an outbound
             // socket. UDP has no state column and every row is a bound port.
+            // A localized state label may contain spaces; only the first
+            // three fields and the last (PID) have fixed meaning here.
             if protocol == Protocol::Tcp
-                && (fields.len() != 5 || !matches!(fields[2], "0.0.0.0:0" | "[::]:0"))
+                && (fields.len() < 5 || !matches!(fields[2], "0.0.0.0:0" | "[::]:0"))
             {
                 continue;
             }
@@ -290,6 +292,20 @@ mod imp {
     /// Split on the last colon: an IPv6 address is full of them.
     fn port_of(address: &str) -> Option<u16> {
         address.rsplit_once(':')?.1.parse().ok()
+    }
+
+    #[test]
+    fn multiword_state_labels_do_not_hide_listeners() {
+        // Synthetic labels, not a claim about any Windows translation.
+        let rows = "TCP 127.0.0.1:28016 0.0.0.0:0 STATE LABEL 42\n\
+                    TCP [::]:28017 [::]:0 STATE LABEL 42\n\
+                    TCP 127.0.0.1:28018 127.0.0.1:50000 OTHER STATE 42\n\
+                    TCP 127.0.0.1:28019 0.0.0.0:0 STATE LABEL 43\n\
+                    TCP 127.0.0.1:28020 0.0.0.0:0 42";
+        assert_eq!(parse(rows, 42), vec![
+            Listening { protocol: Protocol::Tcp, port: 28016 },
+            Listening { protocol: Protocol::Tcp, port: 28017 },
+        ], "multiword state labels must retain listeners while excluding connected, wrong-PID and truncated rows");
     }
 
     #[test]
