@@ -355,6 +355,7 @@ fn run(
         } => (server_id.clone(), prepare::absolute(runtime_root)?),
         _ => unreachable!(),
     };
+    let mut runtime_owner = crate::runtime::Runtime::acquire(d, &root)?;
     let runtime = prepare::fetch(d, &root, &id, out, stop)?;
     let Command::Start {
         server_dir,
@@ -376,15 +377,17 @@ fn run(
         });
         return Ok(());
     }
+    let server = prepare::absolute(&server_dir)?;
     let p = prepare::launch(
         d,
         &runtime,
-        &prepare::absolute(&server_dir)?,
+        &server,
         &server_name,
         &settings,
         &secrets,
         bind_address.as_deref(),
     )?;
+    runtime_owner.install(d, &server)?;
     let engine = Arc::new(p.engine);
     {
         let mut l = live.lock().unwrap();

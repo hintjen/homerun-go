@@ -22,6 +22,20 @@ fn fake_game() {
         return;
     }
     let port: u16 = std::env::var("HOMERUN_TEST_PORT").unwrap().parse().unwrap();
+    let save = std::env::var("HOMERUN_TEST_SAVE").unwrap_or_else(|_| "saved".into());
+    if let Ok(runtime) = std::env::var("HOMERUN_TEST_RUNTIME") {
+        assert_eq!(
+            fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+            fs::canonicalize(runtime).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string("Bundles/asset").unwrap(),
+            "runtime asset"
+        );
+        // The game writes to its cwd-relative save path; it knows no junctions.
+        let previous = fs::read_to_string(&save).unwrap_or_default();
+        fs::write(&save, format!("{previous}boot\n")).unwrap();
+    }
 
     /// Re-invoke this executable as one more process in the chain.
     fn spawn_self(port: &str, role: &str) {
@@ -87,7 +101,7 @@ fn fake_game() {
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
         if line == "quit" && !deaf {
-            fs::write("saved", "world flushed").unwrap();
+            fs::write(&save, "world flushed").unwrap();
             return;
         }
         if line == "crash" {
@@ -104,6 +118,17 @@ struct Fixture {
     port: u16,
 }
 impl Fixture {
+    fn with_runtime_saves() -> Self {
+        let mut f = Self::new();
+        let launch = &mut f.d["platforms"][platform::HOST]["launch"];
+        launch["cwdBase"] = json!("runtime");
+        launch["env"]["HOMERUN_TEST_RUNTIME"] = json!("{runtimeDir}");
+        launch["env"]["HOMERUN_TEST_SAVE"] = json!("server/world.save");
+        f.d["saves"] = json!({"paths":["world"],"mounts":[{"runtime":"server","server":"world"}]});
+        fs::create_dir_all(f.root.join("runtime/fake/Bundles")).unwrap();
+        fs::write(f.root.join("runtime/fake/Bundles/asset"), "runtime asset").unwrap();
+        f
+    }
     fn new() -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
@@ -145,6 +170,240 @@ impl Fixture {
         "runtimeRoot":self.root.join("runtime"), "serverDir":self.root.join("server"),
         "serverName":"{secret:rcon}","settings":{},"secrets":{"rcon":"do-not-print-this"},"licenceAccepted":true})
     }
+}
+
+#[test]
+fn runtime_assets_and_server_saves_work_together_and_unmount_on_eof() {
+    let f = Fixture::with_runtime_saves();
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/world/world.save")).unwrap(),
+        "boot\n"
+    );
+    assert!(platform::is_mount(&f.root.join("runtime/fake/server")));
+    h.eof();
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/world/world.save")).unwrap(),
+        "world flushed"
+    );
+    assert!(
+        !f.root.join("runtime/fake/server").exists(),
+        "the updater must never inherit an active save mount"
+    );
+    assert!(!f.root.join("runtime/.homerun-mounts-fake.json").exists());
+    assert!(f.root.join("server/settings.json").exists());
+}
+
+#[test]
+fn shared_runtime_lease_refuses_a_second_runner_without_touching_saves() {
+    let f = Fixture::with_runtime_saves();
+    let mut first = Host::new();
+    first.send(f.start());
+    first.until("server-started");
+    let mut second = Host::new();
+    second.send(f.start());
+    assert_eq!(second.until("error")["code"], "busy");
+    second.eof();
+    assert!(platform::is_mount(&f.root.join("runtime/fake/server")));
+    first.eof();
+}
+
+#[test]
+fn existing_real_runtime_save_directory_is_never_replaced() {
+    let f = Fixture::with_runtime_saves();
+    fs::create_dir(f.root.join("runtime/fake/server")).unwrap();
+    fs::write(
+        f.root.join("runtime/fake/server/vendor-world"),
+        "do not remove",
+    )
+    .unwrap();
+    let mut h = Host::new();
+    h.send(f.start());
+    assert_eq!(h.until("error")["code"], "fetch_failed");
+    h.eof();
+    assert_eq!(
+        fs::read_to_string(f.root.join("runtime/fake/server/vendor-world")).unwrap(),
+        "do not remove"
+    );
+}
+
+#[test]
+fn stale_save_link_is_removed_before_downloader_runs() {
+    let mut f = Fixture::with_runtime_saves();
+    let target = f.root.join("server/world");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("keep"), "world data").unwrap();
+    let link = f.root.join("runtime/fake/server");
+    platform::mount_dir(&link, &target).unwrap();
+    let journal = f.root.join("runtime/.homerun-mounts-fake.json");
+    fs::write(
+        &journal,
+        serde_json::to_vec(&f.d["saves"]["mounts"]).unwrap(),
+    )
+    .unwrap();
+    f.d["saves"]["mounts"] = json!([]);
+    fs::remove_file(f.root.join("runtime/fake/.homerun-build")).unwrap();
+    let exe = if cfg!(windows) { "fake.exe" } else { "fake" };
+    let bytes = fs::read(f.root.join("runtime/fake").join(exe)).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    f.d["platforms"][platform::HOST]["runtime"]["url"] =
+        json!(format!("http://{}/{exe}", listener.local_addr().unwrap()));
+    let server = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (mut socket, _) = loop {
+            if let Ok(connection) = listener.accept() {
+                break connection;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "runner never requested fixture download"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        // Windows accepts can inherit the listener's nonblocking mode.
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = [0; 4096];
+        let _ = socket.read(&mut request).unwrap();
+        let clean_before_fetch = !platform::is_mount(&link) && !journal.exists();
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        )
+        .unwrap();
+        socket.write_all(&bytes).unwrap();
+        clean_before_fetch
+    });
+    let mut h = Host::new();
+    h.send(json!({"cmd":"fetch","serverId":"s1","runtimeRoot":f.root.join("runtime"),"descriptor":f.d,"licenceAccepted":true}));
+    h.until("fetch-complete");
+    h.eof();
+    assert!(
+        server.join().unwrap(),
+        "the downloader was started while a stale save link still existed"
+    );
+    assert_eq!(
+        fs::read_to_string(target.join("keep")).unwrap(),
+        "world data"
+    );
+}
+
+#[test]
+fn runtime_save_mounts_are_removed_on_game_crash() {
+    let f = Fixture::with_runtime_saves();
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    h.send(json!({"cmd":"console","serverId":"s1","command":"crash"}));
+    h.until("server-crashed");
+    h.eof();
+    assert!(!f.root.join("runtime/fake/server").exists());
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/world/world.save")).unwrap(),
+        "boot\n"
+    );
+}
+
+#[test]
+fn a_spawn_failure_rolls_back_created_save_mounts() {
+    let f = Fixture::with_runtime_saves();
+    let exe = if cfg!(windows) { "fake.exe" } else { "fake" };
+    fs::write(f.root.join("runtime/fake").join(exe), "not an executable").unwrap();
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-crashed");
+    h.eof();
+    assert!(
+        !f.root.join("runtime/fake/server").exists(),
+        "failed spawn leaked a save junction"
+    );
+    assert!(!f.root.join("runtime/.homerun-mounts-fake.json").exists());
+}
+
+#[test]
+fn save_mount_parents_cannot_redirect_either_end() {
+    for runtime_side in [true, false] {
+        let mut f = Fixture::with_runtime_saves();
+        let outside = f.root.join("unrelated");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sentinel"), "unchanged").unwrap();
+        let base = if runtime_side {
+            f.root.join("runtime/fake")
+        } else {
+            f.root.join("server")
+        };
+        fs::create_dir_all(&base).unwrap();
+        platform::mount_dir(&base.join("alias"), &outside).unwrap();
+        let side = if runtime_side { "runtime" } else { "server" };
+        f.d["saves"]["mounts"][0][side] = json!("alias/world");
+        let mut h = Host::new();
+        h.send(f.start());
+        assert_eq!(h.until("error")["code"], "descriptor_invalid");
+        h.eof();
+        assert_eq!(
+            fs::read_to_string(outside.join("sentinel")).unwrap(),
+            "unchanged"
+        );
+        assert!(!outside.join("world").exists());
+        platform::unmount_dir(&base.join("alias")).unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn hard_kill_recovers_stale_mount_before_another_server_uses_runtime() {
+    let f = Fixture::with_runtime_saves();
+    let mut first = Host::new();
+    first.send(f.start());
+    first.until("server-started");
+    first.child.kill().unwrap();
+    first.child.wait().unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while TcpListener::bind(("127.0.0.1", f.port)).is_err() {
+        assert!(Instant::now() < until, "job object did not reap the game");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        platform::is_mount(&f.root.join("runtime/fake/server")),
+        "hard kill must actually exercise stale-junction recovery"
+    );
+    // Recovery is not tied to the current descriptor: even a fetch after
+    // removing saves.mounts must remove the old link before touching runtime.
+    let mut recovery = Host::new();
+    let mut descriptor = f.d.clone();
+    descriptor["saves"]["mounts"] = json!([]);
+    recovery.send(json!({"cmd":"fetch","serverId":"s1","runtimeRoot":f.root.join("runtime"),"descriptor":descriptor,"licenceAccepted":true}));
+    recovery.until("fetch-complete");
+    recovery.eof();
+    assert!(
+        !f.root.join("runtime/fake/server").exists(),
+        "fetch kept a stale mount from an older descriptor"
+    );
+    let mut second = Host::new();
+    let mut command = f.start();
+    command["serverDir"] = json!(f.root.join("server-b"));
+    second.send(command);
+    second.until("server-started");
+    second.eof();
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/world/world.save")).unwrap(),
+        "boot\n",
+        "server B wrote into server A's world"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("server-b/world/world.save")).unwrap(),
+        "world flushed"
+    );
+    assert!(!f.root.join("runtime/fake/server").exists());
 }
 impl Drop for Fixture {
     fn drop(&mut self) {

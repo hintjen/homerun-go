@@ -218,6 +218,14 @@
                   "null"
                 ]
               },
+              "cwdBase": {
+                "default": "server",
+                "description": "Directory cwd is relative to. Runtime is shared; keep saves under serverDir using an absolute data path or saves.mounts.",
+                "enum": [
+                  "server",
+                  "runtime"
+                ]
+              },
               "env": {
                 "additionalProperties": {
                   "type": "string"
@@ -409,6 +417,28 @@
         "excludes": {
           "items": {
             "type": "string"
+          },
+          "type": "array"
+        },
+        "mounts": {
+          "items": {
+            "properties": {
+              "runtime": {
+                "description": "Fixed directory path relative to the game's runtime. No traversal, aliases or placeholders.",
+                "minLength": 1,
+                "type": "string"
+              },
+              "server": {
+                "description": "Real directory relative to this server's folder; saves physically live here.",
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "runtime",
+              "server"
+            ],
+            "type": "object"
           },
           "type": "array"
         },

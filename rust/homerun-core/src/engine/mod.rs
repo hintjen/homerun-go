@@ -72,6 +72,8 @@ pub use descriptor::{GameDescriptor, SCHEMA_VERSION};
 
 #[cfg(test)]
 mod tests {
+    const RUNTIME_DIR: &str = "C:/runtime/rust";
+
     use super::*;
     use serde_json::{json, Map};
     use std::collections::BTreeMap;
@@ -142,6 +144,7 @@ mod tests {
                 server_name: "Justin's server",
                 server_dir: "C:\\servers\\abc",
                 bind_address: "127.0.0.1",
+                runtime_dir: RUNTIME_DIR,
             },
         )
         .unwrap();
@@ -214,6 +217,7 @@ mod tests {
                 server_name: "irrelevant",
                 server_dir: "C:\\s",
                 bind_address: "127.0.0.1",
+                runtime_dir: RUNTIME_DIR,
             },
         )
         .unwrap();

@@ -1915,6 +1915,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     server_name: &server_name,
                     server_dir: &server_dir,
                     bind_address: &bind_address,
+                    runtime_dir: &optional_text("runtimeDir").unwrap_or_default(),
                 },
             )
             .map_err(|e| e.to_string())?;

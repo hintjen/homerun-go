@@ -295,7 +295,9 @@ mod tests {
     /// an unrelated refusal to a licence prompt.
     #[test]
     fn nothing_is_named_when_the_terms_are_accepted() {
-        assert!(doctor(&rust(), &capable(), &NOTHING, true).licence.is_none());
+        assert!(doctor(&rust(), &capable(), &NOTHING, true)
+            .licence
+            .is_none());
 
         // A game with no terms of its own never has this problem, whatever
         // the host's record says. `licence: null` is not "accepted".
@@ -309,7 +311,9 @@ mod tests {
                 "launch": { "exe": "S.exe" } } }
         }))
         .unwrap();
-        assert!(doctor(&no_terms, &capable(), &NOTHING, false).licence.is_none());
+        assert!(doctor(&no_terms, &capable(), &NOTHING, false)
+            .licence
+            .is_none());
     }
 
     /// Disk is what is still to download. A machine that already has the
@@ -410,6 +414,22 @@ mod tests {
         let v = doctor(&GameDescriptor::default(), &capable(), &NOTHING, true);
         assert!(!v.ok);
         assert!(!v.problems.is_empty());
+    }
+
+    #[test]
+    fn runtime_working_directory_surfaces_the_save_warning() {
+        let mut d = rust();
+        for p in d.platforms.values_mut() {
+            p.launch.cwd_base = super::super::descriptor::CwdBase::Runtime;
+        }
+        let verdict = doctor(&d, &capable(), &NOTHING, true);
+        assert!(
+            verdict
+                .warnings
+                .iter()
+                .any(|w| w.contains("no save mounts")),
+            "doctor must warn that runtime-relative saves need redirection"
+        );
     }
 
     #[test]

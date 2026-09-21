@@ -1,5 +1,5 @@
-//! `{setting:…}`, `{port:…}`, `{secret:…}`, `{bindAddress}` — and the one rule
-//! that makes them safe.
+//! `{setting:…}`, `{port:…}`, `{secret:…}`, `{bindAddress}`, `{runtimeDir}` —
+//! and the one rule that makes them safe.
 //!
 //! # Substitution happens once, and never looks at what it produced
 //!
@@ -78,6 +78,12 @@ pub struct Bindings<'a> {
     /// `{bindAddress}` in its launch line is a descriptor whose server binds
     /// wherever it likes.
     pub bind_address: &'a str,
+    /// This game's installed files, for `{runtimeDir}`.
+    ///
+    /// Shared by every server of the game on the machine, which is exactly
+    /// why it is a different binding from `{serverDir}` rather than a path
+    /// built out of it.
+    pub runtime_dir: &'a str,
 }
 
 /// What a string resolved to.
@@ -111,6 +117,8 @@ pub enum Placeholder {
     Secret(String),
     ServerName,
     ServerDir,
+    /// This game's installed files, shared by every server of it.
+    RuntimeDir,
     /// The address the server is told to bind. Host-side only: it is a fact
     /// about this machine, not about how a player reaches the server.
     BindAddress,
@@ -130,6 +138,7 @@ impl Placeholder {
             Placeholder::Secret(n) => format!("{{secret:{n}}}"),
             Placeholder::ServerName => "{serverName}".into(),
             Placeholder::ServerDir => "{serverDir}".into(),
+            Placeholder::RuntimeDir => "{runtimeDir}".into(),
             Placeholder::BindAddress => "{bindAddress}".into(),
             Placeholder::Host => "{host}".into(),
         }
@@ -203,6 +212,7 @@ fn parse(body: &str, whole: &str) -> Result<Placeholder> {
         None => match body {
             "serverName" => Ok(Placeholder::ServerName),
             "serverDir" => Ok(Placeholder::ServerDir),
+            "runtimeDir" => Ok(Placeholder::RuntimeDir),
             "bindAddress" => Ok(Placeholder::BindAddress),
             "host" => Ok(Placeholder::Host),
             _ => Err(unknown()),
@@ -286,6 +296,14 @@ pub fn fill(input: &str, bindings: &Bindings) -> Result<Filled> {
                 }
                 Placeholder::ServerName => out.push_str(bindings.server_name),
                 Placeholder::ServerDir => out.push_str(bindings.server_dir),
+                Placeholder::RuntimeDir => {
+                    if bindings.runtime_dir.is_empty() {
+                        return Err(Error::Malformed(
+                            "The host has not supplied this game's runtimeDir.".into(),
+                        ));
+                    }
+                    out.push_str(bindings.runtime_dir);
+                }
                 Placeholder::BindAddress => out.push_str(bindings.bind_address),
                 Placeholder::Host => {
                     return Err(Error::Malformed(format!(
@@ -309,6 +327,17 @@ pub fn fill(input: &str, bindings: &Bindings) -> Result<Filled> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_dir_is_a_literal_host_binding() {
+        let f = Fixture::new();
+        assert_eq!(
+            fill("{runtimeDir}/Bundles", &f.bindings()).unwrap(),
+            Filled::Text(format!("{}/Bundles", f.runtime_dir))
+        );
+        let mut missing = f.bindings();
+        missing.runtime_dir = "";
+        assert!(fill("{runtimeDir}", &missing).is_err());
+    }
     use super::*;
     use serde_json::{json, Value};
 
@@ -319,6 +348,7 @@ mod tests {
         server_name: String,
         server_dir: String,
         bind_address: String,
+        runtime_dir: String,
     }
 
     impl Fixture {
@@ -341,6 +371,7 @@ mod tests {
                 server_name: "Justin's server".into(),
                 server_dir: "C:\\servers\\abc".into(),
                 bind_address: "127.0.0.1".into(),
+                runtime_dir: r"C:\runtime\rust".into(),
             }
         }
 
@@ -352,6 +383,7 @@ mod tests {
                 server_name: &self.server_name,
                 server_dir: &self.server_dir,
                 bind_address: &self.bind_address,
+                runtime_dir: &self.runtime_dir,
             }
         }
     }
@@ -500,11 +532,11 @@ mod tests {
     #[test]
     fn the_bind_address_resolves_where_a_launch_line_asks_for_it() {
         assert_eq!(text("{bindAddress}"), "127.0.0.1");
+        assert_eq!(text("+server.ip {bindAddress}"), "+server.ip 127.0.0.1");
         assert_eq!(
-            text("+server.ip {bindAddress}"),
-            "+server.ip 127.0.0.1"
+            text("-bind={bindAddress}:{port:game}"),
+            "-bind=127.0.0.1:28015"
         );
-        assert_eq!(text("-bind={bindAddress}:{port:game}"), "-bind=127.0.0.1:28015");
     }
 
     /// Player text is never rescanned, and the newest placeholder is no
@@ -512,8 +544,7 @@ mod tests {
     #[test]
     fn a_server_named_after_the_bind_address_is_still_literal_text() {
         let mut f = Fixture::new();
-        f.settings
-            .insert("hostname".into(), json!("{bindAddress}"));
+        f.settings.insert("hostname".into(), json!("{bindAddress}"));
         let got = fill("{setting:hostname}", &f.bindings()).unwrap();
         assert_eq!(got.text().unwrap(), "{bindAddress}");
     }
@@ -525,7 +556,10 @@ mod tests {
         let f = Fixture::new();
         for input in ["{bindaddress}", "{bind_address}", "{bindAddress:game}"] {
             let err = fill(input, &f.bindings()).unwrap_err().to_string();
-            assert!(err.contains(input.trim_matches(['{', '}'])), "{input}: {err}");
+            assert!(
+                err.contains(input.trim_matches(['{', '}'])),
+                "{input}: {err}"
+            );
         }
     }
 

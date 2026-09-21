@@ -12,6 +12,11 @@ change falls on.
 
 ## Documentation Index
 
+### [Runtime working directories and save mounts](./runtime-save-mounts.md)
+
+Shared game assets with server-owned saves: cwd selection, directory junctions,
+runtime ownership, crash recovery, Steam update policy and onboarding limits.
+
 ### [Multi-game review follow-up](./multi-game-review-followup.md)
 
 September 21 review fixes, unresolved risks and corrections to validation claims.

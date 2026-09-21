@@ -111,12 +111,18 @@ See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
 ## `prepare.rs`: directories, settings and resources
 
+For cwd-relative assets, `launch.cwdBase: "runtime"` selects the shared runtime
+while `saves.mounts` redirects save directories into the server folder. See
+[runtime working directories and save mounts](./runtime-save-mounts.md) for
+locking, recovery before updates, path restrictions and real-game limitations.
+
 The runtime root holds one directory per game. The shared steamcmd cache is
 its sibling under the runtime parent. RAM/free disk/CPU capacity comes from
 the platform module, and a required resource that cannot be measured causes
 a refusal rather than an optimistic launch.
 
-Relative cwd/config paths are confined to the server directory. Managed files
+Relative cwd paths are confined to the selected server or runtime base; config
+paths stay confined to the server directory. Managed files
 cannot traverse symbolic links. JSON object and properties files merge managed
 keys without erasing unrelated settings. A managed key whose setting is unset
 is **removed** rather than left at the previous launch's value; unmanaged keys,

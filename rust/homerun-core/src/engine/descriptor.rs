@@ -317,10 +317,33 @@ pub struct Launch {
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
-    /// Relative to the server directory. `.` — the default — is the server
-    /// directory itself, which is where saves have to land.
+    /// Relative to whatever [`Launch::cwd_base`] names. `.` — the default —
+    /// is that directory itself.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Which directory `cwd` is relative to.
+    ///
+    /// Defaults to the server directory, which is where saves have to land
+    /// and what every descriptor written before this field existed meant.
+    /// A game that resolves its own data relative to the working directory —
+    /// such as the Rust pilot — needs `runtime` instead, and an absolute
+    /// save-path argument or [`Saves::mounts`] to get its saves back out. See
+    /// `docs/game-runner.md`.
+    #[serde(default)]
+    pub cwd_base: CwdBase,
+}
+
+/// Which directory a launch's working directory is relative to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CwdBase {
+    /// The server directory: this server's own folder, backed up and moved
+    /// as a unit.
+    #[default]
+    Server,
+    /// The runtime directory: this game's installed files, shared by every
+    /// server of that game on the machine.
+    Runtime,
 }
 
 /// How a host knows the server is up.
@@ -495,6 +518,30 @@ pub struct Saves {
     pub paths: Vec<String>,
     #[serde(default)]
     pub excludes: Vec<String>,
+    /// Directories a game insists on finding inside its runtime directory
+    /// that must really live under the server directory.
+    ///
+    /// The escape hatch for the large class of servers that resolve both
+    /// their game data and their saves against the working directory: data
+    /// is shared per game, saves are per server, and one working directory
+    /// cannot be both. Each entry is a link in the runtime directory
+    /// pointing at a real directory under the server. See
+    /// [`crate::engine::descriptor::Mount`] and `docs/game-runner.md`.
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
+}
+
+/// One directory the game finds in its runtime that really lives under the
+/// server.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Mount {
+    /// Where the game looks, relative to the runtime directory.
+    #[serde(default)]
+    pub runtime: String,
+    /// Where the bytes are, relative to the server directory.
+    #[serde(default)]
+    pub server: String,
 }
 
 /// Where live facts about a running server come from.

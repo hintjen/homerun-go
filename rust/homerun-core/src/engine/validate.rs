@@ -78,6 +78,7 @@ pub fn report(descriptor: &GameDescriptor) -> Report {
     check_bind_address(descriptor, &mut r);
     check_platforms(descriptor, &mut r);
     check_config_and_saves(descriptor, &mut r);
+    check_mounts(descriptor, &mut r);
     check_servable(descriptor, &mut r);
     check_observe(descriptor, &mut r);
 
@@ -635,6 +636,62 @@ fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
     }
 }
 
+/// Fixed directory paths for save mounts, also used when recovering a journal.
+/// Deliberately portable: no Windows devices, streams, trailing-dot aliases,
+/// templating or alternate separators, even on a Unix authoring machine.
+pub fn mount_path_is_safe(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains(['\\', ':', '{', '}', '*', '?', '"', '<', '>', '|'])
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|part| {
+            let base = part.split('.').next().unwrap_or("").to_ascii_uppercase();
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && !part.ends_with(['.', ' '])
+                && !matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                && !(base.len() == 4
+                    && (base.starts_with("COM") || base.starts_with("LPT"))
+                    && matches!(base.as_bytes()[3], b'1'..=b'9'))
+        })
+}
+
+fn check_mounts(d: &GameDescriptor, r: &mut Report) {
+    let overlap = |a: &str, b: &str| {
+        let (a, b) = (a.to_lowercase(), b.to_lowercase());
+        a == b || a.starts_with(&(b.clone() + "/")) || b.starts_with(&(a + "/"))
+    };
+    for (index, mount) in d.saves.mounts.iter().enumerate() {
+        for (name, path) in [("runtime", &mount.runtime), ("server", &mount.server)] {
+            if !mount_path_is_safe(path) {
+                r.problems.push(format!("save mount {index} has an unsafe {name} path; use a fixed relative directory without traversal or Windows aliases."));
+            }
+        }
+        for other in &d.saves.mounts[..index] {
+            if overlap(&mount.runtime, &other.runtime) || overlap(&mount.server, &other.server) {
+                r.problems
+                    .push("save mount directories must not overlap or alias each other.".into());
+            }
+        }
+        for platform in d.platforms.values() {
+            let launch = &platform.launch;
+            if overlap(&mount.runtime, &launch.exe)
+                || (launch.cwd_base == super::descriptor::CwdBase::Runtime
+                    && overlap(&mount.runtime, launch.cwd.as_deref().unwrap_or(".")))
+            {
+                r.problems.push("a save mount must not cover the game executable or its runtime working directory.".into());
+            }
+        }
+    }
+    for (host, platform) in &d.platforms {
+        if platform.launch.cwd_base == super::descriptor::CwdBase::Runtime
+            && d.saves.mounts.is_empty()
+        {
+            r.warnings.push(format!("the {host} working directory is the shared runtime and has no save mounts; prove that an absolute data-path argument keeps every save under serverDir."));
+        }
+    }
+}
+
 fn check_servable(d: &GameDescriptor, r: &mut Report) {
     let setting_keys: HashSet<&str> = d.settings.iter().map(|s| s.key.as_str()).collect();
     let port_names: HashSet<&str> = d.ports.iter().map(|p| p.name.as_str()).collect();
@@ -742,6 +799,11 @@ fn check_placeholders(
             // A fact about this machine, and never about how a player
             // reaches the server: in a join URL it would publish `127.0.0.1`
             // as somewhere to connect to.
+            (Placeholder::RuntimeDir, Site::Servable) => {
+                r.problems.push(format!(
+                    "\"{text}\" is shown to players and cannot contain a local runtime directory."
+                ));
+            }
             (Placeholder::BindAddress, Site::Servable) => {
                 r.problems.push(format!(
                     "\"{text}\" is shown to players and cannot contain the address \
@@ -793,6 +855,89 @@ mod tests {
     fn the_pilot_is_valid() {
         let r = report(&rust());
         assert!(r.ok(), "{:#?}", r.problems);
+    }
+
+    #[test]
+    fn mount_paths_reject_escapes_aliases_and_overlaps() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../world",
+            "/world",
+            "C:/world",
+            "server\\world",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "world.",
+            "world ",
+            "NUL",
+            "con.txt",
+            "COM1",
+            "x:stream",
+            "{serverName}",
+            "a\nb",
+        ] {
+            for side in ["runtime", "server"] {
+                let mut d = rust();
+                let mut mount = super::super::descriptor::Mount {
+                    runtime: "server".into(),
+                    server: "saves".into(),
+                };
+                if side == "runtime" {
+                    mount.runtime = bad.into();
+                } else {
+                    mount.server = bad.into();
+                }
+                d.saves.mounts.push(mount);
+                assert!(
+                    !report(&d).ok(),
+                    "unsafe {side} mount path accepted: {bad:?}"
+                );
+            }
+        }
+        let mut d = rust();
+        d.saves.mounts = vec![
+            super::super::descriptor::Mount {
+                runtime: "Server".into(),
+                server: "world-a".into(),
+            },
+            super::super::descriptor::Mount {
+                runtime: "server/nested".into(),
+                server: "world-b".into(),
+            },
+        ];
+        assert!(report(&d).problems.iter().any(|p| p.contains("overlap")));
+        d.saves.mounts.truncate(1);
+        assert!(report(&d).ok());
+        d.saves.mounts[0].runtime = d.platforms.values().next().unwrap().launch.exe.clone();
+        assert!(report(&d).problems.iter().any(|p| p.contains("executable")));
+    }
+
+    #[test]
+    fn runtime_cwd_without_save_redirection_warns_and_runtime_dir_is_private() {
+        let mut d = rust();
+        for p in d.platforms.values_mut() {
+            p.launch.cwd_base = super::super::descriptor::CwdBase::Runtime;
+        }
+        assert!(report(&d)
+            .warnings
+            .iter()
+            .any(|s| s.contains("no save mounts")));
+        d.saves.mounts.push(super::super::descriptor::Mount {
+            runtime: "server".into(),
+            server: "world".into(),
+        });
+        assert!(!report(&d)
+            .warnings
+            .iter()
+            .any(|s| s.contains("no save mounts")));
+        d.client.join_url = Some("game://{runtimeDir}".into());
+        assert!(
+            !report(&d).ok(),
+            "runtime paths must not reach public join URLs"
+        );
     }
 
     fn problems_of(patch: serde_json::Value) -> Vec<String> {
@@ -1051,7 +1196,10 @@ mod tests {
         let problems = problems_of(json!({
             "client": { "joinUrl": "steam://connect/{bindAddress}:{port:game}" }
         }));
-        assert!(says(&problems, "the address the server binds"), "{problems:#?}");
+        assert!(
+            says(&problems, "the address the server binds"),
+            "{problems:#?}"
+        );
     }
 
     // ─── one spelling for a closed set ─────────────────────────────────────

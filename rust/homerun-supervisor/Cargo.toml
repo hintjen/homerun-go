@@ -295,6 +295,11 @@ windows-sys = { version = "0.61", default-features = false, features = [
     # `CreateJobObjectW` takes a SECURITY_ATTRIBUTES pointer, so its binding
     # is gated on this even though the pointer passed is null.
     "Win32_Security",
+    # A directory junction, which is DeviceIoControl and nothing higher-level:
+    # `std` has no API for one, and the alternative -- a symbolic link -- needs
+    # a privilege a player's account does not have.
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
     "Win32_System_JobObjects",
     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds an IO_COUNTERS from here.
     "Win32_System_Threading",

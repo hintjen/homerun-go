@@ -229,10 +229,15 @@ pub fn launch(
         server_name: name,
         server_dir: &server.to_string_lossy(),
         bind_address: bind,
+        runtime_dir: &runtime.to_string_lossy(),
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;
-    let cwd = confined(server, &inv.cwd)?;
+    let cwd_root = match inv.cwd_base {
+        engine::descriptor::CwdBase::Server => server,
+        engine::descriptor::CwdBase::Runtime => runtime,
+    };
+    let cwd = confined(cwd_root, &inv.cwd)?;
     fs::create_dir_all(&cwd).map_err(|_| {
         fail(
             codes::SPAWN_FAILED,
