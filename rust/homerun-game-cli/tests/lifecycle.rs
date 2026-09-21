@@ -614,6 +614,53 @@ fn start_fetches_a_missing_runtime_from_a_local_fixture_server() {
     http.join().unwrap();
 }
 
+/// `doctor` reported every refusal as `requires_unmet`, including "nobody has
+/// accepted the terms". A caller cannot put the licence in front of a person
+/// when all it has been told is that the computer is not ready, and the
+/// contract has a code for exactly this. The other refusals must keep theirs.
+#[test]
+fn doctor_reports_an_unaccepted_licence_under_its_own_code() {
+    let f = Fixture::new();
+    let mut d = f.d.clone();
+    d["licence"] = json!({
+        "name": "the Test Server Terms",
+        "url": "https://example.invalid/terms"
+    });
+    // Out of reach on any machine, so the verdict carries a second refusal
+    // that must NOT be relabelled as a licence problem.
+    d["requires"] = json!({ "ramMb": 1024 * 1024 });
+    let descriptor = f.root.join("game.json");
+    fs::write(&descriptor, d.to_string()).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
+        .args(["doctor", &descriptor.to_string_lossy(), "--json"])
+        .arg("--runtime-root")
+        .arg(f.root.join("runtime"))
+        .output()
+        .unwrap();
+
+    let events: Vec<Value> = String::from_utf8_lossy(&result.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("stdout must contain NDJSON only"))
+        .collect();
+
+    let licence = events
+        .iter()
+        .find(|e| e["code"] == "licence_not_accepted")
+        .unwrap_or_else(|| panic!("no licence_not_accepted event: {events:?}"));
+    assert!(
+        licence["message"]
+            .as_str()
+            .unwrap()
+            .contains("the Test Server Terms"),
+        "{licence}"
+    );
+    assert!(
+        events.iter().any(|e| e["code"] == "requires_unmet"),
+        "the memory refusal must keep its own code: {events:?}"
+    );
+}
+
 #[test]
 fn probe_writes_evidence_and_verify_checks_the_same_real_process() {
     let f = Fixture::new();
