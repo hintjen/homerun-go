@@ -94,6 +94,19 @@ exits, so the pid the runner holds is not the pid doing the work, and even
 is **not** in the job — see `job.rs` for why, and note that the desktop
 detaching from the runner at quit is unaffected by any of this. Nothing about
 Android, iOS or Linux changes: they have process groups and signals already.
+
+**The window this deliberately does not close.** A child is assigned to its
+job immediately after `CreateProcess` returns, not before it runs, so in the
+microseconds between it is in no job and a grandchild started in that window
+would not be a member. For that to matter a vendor's server would have to
+spawn something before its image has finished loading. Closing it means
+`CREATE_SUSPENDED` and a resume that `std::process` gives no thread handle
+for — enumerating the new process's threads to resume them — which trades a
+window nothing has ever fallen through for a failure mode where the game
+never starts at all. **This is a decision, not an oversight** (reviewed and
+agreed alongside the runner-not-in-the-job choice): do not "fix" it without a
+reason better than tidiness.
+
 See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
 ## `prepare.rs`: directories, settings and resources
