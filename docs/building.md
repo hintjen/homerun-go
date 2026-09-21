@@ -611,7 +611,7 @@ is probably unset; the script warns about that separately.
 
 **`Build reported success but lib….a is not at …`** — the crate's
 `crate-type` no longer matches the target. iOS needs `staticlib`, Android
-needs `cdylib`; both are declared in `rust/homerun-pumpkin-ffi/Cargo.toml`.
+needs `cdylib`; both are declared in `rust/homerun-supervisor/Cargo.toml`.
 
 **`No built UI bundle at …`** — run `npm install`, or the path in
 `HOMERUN_UI_DIR` has no `index.html` (the marker for a real export). An

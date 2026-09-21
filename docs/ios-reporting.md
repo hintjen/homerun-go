@@ -237,7 +237,7 @@ follow-up.
 | `ios/HomerunHost/AppErrors.swift` | `context()` — shared between app errors and the crash report's host context |
 | `ios/coretest/main.swift` | Every wrapper above, against the real core, with no simulator |
 | `rust/homerun-core/src/reporting/` | The payloads, the cadence, the parsers |
-| `rust/homerun-pumpkin-ffi/src/host_dispatch.rs` | The poll and the ping — the two calls with effects |
+| `rust/homerun-supervisor/src/host_dispatch.rs` | The poll and the ping — the two calls with effects |
 
 ## Triage
 

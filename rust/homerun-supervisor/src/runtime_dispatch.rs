@@ -138,6 +138,9 @@ mod tests {
     /// take the caller's thread with it.
     #[test]
     fn a_panicking_task_is_an_error_when_we_waited_for_it() {
+        // Intentional task panics run the process-global crash hook too.
+        // Hold the same guard as its tests until the runtime has shut down.
+        let _guard = crate::crash::test_guard();
         let engine = runtime();
 
         let outcome = dispatch(engine.handle(), async {
@@ -152,6 +155,7 @@ mod tests {
     /// was accepted. The panic stays inside the task.
     #[test]
     fn a_panicking_task_cannot_be_reported_when_we_did_not_wait() {
+        let _guard = crate::crash::test_guard();
         let engine = runtime();
         let websocket = runtime();
         let handle = engine.handle().clone();

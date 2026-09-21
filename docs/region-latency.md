@@ -220,7 +220,7 @@ at fault.
 | File | Role |
 |---|---|
 | `rust/homerun-core/src/region.rs` | `probe_target`, `DEFAULT_PROBE_PORT` — the parsing, and the post-mortem |
-| `rust/homerun-pumpkin-ffi/src/host_dispatch.rs` | `net.regionLatency`, `connect_latency`, `is_measurable` — the only socket |
+| `rust/homerun-supervisor/src/host_dispatch.rs` | `net.regionLatency`, `connect_latency`, `is_measurable` — the only socket |
 | `android/.../BridgeRouter.kt` | `measureLatency` — core call, `UNREACHABLE_MS` |
 | `android/.../Core.kt` | `regionLatency` wrapper |
 | `ios/HomerunHost/BridgeRouter+AppShell.swift` | `measureRegionLatency` — core call, `unreachableMs` |

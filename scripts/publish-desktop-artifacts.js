@@ -1,90 +1,193 @@
 #!/usr/bin/env node
 /**
- * Prepare the artifacts Homerun Desktop downloads, and the manifest it reads.
+ * Prepare manifests from final, signed bytes. Print upload commands; never upload.
  *
- * The desktop packages neither of these. The Pumpkin engine is fetched at
- * launch — the same arrangement Bedrock Dedicated Server has had all along —
- * so a new engine reaches players without a desktop release, and ~114 MB stays
- * out of the installer for everyone who never makes a Pumpkin server. The Node
- * addon is fetched at build time by `download-assets.js`, because it is code
- * the main process loads at startup rather than a server it spawns.
+ * # Channels
  *
- * # Why the build id is the digest
+ * Every published location hangs off one prefix: the immutable object keys, the
+ * `latest.json` each manifest lands at, the absolute `url` written inside it,
+ * and the mutable `assets/homerun_core.node` alias. `--channel` picks it, and
+ * the default is `dev`.
  *
- * Pumpkin publishes no version number, and inventing one here would be a second
- * source of truth about which engine a world has met. The digest cannot
- * disagree with the file: rebuild the same source and the id is unchanged, so
- * nobody re-downloads 114 MB to arrive where they already were. The fork
- * revision rides along as `rev` for people, not for comparison.
+ * `prod` is the prefix installed desktops read on every server launch, so a
+ * publish there reaches every player within one launch. Defaulting to it would
+ * mean a forgotten argument ships an engine; defaulting to `dev` means a
+ * forgotten argument publishes somewhere nobody is listening. `prod` reproduces
+ * the previous layout exactly -- same keys, same absolute URLs -- so switching
+ * to it is not a migration.
  *
- * # The Minecraft version
+ * An unrecognised channel is refused rather than guessed at, because the guess
+ * that matters is the one that resolves to `prod`.
  *
- * `minecraftVersion` and `protocol` are the client a build accepts, and they
- * are asked of the built engine itself (`--minecraft-version`) rather than read
- * from source here, so they cannot describe a different build than the one being
- * published. The desktop pins a server's `VERSION` to it, which is what lets a
- * launcher on any device start a client that can join. So this has to run on a
- * machine that can execute the engine — the Windows runner — and a manifest
- * without it is refused rather than written.
+ * The dev prefix is `homerun-desktop-dev`, deliberately NOT a directory under
+ * `homerun-desktop`: a nested prefix is covered by any IAM statement or bucket
+ * policy scoped to `homerun-desktop/*`, and this wants to be the kind of thing
+ * that fails with AccessDenied rather than the kind that silently inherits
+ * production's permissions. It is also why `homerun-desktop/` -- with the
+ * slash -- is the string the tests look for in dev output: `homerun-desktop`
+ * without it is a substring of the dev prefix and matches both.
  *
- * # What this does not do
+ * # --verify
  *
- * It does not upload. The digests and the manifest are computed here and the
- * exact commands are printed, so the credentials stay in CI where they belong
- * and a local run cannot publish by accident.
- *
- * Usage:
- *   npm run rust:pumpkin-bin-windows && npm run rust:core-node
- *   node scripts/publish-desktop-artifacts.js
+ * Signing rewrites the bytes, so a manifest prepared before it names a digest
+ * the desktop will refuse, and refuse permanently: a checksum mismatch is not
+ * retried. Nothing in the upload path notices. `--verify` re-hashes each file
+ * against the manifest already on disk beside it and exits nonzero on any
+ * disagreement, so a publish job can assert the order it depended on rather
+ * than assume it.
  */
 const { execFileSync } = require("child_process");
+const os = require("os");
 const crypto = require("crypto");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
+const { ROOT } = require("./targets");
 
-const { ROOT, TARGETS } = require("./targets");
+/**
+ * The publish channels, and the one an omitted argument means.
+ *
+ * `HOMERUN_ARTIFACT_CHANNEL` is the environment name, and it is load-bearing
+ * outside this file: `publish-desktop-artifacts.yml` in hintjen/homerun greps
+ * the checked-out copy of this script for that exact string to decide whether
+ * the revision it checked out understands channels at all, and refuses a dev
+ * publish when it does not. Renaming it is a two-repository change.
+ */
+const CHANNELS = {
+  prod: {
+    s3: "s3://fractal-homerun/homerun-desktop",
+    public: "https://fractal-homerun.s3.amazonaws.com/homerun-desktop",
+  },
+  dev: {
+    s3: "s3://fractal-homerun/homerun-desktop-dev",
+    public: "https://fractal-homerun.s3.amazonaws.com/homerun-desktop-dev",
+  },
+};
+const DEFAULT_CHANNEL = "dev";
+const CHANNEL_ENV = "HOMERUN_ARTIFACT_CHANNEL";
 
-/** Where CI puts them. Mirrored in the desktop's PUMPKIN_MANIFEST_URL. */
-const S3_BUCKET = "s3://fractal-homerun/homerun-desktop";
-const PUBLIC_BASE = "https://fractal-homerun.s3.amazonaws.com/homerun-desktop";
+const LAYOUT = {
+  pumpkin: { file: "homerun-desktop-minecraft-pumpkin.exe", prefix: "pumpkin", stem: "homerun-desktop-minecraft-pumpkin", ext: "exe", manifest: "pumpkin-latest.json" },
+  "game-runner": { file: "homerun-game.exe", prefix: "game-runner", stem: "homerun-game", ext: "exe", manifest: "game-runner-latest.json" },
+  "core-node": { file: "homerun_core.node", prefix: "core", stem: "homerun-core", ext: "node", manifest: "core-latest.json" },
+};
 
-const DIST = path.join(ROOT, "dist", "desktop");
+const USAGE =
+  "Usage: node scripts/publish-desktop-artifacts.js " +
+  "[--channel dev|prod] [--only pumpkin|game-runner|core-node] [--verify]";
 
-function sha256(file) {
-  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-}
-
-function requireArtifact(targetName) {
-  const target = TARGETS[targetName];
-  const file = path.join(target.outDir, target.outName || target.artifact);
-  if (!fs.existsSync(file)) {
-    console.error(
-      `\nMissing ${path.relative(ROOT, file)}\n` +
-        `  Build it first: npm run rust:${targetName}\n`
-    );
-    process.exit(1);
+/** An explicit flag, else the environment, else dev. Never a guess. */
+function resolveChannel(requested, env = {}) {
+  // An empty variable is an unset one: a workflow hands an input through as ""
+  // when it was left blank, and that must not resolve to a channel by accident.
+  const name = requested || (env[CHANNEL_ENV] || "").trim() || DEFAULT_CHANNEL;
+  if (!Object.hasOwn(CHANNELS, name)) {
+    throw new Error(`Unknown channel: ${name}. Known channels: ${Object.keys(CHANNELS).join(", ")}.`);
   }
-  return file;
+  return name;
 }
 
-/** The fork revision the engine was built from, for the manifest's `rev`. */
-function pumpkinRev() {
-  const cargo = fs.readFileSync(
-    path.join(ROOT, "rust", "homerun-pumpkin-bin", "Cargo.toml"),
-    "utf8"
-  );
-  const match = cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/);
-  return match ? match[1] : null;
+function parseArgs(argv, env = {}) {
+  const options = { only: null, channel: null, verify: false };
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index];
+    if (arg === "--verify") {
+      if (options.verify) throw new Error(USAGE);
+      options.verify = true;
+      continue;
+    }
+    const key = arg === "--only" ? "only" : arg === "--channel" ? "channel" : null;
+    if (!key) throw new Error(USAGE);
+    const value = argv[++index];
+    if (value === undefined || options[key] !== null) throw new Error(USAGE);
+    options[key] = value;
+  }
+  if (options.only !== null && !Object.hasOwn(LAYOUT, options.only)) throw new Error(USAGE);
+  return { ...options, channel: resolveChannel(options.channel, env) };
+}
+
+/** What a file's final bytes say about where it is published, and as what. */
+function identify(dir, kind, channel) {
+  const layout = LAYOUT[kind];
+  if (!layout) throw new Error(`Unknown artifact: ${kind}`);
+  const file = path.join(dir, layout.file);
+  const bytes = fs.readFileSync(file);
+  if (!bytes.length) throw new Error(`Empty artifact: ${file}`);
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const build = sha256.slice(0, 12);
+  const objectKey = `${layout.prefix}/${layout.stem}-${build}.${layout.ext}`;
+  return {
+    layout, file, bytes, sha256, build, objectKey,
+    url: `${CHANNELS[channel].public}/${objectKey}`,
+    manifestPath: path.join(dir, layout.manifest),
+    manifestKey: `${layout.prefix}/latest.json`,
+  };
+}
+
+function prepareArtifacts(dir, selected, metadata = {}, channel = DEFAULT_CHANNEL) {
+  resolveChannel(channel);
+  // Validate every input before replacing any existing manifest.
+  const artifacts = selected.map((kind) => {
+    const found = identify(dir, kind, channel);
+    const info = metadata[kind] || {};
+    if (kind === "pumpkin" && (!/^\d+(\.\d+){1,2}$/.test(info.minecraftVersion || "") || !Number.isInteger(info.protocol) || info.protocol <= 0)) {
+      throw new Error("Pumpkin must identify its Minecraft version and protocol");
+    }
+    if (kind !== "pumpkin" && !info.version) throw new Error(`Missing version for ${kind}`);
+    if (kind === "core-node" && (!Number.isInteger(info.abi) || info.abi < 1 || !info.sourceBuild)) {
+      throw new Error("Core addon must export its ABI and source build identity");
+    }
+    return {
+      kind, channel, file: found.file, objectKey: found.objectKey,
+      manifestPath: found.manifestPath, manifestKey: found.manifestKey,
+      manifest: { ...info, build: found.build, url: found.url, sha256: found.sha256, size: found.bytes.length },
+    };
+  });
+  for (const artifact of artifacts) {
+    fs.writeFileSync(artifact.manifestPath, `${JSON.stringify(artifact.manifest, null, 2)}\n`);
+  }
+  return artifacts;
 }
 
 /**
- * The Minecraft version the built engine serves, from the engine.
+ * Re-hash what is on disk against the manifest beside it.
  *
- * Run in an empty temp directory with a timeout: an engine built without the
- * flag ignores it and starts a server in its CWD, and that must neither litter
- * the checkout nor hang the publish.
+ * Returns every disagreement rather than the first: a run that signed two
+ * binaries and re-prepared neither should say so once, not twice.
  */
+function verifyArtifacts(dir, selected, channel = DEFAULT_CHANNEL) {
+  resolveChannel(channel);
+  const problems = [];
+  for (const kind of selected) {
+    const layout = LAYOUT[kind];
+    if (!layout) throw new Error(`Unknown artifact: ${kind}`);
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(dir, layout.manifest), "utf8"));
+    } catch (error) {
+      problems.push(`${kind}: cannot read ${layout.manifest}: ${error.message}`);
+      continue;
+    }
+    let found;
+    try {
+      found = identify(dir, kind, channel);
+    } catch (error) {
+      problems.push(`${kind}: cannot hash ${layout.file}: ${error.message}`);
+      continue;
+    }
+    // The digest first: it is the one the desktop enforces, and a mismatch
+    // here explains every other field that disagrees below it.
+    if (manifest.sha256 !== found.sha256) {
+      problems.push(`${kind}: manifest sha256 ${manifest.sha256} but ${layout.file} hashes to ${found.sha256} (prepare manifests AFTER signing)`);
+    }
+    if (manifest.build !== found.build) problems.push(`${kind}: manifest build ${manifest.build} but the file's is ${found.build}`);
+    if (manifest.size !== found.bytes.length) problems.push(`${kind}: manifest size ${manifest.size} but ${layout.file} is ${found.bytes.length} bytes`);
+    if (manifest.url !== found.url) problems.push(`${kind}: manifest url ${manifest.url} is not the ${channel} channel's ${found.url}`);
+  }
+  return problems;
+}
+
+// Ask the built engine, not source: the desktop pins clients to this version.
+// Isolate a build lacking the flag, which might otherwise start in the checkout.
 function engineMinecraftVersion(file) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pumpkin-version-"));
   let out;
@@ -125,55 +228,56 @@ function engineMinecraftVersion(file) {
   return { minecraftVersion, protocol };
 }
 
-const engine = requireArtifact("pumpkin-bin-windows");
-const addon = requireArtifact("core-node");
+function main(args, env = {}) {
+  const options = parseArgs(args, env);
+  const dir = path.join(ROOT, "dist", "desktop");
+  // Existing release jobs only build Pumpkin and the addon. A runner is
+  // required only when explicitly selected, or included when already built.
+  let selected = ["pumpkin", "core-node"];
+  if (fs.existsSync(path.join(dir, LAYOUT["game-runner"].file))) selected.push("game-runner");
+  if (options.only) selected = [options.only];
 
-const engineDigest = sha256(engine);
-const engineSize = fs.statSync(engine).size;
-// Twelve hex characters: enough that a collision is not a thing that happens,
-// short enough to be a directory name a person can read in a log line.
-const build = engineDigest.slice(0, 12);
-const engineName = `homerun-desktop-minecraft-pumpkin-${build}.exe`;
-const { minecraftVersion, protocol } = engineMinecraftVersion(engine);
+  if (options.verify) {
+    const problems = verifyArtifacts(dir, selected, options.channel);
+    if (problems.length) {
+      throw new Error(`Manifests do not describe the files beside them:\n  ${problems.join("\n  ")}`);
+    }
+    console.log(`Verified ${selected.join(", ")} against their ${options.channel} manifests.`);
+    return;
+  }
 
-const manifest = {
-  build,
-  url: `${PUBLIC_BASE}/pumpkin/${engineName}`,
-  sha256: engineDigest,
-  size: engineSize,
-  rev: pumpkinRev() || undefined,
-  minecraftVersion,
-  protocol,
-};
+  const metadata = {};
+  for (const kind of selected) {
+    if (kind === "core-node") {
+      const addon = require(path.join(dir, LAYOUT[kind].file));
+      metadata[kind] = { version: addon.coreVersion(), abi: addon.coreAbiVersion(), sourceBuild: addon.coreBuildId() };
+    } else {
+      const crate = kind === "pumpkin" ? "homerun-pumpkin-bin" : "homerun-game-cli";
+      const cargo = fs.readFileSync(path.join(ROOT, "rust", crate, "Cargo.toml"), "utf8");
+      metadata[kind] = kind === "pumpkin"
+        ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1], ...engineMinecraftVersion(path.join(dir, LAYOUT.pumpkin.file)) }
+        : { version: cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1], protocol: 1 };
+    }
+  }
+  const artifacts = prepareArtifacts(dir, selected, metadata, options.channel);
+  const base = CHANNELS[options.channel].s3;
+  console.log(`Channel ${options.channel}. Everything below is under ${base}.\n`);
+  console.log("Manifests prepared. Sign artifacts BEFORE this step; regenerate after any byte changes.\n");
+  for (const artifact of artifacts) {
+    console.log(`${artifact.kind}: ${artifact.manifest.build}, ${artifact.manifest.size} bytes, SHA-256 ${artifact.manifest.sha256}`);
+  }
+  console.log("\nUpload all immutable binaries before updating any latest.json:");
+  for (const artifact of artifacts) console.log(`aws s3 cp "${artifact.file}" ${base}/${artifact.objectKey}`);
+  for (const artifact of artifacts) console.log(`aws s3 cp "${artifact.manifestPath}" ${base}/${artifact.manifestKey} --cache-control no-cache`);
+  const addon = artifacts.find((artifact) => artifact.kind === "core-node");
+  if (addon) {
+    console.log("\nCompatibility alias for existing desktop builds (new builds should pin the manifest SHA-256):");
+    console.log(`aws s3 cp "${addon.file}" ${base}/assets/homerun_core.node`);
+  }
+}
 
-const manifestPath = path.join(DIST, "pumpkin-latest.json");
-fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
-
-const addonDigest = sha256(addon);
-
-console.log(`\nPumpkin engine   ${path.relative(ROOT, engine)}`);
-console.log(`  build          ${build}`);
-console.log(`  sha256         ${engineDigest}`);
-console.log(`  size           ${(engineSize / 1024 / 1024).toFixed(1)} MB`);
-console.log(`  rev            ${manifest.rev ?? "(unknown)"}`);
-console.log(`  minecraft      ${minecraftVersion} (protocol ${protocol})`);
-console.log(`\nNode addon       ${path.relative(ROOT, addon)}`);
-console.log(`  sha256         ${addonDigest}`);
-console.log(`\nManifest         ${path.relative(ROOT, manifestPath)}`);
-
-console.log(`
-To publish (CI, or a maintainer with credentials):
-
-  # The engine first. The manifest must never name a file that is not there
-  # yet, or a launch between the two uploads downloads a 404.
-  aws s3 cp "${engine}" ${S3_BUCKET}/pumpkin/${engineName}
-  aws s3 cp "${manifestPath}" ${S3_BUCKET}/pumpkin/latest.json --cache-control no-cache
-
-  # The addon is pulled at desktop build time, not at launch, so it has no
-  # manifest and is simply replaced.
-  aws s3 cp "${addon}" ${S3_BUCKET}/assets/homerun_core.node
-
-Sign both before uploading if the signing account is available: they arrive on
-a player's disk unannounced and are executed, and unlike BDS and the Zulu JREs
-they carry nobody else's signature.
-`);
+if (require.main === module) {
+  try { main(process.argv.slice(2), process.env || {}); }
+  catch (error) { console.error(error.message); process.exitCode = 1; }
+}
+module.exports = { prepareArtifacts, verifyArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV };

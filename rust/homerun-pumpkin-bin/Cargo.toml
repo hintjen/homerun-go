@@ -14,7 +14,7 @@ name = "homerun-pumpkin"
 path = "src/main.rs"
 
 [dependencies]
-# The same fork at the same rev as `homerun-pumpkin-ffi`. These two must not
+# The same fork at the same rev as `homerun-supervisor`. These two must not
 # drift: the FFI crate's `pumpkin_settings` writes the config this binary
 # reads, and a settings key that moved between revs would be written to a file
 # the running server does not read. There is a test for this — see
@@ -30,7 +30,14 @@ pumpkin-data = { git = "https://github.com/hintjen/Pumpkin-homerun", rev = "62a0
 # every key and every enum's serde representation a second time, and getting
 # one wrong is silent: `GameMode` serialises as "Survival", so a lower-cased
 # guess would be dropped on load and the server would start on defaults.
-homerun-pumpkin-ffi = { path = "../homerun-pumpkin-ffi", features = ["pumpkin-engine"] }
+# The explicit `package =` is not redundant: the supervisor's lib target is
+# still named `homerun_pumpkin_ffi` so Android and iOS keep loading the file
+# name they always have (see that crate's `[lib]`), and without this key that
+# old spelling would be what Rust source here had to say. Naming the package
+# explicitly makes the extern name follow the package instead.
+homerun-supervisor = { package = "homerun-supervisor", path = "../homerun-supervisor", features = [
+    "pumpkin-engine",
+] }
 homerun-core = { path = "../homerun-core" }
 
 serde_json = "1"

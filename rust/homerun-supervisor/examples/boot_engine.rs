@@ -21,6 +21,10 @@ use std::os::raw::c_char;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+// `homerun_pumpkin_ffi`, not `homerun_supervisor`: an example is compiled
+// inside its own package, where the lib target's name is the only spelling
+// there is, and that name stays frozen for the hosts. See `[lib]` in
+// Cargo.toml. Dependent *crates* alias it back to the package name.
 use homerun_pumpkin_ffi::{
     homerun_free_string, homerun_server_logs_since, homerun_server_start, homerun_server_state,
     homerun_server_stop,

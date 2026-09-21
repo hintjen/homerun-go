@@ -2,10 +2,10 @@
 /**
  * Assert that every crate depending on Pumpkin pins the *same* rev.
  *
- * Two crates now name the fork independently: `homerun-pumpkin-ffi`, which
+ * Two crates now name the fork independently: `homerun-supervisor`, which
  * links it for iOS and — more to the point here — writes the `pumpkin.toml`
  * that configures a run, and `homerun-pumpkin-bin`, which *is* the server
- * Android starts. They are two halves of one thing: the FFI crate spells the
+ * Android starts. They are two halves of one thing: the supervisor spells the
  * config keys, the binary reads them.
  *
  * So a drift between them is not a version skew, it is a silent
@@ -29,7 +29,7 @@ const { ROOT } = require("./targets");
 
 /** Every manifest that may name the fork. */
 const MANIFESTS = [
-  path.join(ROOT, "rust", "homerun-pumpkin-ffi", "Cargo.toml"),
+  path.join(ROOT, "rust", "homerun-supervisor", "Cargo.toml"),
   path.join(ROOT, "rust", "homerun-pumpkin-bin", "Cargo.toml"),
 ];
 
@@ -74,7 +74,7 @@ if (missingRev || revs.length > 1) {
     console.error(`  ${rev}  ${where}  (${crate})`);
   }
   console.error(
-    "\nEvery crate must name one rev. `homerun-pumpkin-ffi` writes the config\n" +
+    "\nEvery crate must name one rev. `homerun-supervisor` writes the config\n" +
       "that `homerun-pumpkin-bin` reads, so a split means the host configures a\n" +
       "server that is not the one it started — which presents as a server\n" +
       "running on its own defaults, with nothing to say so.\n",

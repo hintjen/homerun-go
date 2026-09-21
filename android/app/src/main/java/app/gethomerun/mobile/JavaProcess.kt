@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit
  *    launches nobody supervises.
  *
  * A **server** launch does not use [run]. It is handed to the supervisor in
- * `homerun-pumpkin-ffi`, which owns the console, the stop ladder and the
+ * `homerun-supervisor`, which owns the console, the stop ladder and the
  * meaning of an exit — the same state machine that runs the linked engine on
  * iOS. [run] is for the short, unsupervised launches: start it, read what it
  * says, wait for it to stop.
@@ -62,7 +62,7 @@ object JavaProcess {
         val env: Map<String, String>,
         val workDir: File,
     ) {
-        /** The shape the supervisor in `homerun-pumpkin-ffi` reads. */
+        /** The shape `homerun-supervisor` reads. */
         fun toJson(): JsonObject = buildJsonObject {
             put("program", program)
             put("args", buildJsonArray { args.forEach { add(it) } })
