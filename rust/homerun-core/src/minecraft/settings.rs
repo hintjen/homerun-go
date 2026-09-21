@@ -187,6 +187,63 @@ pub fn parse_user_list(env: &Value, primary: &str, fallbacks: &[&str]) -> Vec<St
     Vec::new()
 }
 
+/// The part of a `GET /api/server/<id>/` body worth keeping for a launch the
+/// API cannot be asked about.
+///
+/// # Why a host remembers anything
+///
+/// A settings lookup that fails — no token yet, a 401 on a stale one, a
+/// backend hiccup, no signal — used to launch vanilla-latest with no loader,
+/// no mods and no plugins, and every surface reported a healthy server. On a
+/// player's phone that fallback started a vanilla server where a Paper one
+/// was configured; the player stopped it and started again, and the two
+/// launches overlapping is what took the JVM down. The server the player
+/// configured last time is a far better guess than the one nobody did, so a
+/// host writes this beside the world after every successful fetch and reads
+/// it back when the next fetch fails.
+///
+/// # What is deliberately not in it
+///
+/// Only the *configuration* survives — what the player chose, which does not
+/// change between launches unless they change it. Everything the API issues
+/// per launch is dropped, because replaying it is worse than not having it:
+///
+/// - `backup` and `backup_lease_device`: repository credentials on disk, and
+///   a lease that belonged to some earlier moment. A launch from memory hosts
+///   without backups, exactly as a server with no repository does.
+/// - `RESTORE_FROM_SNAPSHOT`: a one-shot pin the API clears on the next
+///   running ack. Replayed, it would restore an old snapshot over the world
+///   the player has been playing since.
+/// - `links`: tunnel credentials from a previous session, which the legacy
+///   provisioner has since replaced. The post-launch poll takes the absence
+///   as "no baseline", which is what it is.
+///
+/// The result is shaped like the body it came from, so a host parses it with
+/// the same code and gets `null` for every field this stripped — no second
+/// parser, no second set of defaults to drift. `None` when the body carries no
+/// configuration at all, so a host never remembers an empty record over a
+/// good one.
+pub fn remember(body: &Value) -> Option<Value> {
+    let config = body.get("config")?.as_object()?;
+    let env = config.get("environment_variables")?.as_object()?;
+
+    let mut kept_env = env.clone();
+    kept_env.remove("RESTORE_FROM_SNAPSHOT");
+
+    let mut kept_config = serde_json::Map::new();
+    kept_config.insert("environment_variables".into(), Value::Object(kept_env));
+    if let Some(game_type) = config.get("game_type") {
+        kept_config.insert("game_type".into(), game_type.clone());
+    }
+
+    let mut kept = serde_json::Map::new();
+    kept.insert("config".into(), Value::Object(kept_config));
+    if let Some(game_type) = body.get("game_type") {
+        kept.insert("game_type".into(), game_type.clone());
+    }
+    Some(Value::Object(kept))
+}
+
 /// Resolve `environment_variables` into settings.
 ///
 /// `game_type` is the API's (`native-crossplay` forces offline mode on vanilla,
@@ -457,6 +514,89 @@ pub fn merge_banned(existing: &str, additions: &[Player], created: &str) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── What a host remembers between launches ───────────────────────────
+
+    fn api_body() -> Value {
+        json!({
+            "game_type": "native-crossplay",
+            "backup": { "repo_url": "rest:https://backups.example/x", "password": "hunter2" },
+            "backup_lease_device": "somebody-elses-phone",
+            "config": {
+                "game_type": "native-crossplay",
+                "environment_variables": {
+                    "TYPE": "PAPER",
+                    "VERSION": "1.21.11",
+                    "MOTD": "Player's Minecraft Server",
+                    "OPS": "Notch",
+                    "RESTORE_FROM_SNAPSHOT": "abc123"
+                },
+                "links": [ { "native_config": { "private_key": "k", "endpoint": "e", "public_key": "p" } } ]
+            }
+        })
+    }
+
+    /// The configuration is what the player chose; a launch from memory must
+    /// be the server they configured, not vanilla-latest.
+    #[test]
+    fn a_remembered_body_keeps_the_players_configuration() {
+        let kept = remember(&api_body()).expect("a configured server is remembered");
+        let env = &kept["config"]["environment_variables"];
+        assert_eq!(env["TYPE"], "PAPER");
+        assert_eq!(env["VERSION"], "1.21.11");
+        assert_eq!(env["MOTD"], "Player's Minecraft Server");
+        assert_eq!(env["OPS"], "Notch");
+        assert_eq!(
+            kept["game_type"], "native-crossplay",
+            "crossplay decides online mode"
+        );
+        assert_eq!(kept["config"]["game_type"], "native-crossplay");
+    }
+
+    /// Everything the API issues per launch is dropped: credentials must not
+    /// sit on disk, a lease is a moment that has passed, a restore pin is
+    /// one-shot, and a tunnel from last session is dead.
+    #[test]
+    fn a_remembered_body_carries_nothing_the_api_issues_per_launch() {
+        let kept = remember(&api_body()).unwrap();
+        assert!(kept.get("backup").is_none(), "repository credentials");
+        assert!(
+            kept.get("backup_lease_device").is_none(),
+            "a lease from another moment"
+        );
+        assert!(
+            kept["config"].get("links").is_none(),
+            "last session's tunnel"
+        );
+        assert!(
+            kept["config"]["environment_variables"]
+                .get("RESTORE_FROM_SNAPSHOT")
+                .is_none(),
+            "a one-shot pin, replayed, restores over a live world"
+        );
+        assert!(
+            !kept.to_string().contains("hunter2"),
+            "nothing secret survives, whatever key it was under"
+        );
+    }
+
+    /// A body with no configuration is not worth remembering — it would
+    /// replace a good record with an empty one.
+    #[test]
+    fn a_body_without_configuration_is_not_remembered() {
+        assert!(remember(&json!({ "game_type": "java" })).is_none());
+        assert!(remember(&json!({ "config": { "game_type": "java" } })).is_none());
+        assert!(remember(&json!({ "config": null })).is_none());
+        assert!(remember(&json!(null)).is_none());
+    }
+
+    /// Remembering is idempotent: what a host reads back and remembers again
+    /// is what it had.
+    #[test]
+    fn remembering_a_remembered_body_changes_nothing() {
+        let once = remember(&api_body()).unwrap();
+        assert_eq!(remember(&once).unwrap(), once);
+    }
 
     fn identity(name: &str, id: &str) -> Identity {
         Identity {

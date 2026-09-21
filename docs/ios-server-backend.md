@@ -448,7 +448,11 @@ broadcasting to the LAN list.
 line per launch says what was applied, and another says what was ignored. If it
 says the right thing and the server does not, the mapping in
 `pumpkin_settings.rs` is wrong; if it says nothing was supplied, the settings
-fetch failed — check the token and `HomerunAPI.serverSettings`.
+fetch failed *and* nothing was remembered from a previous launch — check the
+token and `HomerunAPI.serverSettings`. A fetch that fails for a server that
+has launched before says `using the ones from its last launch` instead and
+runs on `homerun-remembered.json` beside the world; a dashboard change made
+since is not in it until a fetch succeeds.
 
 **Every player is treated as new after an update.** Online mode changed. UUIDs
 are keyed by it, so an offline server cannot recognise players a previously

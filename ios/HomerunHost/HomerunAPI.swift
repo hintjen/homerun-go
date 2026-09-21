@@ -338,34 +338,91 @@ enum HomerunAPI {
         /// The tunnel as it stood before this launch — the staleness baseline
         /// the post-launch poll compares against.
         let tunnelBefore: WireProxy.Link?
+        /// True when these came from the record beside the world rather than
+        /// from the API — see `serverSettings`. Worth a console line: the
+        /// player is getting last launch's configuration, and a change they
+        /// made on the dashboard since is not in it.
+        var remembered = false
     }
 
-    /// Read a server's settings, or nil if they could not be read.
+    /// What a host keeps beside a world for the next launch the API cannot be
+    /// asked about. Shaped like the API body it was cut from, so `parseSettings`
+    /// reads it and every field the core stripped comes out nil.
+    private static let memoryFile = "homerun-remembered.json"
+
+    /// Read a server's settings — from the API, or failing that from the
+    /// record the last successful fetch left beside the world — or nil when
+    /// there is neither.
     ///
-    /// Nil is a normal outcome, not an error: no token yet, no signal, a
-    /// backend hiccup. Every caller must treat it as "host without backups"
-    /// rather than as a reason to refuse the launch — a settings lookup that
-    /// failed is a far worse reason not to start a server than to start one
-    /// with defaults.
+    /// A lookup that fails is a normal outcome, not an error: no token yet, a
+    /// 401 on a stale one, no signal, a backend hiccup. What it used to mean
+    /// was the engine's defaults with no loader, no mods and no plugins — and
+    /// on Android that started a vanilla server where a player had configured
+    /// Paper, which is plausibly why they stopped it and started again into
+    /// the launch that then crashed. The server they configured last time is a
+    /// far better guess than the one nobody did, so every successful fetch
+    /// writes what the core says is worth keeping into `dir`, and a failed one
+    /// reads it back. `ServerSettings.remembered` says which happened, so the
+    /// console can say so too.
+    ///
+    /// Nil is now only a server this device has never fetched settings for.
+    /// Every caller must still treat it as "host without backups" rather than
+    /// as a reason to refuse the launch. `dir` is the server's own directory,
+    /// so the record is deleted with the server; nil skips the memory.
     ///
     /// Uses the **user** token, unlike the two reporting calls above: this is
     /// the user's server being read, not the device speaking for itself.
     static func serverSettings(
         apiURL: String,
         serverId: String,
-        token: String
+        token: String,
+        dir: URL? = nil
     ) async -> ServerSettings? {
+        if let body = await fetchSettings(apiURL: apiURL, serverId: serverId, token: token) {
+            if let dir { remember(body, in: dir) }
+            return parseSettings(body)
+        }
+        guard let dir, let remembered = recall(from: dir) else { return nil }
+        HostLog.host.info("\(serverId, privacy: .public): using the settings remembered from its last launch")
+        var settings = parseSettings(remembered)
+        settings.remembered = true
+        return settings
+    }
+
+    /// The API's body, or nil for every way a fetch can fail.
+    private static func fetchSettings(apiURL: String, serverId: String, token: String) async -> [String: Any]? {
         guard !token.isEmpty else {
             HostLog.host.info("no token for \(serverId, privacy: .public) — using defaults")
             return nil
         }
-
         guard let body = try? await get(apiURL: apiURL, path: "/api/server/\(serverId)/", token: token)
         else {
             HostLog.host.error("could not read settings for \(serverId, privacy: .public)")
             return nil
         }
+        return body
+    }
 
+    /// Keep what the core says is worth keeping. Never an empty record over a
+    /// good one: a body with nothing to keep leaves the file as it was.
+    private static func remember(_ body: [String: Any], in dir: URL) {
+        guard let kept = Core.rememberSettings(body: body),
+            let data = try? JSONSerialization.data(withJSONObject: kept)
+        else { return }
+        do {
+            try data.write(to: dir.appendingPathComponent(memoryFile), options: .atomic)
+        } catch {
+            HostLog.host.error("could not remember the settings: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func recall(from dir: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: dir.appendingPathComponent(memoryFile)) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    /// Read an API body — or a remembered subset of one — into settings.
+    private static func parseSettings(_ body: [String: Any]) -> ServerSettings {
         let env = (body["config"] as? [String: Any])?["environment_variables"] as? [String: Any]
 
         func nonEmpty(_ value: Any?) -> String? {
