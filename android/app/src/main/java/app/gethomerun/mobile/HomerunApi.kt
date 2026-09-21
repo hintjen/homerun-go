@@ -16,6 +16,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
@@ -99,7 +100,21 @@ object HomerunApi {
          * this one is the dead previous set.
          */
         val tunnelBefore: WireProxy.Link?,
+        /**
+         * True when these came from the record beside the world rather than
+         * from the API — see [serverSettings]. Worth a console line: the
+         * player is getting last launch's configuration, and a change they
+         * made on the dashboard since is not in it.
+         */
+        val remembered: Boolean = false,
     )
+
+    /**
+     * What a host keeps beside a world for the next launch the API cannot be
+     * asked about. Shaped like the API body it was cut from, so [parseSettings]
+     * reads it and every field the core stripped comes out null.
+     */
+    private const val MEMORY_FILE = "homerun-settings.json"
 
     /** Mirrors the desktop's whitelist; anything else is treated as vanilla. */
     private val LOADERS = setOf(
@@ -145,32 +160,84 @@ object HomerunApi {
     private fun JsonElement?.objectOrNull(): JsonObject? = this as? JsonObject
 
     /**
-     * Read a server's settings, or null if they could not be read.
+     * Read a server's settings — from the API, or failing that from the
+     * record the last successful fetch left beside the world — or null when
+     * there is neither.
      *
-     * Null is a normal outcome, not an error: no token yet, no signal, a
-     * backend hiccup. The caller falls back to vanilla-latest exactly as the
-     * desktop does — refusing to start a server because a settings lookup
-     * failed would be worse than starting the default one.
+     * A lookup that fails is a normal outcome, not an error: no token yet, a
+     * 401 on a stale one, no signal, a backend hiccup. What it used to mean
+     * was vanilla-latest with no loader, no mods and no plugins, exactly as
+     * the desktop falls back — and that started a vanilla server where a
+     * player had configured Paper, which is plausibly why they stopped it and
+     * started again into the launch that then crashed (`fix/superseded-launch`).
+     * The server they configured last time is a far better guess than the one
+     * nobody did, so every successful fetch writes what the core says is worth
+     * keeping into [dir], and a failed one reads it back. [ServerSettings.remembered]
+     * says which happened, so the console can say so too.
      *
-     * It is a *bad* outcome all the same, and one worth being loud about: the
-     * fallback is a different server from the one the player configured. Every
-     * field below is therefore read defensively rather than optimistically —
-     * one absent key must not cost the other fifteen.
+     * Null is now only a server this device has never fetched settings for,
+     * and the caller still takes its vanilla-latest path for that. It is a
+     * *bad* outcome all the same, and one worth being loud about: the fallback
+     * is a different server from the one the player configured. Every field
+     * below is therefore read defensively rather than optimistically — one
+     * absent key must not cost the other fifteen.
+     *
+     * [dir] is the server's own directory, so the record is deleted with the
+     * server and cannot outlive it. Null skips the memory entirely.
      */
     suspend fun serverSettings(
         apiUrl: String,
         serverId: String,
         token: String,
+        dir: File? = null,
     ): ServerSettings? = withContext(Dispatchers.IO) {
+        val fetched = fetchSettings(apiUrl, serverId, token)
+        if (fetched != null) {
+            dir?.let { remember(it, fetched) }
+            return@withContext parseSettings(fetched)
+        }
+        val remembered = dir?.let { recall(it) } ?: return@withContext null
+        Log.i(TAG, "$serverId: using the settings remembered from its last launch")
+        parseSettings(remembered)?.copy(remembered = true)
+    }
+
+    /** The API's body, or null for every way a fetch can fail. */
+    private fun fetchSettings(apiUrl: String, serverId: String, token: String): JsonObject? {
         if (token.isBlank()) {
             Log.i(TAG, "no token for $serverId — using defaults")
-            return@withContext null
+            return null
         }
+        return try {
+            get(apiUrl, "/api/server/$serverId/", token)
+        } catch (err: Exception) {
+            Log.w(TAG, "could not read settings for $serverId: ${err.message}")
+            null
+        }
+    }
 
-        try {
-            val body = get(apiUrl, "/api/server/$serverId/", token)
-                ?: return@withContext null
+    /**
+     * Keep what the core says is worth keeping. Never an empty record over a
+     * good one: a body with nothing to keep leaves the file as it was.
+     */
+    private fun remember(dir: File, body: JsonObject) {
+        val kept = runCatching { Core.rememberSettings(body) }.getOrNull() ?: return
+        runCatching { File(dir, MEMORY_FILE).writeText(json.encodeToString(JsonObject.serializer(), kept)) }
+            .onFailure { Log.w(TAG, "could not remember the settings: ${it.message}") }
+    }
 
+    private fun recall(dir: File): JsonObject? = runCatching {
+        json.parseToJsonElement(File(dir, MEMORY_FILE).readText()).jsonObject
+    }.getOrNull()
+
+    /**
+     * Read an API body — or a remembered subset of one — into settings.
+     *
+     * Throws for nothing it can help: every field is read defensively, and the
+     * one exception path left is a body that is not the object it claims to
+     * be, which [serverSettings] turns into "no settings".
+     */
+    private fun parseSettings(body: JsonObject): ServerSettings? {
+        return try {
             val config = body["config"].objectOrNull()
             val env = config?.get("environment_variables").objectOrNull()
             val type = env?.get("TYPE")?.jsonPrimitive?.contentOrNull?.lowercase()
@@ -194,9 +261,9 @@ object HomerunApi {
                 restoreFromSnapshot = env?.get("RESTORE_FROM_SNAPSHOT")?.jsonPrimitive
                     ?.contentOrNull?.takeIf { it.isNotBlank() },
                 tunnelBefore = linkOf(body)?.link,
-            ).also { Log.i(TAG, "$serverId: ${it.loader} ${it.version ?: "latest"} (${it.gameType})") }
+            ).also { Log.i(TAG, "settings: ${it.loader} ${it.version ?: "latest"} (${it.gameType})") }
         } catch (err: Exception) {
-            Log.w(TAG, "could not read settings for $serverId: ${err.message}")
+            Log.w(TAG, "could not read settings: ${err.message}")
             null
         }
     }

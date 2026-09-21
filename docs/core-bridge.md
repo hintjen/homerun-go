@@ -277,6 +277,7 @@ rather than promoted.
 | `minecraft.jar.couldSatisfy` | `onDisk`, `version?`, `loader?` | bool — the looser offline fallback |
 | `minecraft.settings.fromEnv` | `env`, `gameType?`, `loader?`, `fallbackMotd?` | resolved `Settings` |
 | `minecraft.settings.properties` | `settings`, `runtime` | `[[key, value], …]` for `properties.merge` |
+| `minecraft.settings.remember` | `body` (a `GET /api/server/<id>/` body) | the configuration to keep beside the world for a launch the API cannot be asked about — env minus the restore pin, game types; never credentials, lease or tunnel — or `null` when there is none |
 | `minecraft.settings.offlineUuid` | `name` | the UUID an offline server derives |
 | `minecraft.settings.dashUuid` | `undashed` | Mojang's 32-char hex, dashed |
 | `minecraft.settings.opsJson` | `players` | `ops.json` content |

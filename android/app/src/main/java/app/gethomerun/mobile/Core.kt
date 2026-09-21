@@ -2072,6 +2072,18 @@ object Core {
      * `server.properties` — the desktop computes it twice from two places and
      * the two disagree, which is what silently breaks op-ing.
      */
+    /**
+     * What to keep beside the world from a `GET /api/server/<id>/` body, for
+     * a launch the API cannot be asked about.
+     *
+     * The configuration and nothing the API issues per launch — the core
+     * decides which is which (`settings::remember`), because getting it wrong
+     * either puts credentials on disk or replays a one-shot restore pin over a
+     * live world. Null when the body has nothing worth keeping.
+     */
+    fun rememberSettings(body: JsonObject): JsonObject? =
+        call("minecraft.settings.remember", buildJsonObject { put("body", body) }) as? JsonObject
+
     fun onlineMode(settings: HomerunApi.ServerSettings): Boolean? =
         (call("minecraft.settings.fromEnv", buildJsonObject {
             put("env", settings.env)

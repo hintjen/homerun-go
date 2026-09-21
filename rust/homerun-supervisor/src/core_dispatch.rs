@@ -1708,6 +1708,13 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             serde_json::to_value(resolved).map_err(|e| e.to_string())
         }
 
+        // The subset of an API body a host keeps for a launch the API cannot be
+        // asked about. Null when there is nothing worth keeping, so a host
+        // never overwrites a good record with an empty one.
+        "minecraft.settings.remember" => {
+            Ok(settings::remember(field("body")?).unwrap_or(Value::Null))
+        }
+
         "minecraft.settings.properties" => {
             let resolved: settings::Settings = serde_json::from_value(field("settings")?.clone())
                 .map_err(|e| format!("bad settings: {e}"))?;
@@ -2346,6 +2353,35 @@ mod tests {
             message.contains("rebuild"),
             "the message must say what to do about it: {message}"
         );
+    }
+
+    /// What a host writes beside the world after a successful settings fetch,
+    /// shaped like the body so the same parser reads it back. Null, not an
+    /// error, when there is nothing to keep — a host must not overwrite a good
+    /// record with an empty one.
+    #[test]
+    fn a_remembered_settings_body_is_the_configuration_and_nothing_issued_per_launch() {
+        let kept = ok(
+            "minecraft.settings.remember",
+            json!({ "body": {
+                "game_type": "java",
+                "backup": { "password": "hunter2" },
+                "backup_lease_device": "another-phone",
+                "config": {
+                    "environment_variables": { "TYPE": "PAPER", "VERSION": "1.21.11", "RESTORE_FROM_SNAPSHOT": "x" },
+                    "links": [ { "native_config": {} } ]
+                }
+            } }),
+        );
+        assert_eq!(kept["config"]["environment_variables"]["TYPE"], "PAPER");
+        assert_eq!(kept["game_type"], "java");
+        assert!(kept.get("backup").is_none());
+        assert!(kept.get("backup_lease_device").is_none());
+        assert!(kept["config"].get("links").is_none());
+        assert!(kept["config"]["environment_variables"].get("RESTORE_FROM_SNAPSHOT").is_none());
+
+        let nothing = ok("minecraft.settings.remember", json!({ "body": { "game_type": "java" } }));
+        assert!(nothing.is_null());
     }
 
     #[test]

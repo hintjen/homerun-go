@@ -74,9 +74,14 @@ extension BridgeRouter {
         // the engine starts: the backup lease gate, and the tunnel baseline. It
         // costs a round trip that this host did not previously pay — the same
         // one Android has always paid.
-        let settings = token.isEmpty || apiURL.isEmpty
+        // The server's own directory goes along so a fetch that fails can
+        // fall back to what the last one found — and so that record is
+        // deleted with the server.
+        let settings = apiURL.isEmpty
             ? nil
-            : await HomerunAPI.serverSettings(apiURL: apiURL, serverId: serverId, token: token)
+            : await HomerunAPI.serverSettings(
+                apiURL: apiURL, serverId: serverId, token: token,
+                dir: HostStore.serverDirectory(id: serverId))
 
         // Ahead of everything expensive, and ahead of the lease gate: this host
         // links its engine, and a linked engine does not refuse a modpack — it
@@ -130,6 +135,15 @@ extension BridgeRouter {
         if let settings {
             config.settingsEnv = settings.env
             config.gameType = settings.gameType
+
+            // Said out loud: the player is getting last launch's
+            // configuration, and a change they made on the dashboard since is
+            // not in it.
+            if settings.remembered {
+                config.launchNotes.append(
+                    "[Homerun] Could not fetch this server's settings — using the ones from "
+                        + "its last launch. Any changes made since will apply next time.")
+            }
 
             // Pumpkin serves one Minecraft version whatever `VERSION` says,
             // and every launcher reads `VERSION` to pick a client — so the

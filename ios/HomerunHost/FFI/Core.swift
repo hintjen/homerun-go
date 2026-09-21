@@ -1178,6 +1178,17 @@ enum Core {
         return value as? String
     }
 
+    /// What to keep beside the world from a `GET /api/server/<id>/` body, for
+    /// a launch the API cannot be asked about.
+    ///
+    /// The configuration and nothing the API issues per launch — the core
+    /// decides which is which (`settings::remember`), because getting it wrong
+    /// either puts credentials on disk or replays a one-shot restore pin over
+    /// a live world. Nil when the body has nothing worth keeping.
+    static func rememberSettings(body: [String: Any]) -> [String: Any]? {
+        (try? call("minecraft.settings.remember", ["body": body])) as? [String: Any]
+    }
+
     /// Whether a server's settings put it in online mode.
     static func onlineMode(env: [String: Any], gameType: String?, loader: String) -> Bool? {
         var args: [String: Any] = ["env": env, "loader": loader]
