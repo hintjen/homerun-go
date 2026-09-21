@@ -4,7 +4,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
-const { prepareArtifacts, LAYOUT, PUBLIC_BASE } = require("./publish-desktop-artifacts");
+const {
+  prepareArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV,
+} = require("./publish-desktop-artifacts");
 const { TARGETS } = require("./targets");
 
 const metadata = {
@@ -48,7 +50,9 @@ test("missing or empty inputs cannot partially replace existing manifests", (t) 
 test("published locations preserve Pumpkin and match the desktop runner URL", (t) => {
   const artifacts = prepareArtifacts(fixture(t), ["pumpkin", "game-runner", "core-node"], metadata);
   assert.deepEqual(artifacts.map((a) => a.manifestKey), ["pumpkin/latest.json", "game-runner/latest.json", "core/latest.json"]);
-  for (const artifact of artifacts) assert.equal(artifact.manifest.url, `${PUBLIC_BASE}/${artifact.objectKey}`);
+  for (const artifact of artifacts) {
+    assert.equal(artifact.manifest.url, `${CHANNELS[artifact.channel].public}/${artifact.objectKey}`);
+  }
   assert.match(artifacts[0].objectKey, /^pumpkin\/homerun-desktop-minecraft-pumpkin-[a-f0-9]{12}\.exe$/);
   assert.match(artifacts[1].objectKey, /^game-runner\/homerun-game-[a-f0-9]{12}\.exe$/);
   assert.match(artifacts[2].objectKey, /^core\/homerun-core-[a-f0-9]{12}\.node$/);
@@ -70,7 +74,7 @@ test("runner can be prepared without building Pumpkin and targets Windows with s
   assert.equal(TARGETS["game-runner"].artifact, "homerun-game.exe");
 });
 
-function runPublisher(t, args, includeRunner = false) {
+function runPublisher(t, args, includeRunner = false, env = {}) {
   const root = fixture(t);
   const dir = path.join(root, "dist", "desktop");
   fs.mkdirSync(dir, { recursive: true });
@@ -102,11 +106,16 @@ function runPublisher(t, args, includeRunner = false) {
     return require(name);
   }
   imports.main = entry;
-  const processStub = { argv: ["node", "publish", ...args], exitCode: 0 };
+  // The printed `aws s3 cp` commands are the other half of the channel: a
+  // manifest under the dev prefix uploaded by a prod command is the same
+  // accident from the other direction, so the tests read what was printed.
+  const logs = [];
+  const processStub = { argv: ["node", "publish", ...args], env, exitCode: 0 };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "publish-desktop-artifacts.js"), "utf8"), {
-    require: imports, module: entry, process: processStub, console: { log() {}, error() {} },
+    require: imports, module: entry, process: processStub,
+    console: { log: (line) => logs.push(String(line)), error: (line) => logs.push(String(line)) },
   });
-  return { dir, queries, exitCode: processStub.exitCode };
+  return { dir, queries, exitCode: processStub.exitCode, output: logs.join("\n") };
 }
 
 test("Pumpkin publication still asks the built engine for its Minecraft version", (t) => {
@@ -136,4 +145,91 @@ test("bare publication includes an available runner but explicit selection refus
 
 test("Pumpkin metadata cannot be omitted by direct preparation callers", (t) => {
   assert.throws(() => prepareArtifacts(fixture(t), ["pumpkin"]), /Minecraft version and protocol/);
+});
+
+// The production prefix with its trailing slash. Without the slash it is a
+// substring of `homerun-desktop-dev` and would match dev output too, which is
+// the one thing these tests exist to tell apart.
+const PROD_KEY_PREFIX = "homerun-desktop/";
+
+function manifestsWritten(dir) {
+  return Object.values(LAYOUT)
+    .map((layout) => path.join(dir, layout.manifest))
+    .filter((file) => fs.existsSync(file))
+    .map((file) => fs.readFileSync(file, "utf8"));
+}
+
+test("prod publishes exactly the keys and URLs it published before channels existed", (t) => {
+  const { dir, exitCode, output } = runPublisher(t, ["--channel", "prod"], true);
+  assert.equal(exitCode, 0);
+  const pumpkin = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT.pumpkin.manifest)));
+  const runner = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT["game-runner"].manifest)));
+  const addon = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT["core-node"].manifest)));
+  assert.equal(
+    pumpkin.url,
+    `https://fractal-homerun.s3.amazonaws.com/homerun-desktop/pumpkin/homerun-desktop-minecraft-pumpkin-${pumpkin.build}.exe`
+  );
+  assert.equal(
+    runner.url,
+    `https://fractal-homerun.s3.amazonaws.com/homerun-desktop/game-runner/homerun-game-${runner.build}.exe`
+  );
+  assert.equal(
+    addon.url,
+    `https://fractal-homerun.s3.amazonaws.com/homerun-desktop/core/homerun-core-${addon.build}.node`
+  );
+  for (const line of [
+    `aws s3 cp "${path.join(dir, LAYOUT.pumpkin.file)}" s3://fractal-homerun/homerun-desktop/pumpkin/homerun-desktop-minecraft-pumpkin-${pumpkin.build}.exe`,
+    `aws s3 cp "${path.join(dir, LAYOUT.pumpkin.manifest)}" s3://fractal-homerun/homerun-desktop/pumpkin/latest.json --cache-control no-cache`,
+    `aws s3 cp "${path.join(dir, LAYOUT["core-node"].file)}" s3://fractal-homerun/homerun-desktop/assets/homerun_core.node`,
+  ]) {
+    assert.ok(output.includes(line), `prod output must still print: ${line}`);
+  }
+});
+
+test("dev names the production prefix nowhere, in any manifest or command", (t) => {
+  const { dir, exitCode, output } = runPublisher(t, [], true);
+  assert.equal(exitCode, 0, "dev is the default, so a bare run is a dev run");
+  const written = manifestsWritten(dir);
+  assert.equal(written.length, 3);
+  for (const manifest of written) {
+    assert.ok(!manifest.includes(PROD_KEY_PREFIX), `a dev manifest must not name production:\n${manifest}`);
+    assert.match(manifest, /homerun-desktop-dev\//);
+  }
+  assert.ok(!output.includes(PROD_KEY_PREFIX), `dev commands must not name production:\n${output}`);
+  // Including the mutable alias, which has no manifest to give it away.
+  assert.ok(output.includes("s3://fractal-homerun/homerun-desktop-dev/assets/homerun_core.node"));
+});
+
+test("the channel comes from the flag, then the environment, then dev", (t) => {
+  assert.equal(resolveChannel(null, {}), "dev");
+  assert.equal(DEFAULT_CHANNEL, "dev");
+  assert.equal(resolveChannel(null, { [CHANNEL_ENV]: "prod" }), "prod");
+  assert.equal(resolveChannel("dev", { [CHANNEL_ENV]: "prod" }), "dev", "an explicit flag wins");
+  // A workflow input left blank arrives as the empty string, not as absent.
+  assert.equal(resolveChannel(null, { [CHANNEL_ENV]: "" }), "dev");
+  assert.equal(resolveChannel(null, { [CHANNEL_ENV]: "  prod  " }), "prod");
+  const fromEnv = runPublisher(t, [], false, { [CHANNEL_ENV]: "prod" });
+  assert.equal(fromEnv.exitCode, 0);
+  assert.match(JSON.parse(fs.readFileSync(path.join(fromEnv.dir, LAYOUT.pumpkin.manifest))).url, /homerun-desktop\/pumpkin\//);
+});
+
+test("an unknown channel is refused rather than resolved", (t) => {
+  assert.throws(() => resolveChannel("staging", {}), /Unknown channel: staging/);
+  assert.throws(() => resolveChannel(null, { [CHANNEL_ENV]: "PROD" }), /Unknown channel: PROD/);
+  assert.throws(() => prepareArtifacts(fixture(t), ["game-runner"], metadata, "staging"), /Unknown channel/);
+  const byFlag = runPublisher(t, ["--channel", "staging"]);
+  assert.equal(byFlag.exitCode, 1);
+  assert.match(byFlag.output, /Unknown channel: staging/);
+  assert.equal(manifestsWritten(byFlag.dir).length, 0, "a refused channel must not write a manifest");
+  const byEnv = runPublisher(t, [], false, { [CHANNEL_ENV]: "production" });
+  assert.equal(byEnv.exitCode, 1);
+  assert.equal(manifestsWritten(byEnv.dir).length, 0);
+});
+
+test("the usage line refuses arguments it does not understand", (t) => {
+  for (const args of [["--channel"], ["--only"], ["--channel", "dev", "--channel", "prod"], ["--verify"], ["--only", "everything"]]) {
+    const run = runPublisher(t, args);
+    assert.equal(run.exitCode, 1, `must refuse: ${args.join(" ")}`);
+    assert.equal(manifestsWritten(run.dir).length, 0);
+  }
 });
