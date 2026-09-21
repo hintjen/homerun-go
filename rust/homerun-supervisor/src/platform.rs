@@ -239,6 +239,101 @@ pub fn executable(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// Make one directory appear inside another without copying it.
+///
+/// # Why this exists
+///
+/// A great many dedicated servers — every Unity one met so far — resolve
+/// *both* their game data and their saves relative to the working directory.
+/// Their data lives in the runtime directory, which is shared by every server
+/// of that game; their saves have to live under the server directory, because
+/// that is the unit Homerun backs up, moves and deletes. Satisfy one and the
+/// other breaks. See `docs/game-runner.md`.
+///
+/// So the working directory is the runtime directory, and the save directory
+/// the game writes to *inside* it is a link to a real directory under the
+/// server. The game sees the layout it insists on; the bytes are where they
+/// have to be.
+///
+/// # A junction on Windows, and not a symbolic link
+///
+/// `std::os::windows::fs::symlink_dir` needs `SeCreateSymbolicLinkPrivilege`,
+/// which a player's account does not have unless Developer Mode is on. A
+/// **directory junction** needs no privilege at all, and `std` has no API for
+/// one — so this is `DeviceIoControl` with `FSCTL_SET_REPARSE_POINT`, which
+/// is the whole reason this module gained a Win32 dependency.
+///
+/// On Unix it is a symlink, which needs nothing.
+pub fn mount_dir(link: &Path, target: &Path) -> Result<(), String> {
+    imp::mount_dir(link, target)
+}
+
+/// Remove a link made by [`mount_dir`], leaving what it pointed at alone.
+///
+/// `remove_dir` on a junction removes the junction. `remove_dir_all` is not
+/// used here and must not be: the whole point is that the target is a
+/// player's save directory.
+pub fn unmount_dir(link: &Path) -> Result<(), String> {
+    if !is_mount(link) {
+        return Ok(());
+    }
+    #[cfg(windows)]
+    let result = std::fs::remove_dir(link);
+    #[cfg(unix)]
+    let result = std::fs::remove_file(link);
+    result.map_err(|e| format!("the link at {} could not be removed: {e}", link.display()))
+}
+
+/// Whether this path is a link rather than a real directory.
+///
+/// `FileType::is_symlink` is true for a junction as well as a symbolic link
+/// on Windows, which is what this needs: both are links, and neither is a
+/// directory whose contents belong to anybody.
+pub fn is_mount(link: &Path) -> bool {
+    std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// Where a link points, or `None` if it is not one.
+///
+/// Used to tell a link left over from *this* server from one left over from a
+/// different server of the same game — they share a runtime directory, so a
+/// stale link is a launch that would write one world into another's folder.
+pub fn mount_target(link: &Path) -> Option<PathBuf> {
+    std::fs::read_link(link).ok()
+}
+
+/// Held from before fetch until all game effects finish. The file persists;
+/// the OS lock, unlike a PID file, is released on abrupt process death too.
+pub struct RuntimeLease {
+    _file: std::fs::File,
+}
+impl RuntimeLease {
+    pub fn acquire(path: &Path) -> Result<Self, String> {
+        if is_mount(path) {
+            return Err("The runtime lock cannot be a link.".into());
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let file = options
+            .open(path)
+            .map_err(|_| "This runtime is in use or its lock cannot be opened.".to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            // SAFETY: flock only operates on our open file descriptor.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Err("This runtime is in use.".into());
+            }
+        }
+        Ok(Self { _file: file })
+    }
+}
+
 /// Make a file executable, where that is a thing files are.
 ///
 /// A no-op on Windows. On Unix a freshly-unzipped server binary has whatever
@@ -428,6 +523,130 @@ mod imp {
     }
 
     pub fn make_executable(_path: &Path) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// A directory junction, built by hand because `std` has no API for one
+    /// and the thing it does have needs a privilege players lack.
+    ///
+    /// The layout below is `REPARSE_DATA_BUFFER` for
+    /// `IO_REPARSE_TAG_MOUNT_POINT`, which is fixed and undocumented in the
+    /// helpful sense: an eight-byte header, four `u16` offsets and lengths,
+    /// then both spellings of the path one after the other. The lengths
+    /// exclude their terminators and the terminators are still required.
+    pub fn mount_dir(link: &Path, target: &Path) -> Result<(), String> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+
+        const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+        const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+        // The target has to be absolute and fully resolved: a junction stores
+        // a path, not a reference, and a relative one would be resolved
+        // against whatever the reader's working directory happened to be.
+        let full = target.canonicalize().map_err(|e| {
+            format!(
+                "the folder {} this game's saves belong in could not be found: {e}",
+                target.display()
+            )
+        })?;
+        let full = full.to_string_lossy();
+        // `canonicalize` gives the verbatim `\\?\C:\…` form; a junction wants
+        // the object-manager `\??\C:\…` spelling of the same path.
+        let printed = full.strip_prefix(r"\\?\").unwrap_or(&full);
+        let substitute = format!(r"\??\{printed}");
+
+        let wide = |text: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(text)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let (substitute, printed) = (wide(&substitute), wide(printed));
+        // Lengths exclude the terminator; the buffer still carries it.
+        let (sub_bytes, print_bytes) = ((substitute.len() - 1) * 2, (printed.len() - 1) * 2);
+        let path_bytes = substitute.len() * 2 + printed.len() * 2;
+        if path_bytes + 16 > 16 * 1024 {
+            return Err("The save path is too long for a Windows directory junction.".into());
+        }
+
+        let mut buffer: Vec<u8> = Vec::with_capacity(8 + 8 + path_bytes);
+        buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+        buffer.extend_from_slice(&(((8 + path_bytes) as u16).to_le_bytes()));
+        buffer.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        buffer.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+        buffer.extend_from_slice(&(sub_bytes as u16).to_le_bytes());
+        buffer.extend_from_slice(&((substitute.len() * 2) as u16).to_le_bytes()); // PrintNameOffset
+        buffer.extend_from_slice(&(print_bytes as u16).to_le_bytes());
+        for unit in substitute.iter().chain(printed.iter()) {
+            buffer.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        // The link itself is an ordinary empty directory until the reparse
+        // point is written onto it.
+        std::fs::create_dir(link)
+            .map_err(|e| format!("the folder {} could not be created: {e}", link.display()))?;
+
+        let path = wide(&link.to_string_lossy());
+        // SAFETY: a NUL-terminated wide path, and the flags a directory needs
+        // -- BACKUP_SEMANTICS to open one at all, OPEN_REPARSE_POINT so this
+        // opens the link rather than following it.
+        let handle = unsafe {
+            CreateFileW(
+                path.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                std::ptr::null_mut(),
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            let error = std::io::Error::last_os_error();
+            let _ = std::fs::remove_dir(link);
+            return Err(format!(
+                "the folder {} could not be opened: {}",
+                link.display(),
+                error
+            ));
+        }
+
+        let mut returned = 0u32;
+        // SAFETY: a handle we just opened, and a buffer whose declared length
+        // is its own.
+        let ok = unsafe {
+            DeviceIoControl(
+                handle,
+                FSCTL_SET_REPARSE_POINT,
+                buffer.as_ptr().cast(),
+                buffer.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        };
+        let failure = std::io::Error::last_os_error();
+        // SAFETY: closed exactly once, on both paths.
+        unsafe { CloseHandle(handle) };
+
+        if ok == 0 {
+            // Leave nothing half-made: an empty directory where a link was
+            // meant to be is the shape that makes the next launch think the
+            // game's saves are somewhere they are not.
+            let _ = std::fs::remove_dir(link);
+            return Err(format!(
+                "the folder {} could not be linked to {}: {failure}",
+                link.display(),
+                target.display()
+            ));
+        }
         Ok(())
     }
 }
@@ -683,6 +902,29 @@ mod imp {
         std::fs::set_permissions(path, permissions)
             .map_err(|_| format!("{} could not be made runnable.", path.display()))
     }
+
+    /// A symbolic link, which needs no privilege here — the reason Windows
+    /// gets a junction instead is that there it does.
+    pub fn mount_dir(link: &Path, target: &Path) -> Result<(), String> {
+        let full = target.canonicalize().map_err(|e| {
+            format!(
+                "the folder {} this game's saves belong in could not be found: {e}",
+                target.display()
+            )
+        })?;
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("the folder {} could not be created: {e}", parent.display())
+            })?;
+        }
+        std::os::unix::fs::symlink(&full, link).map_err(|e| {
+            format!(
+                "the folder {} could not be linked to {}: {e}",
+                link.display(),
+                target.display()
+            )
+        })
+    }
 }
 
 #[cfg(test)]
@@ -860,12 +1102,14 @@ mod tests {
     /// socket to produce any of them.
     #[test]
     fn loopback_is_told_from_everything_else_including_a_mapped_address() {
-        let confined = |a: &str| Listening {
-            protocol: Protocol::Tcp,
-            port: 1,
-            address: a.parse().unwrap(),
-        }
-        .is_confined();
+        let confined = |a: &str| {
+            Listening {
+                protocol: Protocol::Tcp,
+                port: 1,
+                address: a.parse().unwrap(),
+            }
+            .is_confined()
+        };
 
         assert!(confined("127.0.0.1"));
         assert!(confined("127.0.0.53"), "all of 127/8 is this computer");
@@ -878,6 +1122,98 @@ mod tests {
         assert!(!confined("::"));
         assert!(!confined("192.168.1.10"));
         assert!(!confined("::ffff:192.168.1.10"));
+    }
+
+    // ─── one directory appearing inside another ────────────────────────────
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "homerun-mount-{}-{name}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The whole contract in one test: a game writing to the link writes to
+    /// the target, and the target is somewhere else entirely.
+    ///
+    /// On Windows this is a junction rather than a symbolic link, and the
+    /// difference is not stylistic — a symbolic link needs a privilege a
+    /// player's account does not have, so a test that passed with one would
+    /// prove nothing about a player's machine.
+    #[test]
+    fn a_game_writing_through_a_link_writes_where_the_link_points() {
+        let root = scratch("write");
+        let target = root.join("server/saves");
+        let link = root.join("runtime/server");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+
+        mount_dir(&link, &target).expect("a link must be makeable without elevation");
+        assert!(is_mount(&link), "it must read as a link, not a directory");
+
+        std::fs::write(link.join("world.sav"), "a world").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("world.sav")).unwrap(),
+            "a world",
+            "the bytes did not land under the server directory"
+        );
+
+        // And removing the link must not be removing the world.
+        unmount_dir(&link).unwrap();
+        assert!(!link.exists(), "the link outlived its removal");
+        assert!(
+            target.join("world.sav").exists(),
+            "removing the link took the saves with it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two servers of one game share a runtime directory, so a link left
+    /// behind by one is a launch that would write another's world into it.
+    /// Telling them apart needs the target, not just the presence.
+    #[test]
+    fn a_link_says_where_it_points() {
+        let root = scratch("target");
+        let (first, second) = (root.join("a"), root.join("b"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let link = root.join("link");
+
+        mount_dir(&link, &first).unwrap();
+        let seen = mount_target(&link).expect("a link must say where it points");
+        assert_eq!(
+            seen.canonicalize().unwrap(),
+            first.canonicalize().unwrap(),
+            "got {seen:?}"
+        );
+        assert_ne!(seen.canonicalize().unwrap(), second.canonicalize().unwrap());
+
+        assert!(
+            mount_target(&first).is_none(),
+            "a real directory is not a link"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Removing something that is not a link is not this function's job, and
+    /// silently doing it would delete a player's directory.
+    #[test]
+    fn a_real_directory_is_never_removed_by_unmounting() {
+        let root = scratch("real");
+        let real = root.join("not-a-link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("keep"), "mine").unwrap();
+
+        unmount_dir(&real).expect("unmounting a non-link is not an error");
+        assert!(
+            real.join("keep").exists(),
+            "a real directory was removed by something that only removes links"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

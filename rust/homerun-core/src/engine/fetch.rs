@@ -22,6 +22,25 @@
 //! "whatever is current", only Steam knows what that is, and a game that
 //! force-updates will refuse every client the moment it is behind. steamcmd
 //! is cheap when it has nothing to do, so it runs.
+//!
+//! # Updating and verifying are different questions
+//!
+//! `app_update` asks Steam what changed and fetches that. `validate` rereads
+//! every file on disk and checksums it. Running both on every start made the
+//! second the expensive one by a distance: the Rust pilot measured a
+//! full re-verify of 5,869,171,402 bytes, minutes per start, on a runtime
+//! that was already complete and already current.
+//!
+//! So they are decided separately. An update check still runs every time an
+//! unpinned runtime is launched, because that is what a force-updating game
+//! requires. A **verify** runs only when there is a reason to doubt what is
+//! on disk: nothing recorded there yet (a first install, or an install that
+//! was interrupted before it could stamp), or a host that has one --
+//! [`Present::suspect`].
+//!
+//! The risk this accepts is a runtime that is quietly corrupt in a way Steam
+//! believes is current. That is what the suspect flag and a repair are for,
+//! and it costs one slow start rather than every start.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +55,14 @@ pub struct Present {
     /// means nothing is there, or nothing that said what it was.
     #[serde(default)]
     pub build_id: Option<String>,
+    /// The host has reason to believe what is on disk is damaged.
+    ///
+    /// An observation rather than an instruction: a launch that failed in a
+    /// way that looks like a broken install, or a person who asked for a
+    /// repair. It is what turns an ordinary update into a full verify, and
+    /// it is the only thing that does so once a runtime has been stamped.
+    #[serde(default)]
+    pub suspect: bool,
 }
 
 /// How to get the runtime.
@@ -66,6 +93,11 @@ pub enum Plan {
         /// `None` is "whatever is current" — see the module header.
         #[serde(default)]
         build_id: Option<String>,
+        /// Re-read and checksum every file, rather than only fetching what
+        /// changed. Minutes on a large game, so it is asked for rather than
+        /// assumed — see the module header.
+        #[serde(default = "verify_by_default")]
+        verify: bool,
     },
 }
 
@@ -78,6 +110,11 @@ impl Plan {
             | Plan::SteamCmd { dir, .. } => dir,
         }
     }
+}
+
+// Plans serialized before this field existed always verified Steam installs.
+fn verify_by_default() -> bool {
+    true
 }
 
 /// The build id a direct download is known by.
@@ -147,7 +184,7 @@ pub fn plan(
                 .app_id
                 .ok_or_else(|| missing(descriptor, "a Steam application id"))?;
             if let Some(pinned) = &runtime.build_id {
-                if present.build_id.as_deref() == Some(pinned.as_str()) {
+                if present.build_id.as_deref() == Some(pinned.as_str()) && !present.suspect {
                     return Ok(Plan::AlreadyPresent {
                         dir,
                         build_id: pinned.clone(),
@@ -158,6 +195,10 @@ pub fn plan(
                 dir,
                 app_id,
                 build_id: runtime.build_id.clone(),
+                // Nothing recorded means a first install or one that was
+                // interrupted before it could say what it was; either way
+                // what is on disk is not known to be whole.
+                verify: present.build_id.is_none() || present.suspect,
             })
         }
         RuntimeSource::Unknown => Err(Error::Unsupported(format!(
@@ -211,7 +252,10 @@ mod tests {
         .unwrap()
     }
 
-    const NOTHING: Present = Present { build_id: None };
+    const NOTHING: Present = Present {
+        build_id: None,
+        suspect: false,
+    };
 
     #[test]
     fn the_pilot_is_fetched_with_steamcmd_anonymously() {
@@ -221,9 +265,97 @@ mod tests {
             Plan::SteamCmd {
                 dir: "C:\\rt\\rust".into(),
                 app_id: 258550,
-                build_id: None
+                build_id: None,
+                // Nothing recorded on disk, so this first install is
+                // verified as well as fetched.
+                verify: true
             }
         );
+    }
+
+    #[test]
+    fn old_serialized_steam_plans_keep_verifying() {
+        let old: Plan =
+            serde_json::from_value(json!({"kind":"steamCmd","dir":"C:/rt/rust","appId":258550}))
+                .unwrap();
+        assert!(
+            matches!(old, Plan::SteamCmd { verify: true, .. }),
+            "omitting the new field must preserve the old verification behavior"
+        );
+    }
+
+    #[test]
+    fn a_suspect_pinned_steam_runtime_is_not_skipped() {
+        let mut d = rust();
+        d.platforms.get_mut("win32-x64").unwrap().runtime.build_id = Some("pinned".into());
+        let present = Present {
+            build_id: Some("pinned".into()),
+            suspect: true,
+        };
+        assert!(
+            matches!(
+                plan(&d, "win32-x64", "C:/rt", &present).unwrap(),
+                Plan::SteamCmd { verify: true, .. }
+            ),
+            "a matching stamp must not hide the host's corruption observation"
+        );
+    }
+
+    /// The measured cost of getting this wrong: the Rust pilot re-verified
+    /// 5,869,171,402 bytes on every start, minutes at a time, on a runtime
+    /// that was already complete and already current. An update check is
+    /// cheap and still runs; a full verify is not and now needs a reason.
+    #[test]
+    fn a_stamped_runtime_is_updated_without_being_verified_again() {
+        let present = Present {
+            build_id: Some("app258550".into()),
+            suspect: false,
+        };
+        match plan(&rust(), "win32-x64", "C:\rt", &present).unwrap() {
+            Plan::SteamCmd { verify, .. } => assert!(
+                !verify,
+                "a complete runtime does not need every file read again"
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Unpinned still means "ask Steam what is current" every time: a game
+    /// that force-updates refuses every client the moment it is behind. What
+    /// changed is only whether the files are re-read.
+    #[test]
+    fn an_unpinned_runtime_is_still_never_already_present() {
+        let present = Present {
+            build_id: Some("app258550".into()),
+            suspect: false,
+        };
+        assert!(
+            matches!(
+                plan(&rust(), "win32-x64", "C:\rt", &present).unwrap(),
+                Plan::SteamCmd { .. }
+            ),
+            "an unpinned runtime must still be offered to steamcmd"
+        );
+    }
+
+    /// The two reasons to doubt what is on disk, and the only two.
+    #[test]
+    fn a_first_install_or_a_suspect_one_is_verified() {
+        for present in [
+            Present {
+                build_id: None,
+                suspect: false,
+            },
+            Present {
+                build_id: Some("app258550".into()),
+                suspect: true,
+            },
+        ] {
+            match plan(&rust(), "win32-x64", "C:\rt", &present).unwrap() {
+                Plan::SteamCmd { verify, .. } => assert!(verify, "for {present:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -252,6 +384,7 @@ mod tests {
         let id =
             direct_build_id("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
         let present = Present {
+            suspect: false,
             build_id: Some(id.clone()),
         };
         assert_eq!(
@@ -266,6 +399,7 @@ mod tests {
     #[test]
     fn a_different_build_on_disk_is_replaced() {
         let present = Present {
+            suspect: false,
             build_id: Some("000000000000".into()),
         };
         assert!(matches!(
@@ -286,6 +420,7 @@ mod tests {
         }))
         .unwrap();
         let present = Present {
+            suspect: false,
             build_id: Some("19283746".into()),
         };
         assert!(matches!(
@@ -359,7 +494,10 @@ mod tests {
 
         let id =
             direct_build_id("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-        let present = Present { build_id: Some(id) };
+        let present = Present {
+            build_id: Some(id),
+            suspect: false,
+        };
         let skipped =
             serde_json::to_value(plan(&direct(json!({})), "win32-x64", "/rt", &present).unwrap())
                 .unwrap();

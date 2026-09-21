@@ -1,7 +1,7 @@
 //! Standalone fronts over the same lifecycle used by Electron.
 use crate::{
     prepare,
-    protocol::{Command, Event},
+    protocol::{codes, Command, Event},
     runner::{Output, Runner},
 };
 use homerun_core::engine;
@@ -153,12 +153,22 @@ pub fn run() -> std::result::Result<(), String> {
         // No success event exists for doctor in v1: report via stderr in JSON
         // mode and use protocol errors for refusals, rather than inventing events.
         if as_json {
+            // Every doctor problem used to go out as `requires_unmet`,
+            // including "nobody has accepted the terms" -- which is not a
+            // fact about this computer and has a code of its own in the
+            // contract. A caller cannot offer the licence to a person when
+            // the only thing it was told is that the machine is not ready.
             for message in &verdict.problems {
+                let code = if verdict.licence.as_deref() == Some(message.as_str()) {
+                    codes::LICENCE_NOT_ACCEPTED
+                } else {
+                    codes::REQUIRES_UNMET
+                };
                 print!(
                     "{}",
                     Event::Error {
                         server_id: Some(id.clone()),
-                        code: "requires_unmet".into(),
+                        code: code.into(),
                         message: message.clone()
                     }
                     .line()

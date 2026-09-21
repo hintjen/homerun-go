@@ -54,6 +54,18 @@ pub struct Verdict {
     /// Whether the runtime is already on this machine — the difference
     /// between a ten-second first launch and a nine-gigabyte one.
     pub runtime_present: bool,
+    /// The licence refusal, when that is one of the reasons not to start.
+    ///
+    /// The same sentence also appears in `problems`, which is deliberate: a
+    /// caller that only reads `problems` keeps working exactly as it did.
+    /// What this adds is the *kind* of a problem, which a list of sentences
+    /// cannot carry — and the protocol has a code for this one
+    /// (`licence_not_accepted`) that a caller could not previously reach,
+    /// because every doctor problem went out as `requires_unmet`. Nobody can
+    /// act on "this computer is not ready" when the answer is "somebody has
+    /// to accept the terms".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub licence: Option<String>,
 }
 
 /// Judge a machine against a game.
@@ -123,13 +135,16 @@ pub fn doctor(
         }
     }
 
+    let mut licence_problem = None;
     if licence::gate(descriptor, licence_accepted).is_err() {
         if let Some(terms) = licence::terms(descriptor) {
-            problems.push(format!(
+            let sentence = format!(
                 "Nobody has accepted {} yet. {} cannot be downloaded until somebody does.",
                 terms.name,
                 display_name(descriptor)
-            ));
+            );
+            problems.push(sentence.clone());
+            licence_problem = Some(sentence);
         }
     }
 
@@ -145,6 +160,7 @@ pub fn doctor(
         problems,
         warnings,
         runtime_present,
+        licence: licence_problem,
     }
 }
 
@@ -206,7 +222,10 @@ mod tests {
         }
     }
 
-    const NOTHING: fetch::Present = fetch::Present { build_id: None };
+    const NOTHING: fetch::Present = fetch::Present {
+        build_id: None,
+        suspect: false,
+    };
 
     #[test]
     fn a_capable_machine_with_accepted_terms_is_cleared() {
@@ -255,6 +274,48 @@ mod tests {
         );
     }
 
+    /// "Nobody has accepted the terms" is not a fact about this computer, and
+    /// the protocol has a code of its own for it. A list of sentences cannot
+    /// carry the *kind* of a problem, so the licence refusal is named as well
+    /// as listed — and it stays in `problems` too, so a caller that only
+    /// reads that list is unaffected.
+    #[test]
+    fn the_licence_refusal_is_named_as_well_as_listed() {
+        let v = doctor(&rust(), &capable(), &NOTHING, false);
+        let named = v.licence.as_deref().expect("the licence is the blocker");
+        assert!(named.contains("Facepunch"), "{named}");
+        assert!(
+            v.problems.iter().any(|p| p == named),
+            "a caller reading only `problems` must still see it: {:?}",
+            v.problems
+        );
+    }
+
+    /// And it is absent when it is not the reason, so a caller cannot route
+    /// an unrelated refusal to a licence prompt.
+    #[test]
+    fn nothing_is_named_when_the_terms_are_accepted() {
+        assert!(doctor(&rust(), &capable(), &NOTHING, true)
+            .licence
+            .is_none());
+
+        // A game with no terms of its own never has this problem, whatever
+        // the host's record says. `licence: null` is not "accepted".
+        let no_terms: GameDescriptor = serde_json::from_value(json!({
+            "id": "g", "name": "G", "hosts": ["win32-x64"],
+            "ready": { "marker": "up", "timeoutMs": 1000 },
+            "console": { "via": "stdin" },
+            "stop": { "via": "console", "command": "quit", "graceMs": 1000 },
+            "platforms": { "win32-x64": {
+                "runtime": { "source": "direct", "url": "https://x/y.zip", "sha256": "a".repeat(64) },
+                "launch": { "exe": "S.exe" } } }
+        }))
+        .unwrap();
+        assert!(doctor(&no_terms, &capable(), &NOTHING, false)
+            .licence
+            .is_none());
+    }
+
     /// Disk is what is still to download. A machine that already has the
     /// runtime is not asked to find room for it twice -- the case a laptop
     /// with a full-ish drive hits on its second launch.
@@ -281,6 +342,7 @@ mod tests {
         assert!(!fresh.ok, "a fresh install needs the space");
 
         let present = fetch::Present {
+            suspect: false,
             build_id: Some("1928".into()),
         };
         let again = doctor(&pinned, &cramped, &present, true);
@@ -352,6 +414,22 @@ mod tests {
         let v = doctor(&GameDescriptor::default(), &capable(), &NOTHING, true);
         assert!(!v.ok);
         assert!(!v.problems.is_empty());
+    }
+
+    #[test]
+    fn runtime_working_directory_surfaces_the_save_warning() {
+        let mut d = rust();
+        for p in d.platforms.values_mut() {
+            p.launch.cwd_base = super::super::descriptor::CwdBase::Runtime;
+        }
+        let verdict = doctor(&d, &capable(), &NOTHING, true);
+        assert!(
+            verdict
+                .warnings
+                .iter()
+                .any(|w| w.contains("no save mounts")),
+            "doctor must warn that runtime-relative saves need redirection"
+        );
     }
 
     #[test]

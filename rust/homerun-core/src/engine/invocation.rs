@@ -34,8 +34,10 @@ pub struct Invocation {
     pub exe: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
-    /// Relative to the server directory. `.` is the server directory itself.
+    /// Relative to `cwd_base`; `.` is that directory itself.
     pub cwd: String,
+    #[serde(default)]
+    pub cwd_base: super::descriptor::CwdBase,
 }
 
 /// Compose the launch line for a host.
@@ -107,6 +109,7 @@ pub fn compose(descriptor: &GameDescriptor, host: &str, bindings: &Bindings) -> 
         args,
         env,
         cwd: launch.cwd.clone().unwrap_or_else(|| ".".to_string()),
+        cwd_base: launch.cwd_base,
     })
 }
 
@@ -116,6 +119,8 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::super::settings::Resolved;
+
+    const RUNTIME_DIR: &str = "C:/runtime/g";
 
     fn descriptor(args: &[&str]) -> GameDescriptor {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
@@ -161,6 +166,7 @@ mod tests {
                 server_name: "Justin's server",
                 server_dir: "C:\\servers\\abc",
                 bind_address: "127.0.0.1",
+                runtime_dir: RUNTIME_DIR,
             }
         }
     }

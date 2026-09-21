@@ -208,7 +208,9 @@ pub fn schema() -> Value {
                                     "type": "object",
                                     "additionalProperties": { "type": "string" }
                                 },
-                                "cwd": { "type": ["string", "null"] }
+                                "cwd": { "type": ["string", "null"] },
+                                "cwdBase": { "enum": ["server", "runtime"], "default": "server",
+                                    "description": "Directory cwd is relative to. Runtime is shared; keep saves under serverDir using an absolute data path or saves.mounts." }
                             }
                         }
                     }
@@ -287,7 +289,14 @@ pub fn schema() -> Value {
                 "type": "object",
                 "properties": {
                     "paths": { "type": "array", "items": { "type": "string" } },
-                    "excludes": { "type": "array", "items": { "type": "string" } }
+                    "excludes": { "type": "array", "items": { "type": "string" } },
+                    "mounts": { "type": "array", "items": {
+                        "type": "object", "required": ["runtime", "server"],
+                        "properties": {
+                            "runtime": { "type": "string", "minLength": 1, "description": "Fixed directory path relative to the game's runtime. No traversal, aliases or placeholders." },
+                            "server": { "type": "string", "minLength": 1, "description": "Real directory relative to this server's folder; saves physically live here." }
+                        }
+                    } }
                 }
             },
             "observe": {
@@ -395,6 +404,7 @@ mod tests {
                         args: vec!["-batchmode".into()],
                         env: BTreeMap::from([("K".to_string(), "v".to_string())]),
                         cwd: Some(".".into()),
+                        cwd_base: CwdBase::Runtime,
                     },
                 },
             )]),
@@ -430,6 +440,10 @@ mod tests {
             saves: Saves {
                 paths: vec!["world".into()],
                 excludes: vec!["*.log".into()],
+                mounts: vec![Mount {
+                    runtime: "server".into(),
+                    server: "server".into(),
+                }],
             },
             observe: Observe {
                 players: PlayersVia::Rcon,
