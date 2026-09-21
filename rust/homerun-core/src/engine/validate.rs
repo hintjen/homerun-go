@@ -75,6 +75,7 @@ pub fn report(descriptor: &GameDescriptor) -> Report {
     check_settings(descriptor, &mut r);
     check_ports(descriptor, &mut r);
     check_lifecycle(descriptor, &mut r);
+    check_bind_address(descriptor, &mut r);
     check_platforms(descriptor, &mut r);
     check_config_and_saves(descriptor, &mut r);
     check_servable(descriptor, &mut r);
@@ -242,7 +243,43 @@ fn check_settings(d: &GameDescriptor, r: &mut Report) {
             ));
         }
 
+        check_options(setting, r);
         check_default(setting, r);
+    }
+}
+
+/// A closed set is a `string` setting with a non-empty list of strings, and
+/// there is no other kind.
+///
+/// The API, the UI and this crate all had to agree on one spelling for "pick
+/// one of these", and they now do: `type: "string"` plus `options`, with no
+/// `enum` type anywhere. This is the half of that agreement core is
+/// responsible for, and it is a refusal rather than a warning because the
+/// alternative is a player being offered choices the launch line cannot carry.
+///
+/// An `int` or `bool` with options is the shape someone reaches for when they
+/// want a small set of numbers; the answer is a `string` setting whose options
+/// are `"1"`, `"2"`, `"4"`, because that is what reaches argv either way.
+///
+/// An empty list is not an error: it is indistinguishable from no list at
+/// all, and every reader here already treats it that way.
+fn check_options(setting: &Setting, r: &mut Report) {
+    if setting.options.is_empty() {
+        return;
+    }
+    if setting.kind != SettingKind::String {
+        r.problems.push(format!(
+            "the setting \"{}\" offers a fixed set of choices, which only a text \
+             setting can do. Declare it as text and write its choices as text.",
+            setting.key
+        ));
+    }
+    if let Some(odd) = setting.options.iter().find(|o| !o.is_string()) {
+        r.problems.push(format!(
+            "the setting \"{}\" offers {odd} as one of its choices, and every choice \
+             has to be text.",
+            setting.key
+        ));
     }
 }
 
@@ -288,6 +325,20 @@ fn check_default(setting: &Setting, r: &mut Report) {
         )),
     }
 
+    // The descriptor's own half of a default has to satisfy the rule player
+    // text satisfies, or the refusal lands on a player who typed nothing.
+    // `{serverName}` is stripped first: that part is the player's, and
+    // `settings::resolve` checks it on its own account.
+    if setting.kind == SettingKind::String && setting.options.is_empty() {
+        if let Err(err) = super::settings::check_text(&format!("\"{}\"", setting.key), &stripped) {
+            r.problems.push(format!(
+                "the setting \"{}\" has a default that Homerun would refuse from a \
+                 player: {err}",
+                setting.key
+            ));
+        }
+    }
+
     if !setting.options.is_empty() && !setting.options.contains(&setting.default) {
         r.problems.push(format!(
             "the setting \"{}\" defaults to something that is not one of the choices \
@@ -317,6 +368,39 @@ fn check_ports(d: &GameDescriptor, r: &mut Report) {
                 port.name
             ));
         }
+    }
+}
+
+/// A game with an administrative console had better be told where to put it.
+///
+/// `expose: false` says the port stays on this computer, and the runner
+/// refuses a launch that binds it wider — but refusing after the fact is a
+/// stopped server and a message, where passing `{bindAddress}` is a server
+/// that comes up correctly. A descriptor with an RCON console and no
+/// `{bindAddress}` anywhere in its launch line is one whose console binds
+/// wherever the game feels like, which on most games is every interface.
+///
+/// A warning rather than a problem: a game may take its bind address from a
+/// config file this descriptor writes, or may have no way to be told at all,
+/// and in the second case the descriptor is still the best available and the
+/// runner's check is what stands behind it.
+fn check_bind_address(d: &GameDescriptor, r: &mut Report) {
+    if d.console.via != ConsoleVia::Rcon {
+        return;
+    }
+    let used = templated_strings(d).iter().any(|s| {
+        template::placeholders(s)
+            .map(|found| found.contains(&Placeholder::BindAddress))
+            .unwrap_or(false)
+    });
+    if !used {
+        r.warnings.push(
+            "this game has an administrative console and nothing in its launch line \
+             says which address to bind it to, so the game will choose — and most \
+             choose every network interface. Pass {bindAddress} where this game \
+             takes a bind address."
+                .into(),
+        );
     }
 }
 
@@ -442,6 +526,7 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
         for arg in &launch.args {
             check_placeholders(arg, Site::Host, &setting_keys, &port_names, r);
         }
+        check_dropped_flags(host, &launch.args, r);
         for value in launch.env.values() {
             check_placeholders(value, Site::Host, &setting_keys, &port_names, r);
         }
@@ -468,6 +553,63 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
             }
         }
     }
+}
+
+/// Warn where the flag-dropping rule will take a flag that is nobody's.
+///
+/// [`super::invocation`] drops the token in front of an unset sole
+/// placeholder, because `+server.seed {setting:seed}` has to lose both halves
+/// or leave a flag with no value after it. The rule cannot tell that pair
+/// apart from `-batchmode {setting:seed}`, where `-batchmode` carries no
+/// value and the seed is a bare positional — so on every launch with no seed,
+/// that descriptor silently loses `-batchmode` too. It is inherent to the
+/// rule rather than a bug in it, which is exactly why it should be visible
+/// while someone is writing the file instead of when a headless machine opens
+/// a window.
+///
+/// What tells the two apart is the descriptor author's own naming: a flag
+/// that introduces a setting almost always names it. So this stays quiet when
+/// the flag mentions the setting's key and speaks up when it does not. That
+/// is a guess about spelling, which is why it is a warning and never a
+/// refusal — the cost of a wrong one is a glance, and the cost of no warning
+/// at all is an argument missing from every default launch.
+fn check_dropped_flags(host: &str, args: &[String], r: &mut Report) {
+    for pair in args.windows(2) {
+        let (flag, value) = (&pair[0], &pair[1]);
+        if !template::looks_like_flag(flag) || !template::is_sole_placeholder(value) {
+            continue;
+        }
+        let Ok(found) = template::placeholders(value) else {
+            continue;
+        };
+        let Some(Placeholder::Setting(key)) = found.first() else {
+            continue;
+        };
+        if mentions(flag, key) {
+            continue;
+        }
+        r.warnings.push(format!(
+            "on {host} this game runs \"{flag}\" in front of \"{}\", so when that \
+             setting is not set Homerun leaves out both of them. If \"{flag}\" is a \
+             flag in its own right rather than the one \"{key}\" belongs to, give \
+             \"{key}\" its own flag or a default so it is never unset.",
+            value.trim()
+        ));
+    }
+}
+
+/// Whether a flag token names a setting, ignoring how either is punctuated.
+///
+/// `+server.maxplayers` names `maxPlayers`; `-batchmode` names nothing.
+fn mentions(flag: &str, key: &str) -> bool {
+    let squash = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let key = squash(key);
+    !key.is_empty() && squash(flag).contains(&key)
 }
 
 fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
@@ -597,6 +739,15 @@ fn check_placeholders(
                     "\"{text}\" is shown to players and cannot depend on a setting."
                 ));
             }
+            // A fact about this machine, and never about how a player
+            // reaches the server: in a join URL it would publish `127.0.0.1`
+            // as somewhere to connect to.
+            (Placeholder::BindAddress, Site::Servable) => {
+                r.problems.push(format!(
+                    "\"{text}\" is shown to players and cannot contain the address \
+                     the server binds on this computer."
+                ));
+            }
             (Placeholder::Host, Site::Host) => {
                 r.problems.push(format!(
                     "\"{text}\" uses the address players connect to, which is known \
@@ -650,6 +801,14 @@ mod tests {
         deep_merge(&mut base, &patch);
         let d: GameDescriptor = serde_json::from_value(base).unwrap();
         report(&d).problems
+    }
+
+    fn warnings_of(patch: serde_json::Value) -> Vec<String> {
+        let mut base: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+        deep_merge(&mut base, &patch);
+        let d: GameDescriptor = serde_json::from_value(base).unwrap();
+        report(&d).warnings
     }
 
     fn deep_merge(target: &mut serde_json::Value, patch: &serde_json::Value) {
@@ -853,6 +1012,147 @@ mod tests {
             r.warnings.iter().any(|w| w.contains("save may be lost")),
             "{:#?}",
             r.warnings
+        );
+    }
+
+    // ─── the address the server is told to bind ────────────────────────────
+
+    /// `expose: false` is a promise about where a port goes. A descriptor
+    /// with an administrative console that never passes `{bindAddress}`
+    /// leaves the game to choose, and most games choose every interface.
+    #[test]
+    fn an_administrative_console_with_no_bind_address_is_warned_about() {
+        let warnings = warnings_of(json!({ "platforms": { "win32-x64": { "launch": {
+            "args": ["-batchmode", "+rcon.port", "{port:rcon}"]
+        }}}}));
+        assert!(
+            warnings.iter().any(|w| w.contains("{bindAddress}")),
+            "{warnings:#?}"
+        );
+    }
+
+    /// The pilot passes it, so the warning is not something every descriptor
+    /// carries and nobody reads.
+    #[test]
+    fn the_pilot_tells_its_server_which_address_to_bind() {
+        let r = report(&rust());
+        assert!(r.ok(), "{:#?}", r.problems);
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("{bindAddress}")),
+            "{:#?}",
+            r.warnings
+        );
+    }
+
+    /// It is a fact about this computer. In a join URL it would publish
+    /// `127.0.0.1` as somewhere for a player to connect to.
+    #[test]
+    fn the_bind_address_cannot_appear_in_a_join_address() {
+        let problems = problems_of(json!({
+            "client": { "joinUrl": "steam://connect/{bindAddress}:{port:game}" }
+        }));
+        assert!(says(&problems, "the address the server binds"), "{problems:#?}");
+    }
+
+    // ─── one spelling for a closed set ─────────────────────────────────────
+
+    /// The API, the UI and this crate agreed on `type: "string"` plus
+    /// `options`, and on there being no second way to say it. A numeric
+    /// setting with choices is the shape that would have been that second
+    /// way, so core refuses it rather than offering a player choices the
+    /// launch line cannot carry.
+    #[test]
+    fn a_closed_set_on_a_number_or_a_yes_or_no_is_refused() {
+        for kind in ["int", "bool"] {
+            let problems = problems_of(json!({ "settings": [
+                { "key": "tickRate", "type": kind, "label": "Tick rate",
+                  "default": 30, "options": [30, 60] }
+            ]}));
+            assert!(
+                says(&problems, "only a text setting"),
+                "for {kind}: {problems:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_choice_that_is_not_text_is_refused() {
+        let problems = problems_of(json!({ "settings": [
+            { "key": "difficulty", "type": "string", "label": "Difficulty",
+              "default": "normal", "options": ["normal", 3] }
+        ]}));
+        assert!(says(&problems, "has to be text"), "{problems:#?}");
+    }
+
+    /// An empty list is how "no closed set" arrives from a generator that
+    /// always writes the key. It is not a fault, and every reader here
+    /// already treats it as absent.
+    #[test]
+    fn an_empty_list_of_choices_is_the_same_as_no_list() {
+        let problems = problems_of(json!({ "settings": [
+            { "key": "hostname", "type": "string", "label": "Name",
+              "default": "x", "options": [] }
+        ]}));
+        assert!(!says(&problems, "choices"), "{problems:#?}");
+    }
+
+    /// Bounds on anything but a number are ignored rather than refused —
+    /// a descriptor that carries them still runs — but silently ignoring
+    /// them is how someone believes a limit is being enforced.
+    #[test]
+    fn bounds_on_something_that_is_not_a_number_are_warned_about() {
+        let warnings = warnings_of(json!({ "settings": [
+            { "key": "hostname", "type": "string", "label": "Name",
+              "default": "x", "min": 1, "max": 10 }
+        ]}));
+        assert!(
+            warnings.iter().any(|w| w.contains("not a number")),
+            "{warnings:#?}"
+        );
+    }
+
+    // ─── the flag-dropping rule, made visible ──────────────────────────────
+
+    /// `-batchmode` is a flag in its own right and the seed after it is a
+    /// bare positional, so every launch without a seed loses `-batchmode`
+    /// as well. The rule cannot tell that from a flag-and-value pair, so
+    /// authoring time is where it has to be said.
+    #[test]
+    fn a_flag_that_is_nobody_s_value_is_warned_about_before_it_disappears() {
+        let warnings = warnings_of(json!({ "platforms": { "win32-x64": { "launch": {
+            "args": ["-batchmode", "{setting:seed}"]
+        }}}}));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("-batchmode") && w.contains("seed")),
+            "{warnings:#?}"
+        );
+    }
+
+    /// And stays quiet for the pair it cannot be, which is the whole reason
+    /// the check reads the descriptor's own naming rather than warning on
+    /// every optional setting in every game.
+    #[test]
+    fn a_flag_that_names_its_setting_is_not_warned_about() {
+        let warnings = warnings_of(json!({ "platforms": { "win32-x64": { "launch": {
+            "args": ["+server.seed", "{setting:seed}",
+                     "+server.maxplayers", "{setting:maxPlayers}"]
+        }}}}));
+        assert!(
+            !warnings.iter().any(|w| w.contains("+server.")),
+            "{warnings:#?}"
+        );
+    }
+
+    /// The pilot is the descriptor every other module is tested against; a
+    /// check that fires on it is a check nobody will read.
+    #[test]
+    fn the_pilot_earns_no_dropped_flag_warning() {
+        let warnings = report(&rust()).warnings;
+        assert!(
+            !warnings.iter().any(|w| w.contains("leaves out both")),
+            "{warnings:#?}"
         );
     }
 

@@ -32,6 +32,7 @@
 //! samples into a percentage. Computing one here would put that arithmetic
 //! back in the place this crate spent a day taking it out of.
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use homerun_core::tunnel::Protocol;
@@ -69,6 +70,33 @@ pub fn is_shipping_host() -> bool {
 pub struct Listening {
     pub protocol: Protocol,
     pub port: u16,
+    /// The local address it is bound to.
+    ///
+    /// Carried because the port on its own cannot answer the question the
+    /// descriptor asks. `expose: false` says a port stays on this computer,
+    /// and `127.0.0.1:28016` and `0.0.0.0:28016` are the same port and
+    /// opposite answers — the second is an administrative console on the LAN
+    /// behind one password. Dropping the address here is what made that
+    /// promise unenforceable, so it is kept even though only one caller
+    /// reads it.
+    pub address: IpAddr,
+}
+
+impl Listening {
+    /// Whether nothing outside this computer can reach this socket.
+    ///
+    /// `Ipv6Addr::is_loopback` is false for `::ffff:127.0.0.1`, which is how
+    /// a dual-stack listener on loopback appears in some tables — so a
+    /// v4-mapped address is unwrapped before the question is asked.
+    pub fn is_confined(&self) -> bool {
+        match self.address {
+            IpAddr::V4(v4) => v4.is_loopback(),
+            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+                Some(v4) => v4.is_loopback(),
+                None => v6.is_loopback(),
+            },
+        }
+    }
 }
 
 /// What a process is costing. Counters, never rates — see the module header.
@@ -93,7 +121,7 @@ pub fn listening_ports(pid: u32) -> Vec<Listening> {
     // and deduped because the same socket appears in both the v4 and the v6
     // table when a server binds dual-stack. `tunnel::Protocol` is a wire
     // type with no ordering of its own and does not need one for this.
-    found.sort_unstable_by_key(|l| (l.protocol == Protocol::Udp, l.port));
+    found.sort_unstable_by_key(|l| (l.protocol == Protocol::Udp, l.port, l.address));
     found.dedup();
     found
 }
@@ -280,8 +308,12 @@ mod imp {
                 continue;
             }
 
-            if let Some(port) = port_of(fields[1]) {
-                out.push(Listening { protocol, port });
+            if let Some((address, port)) = endpoint(fields[1]) {
+                out.push(Listening {
+                    protocol,
+                    port,
+                    address,
+                });
             }
         }
         out
@@ -289,9 +321,12 @@ mod imp {
 
     /// `0.0.0.0:28015`, `[::]:28015`, `127.0.0.1:28016`.
     ///
-    /// Split on the last colon: an IPv6 address is full of them.
-    fn port_of(address: &str) -> Option<u16> {
-        address.rsplit_once(':')?.1.parse().ok()
+    /// Split on the last colon: an IPv6 address is full of them, and the
+    /// brackets netstat puts around one are not part of it.
+    fn endpoint(text: &str) -> Option<(IpAddr, u16)> {
+        let (host, port) = text.rsplit_once(':')?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        Some((host.parse().ok()?, port.parse().ok()?))
     }
 
     #[test]
@@ -303,8 +338,8 @@ mod imp {
                     TCP 127.0.0.1:28019 0.0.0.0:0 STATE LABEL 43\n\
                     TCP 127.0.0.1:28020 0.0.0.0:0 42";
         assert_eq!(parse(rows, 42), vec![
-            Listening { protocol: Protocol::Tcp, port: 28016 },
-            Listening { protocol: Protocol::Tcp, port: 28017 },
+            Listening { protocol: Protocol::Tcp, port: 28016, address: "127.0.0.1".parse().unwrap() },
+            Listening { protocol: Protocol::Tcp, port: 28017, address: "::".parse().unwrap() },
         ], "multiword state labels must retain listeners while excluding connected, wrong-PID and truncated rows");
     }
 
@@ -321,15 +356,18 @@ mod imp {
             vec![
                 Listening {
                     protocol: Protocol::Tcp,
-                    port: 28016
+                    port: 28016,
+                    address: "127.0.0.1".parse().unwrap()
                 },
                 Listening {
                     protocol: Protocol::Tcp,
-                    port: 28017
+                    port: 28017,
+                    address: "::".parse().unwrap()
                 },
                 Listening {
                     protocol: Protocol::Udp,
-                    port: 28015
+                    port: 28015,
+                    address: "0.0.0.0".parse().unwrap()
                 },
             ],
             "localized TCP listeners and UDP must be observed without publishing connections"
@@ -440,15 +478,42 @@ mod imp {
                 if protocol == Protocol::Tcp && *state != "0A" {
                     continue;
                 }
-                if let Some(port) = local
-                    .rsplit_once(':')
-                    .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok())
-                {
-                    out.push(Listening { protocol, port });
+                if let Some((address, port)) = endpoint(local) {
+                    out.push(Listening {
+                        protocol,
+                        port,
+                        address,
+                    });
                 }
             }
         }
         out
+    }
+
+    /// `/proc/net/*` writes an endpoint as `<address-hex>:<port-hex>`, and
+    /// the address half is words of **host** byte order rather than network
+    /// order. On every machine this compiles for that is little-endian, so
+    /// `0100007F` is `127.0.0.1` and not `1.0.0.127` — reading it the
+    /// obvious way gives a plausible address that is not the one bound,
+    /// which is exactly the kind of answer this module refuses to produce.
+    #[cfg(target_os = "linux")]
+    fn endpoint(text: &str) -> Option<(IpAddr, u16)> {
+        let (host, port) = text.rsplit_once(':')?;
+        let port = u16::from_str_radix(port, 16).ok()?;
+        let address = match host.len() {
+            8 => IpAddr::from(u32::from_str_radix(host, 16).ok()?.to_le_bytes()),
+            32 => {
+                let mut bytes = [0u8; 16];
+                for (i, word) in host.as_bytes().chunks(8).enumerate() {
+                    let word = std::str::from_utf8(word).ok()?;
+                    bytes[i * 4..i * 4 + 4]
+                        .copy_from_slice(&u32::from_str_radix(word, 16).ok()?.to_le_bytes());
+                }
+                IpAddr::from(bytes)
+            }
+            _ => return None,
+        };
+        Some((address, port))
     }
 
     #[cfg(target_os = "linux")]
@@ -494,13 +559,23 @@ mod imp {
             let Some(name) = fields.get(8) else { continue };
             // `*:28015`, `127.0.0.1:28016`, and for UDP sometimes a trailing
             // ` (Idle)` which `split_whitespace` has already removed.
-            if let Some(port) = name
-                .split("->")
-                .next()
-                .and_then(|local| local.rsplit_once(':'))
-                .and_then(|(_, port)| port.parse().ok())
-            {
-                out.push(Listening { protocol, port });
+            if let Some((address, port)) = name.split("->").next().and_then(|local| {
+                let (host, port) = local.rsplit_once(':')?;
+                // lsof writes the unspecified address as `*`, and brackets an
+                // IPv6 one.
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                let address: IpAddr = if host == "*" {
+                    std::net::Ipv4Addr::UNSPECIFIED.into()
+                } else {
+                    host.parse().ok()?
+                };
+                Some((address, port.parse::<u16>().ok()?))
+            }) {
+                out.push(Listening {
+                    protocol,
+                    port,
+                    address,
+                });
             }
         }
         out
@@ -723,12 +798,18 @@ mod tests {
         if observed.is_empty() {
             return;
         }
+        let found = observed
+            .iter()
+            .find(|l| l.protocol == Protocol::Tcp && l.port == port)
+            .unwrap_or_else(|| panic!("bound {port} and saw {observed:?}"));
+        // Bound to loopback above, so this is the address the table has to
+        // have reported -- the half of the observation that used to be
+        // thrown away, and the only thing that can tell a private port from
+        // a published one.
         assert!(
-            observed.contains(&Listening {
-                protocol: Protocol::Tcp,
-                port
-            }),
-            "bound {port} and saw {observed:?}"
+            found.is_confined(),
+            "bound 127.0.0.1:{port} and the table says {}",
+            found.address
         );
     }
 
@@ -745,12 +826,58 @@ mod tests {
 
         let observed = listening_ports(std::process::id());
         assert!(
-            !observed.contains(&Listening {
-                protocol: Protocol::Tcp,
-                port
-            }),
+            !observed
+                .iter()
+                .any(|l| l.protocol == Protocol::Tcp && l.port == port),
             "reported {port}, which nothing is listening on"
         );
+    }
+
+    /// A port bound to every interface must read as *not* confined, which is
+    /// the observation the runner refuses a launch on. Testable without a
+    /// game, and on every platform.
+    #[test]
+    fn a_port_bound_to_every_interface_is_not_confined() {
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").expect("bindable");
+        let port = listener.local_addr().unwrap().port();
+
+        let observed = listening_ports(std::process::id());
+        if observed.is_empty() {
+            return; // see the note in the test above
+        }
+        let found = observed
+            .iter()
+            .find(|l| l.protocol == Protocol::Tcp && l.port == port)
+            .unwrap_or_else(|| panic!("bound {port} and saw {observed:?}"));
+        assert!(
+            !found.is_confined(),
+            "bound 0.0.0.0:{port} and it reads as confined at {}",
+            found.address
+        );
+    }
+
+    /// The four shapes the question has to get right, without needing a
+    /// socket to produce any of them.
+    #[test]
+    fn loopback_is_told_from_everything_else_including_a_mapped_address() {
+        let confined = |a: &str| Listening {
+            protocol: Protocol::Tcp,
+            port: 1,
+            address: a.parse().unwrap(),
+        }
+        .is_confined();
+
+        assert!(confined("127.0.0.1"));
+        assert!(confined("127.0.0.53"), "all of 127/8 is this computer");
+        assert!(confined("::1"));
+        // How a dual-stack loopback listener appears in some tables, and the
+        // one `Ipv6Addr::is_loopback` answers wrongly on its own.
+        assert!(confined("::ffff:127.0.0.1"));
+
+        assert!(!confined("0.0.0.0"));
+        assert!(!confined("::"));
+        assert!(!confined("192.168.1.10"));
+        assert!(!confined("::ffff:192.168.1.10"));
     }
 
     #[test]

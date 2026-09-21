@@ -252,11 +252,26 @@ pub mod codes {
     pub const SPAWN_FAILED: &str = "spawn_failed";
     pub const READY_TIMEOUT: &str = "ready_timeout";
     pub const BUSY: &str = "busy";
+    /// The server bound a port the descriptor said would stay on this
+    /// computer to an address other computers can reach, and the runner
+    /// stopped it.
+    ///
+    /// **This is protocol v1's ninth code and an addition to the contract.**
+    /// It is not `descriptor_invalid`: the descriptor may be perfectly good
+    /// and the game may simply have ignored the address it was given, and a
+    /// desktop that reads `descriptor_invalid` as "this file is broken, do
+    /// not retry" would say the wrong thing. It is not `spawn_failed`
+    /// either — the server started, which is how the port came to be
+    /// observed at all.
+    ///
+    /// A desktop built before this code existed shows the message, which is
+    /// written for a player and says what happened.
+    pub const PORT_EXPOSED: &str = "port_exposed";
 
     /// Every one of them, for the test that keeps this list and the
     /// document's in step.
     #[cfg(test)]
-    pub const ALL: [&str; 8] = [
+    pub const ALL: [&str; 9] = [
         LICENCE_NOT_ACCEPTED,
         DESCRIPTOR_INVALID,
         REQUIRES_UNMET,
@@ -265,6 +280,7 @@ pub mod codes {
         SPAWN_FAILED,
         READY_TIMEOUT,
         BUSY,
+        PORT_EXPOSED,
     ];
 }
 
@@ -611,6 +627,7 @@ mod tests {
                 "spawn_failed",
                 "ready_timeout",
                 "busy",
+                "port_exposed",
             ]
         );
     }

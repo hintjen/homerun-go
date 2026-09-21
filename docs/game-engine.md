@@ -43,7 +43,7 @@ So this is a sibling of `game`, not a subclass of it: its own module, its own
 `engine.*` namespace, and no change to `game.*` at all. Minecraft keeps the
 trait; descriptor-driven games get this.
 
-## The three rules that are about safety
+## The rules that are about safety
 
 Each is enforced in code, and each exists because the working behaviour and
 the safe behaviour are not the same thing.
@@ -103,6 +103,42 @@ A game whose dedicated server needs a Steam account that *owns* it is out of
 scope — not a feature request. There is no account we could use that would not
 be either a shared credential or the player's own.
 
+### A player's text is not a switch
+
+`engine::settings::check_text` refuses player text that begins with `+`, `-`
+or `/`, contains a `"`, a control character, a backtick, `${` or `$(`, or runs
+past 256 characters. It runs on every `string` setting and on the server's own
+name, in `resolve`, which is the one call every path makes before a value
+becomes an argument — including the CLI's, which has no API in front of it.
+
+Arguments are a `Vec<String>` from `invocation` to `Command::args`, so a space
+in a value cannot split it in two. That property is real and it is not enough:
+
+- A `+key value` parser — Valve's, Facepunch's — reads **one argv element**
+  that happens to be `+rcon.web` as a new switch rather than as the value of
+  the switch before it. A server named `+rcon.web` turns on the web console
+  on a server whose player chose the name.
+- A game that re-reads the raw command line — Unreal's `-Key=Value`,
+  Facepunch.CommandLine — parses what Windows handed it, not the vector Rust
+  built. Rust quotes for MSVCRT's rules, and a parser that is not MSVCRT can
+  be broken out of with a `"`.
+- A control character reaches a log, a properties file, and a console's
+  stdin, where a newline is a second command.
+
+**One rule, wherever the value lands.** Not a stricter rule for argv than for
+a config file: the same value routinely lands in both, so a per-site rule buys
+precision only for a setting used in exactly one place — and which place that
+is changes when a descriptor is edited, with nothing telling the player their
+name has just become illegal. `{serverName}` decides it outright, being a
+Homerun name that exists before a game is chosen and must be judged the same
+way for every game.
+
+The cost is named rather than hidden: a name may not begin with `+`, `-` or
+`/` and may not contain `"`, so `-=[Clan]=-` is refused where `=[Clan]=-` is
+not. The API enforces the same rule, so a player meets it in a form rather
+than at a launch that fails. A setting with `options` is exempt — its values
+come from the descriptor, which is ours.
+
 ## The descriptor — `descriptor.rs`
 
 The Rust types **are** the schema. There is no second spelling: the JSON
@@ -154,6 +190,15 @@ door was used is not a backstop.
 Unlike `validate`, it stops at the first problem: its audience is a player who
 set one thing wrong, and the protocol carries one `error.message`.
 
+**A closed set has exactly one spelling**, agreed across three repositories:
+`type: "string"` with a non-empty `options` of strings. There is no `enum`
+type and there is no second way to say it, so `validate` refuses `options` on
+an `int` or a `bool` and refuses a choice that is not text. A small set of
+numbers is a string setting whose options are `"1"`, `"2"`, `"4"` — which is
+what reaches argv either way. `min`/`max` are `int`-only and ignored
+elsewhere, which earns a warning rather than a refusal; an integer that does
+not fit an `i64` is refused. An empty `options` list means the same as none.
+
 ## Templating — `template.rs`
 
 `{setting:<key>}`, `{port:<name>}`, `{secret:<name>}`, `{serverName}`,
@@ -177,14 +222,68 @@ with no seed in it. The rule, exactly:
 | `"+world.offset", "{setting:offset}"` where offset is `-5` | nothing goes; `-5` is a value, not a flag |
 
 A preceding token is dropped only when the dropped token was *solely* a
-placeholder and the token before it starts with `+` or `-` and carries no
-placeholder of its own. The check is against the descriptor's source token,
-not the emitted argument — otherwise a negative value would be mistaken for
-the flag to remove.
+placeholder, the token before it **in the descriptor** starts with `+` or `-`
+and carries no placeholder of its own, and that token is still standing. The
+check is against the descriptor's source token, not the emitted argument —
+otherwise a negative value would be mistaken for the flag to remove.
+
+"Still standing" is the part that reads like pedantry and is not. Dropping
+looked at the last *emitted* argument, which after an earlier drop is some
+earlier token entirely: `["-batchmode", "+a", "{setting:n1}", "{setting:n2}"]`
+with both settings unset lost `+a` to the first drop and then `-batchmode` to
+the second, because `-batchmode` was what the second drop found at the end of
+the list. A game launched with neither flag opens a window on a headless
+machine, and nothing about that failure points back at a seed nobody set.
+
+The rule cannot tell `+server.seed {setting:seed}` from
+`-batchmode {setting:seed}`, where the flag carries no value of its own and
+the seed is a bare positional — that descriptor really does lose `-batchmode`
+on every launch without a seed. It is inherent to the rule, so `validate`
+warns about it instead: quiet when the flag names the setting, which is how
+descriptor authors spell a flag-and-value pair, and loud when it does not.
+A guess about spelling, hence a warning and never a refusal.
 
 An environment variable has no equivalent: a variable set to the empty string
 is a different thing from one that is not set, so an unset setting leaves its
 variable absent.
+
+A **config file's** managed key does have an equivalent, and it is removal.
+The key reflects the setting, so a setting that went from set to unset takes
+its key out of the file rather than leaving the value from the launch before —
+a cleared seed that kept generating the old world is the failure that decided
+it. `properties::remove` and the JSON branch of the runner's `prepare` do
+that; everything unmanaged in the file survives either way.
+
+### A private port stays on this computer, and it is checked
+
+`expose: false` says a port is not published through the gateway. That was a
+promise nothing kept: `prepare` validated the bind address and then dropped
+it, and `platform::Listening` carried a protocol and a port with no address,
+so `127.0.0.1:28016` and `0.0.0.0:28016` were the same observation. An RCON
+console could end up on the LAN behind one password and every check passed.
+
+Three things together make it real:
+
+- **`{bindAddress}`** hands the address to the game. A descriptor that never
+  uses it is a descriptor whose server binds wherever it likes, and
+  `validate` warns about one that has an administrative console.
+- **`Listening` keeps the address** it observed, on all three platforms. The
+  Linux `/proc` tables write it as host-order words, so `0100007F` is
+  `127.0.0.1` and not `1.0.0.127` — reading it the obvious way gives a
+  plausible address that is not the one bound.
+- **The runner refuses a launch** where a port declared `expose: false` is
+  observed on anything but loopback: it stops the server through the normal
+  ladder and sends `port_exposed`. `::ffff:127.0.0.1` counts as loopback,
+  which `Ipv6Addr::is_loopback` does not say on its own.
+
+**Exposed ports may bind wider, deliberately.** The tunnel targets loopback,
+so a published port has no *need* to be on `0.0.0.0` — but games routinely
+bind every interface for one with no way to be told otherwise, and refusing
+that would refuse most of a catalogue over a port that is meant to be
+reachable. What is worth stopping a server over is the private one.
+
+Today `{bindAddress}` is always `127.0.0.1`; the runner refuses any other
+value. Widening that is a contract change rather than a flag.
 
 ## Ports and the gateway — `ports.rs`
 
@@ -417,6 +516,26 @@ Those three answers moved into a `Supervision` the host supplies.
 already used this engine changed; `ProcessEngine::supervised` is the
 descriptor-driven door.
 
+**A console line is decoded lossily, and that is not a nicety.**
+`BufRead::lines()` yields `Err(InvalidData)` for a line that is not UTF-8,
+and `map_while(Result::ok)` — which is what the pump used — reads that as the
+end of the stream. One bad byte therefore ended log capture for the rest of
+the server's life and dropped the pipe. A player whose name is in a legacy
+code page stops `server-log`; before the ready marker it means the server
+never reports ready at all and is killed at the start timeout. So the pump
+reads to the newline, decodes with `from_utf8_lossy`, and carries on. A line
+longer than 16 KiB is cut with a ` [truncated]` marker and the rest of it
+discarded, which is what stops a pipe that turns out not to be carrying lines
+from being a memory problem. Everything else matches `lines()` exactly — one
+trailing newline removed, then one carriage return — because this is the path
+Minecraft's console takes on Android and its parsers were written against
+that. A test asserts the equivalence against `lines()` itself.
+
+The fetcher's steamcmd pump uses the same reader, where the consequence was
+sharper still: steamcmd prints the paths it installs into, so a Windows
+username that is not ASCII meant `Success! App` was never seen and the fetch
+failed every time on that machine.
+
 | | Minecraft | From a descriptor |
 |---|---|---|
 | Ready | `console::is_ready` | a substring the descriptor names |
@@ -508,8 +627,11 @@ setting drops its flag. If the player really did set it, the API stored it
 empty.
 
 **A launch line is missing an argument entirely.** Look for a `{setting:…}`
-whose value is null. The flag before it goes too — that is the rule, not a
-bug. `engine.invocation` in a test with the same settings will show it.
+whose value is null. The flag *immediately* before it in the descriptor goes
+too — that is the rule, not a bug. `engine.invocation` in a test with the same
+settings will show it. If the missing argument is not next to a null
+placeholder, that is a bug rather than the rule, and `validate`'s warnings are
+where to look first.
 
 **`engine.validate` refuses a descriptor that looks fine.** Read the whole
 list rather than the first line; `validate` collects, and the first problem is

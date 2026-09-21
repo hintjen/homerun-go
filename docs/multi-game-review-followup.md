@@ -26,27 +26,57 @@ This record distinguishes fixes from findings still requiring investigation.
   including direct callers of `prepareArtifacts`.
 - Corrected the remaining old crate paths in Android reporting documentation.
 
-## Before a real game: unresolved high-risk findings
+## Before a real game: the gate, and where it stands
 
 **Hard gate:** no real-game onboarding or operation until bind enforcement,
 the argument-value policy, Job Object ownership with process-tree killing,
 lossy UTF-8 log decoding and the null-drop fix below are implemented and
 verified. Merging the engine PR does not waive this gate.
 
+All six are addressed in PR 28 (`fix/game-engine-gate`), which is a draft and
+has not been merged. **The gate is not lifted by this record**: what it
+records is that each item has an implementation and a regression that fails
+without it, every one of them run on Windows 11. What none of them establishes
+is behaviour against a real vendor's server — see *What only a real machine
+can prove* at the end of that PR, which is part of the gate and not a
+footnote.
+
 - H3: bindAddress is restricted to loopback but not passed into invocation;
   observed ports omit the local address. Private/admin sockets can therefore
-  bind more widely than intended. Implement and verify actual bind enforcement.
+  bind more widely than intended. — **Addressed.** `{bindAddress}` passes the
+  address to the game, `platform::Listening` keeps the address it observed,
+  and a port declared `expose: false` seen anywhere but loopback stops the
+  server through its ladder with a new `port_exposed` code. Exposed ports may
+  bind wider, deliberately; `docs/game-engine.md` says why. **Contract change:
+  `port_exposed` is a ninth protocol v1 code and the desktop, the UI and
+  `plans/multi-game-contracts.md` need it.**
 - H4: argv boundaries do not prevent a game's own argument parser from treating
-  player strings as flags. Define a game-appropriate argument-value policy in
-  core and the API. Do not assume shell-free spawning resolves this issue.
-- Windows Job Object ownership and process-tree termination are absent. Test
-  abrupt runner death and launcher descendants, including the tunnel child.
-- Log readers can stop on invalid UTF-8. Use loss-tolerant decoding and test
-  readiness/steamcmd output containing non-UTF-8 bytes.
-- Consecutive omitted/null argument values can remove unrelated flags in the
-  inherited invocation builder. Add a regression for adjacent placeholders.
+  player strings as flags. — **Addressed.** `settings::check_text` refuses a
+  leading `+`/`-`/`/`, `"`, control characters, the shapes the API already
+  refuses, and over 256 characters, on every string setting and on
+  `serverName`, in `resolve`. One rule for every site; the reasoning and the
+  product cost are in `docs/game-engine.md`. The API is not yet as strict —
+  PR 28 lists exactly what it must add.
+- Windows Job Object ownership and process-tree termination are absent. —
+  **Addressed.** One job per spawn with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`,
+  `TerminateJobObject` as the kill rung, the tunnel child owned the same way.
+  The runner is deliberately not in the job, so the desktop's detach-at-quit
+  is unaffected. The spawn-to-assignment window is not closed and is stated.
+- Log readers can stop on invalid UTF-8. — **Addressed.** `read_lines_lossy`
+  in both the process engine and the steamcmd pump, with a 16 KiB line
+  ceiling, and an equivalence test against `lines()` for every shape that is
+  not the bug.
+- Consecutive omitted/null argument values can remove unrelated flags. —
+  **Addressed.** The drop now requires the previous emitted argument to be the
+  immediately preceding source token. `validate` warns where the rule will
+  take a flag that is nobody's, and a null config value now removes its
+  managed key rather than leaving the last launch's value in the file.
 - Reconcile API enum/options, integer bounds and newline validation with core
-  and the pinned schema in `hintjen/homerun:feat/multi-game`.
+  and the pinned schema. — **Addressed in core.** `options` is refused on
+  `int`/`bool` and every choice must be text; `min`/`max` stay int-only with a
+  warning elsewhere. `rust/homerun-core/schema/game.v0.json` is regenerated
+  (documentation only — no descriptor type changed) and **the monorepo must
+  re-pin `games/schema/game.v0.json`**.
 
 ## Other unresolved review findings
 

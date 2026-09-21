@@ -141,6 +141,7 @@ mod tests {
                 secrets: &secrets,
                 server_name: "Justin's server",
                 server_dir: "C:\\servers\\abc",
+                bind_address: "127.0.0.1",
             },
         )
         .unwrap();
@@ -212,6 +213,7 @@ mod tests {
                 secrets: &secrets,
                 server_name: "irrelevant",
                 server_dir: "C:\\s",
+                bind_address: "127.0.0.1",
             },
         )
         .unwrap();

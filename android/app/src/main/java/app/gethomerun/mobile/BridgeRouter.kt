@@ -1552,7 +1552,12 @@ class BridgeRouter(
                         // — vanilla latest, the same fallback the desktop takes.
                         val token = obj["userToken"]?.jsonPrimitive?.contentOrNull.orEmpty()
                         val api = apiUrl()
-                        val settings = HomerunApi.serverSettings(api, serverId, token)
+                        // The server's own directory, so a fetch that fails can
+                        // fall back to what the last one found — and so that
+                        // record is deleted with the server.
+                        val settings = HomerunApi.serverSettings(
+                            api, serverId, token, dir = File(context.filesDir, "servers/$serverId"),
+                        )
 
                         // Before the backend starts, so a crash while starting
                         // up still has somewhere to be reported from.
@@ -1618,6 +1623,14 @@ class BridgeRouter(
                             var version = settings?.version
                             var settingsEnv = settings?.env
                             val launchNotes = mutableListOf<String>()
+                            // Said out loud: the player is getting last
+                            // launch's configuration, and a change they made
+                            // on the dashboard since is not in it.
+                            if (settings?.remembered == true) {
+                                launchNotes += "[Homerun] Could not fetch this server's settings — " +
+                                    "using the ones from its last launch. Any changes made since " +
+                                    "will apply next time."
+                            }
                             if (settings != null) {
                                 val pin = runCatching { Core.pinVersion(settings.version, engine.servedVersion()) }
                                     .onFailure { Log.w(TAG, "$serverId: could not decide a version pin: ${it.message}") }

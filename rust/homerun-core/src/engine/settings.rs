@@ -48,6 +48,96 @@ use crate::{Error, Result};
 /// without asking what it might be.
 pub type Resolved = BTreeMap<String, Value>;
 
+/// The longest a player's text may be, in characters.
+///
+/// The same ceiling the API applies. It is not a security boundary — argv,
+/// config files and environment blocks all have limits far above this — it is
+/// a limit on what a person can plausibly have meant to type.
+pub const MAX_TEXT: usize = 256;
+
+/// What a player's text may not be, wherever it lands.
+///
+/// # Why there is a rule at all, when argv is a list
+///
+/// Arguments are a `Vec<String>` from here to `Command::args`, so a space in
+/// a value cannot split it into two arguments — [`super::invocation`] has a
+/// test named for that. It is a real property and it is not enough.
+///
+/// A dedicated server parses its own argv, and the shapes it parses are not
+/// the shapes the operating system passed it:
+///
+/// - `+key value` parsers — Valve's and Facepunch's — read **one argv
+///   element** that happens to be `+rcon.web` as a new switch, not as the
+///   value of the switch before it. A server named `+rcon.web` therefore
+///   turns on the web console on a server whose player chose the name.
+/// - Games that re-read the raw command line — Unreal's `-Key=Value`,
+///   Facepunch.CommandLine — parse the string Windows hands them, not the
+///   vector Rust built. Rust quotes for MSVCRT's rules, and a parser that is
+///   not MSVCRT can be broken out of with a `"`.
+/// - A control character reaches a log, a properties file and a console's
+///   stdin, and in the last of those a newline is a second command.
+///
+/// None of that is reachable through a shell, because nothing here uses one.
+/// It is reachable through the *game*, which is why the rule is about the
+/// value rather than about quoting it.
+///
+/// # One rule, wherever the value is used
+///
+/// A value can land in argv, in a config file or in an environment variable,
+/// and the same value routinely lands in more than one. Two reasons this is a
+/// single rule rather than a stricter one for argv:
+///
+/// - A setting used in two places would take the strict rule anyway, so a
+///   per-site rule buys precision only for a setting used in exactly one —
+///   and which one that is changes when a descriptor is edited, with nothing
+///   telling the player their name has become illegal.
+/// - `{serverName}` is a *Homerun* name that exists before a game is chosen.
+///   It has to be judged the same way for every game, so at least one value
+///   needs a site-independent rule; having two rules is worse than having the
+///   strict one.
+///
+/// The cost is named rather than hidden: a name may not *begin* with `+`, `-`
+/// or `/`, and may not contain `"`. `-=[Clan]=-` is refused and `=[Clan]=-`
+/// is not. That is a visible product limit, and the API enforces the same one
+/// so a player meets it in a form rather than at a launch that fails.
+///
+/// A setting with `options` is exempt: its values come from the descriptor,
+/// which is ours and signed, not from a player.
+pub fn check_text(setting_label: &str, text: &str) -> Result<()> {
+    let refuse = |why: &str| {
+        Err(Error::Malformed(format!(
+            "{setting_label} {why}. Choose something else and try again."
+        )))
+    };
+
+    if text.chars().count() > MAX_TEXT {
+        return refuse(&format!("has to be {MAX_TEXT} characters or fewer"));
+    }
+    // C0 and DEL. A newline is the one that matters most — it is a second
+    // command on a console's stdin and a second key in a properties file —
+    // but none of them has a meaning a player intended.
+    if text.chars().any(|c| c.is_control()) {
+        return refuse("has to be a single line, with no special characters in it");
+    }
+    if text.contains('"') {
+        return refuse("cannot contain a double quote");
+    }
+    // Matching the API's rule so the two cannot disagree. Nothing here goes
+    // near a shell; what these cost a player is nothing, and a value that one
+    // layer refuses and the other accepts is a bug waiting for a report.
+    if text.contains('`') || text.contains("${") || text.contains("$(") {
+        return refuse("cannot contain ` or ${ or $(");
+    }
+    // A game's own parser reads one of these as the start of a switch,
+    // whatever the operating system thought it was handing over.
+    if let Some(first) = text.trim_start().chars().next() {
+        if matches!(first, '+' | '-' | '/') {
+            return refuse("cannot start with +, - or /");
+        }
+    }
+    Ok(())
+}
+
 /// The placeholder a setting's `default` is allowed to contain, and the only
 /// one.
 ///
@@ -79,6 +169,13 @@ pub fn resolve(
         }
     }
 
+    // The server's name is player text too, and it reaches a launch line
+    // through `{serverName}` and through any default that uses it. It is
+    // checked here because `resolve` is the one call every path makes before
+    // a value becomes an argument -- the API's, and the CLI's, which has no
+    // API in front of it at all.
+    check_text("the server's name", server_name)?;
+
     let mut out = Resolved::new();
     for setting in &descriptor.settings {
         let raw = provided.get(&setting.key);
@@ -88,6 +185,10 @@ pub fn resolve(
         };
         if !value.is_null() {
             check_bounds(setting, &value)?;
+            // A closed set is descriptor-authored, so its values are ours.
+            if let (Value::String(text), true) = (&value, setting.options.is_empty()) {
+                check_text(&label(setting), text)?;
+            }
         }
         out.insert(setting.key.clone(), value);
     }
@@ -390,7 +491,136 @@ mod tests {
         );
     }
 
-    /// Every value [`resolve`] produces is one of four JSON shapes, and the
+    // ─── what a player's text may not be ───────────────────────────────────
+
+    /// The attack the rule exists for. argv is a list, so nothing splits —
+    /// and a `+key value` parser reads this one element as a new switch and
+    /// turns on the web console for a server whose player chose the name.
+    #[test]
+    fn a_setting_that_is_a_switch_is_refused_rather_than_passed_along() {
+        let err = resolve(&rust(), &provided(&[("hostname", json!("+rcon.web"))]), "s")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot start with"), "{err}");
+        assert!(!err.contains("argv") && !err.contains("parse"), "reads for a player: {err}");
+    }
+
+    #[test]
+    fn the_three_switch_characters_are_all_refused_wherever_the_padding_is() {
+        // The last is a non-breaking space, which is padding to a player and
+        // padding to `trim_start`, so it must not hide the switch behind it.
+        for given in ["+x", "-x", "/x", "  -x", "\u{a0}-x"] {
+            let got = resolve(&rust(), &provided(&[("hostname", json!(given))]), "s");
+            assert!(
+                got.is_err() || !given.trim_start().starts_with(['+', '-', '/']),
+                "{given:?} was accepted"
+            );
+        }
+    }
+
+    /// Rust quotes argv for MSVCRT's rules. A game that re-reads the raw
+    /// command line with its own parser — Unreal, Facepunch.CommandLine — is
+    /// not MSVCRT, and a quote is how it gets broken out of.
+    #[test]
+    fn a_double_quote_is_refused_because_not_every_parser_is_the_one_rust_quotes_for() {
+        let err = resolve(
+            &rust(),
+            &provided(&[("hostname", json!("Ruined \" Keep"))]),
+            "s",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("double quote"), "{err}");
+    }
+
+    /// A newline in a value is a second command on a console's stdin and a
+    /// second key in a properties file.
+    #[test]
+    fn a_value_that_is_more_than_one_line_is_refused() {
+        for given in ["a\nb", "a\rb", "a\tb", "a\u{0}b"] {
+            let err = resolve(&rust(), &provided(&[("hostname", json!(given))]), "s")
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("single line"), "for {given:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn text_longer_than_the_ceiling_is_refused_and_text_at_it_is_not() {
+        let at = "a".repeat(MAX_TEXT);
+        assert!(resolve(&rust(), &provided(&[("hostname", json!(at))]), "s").is_ok());
+        let over = "a".repeat(MAX_TEXT + 1);
+        let err = resolve(&rust(), &provided(&[("hostname", json!(over))]), "s")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("256"), "{err}");
+    }
+
+    /// The API refuses these, and a value one layer refuses and the other
+    /// accepts is a bug waiting for a report. Nothing here goes near a shell.
+    #[test]
+    fn the_shell_shapes_the_api_refuses_are_refused_here_too() {
+        for given in ["a`b", "a${b}", "a$(b)"] {
+            assert!(
+                resolve(&rust(), &provided(&[("hostname", json!(given))]), "s").is_err(),
+                "{given} was accepted"
+            );
+        }
+    }
+
+    /// The server's name reaches a launch line through `{serverName}` and
+    /// through any default that uses it, and it is player text like any
+    /// other. `resolve` is the one call every path makes first.
+    #[test]
+    fn the_server_s_own_name_is_held_to_the_same_rule() {
+        let err = resolve(&rust(), &Map::new(), "+rcon.web")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("server's name"), "names what is wrong: {err}");
+        assert!(err.contains("cannot start with"), "{err}");
+    }
+
+    /// A closed set's values are descriptor-authored, so the rule that is
+    /// about player text does not apply to them.
+    #[test]
+    fn a_choice_from_the_descriptor_is_exempt_from_the_rule_about_player_text() {
+        let d: GameDescriptor = serde_json::from_str(
+            r#"{ "id": "g", "name": "G", "settings": [
+                 { "key": "mode", "type": "string", "label": "Mode",
+                   "default": "-hardcore", "options": ["-hardcore", "normal"] } ] }"#,
+        )
+        .unwrap();
+        let got = resolve(&d, &provided(&[("mode", json!("-hardcore"))]), "s").unwrap();
+        assert_eq!(got["mode"], json!("-hardcore"));
+    }
+
+    /// An unset value never reaches a launch line at all, so it is not text
+    /// to be judged — and judging it would refuse a player who typed nothing.
+    #[test]
+    fn an_unset_value_is_not_held_to_the_rule() {
+        assert!(resolve(&rust(), &provided(&[("hostname", json!(""))]), "s").is_ok());
+    }
+
+    /// Ordinary names keep working. The rule costs the first character and
+    /// the double quote, and this is the test that says so out loud.
+    #[test]
+    fn the_names_people_actually_choose_are_still_accepted() {
+        for name in [
+            "Justin's server",
+            "=[Clan]=-",
+            "Ruined Keep",
+            "サーバー",
+            "server #1 (hard)",
+            "100% uptime, we promise",
+        ] {
+            assert!(
+                resolve(&rust(), &provided(&[("hostname", json!(name))]), name).is_ok(),
+                "{name} was refused"
+            );
+        }
+    }
+
+    /// Every resolved value [`resolve`] produces is one of four JSON shapes, and the
     /// rest of the engine is written against that.
     #[test]
     fn every_resolved_value_is_null_string_integer_or_bool() {

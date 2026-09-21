@@ -22,14 +22,71 @@ fn fake_game() {
         return;
     }
     let port: u16 = std::env::var("HOMERUN_TEST_PORT").unwrap().parse().unwrap();
-    let _socket = TcpListener::bind(("127.0.0.1", port)).unwrap();
+
+    /// Re-invoke this executable as one more process in the chain.
+    fn spawn_self(port: &str, role: &str) {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fake_game", "--nocapture", "--test-threads=1"])
+            .env("HOMERUN_TEST_GAME", "1")
+            .env("HOMERUN_TEST_PORT", port)
+            .env("HOMERUN_TEST_MODE", "silent")
+            // Every role is cleared before one is set. Inheriting the
+            // caller's role makes each process start the next, which is an
+            // unbounded chain rather than the three links intended.
+            .env_remove("HOMERUN_TEST_GRANDCHILD")
+            .env_remove("HOMERUN_TEST_RELAY")
+            .env_remove("HOMERUN_TEST_LINGER")
+            .env_remove("HOMERUN_TEST_BIND")
+            .env(role, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+    }
+
+    // A launcher: start the real thing and leave. It binds nothing, so by the
+    // time a stop arrives the real thing's recorded parent is a process that
+    // no longer exists. `taskkill /T` walks parent links and cannot see past
+    // that; a job object holds what its members started regardless.
+    if std::env::var("HOMERUN_TEST_RELAY").is_ok() {
+        spawn_self(&port.to_string(), "HOMERUN_TEST_LINGER");
+        return;
+    }
+
+    // A game that ignores the address it was told to bind. Default loopback,
+    // because that is what a well-behaved one does with {bindAddress}.
+    let bind = std::env::var("HOMERUN_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    let _socket = TcpListener::bind((bind.as_str(), port)).unwrap();
+
+    // A program that holds a port and outlives whoever started it: nothing
+    // asks it to stop, and it keeps the port either way.
+    if std::env::var("HOMERUN_TEST_LINGER").is_ok() {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+
+    if let Ok(grandchild) = std::env::var("HOMERUN_TEST_GRANDCHILD") {
+        spawn_self(&grandchild, "HOMERUN_TEST_RELAY");
+    }
+
     fs::write("pid", std::process::id().to_string()).unwrap();
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
     }
+    // A server that does not take end-of-stdin as a reason to stop -- which
+    // is most of them, since a dedicated server's stdin being closed is
+    // ordinary. Without this the fake game exits the moment the runner dies,
+    // which would make the orphan test pass for a reason that is nothing to
+    // do with owning anything.
+    if std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("orphan") {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    let deaf = std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("deaf");
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
-        if line == "quit" {
+        if line == "quit" && !deaf {
             fs::write("saved", "world flushed").unwrap();
             return;
         }
@@ -164,6 +221,100 @@ impl Drop for Host {
     }
 }
 
+/// A port nothing is using, learned the only way there is.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Whether the port has actually been let go, which is the thing a player
+/// meets: an orphan holding one makes the next start fail `port_unavailable`.
+fn port_freed(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Windows only, and not a gap elsewhere. Unix has process groups and
+/// signals; Android's ladder ends in `SIGKILL` to a pid and its servers are
+/// not launcher-style. The Job Object exists because Windows has no
+/// equivalent, so these are the tests for the thing that only Windows needed.
+///
+/// The runner is ended the way Task Manager, an Electron crash and a
+/// force-quit all end it: `TerminateProcess`, with no chance to run any
+/// cleanup at all. Everything it was supervising has to go with it, or the
+/// game is left holding its ports and writing to its save directory -- and
+/// the next start either fails `port_unavailable` or, past the preflight,
+/// becomes a second server on the same world.
+#[test]
+#[cfg(windows)]
+fn an_abrupt_runner_death_takes_the_game_with_it() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("orphan");
+
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+
+    assert!(
+        TcpListener::bind(("127.0.0.1", f.port)).is_err(),
+        "the game is not actually holding its port, so this proves nothing"
+    );
+
+    h.child.kill().unwrap();
+    h.child.wait().unwrap();
+
+    assert!(
+        port_freed(f.port),
+        "the runner was killed and the game kept running on port {}",
+        f.port
+    );
+}
+
+/// A launcher-style server -- which is what a great many vendors ship --
+/// starts the real server and exits, so the pid the runner holds is not the
+/// pid doing the work. `taskkill /PID n /F` ended a process that had already
+/// gone; even `/T` walks parent links the launcher broke on its way out.
+#[test]
+#[cfg(windows)]
+fn a_game_that_starts_another_program_has_all_of_it_stopped() {
+    let f = Fixture::new();
+    let grandchild = free_port();
+    let mut start = f.start();
+    let env = &mut start["descriptor"]["platforms"][platform::HOST]["launch"]["env"];
+    env["HOMERUN_TEST_GRANDCHILD"] = json!(grandchild.to_string());
+    // Deaf, so the console rung is ignored and the ladder climbs to the rung
+    // that cannot be refused -- which is the one under test.
+    env["HOMERUN_TEST_MODE"] = json!("deaf");
+
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    assert!(
+        TcpListener::bind(("127.0.0.1", grandchild)).is_err(),
+        "the grandchild never started, so this proves nothing"
+    );
+
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+
+    assert!(
+        port_freed(grandchild),
+        "the server was stopped and the program it started kept running on port {grandchild}"
+    );
+    h.eof();
+}
+
 #[test]
 fn stderr_readiness_console_and_eof_save_the_world() {
     let f = Fixture::new();
@@ -204,6 +355,120 @@ fn stderr_readiness_console_and_eof_save_the_world() {
         "world flushed",
         "EOF must send the stop verb before exiting"
     );
+}
+
+/// `expose: false` says a port stays on this computer. Nothing checked it:
+/// the bind address was validated and then dropped, and the observation
+/// carried no address to check against, so `127.0.0.1:28016` and
+/// `0.0.0.0:28016` were the same answer. This game ignores the address it was
+/// given and opens a private port to the network; the runner has to stop it
+/// rather than leave an administrative console reachable from outside.
+#[test]
+fn a_private_port_bound_to_every_interface_stops_the_server() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_BIND"] =
+        json!("0.0.0.0");
+
+    let mut h = Host::new();
+    h.send(start);
+
+    let error = h.until("error");
+    assert_eq!(error["code"], "port_exposed", "{error}");
+    assert_eq!(error["serverId"], "s1");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("game"), "written for a player: {message}");
+    assert!(
+        !message.contains("0.0.0.0:") && !message.contains("expose"),
+        "reads as a verdict rather than a diagnostic: {message}"
+    );
+    assert!(
+        !h.seen.iter().any(|v| v["event"] == "server-started"),
+        "a server that was refused must never be reported running: {:?}",
+        h.seen
+    );
+    h.eof();
+}
+
+/// The same game binding the same private port on loopback is exactly what
+/// the check is meant to allow through, so it must still reach `running`.
+#[test]
+fn a_private_port_on_loopback_is_not_refused() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    assert!(
+        !h.seen.iter().any(|v| v["code"] == "port_exposed"),
+        "{:?}",
+        h.seen
+    );
+    h.eof();
+}
+
+/// The runner has no API in front of it, so core's backstop is the only
+/// thing between a server name and a game's own argument parser. A name that
+/// *is* a switch must be refused before anything is spawned, not passed along
+/// as one argv element for a `+key value` parser to read as a new switch.
+#[test]
+fn a_server_name_that_is_a_switch_is_refused_before_anything_is_spawned() {
+    let f = Fixture::new();
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["serverName"] = json!("+rcon.web");
+    h.send(start);
+
+    let error = h.until("error");
+    assert_eq!(error["serverId"], "s1");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot start with"),
+        "{error}"
+    );
+    assert!(
+        !f.root.join("server").exists() || !f.root.join("server/settings.json").exists(),
+        "nothing should have been written for a launch that was refused"
+    );
+    h.eof();
+}
+
+/// A setting a player cleared has to leave the managed file. Skipping the key
+/// kept the value from the launch before, so a cleared seed went on
+/// generating the old world with nothing on screen naming the number doing
+/// it. Everything the file holds that Homerun does not manage stays put.
+#[test]
+fn a_cleared_setting_leaves_its_managed_key_out_of_the_config_file() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.root.join("server")).unwrap();
+    fs::write(
+        f.root.join("server/settings.json"),
+        r#"{"hostname":"from the launch before","keep":"mine"}"#,
+    )
+    .unwrap();
+
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["settings"] = json!({ "hostname": "" });
+    h.send(start);
+    h.until("server-started");
+
+    let config: Value =
+        serde_json::from_slice(&fs::read(f.root.join("server/settings.json")).unwrap()).unwrap();
+    assert!(
+        config.get("hostname").is_none(),
+        "a cleared setting must not keep the previous launch's value: {config}"
+    );
+    assert_eq!(
+        config["keep"], "mine",
+        "a key Homerun does not manage must survive: {config}"
+    );
+    h.eof();
 }
 
 #[test]

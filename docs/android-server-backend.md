@@ -806,8 +806,26 @@ only a name and a memory ceiling, so `BridgeRouter` reads the rest from
 `/api/server/<id>/` (`HomerunApi`), exactly as `nativeServerManager` does — a
 version changed on the web dashboard then takes effect on the next start. The
 lookup lives in the router rather than the backend so the access token never
-reaches the server process's environment. If it fails, vanilla-latest, which
-is the desktop's fallback too.
+reaches the server process's environment.
+
+**If the lookup fails, the server gets the settings from its last launch.**
+Every successful fetch writes what the core says is worth keeping
+(`minecraft.settings.remember`) to `servers/<id>/homerun-remembered.json`, and a
+fetch that fails for any reason — no token, a 401 on a stale one, no signal, a
+5xx — reads it back through the same parser. It used to be vanilla-latest, the
+desktop's fallback, and that is what started a vanilla server where a player
+had configured Paper; the player stopped it and started again, and the two
+launches overlapping is the `ClassFormatError` in *Triage*. Only the
+configuration is kept: repository credentials, the backup lease, the one-shot
+`RESTORE_FROM_SNAPSHOT` pin and last session's tunnel are stripped by the core,
+because each is per-launch and replaying it is worse than not having it — a
+launch from memory hosts without backups, exactly as a server with no
+repository does. The console says so
+(`Could not fetch this server's settings — using the ones from its last
+launch`), because a change made on the dashboard since is not in them.
+Vanilla-latest is now only a server this device has never fetched settings
+for. The desktop still falls back to vanilla-latest; carrying this over is
+Homerun Desktop's.
 
 ### Being found on the local network — `LocalNetwork`
 
@@ -1202,7 +1220,8 @@ first. Nothing stops there now.
 | Paper 1.21.4 | build **232** picked (newest STABLE), SHA-256 verified, `plugins/` and `bukkit.yml` present, `Done (21.759s)` |
 
 Both were driven straight over the bridge with no login, so the path that ran
-is the no-token one: API lookup fails, vanilla-latest.
+is the no-token one: API lookup fails, vanilla-latest (or, since the settings
+memory, whatever the last successful fetch left beside the world).
 
 ## The Pumpkin backend
 
