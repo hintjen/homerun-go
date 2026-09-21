@@ -545,6 +545,7 @@ fn run(
             server_id: id.clone(),
             data_dir: p.cwd.to_string_lossy().into(),
             java_port: 0,
+            local_network: false,
             settings: None,
         },
         stop.clone(),
