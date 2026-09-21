@@ -233,6 +233,20 @@ data class ServerConfig(
      * anything secret — no tokens, no credentials.
      */
     val extra: Map<String, Any> = emptyMap(),
+    /**
+     * This launch's name for itself, from the core's `proceed` verdict.
+     *
+     * A launch hands it back at every checkpoint. A stop that lands while a
+     * launch is still preparing is only an *intent*, and a start arriving
+     * during that stop is a restart which clears the intent — so a launch
+     * that asks only "was a stop requested" never learns it was replaced.
+     * With the generation the core can say so, and the replaced launch gives
+     * up quietly instead of finishing beside the one that replaced it.
+     *
+     * Null is a caller that did not go through admission; the core then
+     * answers the older question.
+     */
+    val generation: Long? = null,
 )
 
 /**

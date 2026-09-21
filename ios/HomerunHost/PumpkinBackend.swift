@@ -38,6 +38,21 @@ final class PumpkinBackend: ServerBackend {
     private var engineSpawned = false
     private var threadFinished = false
 
+    /// A launch is between `start`'s first line and its last.
+    ///
+    /// Admission already refuses a duplicate. What can still arrive beside a
+    /// launch is a *restart* — Start, Stop while the world was restoring,
+    /// Start again — and the core lets that through on purpose. The two would
+    /// then share everything above: `activeServerId`, the tunnel task, the
+    /// pumps, the server directory the restore is writing. Android met exactly
+    /// this with a jar download in place of the restore, and the first launch
+    /// spawned a JVM on a runtime the second was halfway through unpacking.
+    /// The outgoing launch gives up at its next checkpoint, now that it can
+    /// tell it was replaced; `awaitPreviousLaunch` is what makes the incoming
+    /// one wait for that, the way `awaitPreviousExit` waits for an outgoing
+    /// *engine*.
+    private var launching = false
+
     private var logCursor = 0
     private var logTimer: Timer?
     private var heartbeat: Timer?
@@ -173,6 +188,24 @@ final class PumpkinBackend: ServerBackend {
     func start(serverId: String, config: ServerConfig) async throws {
         try create(serverId: serverId)
 
+        try await awaitPreviousLaunch(serverId: serverId)
+        launching = true
+        defer { launching = false }
+
+        // Cheapest place of all to notice: a stop that landed while this
+        // launch was waiting its turn has cost nothing yet, and nothing above
+        // this line is this launch's to unwind.
+        if lifecycle.shouldAbandon(serverId, generation: config.generation) {
+            // Asked before `abandoned`, which clears the stop intent the
+            // answer depends on.
+            let replaced = superseded(serverId: serverId, generation: config.generation)
+            lifecycle.abandoned(serverId, generation: config.generation)
+            if !replaced {
+                emitState(serverId, .stopped, force: true)
+            }
+            throw ServerBackendError.engine("The server was stopped before it finished starting.")
+        }
+
         activeServerId = serverId
         startedAt = nil
         runFailure = nil
@@ -205,7 +238,8 @@ final class PumpkinBackend: ServerBackend {
                 settings: true,
                 tunnel: config.resolveTunnel != nil)) ?? [],
             serverId: serverId,
-            lifecycle: lifecycle)
+            lifecycle: lifecycle,
+            generation: config.generation)
 
         // Asked to stop at the first step and waited for at the last moment
         // it can be, the same shape as the tunnel below: the cancel is coarse
@@ -338,10 +372,21 @@ final class PumpkinBackend: ServerBackend {
                 tunnelTask?.cancel()
                 tunnelTask = nil
                 stopPumps()
-                lifecycle.abandoned(serverId)
-                // Forced for the same reason `finish` forces: this launch is
-                // over, and it is the only thing that will say so.
-                emitState(serverId, .stopped, force: true)
+                // A no-op in the core for a launch a newer start has replaced:
+                // the entry is the newer launch's now.
+                let replaced = superseded(serverId: serverId, generation: config.generation)
+                lifecycle.abandoned(serverId, generation: config.generation)
+                if replaced {
+                    // The launch replacing this one is parked in
+                    // `awaitPreviousLaunch` and will say `starting` for
+                    // itself; `stopped` from here would flip the card
+                    // underneath it.
+                    HostLog.host.info("a newer start replaced this launch; giving up quietly")
+                } else {
+                    // Forced for the same reason `finish` forces: this launch
+                    // is over, and it is the only thing that will say so.
+                    emitState(serverId, .stopped, force: true)
+                }
             }
             // Put back whatever this launch took over but never got to wait
             // out, so the next start finds it rather than a nil handle and a
@@ -358,6 +403,25 @@ final class PumpkinBackend: ServerBackend {
     /// restart admitted while that was still happening is how Android got two
     /// concurrent launches. The wait sits ahead of the restore because a
     /// mobile launch writes the server directory before it spawns anything.
+    /// Wait out a launch of this backend that is still preparing.
+    ///
+    /// Only a restart lands here — see `launching`. The outgoing launch finds
+    /// out it was replaced at its next checkpoint and unwinds; until it has,
+    /// everything this object holds is still its.
+    private func awaitPreviousLaunch(serverId: String) async throws {
+        guard launching else { return }
+        HostLog.host.info("waiting for the launch this one replaces to give up")
+        while launching {
+            try await Task.sleep(nanoseconds: 200_000_000)
+        }
+    }
+
+    /// True when a newer start has replaced the launch named by `generation`.
+    private func superseded(serverId: String, generation: Int?) -> Bool {
+        guard let generation else { return false }
+        return lifecycle.superseded(serverId, generation: generation)
+    }
+
     private func awaitPreviousExit(serverId: String) async throws {
         guard lifecycle.awaitPreviousExit(serverId) else { return }
         note(serverId, "[Homerun] Waiting for the previous server to finish saving…")

@@ -512,6 +512,42 @@ state and hides every bug about carrying state over: what a second launch
 clears, what it wrongly keeps, what it replays. Most of the interesting
 defects only appear on run two.
 
+### Reproducing a server-lifecycle bug without an account
+
+The start/stop path does not need a login: invoke the bridge yourself over the
+WebView's DevTools socket (`docs/android-host.md` § *Driving the app without
+an account*). A `native-server-start` with an empty `userToken` fails its
+settings lookup and launches vanilla-latest — which is exactly the shape of a
+real incident (the Start → Stop-mid-download → Start `ClassFormatError`), so
+it is a faithful repro, not a shortcut.
+
+```bash
+adb forward tcp:9222 localabstract:webview_devtools_remote_$(adb shell pidof -s app.gethomerun.mobile.debug)
+# Runtime.evaluate this in the page; node 24 has a global WebSocket client:
+HomerunHost.postMessage(JSON.stringify({ v: 1, id: "probe-1", method: "native-server-start",
+  params: { serverId: "<uuid>", config: { name: "Probe", memoryMb: 1024 }, userToken: "" } }))
+```
+
+Two things that cost a cycle each:
+
+- **The response is invisible.** It goes to `window.__homerunHost.receive`,
+  and the UI drops an id it did not issue — so a launch that was *refused*
+  looks like one that silently stopped. Wrap `receive` first so probe replies
+  are `console.log`ged (they then appear in logcat under `HomerunWeb`), and
+  read the `error` there before theorising from the host tags.
+- **The second run is too fast to be the same test.** With the jar cached and
+  the runtime stamped, a stop one second after a start lands *after* the JVM
+  spawned — the terminate path, not the abandon-while-preparing one. To
+  re-exercise preparation, `run-as … rm -rf files/jars files/servers/<id>/server.jar
+  files/servers/<id>/homerun-jar.json` between runs.
+
+The tunnel will fail at the end (`the gateway did not provide one`) and stop
+the server: expected with no token, and it happens after every launch
+checkpoint, so it does not spoil a lifecycle test. Build against staging
+(`--api https://api.fractalnetworks.co`) anyway: the reporter arms on every
+launch, and a probe that does reach a crash with a credential on the device
+would file it wherever the build points.
+
 ### Forcing a server crash report on a real phone
 
 Two things learned on a Pixel while proving crash reporting (2026-09-03):

@@ -77,7 +77,13 @@ pub enum Concurrency {
 pub enum StartVerdict {
     /// Go ahead. The server is already counted active — see the module docs
     /// for why that matters before the first byte is downloaded.
-    Proceed,
+    ///
+    /// `generation` is this launch's name for itself. The host carries it
+    /// through the launch and hands it back to [`Lifecycle::should_abandon`]
+    /// and [`Lifecycle::abandoned`], which is how a launch that has since
+    /// been replaced learns to give up — see *Superseded launches* on
+    /// [`Lifecycle::should_abandon`].
+    Proceed { generation: u64 },
     /// This exact server is already up or on its way. The bridge turns this
     /// into `{ success: true, alreadyRunning: true }`, which is what the
     /// reconcile loop expects to hear; it is not an error the player sees.
@@ -259,8 +265,39 @@ impl Lifecycle {
     /// The host calls this before each irreversible step — before spawning,
     /// and again before opening the tunnel — so a stop that arrived during a
     /// long preparation is honoured promptly instead of after it finishes.
-    pub fn should_abandon(&self, id: &str) -> bool {
-        self.entries.get(id).is_some_and(|e| e.stop_requested)
+    ///
+    /// # Superseded launches
+    ///
+    /// `launch` is the generation [`StartVerdict::Proceed`] handed this
+    /// launch. A stop is recorded as an intent for the launch to find at its
+    /// next checkpoint — but a start arriving *during* that stop is a restart,
+    /// which clears the intent. Without the generation the first launch never
+    /// learns anything happened: it finishes its download alongside the
+    /// second, both unpack the runtime into one directory, and the first
+    /// spawns a JVM on class files the second is still writing. That was a
+    /// `ClassFormatError: Incompatible magic value 0` on a player's phone.
+    ///
+    /// So a launch whose generation is no longer the entry's is told to give
+    /// up whether or not a stop is still pending. `None` is the old question,
+    /// for a host that has not learned its generation yet.
+    pub fn should_abandon(&self, id: &str, launch: Option<u64>) -> bool {
+        self.entries
+            .get(id)
+            .is_some_and(|e| e.stop_requested || launch.is_some_and(|g| g != e.generation))
+    }
+
+    /// True when a newer *start* has replaced this launch.
+    ///
+    /// A superseded launch gives up quietly: nothing it would tear down is
+    /// its any more, and announcing `stopped` would flip the server that is
+    /// coming up in its place. A stop moves the generation too, so the
+    /// distinction is the same one [`Self::exited`] draws for a process: a
+    /// pending stop means this is the stop the launch was asked for, and it
+    /// tears down and announces as usual.
+    pub fn superseded(&self, id: &str, launch: u64) -> bool {
+        self.entries
+            .get(id)
+            .is_some_and(|e| e.generation != launch && !e.stop_requested)
     }
 
     /// True when this state may be announced for this server.
@@ -341,7 +378,9 @@ impl Lifecycle {
         entry.generation += 1;
         entry.stop_requested = false;
         entry.state = State::Starting;
-        StartVerdict::Proceed
+        StartVerdict::Proceed {
+            generation: entry.generation,
+        }
     }
 
     /// A stop call arrived.
@@ -453,7 +492,20 @@ impl Lifecycle {
     }
 
     /// A launch gave up before spawning anything.
-    pub fn abandoned(&mut self, id: &str) {
+    ///
+    /// A superseded launch (see [`Self::should_abandon`]) changes nothing:
+    /// the entry describes the launch that replaced it, and writing `stopped`
+    /// over it would retire a server that is coming up right now. `None` is
+    /// a host that has not learned its generation, and is taken at its word.
+    ///
+    /// A host that wants to know *which* case it is in asks
+    /// [`Self::superseded`] **before** this, not after: an ordinary abandon
+    /// clears the stop intent, and with it the thing that told a stopped
+    /// launch apart from a replaced one.
+    pub fn abandoned(&mut self, id: &str, launch: Option<u64>) {
+        if launch.is_some_and(|g| self.superseded(id, g)) {
+            return;
+        }
         if let Some(entry) = self.entries.get_mut(id) {
             entry.engine = false;
             entry.stop_requested = false;
@@ -508,7 +560,10 @@ mod tests {
     #[test]
     fn a_server_is_active_from_the_moment_a_start_arrives() {
         let mut life = one();
-        assert_eq!(life.start_requested("s"), StartVerdict::Proceed);
+        assert!(matches!(
+            life.start_requested("s"),
+            StartVerdict::Proceed { .. }
+        ));
 
         // Before the jar, before the restore, before anything is spawned.
         assert_eq!(life.active_ids(), vec!["s".to_string()]);
@@ -554,9 +609,9 @@ mod tests {
         let mut life = one();
         life.start_requested("s");
         assert_eq!(life.stop_requested("s"), StopVerdict::AbandonLaunch);
-        assert!(life.should_abandon("s"));
+        assert!(life.should_abandon("s", None));
 
-        life.abandoned("s");
+        life.abandoned("s", None);
         life.call_finished("s");
         life.call_finished("s");
         assert!(life.active_ids().is_empty());
@@ -602,7 +657,10 @@ mod tests {
         life.call_finished("s");
 
         // The old JVM is still saving. A start is allowed — and must wait.
-        assert_eq!(life.start_requested("s"), StartVerdict::Proceed);
+        assert!(matches!(
+            life.start_requested("s"),
+            StartVerdict::Proceed { .. }
+        ));
         assert!(life.await_previous_exit("s"));
 
         // Once it is gone, there is nothing to wait for.
@@ -692,7 +750,10 @@ mod tests {
     #[test]
     fn a_second_start_for_the_same_server_is_not_an_error() {
         let mut life = one();
-        assert_eq!(life.start_requested("s"), StartVerdict::Proceed);
+        assert!(matches!(
+            life.start_requested("s"),
+            StartVerdict::Proceed { .. }
+        ));
         assert_eq!(life.start_requested("s"), StartVerdict::AlreadyRunning);
     }
 
@@ -711,8 +772,14 @@ mod tests {
     #[test]
     fn many_hosts_run_several_at_once() {
         let mut life = Lifecycle::new(Concurrency::Many);
-        assert_eq!(life.start_requested("a"), StartVerdict::Proceed);
-        assert_eq!(life.start_requested("b"), StartVerdict::Proceed);
+        assert!(matches!(
+            life.start_requested("a"),
+            StartVerdict::Proceed { .. }
+        ));
+        assert!(matches!(
+            life.start_requested("b"),
+            StartVerdict::Proceed { .. }
+        ));
         assert_eq!(life.active_ids().len(), 2);
     }
 
@@ -726,7 +793,89 @@ mod tests {
         life.console_ready("s");
         life.stop_requested("s");
 
-        assert_eq!(life.start_requested("s"), StartVerdict::Proceed);
+        assert!(matches!(
+            life.start_requested("s"),
+            StartVerdict::Proceed { .. }
+        ));
+    }
+
+    /// The sequence behind a `ClassFormatError` on a player's phone: Start,
+    /// Stop while the jar was still downloading, Start again. The restart
+    /// cleared the stop intent, so the first launch — which only ever asked
+    /// "was a stop requested?" — carried on, and two launches shared one
+    /// runtime directory.
+    #[test]
+    fn a_launch_superseded_while_preparing_gives_up() {
+        let mut life = one();
+        let StartVerdict::Proceed { generation: first } = life.start_requested("s") else {
+            panic!("a cold start proceeds");
+        };
+        assert_eq!(life.stop_requested("s"), StopVerdict::AbandonLaunch);
+        life.call_finished("s"); // the stop call has returned
+
+        let StartVerdict::Proceed { generation: second } = life.start_requested("s") else {
+            panic!("a start during a stop is a restart");
+        };
+        assert_ne!(first, second);
+
+        // The old question is exactly what let the first launch through.
+        assert!(
+            !life.should_abandon("s", None),
+            "no stop is pending any more — that is the trap"
+        );
+        assert!(
+            life.should_abandon("s", Some(first)),
+            "the first launch must give up"
+        );
+        assert!(life.superseded("s", first));
+        assert!(
+            !life.should_abandon("s", Some(second)),
+            "the second carries on"
+        );
+        assert!(!life.superseded("s", second));
+    }
+
+    /// The first launch giving up must not take the second down with it.
+    #[test]
+    fn a_superseded_launch_abandoning_changes_nothing() {
+        let mut life = one();
+        let StartVerdict::Proceed { generation: first } = life.start_requested("s") else {
+            panic!("a cold start proceeds");
+        };
+        life.stop_requested("s");
+        life.call_finished("s");
+        life.start_requested("s");
+
+        life.abandoned("s", Some(first));
+        assert_eq!(
+            life.state("s"),
+            State::Starting,
+            "the new launch's state must survive the old one giving up"
+        );
+        assert_eq!(life.active_ids(), vec!["s".to_string()]);
+
+        // Its start call returning is ordinary bookkeeping, and the second
+        // launch's own call still holds the entry open.
+        life.call_finished("s");
+        assert_eq!(life.active_ids(), vec!["s".to_string()]);
+    }
+
+    /// A stop alone also moves the generation, so a launch that learned its
+    /// generation gives up on a plain stop exactly as it did before.
+    #[test]
+    fn a_stop_still_abandons_a_launch_that_knows_its_generation() {
+        let mut life = one();
+        let StartVerdict::Proceed { generation } = life.start_requested("s") else {
+            panic!("a cold start proceeds");
+        };
+        assert!(!life.should_abandon("s", Some(generation)));
+        life.stop_requested("s");
+        assert!(life.should_abandon("s", Some(generation)));
+
+        // Not superseded — this is the stop it was asked for, so it tears
+        // down and announces as usual.
+        life.abandoned("s", Some(generation));
+        assert_eq!(life.state("s"), State::Stopped);
     }
 
     // ── The counter ─────────────────────────────────────────────────────────
@@ -785,7 +934,10 @@ mod tests {
         life.call_finished("s");
 
         // Restart while the old JVM is still saving its world.
-        assert_eq!(life.start_requested("s"), StartVerdict::Proceed);
+        assert!(matches!(
+            life.start_requested("s"),
+            StartVerdict::Proceed { .. }
+        ));
 
         let exit = life.exited("s", 0);
         assert!(exit.superseded, "this exit belongs to the previous launch");
@@ -908,6 +1060,6 @@ mod tests {
         let back: Lifecycle = serde_json::from_str(&wire).unwrap();
         assert_eq!(back, life);
         assert_eq!(back.active_ids(), vec!["s".to_string()]);
-        assert!(back.should_abandon("s"));
+        assert!(back.should_abandon("s", None));
     }
 }

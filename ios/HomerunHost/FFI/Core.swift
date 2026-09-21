@@ -502,9 +502,16 @@ enum Core {
             /// Starting cancels any on-stop backup of this server still running.
             let supersedesOnStopBackup: Bool
             let intentional: Bool
+            /// After `exited`: the process belonged to a launch a newer start
+            /// replaced. After a query that named its launch: that launch has
+            /// been replaced, and must give up without tearing anything down.
             let superseded: Bool
             /// Only meaningful when a state was asked about; true otherwise.
             let mayAnnounce: Bool
+            /// After `startRequested` answered `proceed`: this launch's name
+            /// for itself. Carried through the launch and handed back to
+            /// `shouldAbandon` and `abandoned` — see `ServerConfig.generation`.
+            let generation: Int?
         }
 
         // MARK: Events
@@ -526,7 +533,13 @@ enum Core {
 
         func spawned(_ serverId: String) { apply("spawned", serverId) }
         func consoleReady(_ serverId: String) { apply("consoleReady", serverId) }
-        func abandoned(_ serverId: String) { apply("abandoned", serverId) }
+
+        /// A launch gave up before spawning. `generation` is the launch's
+        /// own; the core ignores the abandon of a launch a newer start has
+        /// replaced, because the entry now describes that newer launch.
+        func abandoned(_ serverId: String, generation: Int? = nil) {
+            apply("abandoned", serverId, generation: generation)
+        }
 
         /// What the exit meant: the state, whether anyone asked for it, and
         /// whether it belongs to a launch that has since been replaced.
@@ -540,7 +553,24 @@ enum Core {
         /// `native-server-active-ids`: running, coming up, or winding down.
         func activeIds() -> [String] { query("").activeIds }
         func runningIds() -> [String] { query("").runningIds }
-        func shouldAbandon(_ serverId: String) -> Bool { query(serverId).shouldAbandon }
+
+        /// True when a launch should give up at its next checkpoint.
+        ///
+        /// Ask with the launch's own `generation`. Without it the answer is
+        /// only "was a stop requested", and a restart clears that — which is
+        /// how, on Android, a launch stopped mid-download carried on beside
+        /// the one that replaced it and spawned a JVM on a runtime the other
+        /// was still unpacking.
+        func shouldAbandon(_ serverId: String, generation: Int? = nil) -> Bool {
+            query(serverId, generation: generation).shouldAbandon
+        }
+
+        /// True when a newer start has replaced this launch. It gives up
+        /// quietly: the tunnel, the pumps and the announcement all belong to
+        /// the launch that replaced it now.
+        func superseded(_ serverId: String, generation: Int) -> Bool {
+            query(serverId, generation: generation).superseded
+        }
 
         /// Asked immediately before spawning rather than at admission: the
         /// outgoing engine usually exits while the new launch is preparing.
@@ -563,19 +593,25 @@ enum Core {
         // MARK: Plumbing
 
         @discardableResult
-        private func apply(_ event: String, _ serverId: String, code: Int? = nil) -> View {
+        private func apply(
+            _ event: String, _ serverId: String, code: Int? = nil, generation: Int? = nil
+        ) -> View {
             var args: [String: Any] = [
                 "concurrency": concurrency, "event": event, "serverId": serverId,
             ]
             if let state { args["lifecycle"] = state }
             if let code { args["code"] = code }
+            if let generation { args["generation"] = generation }
             return absorb(call: "lifecycle.apply", args, keepState: true)
         }
 
-        private func query(_ serverId: String, announcing: String? = nil) -> View {
+        private func query(
+            _ serverId: String, announcing: String? = nil, generation: Int? = nil
+        ) -> View {
             var args: [String: Any] = ["concurrency": concurrency, "serverId": serverId]
             if let state { args["lifecycle"] = state }
             if let announcing { args["state"] = announcing }
+            if let generation { args["generation"] = generation }
             return absorb(call: "lifecycle.query", args, keepState: false)
         }
 
@@ -594,7 +630,7 @@ enum Core {
                     verdict: nil, serverId: nil, activeIds: [], runningIds: [], state: "stopped",
                     shouldAbandon: false, awaitPreviousExit: false,
                     supersedesOnStopBackup: false, intentional: false, superseded: false,
-                    mayAnnounce: true)
+                    mayAnnounce: true, generation: nil)
             }
             if keepState, let carried = reply["lifecycle"] as? [String: Any] {
                 state = carried
@@ -611,7 +647,8 @@ enum Core {
                 intentional: reply["intentional"] as? Bool ?? false,
                 superseded: reply["superseded"] as? Bool ?? false,
                 // Absent means "not asked", which is not a veto.
-                mayAnnounce: reply["mayAnnounce"] as? Bool ?? true)
+                mayAnnounce: reply["mayAnnounce"] as? Bool ?? true,
+                generation: reply["generation"] as? Int)
         }
     }
 

@@ -232,17 +232,42 @@ fn load_lifecycle(args: &Value) -> Result<lifecycle::Lifecycle, String> {
     }
 }
 
+/// The launch a caller is asking on behalf of, when it says.
+///
+/// `startRequested` hands each launch its generation; a launch that carries it
+/// back is asking "should *I* give up", which has a different answer from
+/// "was a stop requested" once a restart has replaced it. Absent means the
+/// older question — every host asked it that way before any of them had a
+/// generation to give.
+fn launch_generation(args: &Value) -> Option<u64> {
+    args.get("generation").and_then(|v| v.as_u64())
+}
+
 /// The state to carry forward, plus the questions every caller asks next.
-fn lifecycle_view(life: &lifecycle::Lifecycle, id: &str) -> Result<Value, String> {
-    Ok(json!({
+fn lifecycle_view(
+    life: &lifecycle::Lifecycle,
+    id: &str,
+    launch: Option<u64>,
+) -> Result<Value, String> {
+    let mut view = json!({
         "lifecycle": serde_json::to_value(life).map_err(|e| e.to_string())?,
         "activeIds": life.active_ids(),
         "runningIds": life.running_ids(),
         "state": serde_json::to_value(life.state(id)).map_err(|e| e.to_string())?,
-        "shouldAbandon": life.should_abandon(id),
+        "shouldAbandon": life.should_abandon(id, launch),
         "awaitPreviousExit": life.await_previous_exit(id),
         "supersedesOnStopBackup": life.supersedes_on_stop_backup(id),
-    }))
+    });
+    if let Some(generation) = launch {
+        // Only for a caller that named its launch. `exited` answers
+        // `superseded` about a *process* on the same key and never carries a
+        // generation, so the two cannot collide.
+        merge(
+            &mut view,
+            json!({ "superseded": life.superseded(id, generation) }),
+        );
+    }
+    Ok(view)
 }
 
 /// The caller's perf history, or a fresh one.
@@ -1451,6 +1476,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         "lifecycle.apply" => {
             let mut life = load_lifecycle(&args)?;
             let id = text("serverId")?;
+            let launch = launch_generation(&args);
             let mut reply = json!({});
 
             match text("event")?.as_str() {
@@ -1465,7 +1491,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 "callFinished" => life.call_finished(&id),
                 "spawned" => life.spawned(&id),
                 "consoleReady" => life.console_ready(&id),
-                "abandoned" => life.abandoned(&id),
+                "abandoned" => life.abandoned(&id, launch),
                 "exited" => {
                     let code = args.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) as i32;
                     reply =
@@ -1477,7 +1503,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             // The answer plus the queries a caller always wants next, in one
             // round trip. A host that had to ask separately could act on a
             // list from before its own event landed.
-            merge(&mut reply, lifecycle_view(&life, &id)?);
+            merge(&mut reply, lifecycle_view(&life, &id, launch)?);
             Ok(reply)
         }
 
@@ -1685,7 +1711,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         "lifecycle.query" => {
             let life = load_lifecycle(&args)?;
             let id = optional_text("serverId").unwrap_or_default();
-            let mut view = lifecycle_view(&life, &id)?;
+            let mut view = lifecycle_view(&life, &id, launch_generation(&args))?;
             if let Some(raw) = args.get("state") {
                 let state: state::State =
                     serde_json::from_value(raw.clone()).map_err(|e| format!("bad state: {e}"))?;
@@ -2999,6 +3025,58 @@ geyser"
         let r = step(&r["lifecycle"], "stopRequested", "s", None);
         assert_eq!(r["verdict"], "abandonLaunch");
         assert_eq!(r["shouldAbandon"], true);
+    }
+
+    /// Start, Stop while preparing, Start again — the sequence that put two
+    /// launches into one runtime directory on a phone. The first launch names
+    /// itself when it asks, and is told to give up; its abandon then leaves the
+    /// second launch's entry alone.
+    #[test]
+    fn a_launch_superseded_by_a_restart_is_told_to_give_up_quietly() {
+        let r = ok(
+            "lifecycle.apply",
+            json!({ "event": "startRequested", "serverId": "s" }),
+        );
+        assert_eq!(r["verdict"], "proceed");
+        let first = r["generation"].as_u64().expect("a launch is handed its generation");
+
+        let r = step(&r["lifecycle"], "stopRequested", "s", None);
+        assert_eq!(r["verdict"], "abandonLaunch");
+        let r = step(&r["lifecycle"], "callFinished", "s", None);
+
+        let r = step(&r["lifecycle"], "startRequested", "s", None);
+        assert_eq!(r["verdict"], "proceed", "a start during a stop is a restart");
+        let second = r["generation"].as_u64().unwrap();
+        assert_ne!(first, second);
+        let life = r["lifecycle"].clone();
+
+        // Without a generation the answer is the one that let the bug through.
+        let view = ok("lifecycle.query", json!({ "lifecycle": life, "serverId": "s" }));
+        assert_eq!(view["shouldAbandon"], false);
+        assert!(view.get("superseded").is_none(), "only a named launch is answered");
+
+        let view = ok(
+            "lifecycle.query",
+            json!({ "lifecycle": life, "serverId": "s", "generation": first }),
+        );
+        assert_eq!(view["shouldAbandon"], true);
+        assert_eq!(view["superseded"], true);
+
+        let view = ok(
+            "lifecycle.query",
+            json!({ "lifecycle": life, "serverId": "s", "generation": second }),
+        );
+        assert_eq!(view["shouldAbandon"], false);
+        assert_eq!(view["superseded"], false);
+
+        let r = step(
+            &life,
+            "abandoned",
+            "s",
+            Some(json!({ "generation": first })),
+        );
+        assert_eq!(r["state"], "starting", "the second launch survives the first giving up");
+        assert_eq!(r["activeIds"], json!(["s"]));
     }
 
     #[test]

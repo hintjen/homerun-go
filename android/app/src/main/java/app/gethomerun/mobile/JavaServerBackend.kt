@@ -11,6 +11,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -57,6 +58,23 @@ class JavaServerBackend(
     /** The thread the supervisor's blocking `start` runs on. */
     private var engineThread: Thread? = null
     private var pumpJob: Job? = null
+
+    /**
+     * One launch through this backend at a time.
+     *
+     * Admission already refuses a duplicate. What can still arrive beside a
+     * launch is a *restart* — Start, Stop while the jar was downloading,
+     * Start again — and the core lets that through on purpose. The two would
+     * then share everything: the server directory, the runtime being unpacked
+     * into it, this object's tunnel and console pump. On a player's phone the
+     * first launch spawned a JVM on a `lib/modules` the second was halfway
+     * through rewriting, and the JVM died with `ClassFormatError` before
+     * `main`. The outgoing launch gives up at its next checkpoint, now that
+     * it can tell it was replaced ([abandonIfStopped]); this is what makes the
+     * incoming one wait for that, the way [awaitPreviousExit] waits for an
+     * outgoing *engine*.
+     */
+    private val launchGate = Mutex()
 
     /** Where this host has read the supervisor's console up to. */
     private var engineCursor = 0L
@@ -250,7 +268,15 @@ class JavaServerBackend(
      * disagree.
      */
     override suspend fun start(serverId: String, config: ServerConfig) {
-        launch(serverId, config)
+        if (!launchGate.tryLock()) {
+            Log.i(TAG, "$serverId: waiting for the launch this one replaces to give up")
+            launchGate.lock()
+        }
+        try {
+            launch(serverId, config)
+        } finally {
+            launchGate.unlock()
+        }
     }
 
     private suspend fun launch(serverId: String, config: ServerConfig) {
@@ -258,6 +284,10 @@ class JavaServerBackend(
             ?: throw ServerBackendException.Engine(
                 Core.refusal("noJavaRuntime")
             )
+
+        // Cheapest place of all to notice: a stop that landed while this
+        // launch was waiting its turn on [launchGate] has cost nothing yet.
+        if (abandonIfStopped(serverId, config.generation)) return
 
         val dir = dataDir(serverId)
 
@@ -268,6 +298,7 @@ class JavaServerBackend(
         // re-downloaded world or a green card for an unreachable server.
         val order = LaunchOrder(
             serverId,
+            config.generation,
             Core.launchPlan(
                 backups = config.backupContext != null,
                 settings = config.settingsEnv != null,
@@ -500,9 +531,13 @@ class JavaServerBackend(
             launch
         }.getOrElse { err ->
             // Nothing was spawned, so no exit will arrive to tidy up after
-            // this one.
+            // this one. Announced unless a newer start has replaced this
+            // launch and is waiting on [launchGate]: `stopped` then would flip
+            // the card under a start the player just asked for.
             stopLogPump()
-            transition(serverId, ServerState.STOPPED)
+            if (!superseded(serverId, config.generation)) {
+                transition(serverId, ServerState.STOPPED)
+            }
             throw err as? ServerBackendException ?: ServerBackendException.Engine(
                 err.message ?: "The server could not be prepared."
             )
@@ -514,7 +549,7 @@ class JavaServerBackend(
 
         // Cheapest place to notice: nothing has been spawned, so there is
         // nothing to tear down.
-        if (abandonIfStopped(serverId)) return
+        if (abandonIfStopped(serverId, config.generation)) return
 
         // A start admitted *during* a stop is a restart, and the core says
         // whether an outgoing engine still has to be waited for. Asked here,
@@ -704,7 +739,7 @@ class JavaServerBackend(
         // now, so it can be asked politely rather than killed. Reached when
         // the stop arrived before `process` was assigned — after that, `stop`
         // waits for the console itself.
-        if (lifecycle.shouldAbandon(serverId)) {
+        if (lifecycle.shouldAbandon(serverId, config.generation)) {
             Log.i(TAG, "$serverId: honouring a stop that arrived during startup")
             withContext(Dispatchers.IO) {
                 tunnel.shutdown()
@@ -788,6 +823,8 @@ class JavaServerBackend(
      */
     private inner class LaunchOrder(
         private val serverId: String,
+        /** This launch's own, so a checkpoint can tell "stopped" from "replaced". */
+        private val generation: Long?,
         private val steps: List<Core.Step>,
     ) {
         private var next = 0
@@ -800,7 +837,7 @@ class JavaServerBackend(
                 "launch step out of order: $name comes after ${steps[next - 1].name}"
             }
             next = index + 1
-            return if (steps[index].checkpoint) abandonIfStopped(serverId) else false
+            return if (steps[index].checkpoint) abandonIfStopped(serverId, generation) else false
         }
     }
 
@@ -827,21 +864,44 @@ class JavaServerBackend(
     }
 
     /**
-     * Give up a launch that was stopped while it was still preparing.
+     * Give up a launch that was stopped — or replaced — while it was still
+     * preparing.
      *
      * Returns true when the caller should return without starting anything.
      * Reported as `stopped` rather than `crashed`: the user asked for this.
+     *
+     * [generation] is the launch's own, and it is what lets the core answer
+     * for a launch a newer start has replaced: a plain stop clears nothing
+     * here, but a restart clears the stop intent, and without the generation
+     * the old launch would read that as "carry on". A replaced launch tears
+     * down what is still its own — the pending tunnel resolve and the pump,
+     * because the launch replacing it is parked on [launchGate] and has begun
+     * neither — and announces nothing: the newer launch says `starting` for
+     * itself, and `stopped` from here would flip the card underneath it.
      */
-    private fun abandonIfStopped(serverId: String): Boolean {
-        if (!lifecycle.shouldAbandon(serverId)) return false
-        lifecycle.abandoned(serverId)
-        Log.i(TAG, "$serverId: launch abandoned — a stop arrived while it was preparing")
+    private fun abandonIfStopped(serverId: String, generation: Long?): Boolean {
+        if (!lifecycle.shouldAbandon(serverId, generation)) return false
+        // Asked before `abandoned`, which clears the stop intent the answer
+        // depends on.
+        val replaced = superseded(serverId, generation)
+        // A no-op in the core for a replaced launch: the entry is the newer
+        // launch's now.
+        lifecycle.abandoned(serverId, generation)
         tunnel.cancel()
         // Reached before anything was spawned, so nothing else will stop it.
         stopLogPump()
+        if (replaced) {
+            Log.i(TAG, "$serverId: launch abandoned — a newer start replaced it")
+            return true
+        }
+        Log.i(TAG, "$serverId: launch abandoned — a stop arrived while it was preparing")
         transition(serverId, ServerState.STOPPED)
         return true
     }
+
+    /** True when a newer start has replaced the launch named by [generation]. */
+    private fun superseded(serverId: String, generation: Long?): Boolean =
+        generation != null && lifecycle.superseded(serverId, generation)
 
     override suspend fun stop(serverId: String, graceful: Boolean) {
         if (engineThread?.isAlive != true) {

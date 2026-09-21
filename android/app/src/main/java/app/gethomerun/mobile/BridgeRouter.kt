@@ -1669,6 +1669,10 @@ class BridgeRouter(
                                             api, serverId, token, stale = settings?.tunnelBefore,
                                         )
                                     },
+                                    // The launch's own name, so its checkpoints
+                                    // can tell "stopped" from "replaced by a
+                                    // newer start" — see `ServerConfig.generation`.
+                                    generation = admission.generation,
                                 ),
                             )
                             buildJsonObject { put("success", true) }

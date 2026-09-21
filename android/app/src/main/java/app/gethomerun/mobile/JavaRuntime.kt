@@ -208,7 +208,17 @@ object JavaRuntime {
      *
      * Only [major] is touched. The other staged runtime stays in the APK,
      * costing storage but not time, until something asks for it.
+     *
+     * Synchronised because the first thing this does to a runtime that is not
+     * stamped complete is delete it. Two callers at once — which happened,
+     * when a restart overlapped the launch it replaced — meant the second
+     * wiped and began rewriting `lib/modules` while the first was stamping
+     * the directory complete and exec'ing a JVM on it. The JVM read zeroes
+     * where `sun/nio/cs/UTF_8$Encoder` should have been and died before
+     * `main` with `ClassFormatError: Incompatible magic value 0`. Behind the
+     * lock the second caller finds the stamp and returns.
      */
+    @Synchronized
     fun ensure(context: Context, major: Int, onProgress: (Float) -> Unit = {}): File {
         val target = home(context, major)
         if (isInstalled(context, major)) return target
@@ -275,8 +285,10 @@ object JavaRuntime {
      * version that stopped being staged simply stops being asked for.
      *
      * Safe to call at any time: a runtime in use is one this build still
-     * ships, so it is never in the removal set.
+     * ships, so it is never in the removal set. Synchronised with [ensure]
+     * all the same — it deletes directories [ensure] writes.
      */
+    @Synchronized
     fun dropUnusedRuntimes(context: Context) {
         val keep = available(context).map { "runtime-$it" }.toSet()
         val dirs = context.filesDir.listFiles { f -> f.isDirectory } ?: return

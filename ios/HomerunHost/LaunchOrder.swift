@@ -29,13 +29,17 @@ struct LaunchOrder {
     private let steps: [Core.Step]
     private let serverId: String
     private let lifecycle: Core.Lifecycle
+    /// This launch's own, so a checkpoint can tell "stopped" from "replaced
+    /// by a newer start" — see `ServerConfig.generation`.
+    private let generation: Int?
     /// The furthest step reached, so arriving backwards can be detected.
     private var index = 0
 
-    init(steps: [Core.Step], serverId: String, lifecycle: Core.Lifecycle) {
+    init(steps: [Core.Step], serverId: String, lifecycle: Core.Lifecycle, generation: Int? = nil) {
         self.steps = steps
         self.serverId = serverId
         self.lifecycle = lifecycle
+        self.generation = generation
     }
 
     /// Arrive at a step.
@@ -60,11 +64,12 @@ struct LaunchOrder {
         }
         index = position + 1
 
-        if steps[position].checkpoint, lifecycle.shouldAbandon(serverId) {
-            // Someone pressed Stop while this was preparing. Giving up here is
-            // the whole reason the core marks these steps: the alternative is
-            // finishing a launch nobody wants and then stopping it, which the
-            // user watches happen.
+        if steps[position].checkpoint, lifecycle.shouldAbandon(serverId, generation: generation) {
+            // Someone pressed Stop while this was preparing — or pressed Start
+            // again, which replaces this launch with a newer one. Giving up
+            // here is the whole reason the core marks these steps: the
+            // alternative is finishing a launch nobody wants and then stopping
+            // it, which the user watches happen.
             throw ServerBackendError.engine("The server was stopped before it finished starting.")
         }
         return true

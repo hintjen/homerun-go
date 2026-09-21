@@ -1026,6 +1026,31 @@ check("a stop before anything spawned abandons the launch") {
     return "abandonLaunch, and the launch sees it"
 }
 
+check("a launch replaced by a restart is told to give up, quietly") {
+    // Start, Stop while preparing, Start again: the restart clears the stop
+    // intent, so a launch asking only "was a stop requested" carries on
+    // beside the one that replaced it. Android shipped that as a JVM dying
+    // on a runtime the second launch was still unpacking.
+    let life = Core.Lifecycle()
+    guard let first = life.startRequested("a").generation else {
+        throw Wrong(what: "proceed carried no generation")
+    }
+    life.stopRequested("a")
+    life.callFinished("a")
+    guard let second = life.startRequested("a").generation else {
+        throw Wrong(what: "a start during a stop is a restart, and proceeds")
+    }
+    try expect(first != second, "the restart reused generation \(first)")
+    try expect(!life.shouldAbandon("a"), "the old question is what let the bug through")
+    try expect(life.shouldAbandon("a", generation: first), "the replaced launch must give up")
+    try expect(life.superseded("a", generation: first), "and know it was replaced")
+    try expect(!life.shouldAbandon("a", generation: second), "the new launch carries on")
+
+    life.abandoned("a", generation: first)
+    try expect(life.activeIds() == ["a"], "the old launch giving up retired the new one")
+    return "generation \(first) yields to \(second)"
+}
+
 check("a stop before the console terminates rather than asking politely") {
     // A server still generating terrain cannot hear `stop`, and has saved no
     // world to protect.

@@ -162,6 +162,10 @@ extension BridgeRouter {
             }
         }
 
+        // The launch's own name, so its checkpoints can tell "stopped" from
+        // "replaced by a newer start" — see `ServerConfig.generation`.
+        config.generation = admission.generation
+
         if !token.isEmpty, !apiURL.isEmpty {
             config.resolveTunnel = {
                 // The baseline came with the settings above, so this no longer
