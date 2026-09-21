@@ -52,8 +52,17 @@ Windows observes both protocols with one `netstat -ano` call, at most once per
 second after the marker. TCP listener detection uses the unspecified foreign
 endpoint with port zero, not localized state text such as LISTENING/ABHÖREN.
 The monitor still checks cancellation and deadlines every 100 ms between
-observations. This does not verify the socket's bind interface; see the open
-review findings before onboarding a real game.
+observations.
+
+Each observation carries the **local address**, and a port the descriptor
+declares `expose: false` that is observed on anything but loopback stops the
+server through its normal stop ladder and reports `port_exposed`. That is
+checked before the all-ports test, so a private port bound wide is refused the
+first time it is seen rather than after the rest of the server comes up. Ports
+the descriptor exposes are not checked: the tunnel targets loopback, but games
+commonly bind every interface for a published port. The check runs from
+readiness until the server is reported running; a port bound wide later in a
+server's life is not yet observed.
 
 ProcessEngine drains stdout and stderr independently; readiness on stderr
 works even if stdout is quiet. Its original Engine trait callers still receive

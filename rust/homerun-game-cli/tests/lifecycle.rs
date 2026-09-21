@@ -22,7 +22,10 @@ fn fake_game() {
         return;
     }
     let port: u16 = std::env::var("HOMERUN_TEST_PORT").unwrap().parse().unwrap();
-    let _socket = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    // A game that ignores the address it was told to bind. Default loopback,
+    // because that is what a well-behaved one does with {bindAddress}.
+    let bind = std::env::var("HOMERUN_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    let _socket = TcpListener::bind((bind.as_str(), port)).unwrap();
     fs::write("pid", std::process::id().to_string()).unwrap();
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
@@ -204,6 +207,59 @@ fn stderr_readiness_console_and_eof_save_the_world() {
         "world flushed",
         "EOF must send the stop verb before exiting"
     );
+}
+
+/// `expose: false` says a port stays on this computer. Nothing checked it:
+/// the bind address was validated and then dropped, and the observation
+/// carried no address to check against, so `127.0.0.1:28016` and
+/// `0.0.0.0:28016` were the same answer. This game ignores the address it was
+/// given and opens a private port to the network; the runner has to stop it
+/// rather than leave an administrative console reachable from outside.
+#[test]
+fn a_private_port_bound_to_every_interface_stops_the_server() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_BIND"] =
+        json!("0.0.0.0");
+
+    let mut h = Host::new();
+    h.send(start);
+
+    let error = h.until("error");
+    assert_eq!(error["code"], "port_exposed", "{error}");
+    assert_eq!(error["serverId"], "s1");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("game"), "written for a player: {message}");
+    assert!(
+        !message.contains("0.0.0.0:") && !message.contains("expose"),
+        "reads as a verdict rather than a diagnostic: {message}"
+    );
+    assert!(
+        !h.seen.iter().any(|v| v["event"] == "server-started"),
+        "a server that was refused must never be reported running: {:?}",
+        h.seen
+    );
+    h.eof();
+}
+
+/// The same game binding the same private port on loopback is exactly what
+/// the check is meant to allow through, so it must still reach `running`.
+#[test]
+fn a_private_port_on_loopback_is_not_refused() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    assert!(
+        !h.seen.iter().any(|v| v["code"] == "port_exposed"),
+        "{:?}",
+        h.seen
+    );
+    h.eof();
 }
 
 /// The runner has no API in front of it, so core's backstop is the only

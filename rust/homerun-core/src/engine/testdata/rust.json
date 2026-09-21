@@ -34,6 +34,7 @@
         "exe": "RustDedicated.exe",
         "args": [
           "-batchmode", "-nographics",
+          "+server.ip", "{bindAddress}",
           "+server.port", "{port:game}",
           "+server.queryport", "{port:query}",
           "+rcon.port", "{port:rcon}",

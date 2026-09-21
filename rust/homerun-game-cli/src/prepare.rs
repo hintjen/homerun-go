@@ -24,6 +24,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+/// The only address a descriptor-driven server is bound to, today.
+///
+/// Named rather than spelled out at each use so that `{bindAddress}`, the
+/// port preflight and the readiness check cannot drift apart -- the last of
+/// those refuses a launch on the strength of what the other two promised.
+pub const LOOPBACK: &str = "127.0.0.1";
+
 pub type Failure = (&'static str, String);
 pub type Result<T> = std::result::Result<T, Failure>;
 pub fn fail(code: &'static str, text: impl Into<String>) -> Failure {
@@ -177,7 +184,14 @@ pub fn launch(
     secrets: &BTreeMap<String, String>,
     bind: Option<&str>,
 ) -> Result<Prepared> {
-    if bind.is_some_and(|s| s != "127.0.0.1") {
+    // v1 binds descriptor games on loopback and nowhere else: the tunnel
+    // connects to loopback, and a port the descriptor marks `expose: false`
+    // has no business anywhere wider. Widening this is a contract change, not
+    // a flag. What is new is that the address is now *passed to the game*
+    // through `{bindAddress}` rather than validated and dropped -- see
+    // `engine::template`.
+    let bind = bind.unwrap_or(LOOPBACK);
+    if bind != LOOPBACK {
         return Err(fail(
             codes::DESCRIPTOR_INVALID,
             "Game servers must bind to loopback behind the gateway.",
@@ -203,8 +217,8 @@ pub fn launch(
             )
         };
         match p.proto {
-            Protocol::Tcp => tcp.push(TcpListener::bind(("127.0.0.1", p.port)).map_err(error)?),
-            Protocol::Udp => udp.push(UdpSocket::bind(("127.0.0.1", p.port)).map_err(error)?),
+            Protocol::Tcp => tcp.push(TcpListener::bind((LOOPBACK, p.port)).map_err(error)?),
+            Protocol::Udp => udp.push(UdpSocket::bind((LOOPBACK, p.port)).map_err(error)?),
         }
         ports.insert(p.name.clone(), p.port);
     }
@@ -214,6 +228,7 @@ pub fn launch(
         secrets,
         server_name: name,
         server_dir: &server.to_string_lossy(),
+        bind_address: bind,
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;
@@ -284,7 +299,7 @@ pub fn launch(
             secret,
         } => Some(rcon::Target {
             protocol,
-            address: format!("127.0.0.1:{}", ports[&port]),
+            address: format!("{LOOPBACK}:{}", ports[&port]),
             password: secrets
                 .get(&secret)
                 .filter(|s| !s.is_empty())

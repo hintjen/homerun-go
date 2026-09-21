@@ -254,6 +254,37 @@ a cleared seed that kept generating the old world is the failure that decided
 it. `properties::remove` and the JSON branch of the runner's `prepare` do
 that; everything unmanaged in the file survives either way.
 
+### A private port stays on this computer, and it is checked
+
+`expose: false` says a port is not published through the gateway. That was a
+promise nothing kept: `prepare` validated the bind address and then dropped
+it, and `platform::Listening` carried a protocol and a port with no address,
+so `127.0.0.1:28016` and `0.0.0.0:28016` were the same observation. An RCON
+console could end up on the LAN behind one password and every check passed.
+
+Three things together make it real:
+
+- **`{bindAddress}`** hands the address to the game. A descriptor that never
+  uses it is a descriptor whose server binds wherever it likes, and
+  `validate` warns about one that has an administrative console.
+- **`Listening` keeps the address** it observed, on all three platforms. The
+  Linux `/proc` tables write it as host-order words, so `0100007F` is
+  `127.0.0.1` and not `1.0.0.127` — reading it the obvious way gives a
+  plausible address that is not the one bound.
+- **The runner refuses a launch** where a port declared `expose: false` is
+  observed on anything but loopback: it stops the server through the normal
+  ladder and sends `port_exposed`. `::ffff:127.0.0.1` counts as loopback,
+  which `Ipv6Addr::is_loopback` does not say on its own.
+
+**Exposed ports may bind wider, deliberately.** The tunnel targets loopback,
+so a published port has no *need* to be on `0.0.0.0` — but games routinely
+bind every interface for one with no way to be told otherwise, and refusing
+that would refuse most of a catalogue over a port that is meant to be
+reachable. What is worth stopping a server over is the private one.
+
+Today `{bindAddress}` is always `127.0.0.1`; the runner refuses any other
+value. Widening that is a contract change rather than a flag.
+
 ## Ports and the gateway — `ports.rs`
 
 Three numbers, and two of them are never the same:

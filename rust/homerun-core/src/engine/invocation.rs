@@ -160,6 +160,7 @@ mod tests {
                 secrets: &self.secrets,
                 server_name: "Justin's server",
                 server_dir: "C:\\servers\\abc",
+                bind_address: "127.0.0.1",
             }
         }
     }

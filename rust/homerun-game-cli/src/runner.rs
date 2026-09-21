@@ -376,13 +376,15 @@ fn run(
     let ready = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
     let timed_out = Arc::new(AtomicBool::new(false));
+    let exposed = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicBool::new(false));
     let tail = Mutex::new(VecDeque::new());
     let monitor = {
-        let (ready, done, timed_out, started) = (
+        let (ready, done, timed_out, exposed, started) = (
             ready.clone(),
             done.clone(),
             timed_out.clone(),
+            exposed.clone(),
             started.clone(),
         );
         let (engine, stop, out, id, live, d) = (
@@ -408,7 +410,33 @@ fn run(
                         .pid()
                         .map(platform::listening_ports)
                         .unwrap_or_default();
-                    if d.ports.iter().all(|p| {
+                    // `expose: false` is a promise that a port stays on this
+                    // computer, and until now nothing checked it: the bind
+                    // address was validated and dropped, and the observation
+                    // carried no address to check against. A game that
+                    // ignores `{bindAddress}` -- or a descriptor that never
+                    // passes it -- puts an administrative console on the LAN
+                    // behind one password. Checked before the all-ports test
+                    // rather than after, so a port bound wide is refused the
+                    // first time it is seen rather than waiting for the rest
+                    // of the server to come up.
+                    if let Some((name, address)) = breach(&d, &observed) {
+                        exposed.store(true, Ordering::SeqCst);
+                        out.error(
+                            Some(&id),
+                            fail(
+                                codes::PORT_EXPOSED,
+                                format!(
+                                    "This game opened its \"{name}\" port to your whole \
+                                     network at {address}, and Homerun keeps that port \
+                                     to this computer only. The server has been \
+                                     stopped. This is a fault in how the game was set \
+                                     up rather than anything you did."
+                                ),
+                            ),
+                        );
+                        stop.request_stop();
+                    } else if d.ports.iter().all(|p| {
                         observed
                             .iter()
                             .any(|o| o.port == p.port && o.protocol == p.proto)
@@ -517,7 +545,12 @@ fn run(
     );
     done.store(true, Ordering::SeqCst);
     let _ = monitor.join();
-    let requested = stop.should_stop() && !timed_out.load(Ordering::SeqCst);
+    // A launch Homerun refused is neither a stop the player asked for nor a
+    // server that failed to start, so it takes the same road as a ready
+    // timeout: the error has already been sent, and what follows must not
+    // report a clean stop over the top of it.
+    let refused = timed_out.load(Ordering::SeqCst) || exposed.load(Ordering::SeqCst);
+    let requested = stop.should_stop() && !refused;
     if requested || (started.load(Ordering::SeqCst) && matches!(outcome, RunOutcome::Stopped)) {
         live.lock().unwrap().state = "stopped".into();
         out.send(Event::ServerStopped {
@@ -526,7 +559,7 @@ fn run(
         });
     } else {
         live.lock().unwrap().state = "crashed".into();
-        if !ready.load(Ordering::SeqCst) && !timed_out.load(Ordering::SeqCst) {
+        if !ready.load(Ordering::SeqCst) && !refused {
             out.error(
                 Some(&id),
                 fail(
@@ -542,6 +575,28 @@ fn run(
         });
     }
     Ok(())
+}
+
+/// The first port the descriptor keeps to this computer that the server bound
+/// somewhere else.
+///
+/// `expose: true` ports are deliberately not checked. The gateway tunnel
+/// connects to loopback, so binding wider is unnecessary -- but games
+/// routinely bind `0.0.0.0` for a published port with no way to be told
+/// otherwise, and refusing that would refuse most of the catalogue for a
+/// port that is meant to be reachable anyway. What is worth stopping a server
+/// over is the *private* port: an RCON console on the LAN behind one
+/// password.
+fn breach(
+    d: &engine::GameDescriptor,
+    observed: &[platform::Listening],
+) -> Option<(String, std::net::IpAddr)> {
+    d.ports.iter().filter(|p| !p.expose).find_map(|p| {
+        observed
+            .iter()
+            .find(|o| o.port == p.port && o.protocol == p.proto && !o.is_confined())
+            .map(|o| (p.name.clone(), o.address))
+    })
 }
 
 /// Only report a roster when the reply has an explicit supported shape.

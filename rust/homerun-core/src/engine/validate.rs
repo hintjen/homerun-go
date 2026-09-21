@@ -75,6 +75,7 @@ pub fn report(descriptor: &GameDescriptor) -> Report {
     check_settings(descriptor, &mut r);
     check_ports(descriptor, &mut r);
     check_lifecycle(descriptor, &mut r);
+    check_bind_address(descriptor, &mut r);
     check_platforms(descriptor, &mut r);
     check_config_and_saves(descriptor, &mut r);
     check_servable(descriptor, &mut r);
@@ -367,6 +368,39 @@ fn check_ports(d: &GameDescriptor, r: &mut Report) {
                 port.name
             ));
         }
+    }
+}
+
+/// A game with an administrative console had better be told where to put it.
+///
+/// `expose: false` says the port stays on this computer, and the runner
+/// refuses a launch that binds it wider — but refusing after the fact is a
+/// stopped server and a message, where passing `{bindAddress}` is a server
+/// that comes up correctly. A descriptor with an RCON console and no
+/// `{bindAddress}` anywhere in its launch line is one whose console binds
+/// wherever the game feels like, which on most games is every interface.
+///
+/// A warning rather than a problem: a game may take its bind address from a
+/// config file this descriptor writes, or may have no way to be told at all,
+/// and in the second case the descriptor is still the best available and the
+/// runner's check is what stands behind it.
+fn check_bind_address(d: &GameDescriptor, r: &mut Report) {
+    if d.console.via != ConsoleVia::Rcon {
+        return;
+    }
+    let used = templated_strings(d).iter().any(|s| {
+        template::placeholders(s)
+            .map(|found| found.contains(&Placeholder::BindAddress))
+            .unwrap_or(false)
+    });
+    if !used {
+        r.warnings.push(
+            "this game has an administrative console and nothing in its launch line \
+             says which address to bind it to, so the game will choose — and most \
+             choose every network interface. Pass {bindAddress} where this game \
+             takes a bind address."
+                .into(),
+        );
     }
 }
 
@@ -705,6 +739,15 @@ fn check_placeholders(
                     "\"{text}\" is shown to players and cannot depend on a setting."
                 ));
             }
+            // A fact about this machine, and never about how a player
+            // reaches the server: in a join URL it would publish `127.0.0.1`
+            // as somewhere to connect to.
+            (Placeholder::BindAddress, Site::Servable) => {
+                r.problems.push(format!(
+                    "\"{text}\" is shown to players and cannot contain the address \
+                     the server binds on this computer."
+                ));
+            }
             (Placeholder::Host, Site::Host) => {
                 r.problems.push(format!(
                     "\"{text}\" uses the address players connect to, which is known \
@@ -970,6 +1013,45 @@ mod tests {
             "{:#?}",
             r.warnings
         );
+    }
+
+    // ─── the address the server is told to bind ────────────────────────────
+
+    /// `expose: false` is a promise about where a port goes. A descriptor
+    /// with an administrative console that never passes `{bindAddress}`
+    /// leaves the game to choose, and most games choose every interface.
+    #[test]
+    fn an_administrative_console_with_no_bind_address_is_warned_about() {
+        let warnings = warnings_of(json!({ "platforms": { "win32-x64": { "launch": {
+            "args": ["-batchmode", "+rcon.port", "{port:rcon}"]
+        }}}}));
+        assert!(
+            warnings.iter().any(|w| w.contains("{bindAddress}")),
+            "{warnings:#?}"
+        );
+    }
+
+    /// The pilot passes it, so the warning is not something every descriptor
+    /// carries and nobody reads.
+    #[test]
+    fn the_pilot_tells_its_server_which_address_to_bind() {
+        let r = report(&rust());
+        assert!(r.ok(), "{:#?}", r.problems);
+        assert!(
+            !r.warnings.iter().any(|w| w.contains("{bindAddress}")),
+            "{:#?}",
+            r.warnings
+        );
+    }
+
+    /// It is a fact about this computer. In a join URL it would publish
+    /// `127.0.0.1` as somewhere for a player to connect to.
+    #[test]
+    fn the_bind_address_cannot_appear_in_a_join_address() {
+        let problems = problems_of(json!({
+            "client": { "joinUrl": "steam://connect/{bindAddress}:{port:game}" }
+        }));
+        assert!(says(&problems, "the address the server binds"), "{problems:#?}");
     }
 
     // ─── one spelling for a closed set ─────────────────────────────────────

@@ -1892,6 +1892,12 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             let secrets = string_map(&args, "secrets");
             let server_name = optional_text("serverName").unwrap_or_default();
             let server_dir = optional_text("serverDir").unwrap_or_default();
+            // Additive: a caller built against the arm before `{bindAddress}`
+            // existed sends nothing and gets loopback, which is what every
+            // descriptor-driven launch uses today anyway.
+            let bind_address = optional_text("bindAddress")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "127.0.0.1".to_string());
             let invocation = engine::invocation::compose(
                 &descriptor,
                 &text("host")?,
@@ -1901,6 +1907,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     secrets: &secrets,
                     server_name: &server_name,
                     server_dir: &server_dir,
+                    bind_address: &bind_address,
                 },
             )
             .map_err(|e| e.to_string())?;
