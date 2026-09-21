@@ -172,6 +172,7 @@ impl Fixture {
     }
 }
 
+#[cfg(windows)]
 #[test]
 fn runtime_assets_and_server_saves_work_together_and_unmount_on_eof() {
     let f = Fixture::with_runtime_saves();
@@ -196,6 +197,7 @@ fn runtime_assets_and_server_saves_work_together_and_unmount_on_eof() {
     assert!(f.root.join("server/settings.json").exists());
 }
 
+#[cfg(windows)]
 #[test]
 fn shared_runtime_lease_refuses_a_second_runner_without_touching_saves() {
     let f = Fixture::with_runtime_saves();
@@ -229,6 +231,7 @@ fn existing_real_runtime_save_directory_is_never_replaced() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn stale_save_link_is_removed_before_downloader_runs() {
     let mut f = Fixture::with_runtime_saves();
@@ -240,7 +243,10 @@ fn stale_save_link_is_removed_before_downloader_runs() {
     let journal = f.root.join("runtime/.homerun-mounts-fake.json");
     fs::write(
         &journal,
-        serde_json::to_vec(&f.d["saves"]["mounts"]).unwrap(),
+        serde_json::to_vec(
+            &json!({"mounts": f.d["saves"]["mounts"], "job": "Global\\HomerunSave-fixture-absent"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     f.d["saves"]["mounts"] = json!([]);
@@ -297,6 +303,7 @@ fn stale_save_link_is_removed_before_downloader_runs() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn runtime_save_mounts_are_removed_on_game_crash() {
     let f = Fixture::with_runtime_saves();
@@ -313,6 +320,7 @@ fn runtime_save_mounts_are_removed_on_game_crash() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn a_spawn_failure_rolls_back_created_save_mounts() {
     let f = Fixture::with_runtime_saves();
@@ -363,15 +371,14 @@ fn save_mount_parents_cannot_redirect_either_end() {
 fn hard_kill_recovers_stale_mount_before_another_server_uses_runtime() {
     let f = Fixture::with_runtime_saves();
     let mut first = Host::new();
-    first.send(f.start());
+    let mut command = f.start();
+    command["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("orphan");
+    first.send(command);
     first.until("server-started");
     first.child.kill().unwrap();
     first.child.wait().unwrap();
-    let until = Instant::now() + Duration::from_secs(10);
-    while TcpListener::bind(("127.0.0.1", f.port)).is_err() {
-        assert!(Instant::now() < until, "job object did not reap the game");
-        thread::sleep(Duration::from_millis(50));
-    }
+    // Immediately recover: production does not wait for the child's port.
     assert!(
         platform::is_mount(&f.root.join("runtime/fake/server")),
         "hard kill must actually exercise stale-junction recovery"
@@ -405,6 +412,70 @@ fn hard_kill_recovers_stale_mount_before_another_server_uses_runtime() {
     );
     assert!(!f.root.join("runtime/fake/server").exists());
 }
+
+#[cfg(windows)]
+#[test]
+fn recovery_drains_a_still_live_job_before_removing_its_mounts() {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::{
+        JobObjects::OpenJobObjectW, SystemServices::JOB_OBJECT_QUERY,
+    };
+    let f = Fixture::with_runtime_saves();
+    let mut first = Host::new();
+    let mut command = f.start();
+    command["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("orphan");
+    let descendant_port = free_port();
+    command["descriptor"]["platforms"][platform::HOST]["launch"]["env"]
+        ["HOMERUN_TEST_GRANDCHILD"] = json!(descendant_port.to_string());
+    first.send(command);
+    first.until("server-started");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpListener::bind(("127.0.0.1", descendant_port)).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "fixture descendant did not start"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let record: Value = serde_json::from_slice(
+        &fs::read(f.root.join("runtime/.homerun-mounts-fake.json")).unwrap(),
+    )
+    .unwrap();
+    let name: Vec<u16> = record["job"]
+        .as_str()
+        .unwrap()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    // Keep one extra handle: last-handle-close cannot kill the game yet.
+    // This deterministically exercises recovery while old code is still alive.
+    let handle = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name.as_ptr()) };
+    assert!(!handle.is_null());
+    let _retained = unsafe { OwnedHandle::from_raw_handle(handle) };
+    first.child.kill().unwrap();
+    first.child.wait().unwrap();
+    assert!(
+        TcpListener::bind(("127.0.0.1", f.port)).is_err(),
+        "fixture must still be alive before recovery"
+    );
+    let mut recovery = Host::new();
+    let mut descriptor = f.d.clone();
+    descriptor["saves"]["mounts"] = json!([]);
+    recovery.send(json!({"cmd":"fetch","serverId":"s1","runtimeRoot":f.root.join("runtime"),"descriptor":descriptor,"licenceAccepted":true}));
+    recovery.until("fetch-complete");
+    assert!(
+        TcpListener::bind(("127.0.0.1", f.port)).is_ok(),
+        "updating was allowed while the old game still owned its port"
+    );
+    assert!(
+        TcpListener::bind(("127.0.0.1", descendant_port)).is_ok(),
+        "recovery left a descendant using the old runtime"
+    );
+    assert!(!f.root.join("runtime/fake/server").exists());
+    recovery.eof();
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);

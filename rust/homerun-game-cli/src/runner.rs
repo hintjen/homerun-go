@@ -378,7 +378,7 @@ fn run(
         return Ok(());
     }
     let server = prepare::absolute(&server_dir)?;
-    let p = prepare::launch(
+    let mut p = prepare::launch(
         d,
         &runtime,
         &server,
@@ -388,6 +388,9 @@ fn run(
         bind_address.as_deref(),
     )?;
     runtime_owner.install(d, &server)?;
+    if let Some(job) = runtime_owner.process_job() {
+        p.engine.require_job(job);
+    }
     let engine = Arc::new(p.engine);
     {
         let mut l = live.lock().unwrap();

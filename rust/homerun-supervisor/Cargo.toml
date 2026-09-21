@@ -284,7 +284,8 @@ android_logger = "0.14"
 # PC with no Visual C++ Redistributable. kernel32 is part of Windows.
 #
 # `default-features = false` plus three feature groups rather than the lot, so
-# what is compiled is the five functions named in `job.rs`. The version is the
+# what is compiled is the Win32 bindings used by ownership and platform I/O.
+# The version is the
 # one already in both lockfiles through other crates, so this adds a
 # dependency edge and no new crate. Windows-only by target, so no Android, iOS
 # or Linux build resolves it at all; behind `process-engine` as well, because
@@ -300,6 +301,10 @@ windows-sys = { version = "0.61", default-features = false, features = [
     # a privilege a player's account does not have.
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_SystemServices",
     "Win32_System_JobObjects",
     # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds an IO_COUNTERS from here.
     "Win32_System_Threading",

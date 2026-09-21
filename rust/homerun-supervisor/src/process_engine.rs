@@ -44,7 +44,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -189,6 +189,7 @@ impl Supervision {
 /// A game server running as a child process.
 pub struct ProcessEngine {
     invocation: Invocation,
+    required_job: Option<Arc<crate::job::Job>>,
     /// The live run. Held so `command` can reach stdin and `players` can read
     /// the roster the console pump is building.
     run: Arc<Mutex<Option<Live>>>,
@@ -201,7 +202,7 @@ pub struct ProcessEngine {
 }
 
 struct Live {
-    stdin: Option<ChildStdin>,
+    stdin: Option<Box<dyn Write + Send>>,
     roster: Arc<Mutex<RosterState>>,
     pid: u32,
 }
@@ -225,9 +226,16 @@ impl ProcessEngine {
     pub fn supervised(invocation: Invocation, supervision: Supervision) -> Self {
         Self {
             invocation,
+            required_job: None,
             run: Arc::new(Mutex::new(None)),
             supervision,
         }
+    }
+
+    /// Mounted saves require ownership before any game code can run. The
+    /// runtime owner also retains this job until tree exit and link cleanup.
+    pub fn require_job(&mut self, job: Arc<crate::job::Job>) {
+        self.required_job = Some(job);
     }
 
     /// The same engine on a ladder of your choosing. Tests only: a production
@@ -384,9 +392,24 @@ impl ProcessEngine {
         // what stops a hard-killed runner leaving the game behind holding its
         // ports and its saves, and what makes the kill rung a tree kill. It
         // is `None` everywhere else, where a pid and a signal already are one.
-        let job = crate::job::Job::kill_on_close().map(Arc::new);
+        let job = self
+            .required_job
+            .clone()
+            .or_else(|| crate::job::Job::kill_on_close().map(Arc::new));
 
-        let mut child = match command.spawn() {
+        let spawned = if let Some(job) = &self.required_job {
+            job.spawn(&command)
+        } else {
+            command.spawn().map(|child| {
+                if let Some(job) = &job {
+                    if !job.adopt(&child) {
+                        log::warn!("this server could not be put in a job object");
+                    }
+                }
+                crate::job::Process::from(child)
+            })
+        };
+        let mut child = match spawned {
             Ok(child) => child,
             // Never reached `on_ready`, so this is a launch that did not
             // happen rather than a server that died.
@@ -397,18 +420,6 @@ impl ProcessEngine {
                 ))
             }
         };
-
-        if let Some(job) = &job {
-            if !job.adopt(&child) {
-                // Not fatal: the server is running and the ladder still ends
-                // in a kill. It does mean this launch has the supervision it
-                // had before jobs existed, which is worth saying out loud.
-                log::warn!(
-                    "this server could not be put in a job object, so stopping it may \
-                     leave programs it started behind"
-                );
-            }
-        }
 
         let roster = Arc::new(Mutex::new(RosterState::default()));
         *self.live() = Some(Live {
@@ -443,7 +454,7 @@ impl ProcessEngine {
         // else. It takes the child's pid rather than the child itself, because
         // waiting on the child belongs to this thread alone.
         let watcher = spawn_stop_watcher(
-            &child,
+            child.id(),
             stop.clone(),
             self.supervision.ladder.clone(),
             self.console_sender(),
@@ -558,13 +569,12 @@ impl StopWatcher {
 type ConsoleSender = Box<dyn Fn(&str) + Send + 'static>;
 
 fn spawn_stop_watcher(
-    child: &Child,
+    pid: u32,
     stop: StopSignal,
     ladder: Vec<Rung>,
     say: ConsoleSender,
     job: Option<Arc<crate::job::Job>>,
 ) -> StopWatcher {
-    let pid = child.id();
     let done = Arc::new(StopSignal::default());
     let finished = Arc::clone(&done);
 
@@ -831,7 +841,8 @@ mod tests {
                 out.write_all(b"18:22:00 Loading world\n").unwrap();
                 out.write_all(b"18:22:01 Fran\xe7ois has entered the world\n")
                     .unwrap();
-                out.write_all(b"18:22:02 Server startup complete\n").unwrap();
+                out.write_all(b"18:22:02 Server startup complete\n")
+                    .unwrap();
                 out.flush().unwrap();
                 loop {
                     let mut line = String::new();
@@ -965,7 +976,10 @@ mod tests {
         assert_eq!(got.len(), 3, "the stream ended early: {got:?}");
         assert_eq!(got[0], "first");
         assert!(got[1].ends_with(" second"), "{:?}", got[1]);
-        assert!(got[1].contains('\u{fffd}'), "the bad byte vanished silently");
+        assert!(
+            got[1].contains('\u{fffd}'),
+            "the bad byte vanished silently"
+        );
         assert_eq!(got[2], "third", "everything after one bad byte was lost");
     }
 
@@ -983,7 +997,10 @@ mod tests {
             b"a\r\r\n",
         ] {
             let mine = lossy(input);
-            let theirs: Vec<String> = BufReader::new(input).lines().map_while(Result::ok).collect();
+            let theirs: Vec<String> = BufReader::new(input)
+                .lines()
+                .map_while(Result::ok)
+                .collect();
             assert_eq!(mine, theirs, "for {input:?}");
         }
     }
@@ -998,7 +1015,12 @@ mod tests {
         input.extend_from_slice(b"\nnext\n");
 
         let got = lossy(&input);
-        assert_eq!(got.len(), 2, "{:?}", got.iter().map(String::len).collect::<Vec<_>>());
+        assert_eq!(
+            got.len(),
+            2,
+            "{:?}",
+            got.iter().map(String::len).collect::<Vec<_>>()
+        );
         assert_eq!(got[0].len(), MAX_LINE + " [truncated]".len());
         assert!(got[0].ends_with(" [truncated]"), "cut without saying so");
         assert_eq!(got[1], "next", "the reader did not find the next line");
@@ -1033,12 +1055,9 @@ mod tests {
                 stop.clone(),
             );
             let run = scope.spawn(move || {
-                e.run(
-                    &request,
-                    s,
-                    &|line| l.lock().unwrap().push(line),
-                    &|| *r.lock().unwrap() = true,
-                )
+                e.run(&request, s, &|line| l.lock().unwrap().push(line), &|| {
+                    *r.lock().unwrap() = true
+                })
             });
 
             let deadline = Instant::now() + Duration::from_secs(20);

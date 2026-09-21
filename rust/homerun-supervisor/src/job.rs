@@ -54,9 +54,20 @@
 //! - **The kill rung is a tree kill.** `TerminateJobObject` ends every
 //!   process in the job, re-parented or not.
 //!
-//! # The window this does not close
+//! # Mounted saves require stronger ownership
 //!
-//! A child is assigned to its job immediately after `CreateProcess` returns,
+//! `Job::required` creates a named, mandatory job. The mounted path uses
+//! `PROC_THREAD_ATTRIBUTE_JOB_LIST` during `CreateProcessW`, assigning the
+//! process before its initial thread runs. Creation or assignment failure
+//! refuses launch. No post-spawn adoption window or unowned fallback exists.
+//! A recovery record stores the name; recovery reopens the job, terminates it
+//! and queries until ActiveProcesses is zero before unlinking or updating.
+//! Normal cleanup drains the same job, including surviving descendants.
+//! Query/open/termination errors or timeout preserve links and block reuse.
+//!
+//! # The legacy path's window
+//!
+//! For unmounted launches, a child is assigned to its job immediately after `CreateProcess` returns,
 //! not before it runs. In the microseconds between, the child is in no job,
 //! so a grandchild started in that window would not be a member. For it to
 //! matter, a vendor's server would have to spawn something before its image
@@ -67,12 +78,16 @@
 //!
 //! # Everywhere else
 //!
-//! [`Job::kill_on_close`] returns `None` off Windows, so call sites carry no
+//! Mounted launches refuse off Windows until equivalent ownership exists.
+//! [`Job::kill_on_close`] returns `None` off Windows, so legacy call sites carry no
 //! `cfg`. Android and iOS keep exactly the behaviour they had: Android's
 //! stop ladder ends in `SIGKILL` to a pid, which on a platform with process
 //! groups and no re-parenting launchers is the right answer already.
 
 use std::process::Child;
+
+mod owned;
+pub(crate) use owned::Process;
 
 /// A child process and everything it goes on to start.
 ///
@@ -97,43 +112,155 @@ impl Job {
     /// A job that terminates its members when the last handle to it closes.
     ///
     /// `None` off Windows, and `None` if the job cannot be created — in which
-    /// case the caller falls back to what it did before, because a server
-    /// that starts without a job is worse supervised and a server that does
-    /// not start is worse than that.
+    /// case legacy unmounted callers retain their prior fallback. Mounted
+    /// launches must use `required` and the atomic spawn path instead.
     #[cfg(windows)]
     pub fn kill_on_close() -> Option<Job> {
-        use windows_sys::Win32::System::JobObjects::{
-            CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-        };
+        Self::create(None).ok()
+    }
 
-        // SAFETY: an unnamed job with default security, which is what the
-        // two null arguments mean.
-        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        if handle.is_null() {
-            return None;
+    /// A named job for a mounted runtime. Unlike the legacy API, failure is fatal.
+    pub fn required(name: &str) -> Result<Job, String> {
+        #[cfg(windows)]
+        {
+            Self::create(Some(name)).map_err(|e| format!("Cannot own the game's process tree: {e}"))
         }
-        let job = Job { handle };
+        #[cfg(not(windows))]
+        {
+            let _ = name;
+            Err("Save mounts require Windows process-tree ownership on this runner.".into())
+        }
+    }
 
+    #[cfg(windows)]
+    fn create(name: Option<&str>) -> std::io::Result<Job> {
+        use windows_sys::Win32::{Foundation::ERROR_ALREADY_EXISTS, System::JobObjects::*};
+        let wide = name.map(|s| s.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
+        // SAFETY: optional NUL-terminated name, default non-inheritable security.
+        let handle = unsafe {
+            CreateJobObjectW(
+                std::ptr::null(),
+                wide.as_ref().map_or(std::ptr::null(), |s| s.as_ptr()),
+            )
+        };
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let existed =
+            std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32);
+        let job = Job { handle };
+        if name.is_some() && existed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "The process ownership name is already in use.",
+            ));
+        }
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-        // SAFETY: the handle is one we just created, the class matches the
-        // struct being passed, and the length is that struct's own size.
-        let set = unsafe {
+        // SAFETY: live job, correctly sized information class and buffer.
+        if unsafe {
             SetInformationJobObject(
                 handle,
                 JobObjectExtendedLimitInformation,
                 std::ptr::addr_of!(limits).cast(),
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                std::mem::size_of_val(&limits) as u32,
             )
-        };
-        if set == 0 {
-            // Without the limit the job owns nothing, and a job that owns
-            // nothing is worse than none: it would look like supervision.
-            return None;
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
         }
-        Some(job)
+        Ok(job)
+    }
+
+    /// Reopen the exact previous job, terminate it and wait for zero members.
+    /// A destroyed job has no surviving members. Any other open/query error
+    /// blocks recovery; port availability and PID reuse are irrelevant here.
+    pub fn recover(name: &str) -> Result<(), String> {
+        if !name.starts_with("Global\\HomerunSave-") || name.contains('\0') {
+            return Err("The saved process ownership name is invalid.".into());
+        }
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::{
+                Foundation::ERROR_FILE_NOT_FOUND,
+                System::{
+                    JobObjects::*,
+                    SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE},
+                },
+            };
+            let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+            // SAFETY: valid string; the handle is owned here and never inherited.
+            let handle = unsafe {
+                OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE, 0, wide.as_ptr())
+            };
+            if handle.is_null() {
+                let e = std::io::Error::last_os_error();
+                return if e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) {
+                    Ok(())
+                } else {
+                    Err(format!("Cannot inspect the previous game job: {e}"))
+                };
+            }
+            Job { handle }.terminate_and_wait()
+        }
+        #[cfg(not(windows))]
+        {
+            Err(
+                "Cannot establish that the previous mounted game has exited on this platform."
+                    .into(),
+            )
+        }
+    }
+
+    /// Explicitly drain the tree before unlinking saves, including descendants
+    /// whose launcher already exited. Kill-on-close alone is asynchronous.
+    pub fn terminate_and_wait(&self) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::JobObjects::*;
+            // SAFETY: live job handle owned by self.
+            if unsafe { TerminateJobObject(self.handle, 1) } == 0 {
+                return Err(format!(
+                    "Cannot terminate the previous game job: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION =
+                    unsafe { std::mem::zeroed() };
+                // SAFETY: correctly sized output buffer for this information class.
+                if unsafe {
+                    QueryInformationJobObject(
+                        self.handle,
+                        JobObjectBasicAccountingInformation,
+                        std::ptr::addr_of_mut!(info).cast(),
+                        std::mem::size_of_val(&info) as u32,
+                        std::ptr::null_mut(),
+                    )
+                } == 0
+                {
+                    return Err(format!(
+                        "Cannot confirm game job exit: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+                if info.ActiveProcesses == 0 {
+                    return Ok(());
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(
+                        "The previous game process tree has not exited. Save links were retained."
+                            .into(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Process-tree exit cannot be established on this platform.".into())
+        }
     }
 
     #[cfg(not(windows))]

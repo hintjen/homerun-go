@@ -81,31 +81,26 @@ means the wireproxy process spawned, not that the remote gateway is reachable.
 It gets the same job object the game does, so a runner that dies abruptly does
 not leave a gateway connection behind with nothing serving it.
 
-**On Windows the game and the tunnel are each owned by a job object.** A
-runner that is hard-killed — an Electron crash, Task Manager, a force-quit —
-closes its handles whether it wants to or not, and the job takes the game and
-everything it started with it. Without that the game kept its ports and its
-save directory, so the next start failed `port_unavailable`, and a start that
-got past the preflight was a second server writing the same world. The stop
-ladder's last rung is `TerminateJobObject` rather than `taskkill /PID n /F`,
-which matters for a launcher-style server: it starts the real server and
-exits, so the pid the runner holds is not the pid doing the work, and even
-`/T` walks parent links the launcher broke on its way out. The runner itself
-is **not** in the job — see `job.rs` for why, and note that the desktop
-detaching from the runner at quit is unaffected by any of this. Nothing about
-Android, iOS or Linux changes: they have process groups and signals already.
+**Mounted Windows games require a Job Object.** The runner creates a named
+job and assigns the game using `PROC_THREAD_ATTRIBUTE_JOB_LIST` during
+`CreateProcessW`, before the initial thread can run. Creation or assignment
+failure refuses launch. Descendants inherit membership; breakaway is not
+allowed. The stop ladder can terminate the whole job even after a launcher
+exits. The runner itself stays outside the job.
 
-**The window this deliberately does not close.** A child is assigned to its
-job immediately after `CreateProcess` returns, not before it runs, so in the
-microseconds between it is in no job and a grandchild started in that window
-would not be a member. For that to matter a vendor's server would have to
-spawn something before its image has finished loading. Closing it means
-`CREATE_SUSPENDED` and a resume that `std::process` gives no thread handle
-for — enumerating the new process's threads to resume them — which trades a
-window nothing has ever fallen through for a failure mode where the game
-never starts at all. **This is a decision, not an oversight** (reviewed and
-agreed alongside the runner-not-in-the-job choice): do not "fix" it without a
-reason better than tidiness.
+Normal cleanup terminates the remaining tree and confirms zero active
+processes before unlinking saves. Hard runner death closes its job handle and
+initiates termination, but recovery does not assume that termination has
+finished: it reopens the recorded job, terminates and drains it before
+unlinking or updating. Query failure or timeout preserves the links and
+journal. Mounted launches on non-Windows platforms refuse until equivalent
+ownership and recovery exist.
+
+Unmounted game and tunnel launches retain their existing best-effort job
+behavior: post-spawn assignment, a small assignment window, and fallback if
+creation or assignment fails. That fallback provides no ownership guarantee
+and cannot be used for mounted saves. Detaching from the runner on desktop
+quit is unaffected.
 
 See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
@@ -115,6 +110,9 @@ For cwd-relative assets, `launch.cwdBase: "runtime"` selects the shared runtime
 while `saves.mounts` redirects save directories into the server folder. See
 [runtime working directories and save mounts](./runtime-save-mounts.md) for
 locking, recovery before updates, path restrictions and real-game limitations.
+Mounted launches require atomic Windows Job Object membership; recovery and
+normal cleanup confirm the entire job has exited before unlinking saves. The
+legacy best-effort job fallback described above applies only to unmounted games.
 
 The runtime root holds one directory per game. The shared steamcmd cache is
 its sibling under the runtime parent. RAM/free disk/CPU capacity comes from

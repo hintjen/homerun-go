@@ -67,27 +67,43 @@ death. This protects all runner-mediated updates and launches. An external
 steamcmd or manual updater bypassing the runner is outside that protection.
 
 Before any fetch, recover `<runtimeRoot>/.homerun-mounts-<game>.json`. This
-record is outside the directory steamcmd updates. It lists mount locations
+record is outside the directory steamcmd updates. It records a unique named
+Windows Job Object and the mount locations
 from the previous launch, so cleanup works even when a new descriptor has
-removed or renamed its mounts. Recovery removes links only, never their target
+removed or renamed its mounts. Before touching any link, recovery opens that
+exact job, terminates it, and queries until its active process count is zero.
+A missing job means it was destroyed after all its members exited. Any other
+open/query/termination error or a ten-second wait timeout blocks reuse and
+preserves the journal and links. Older journals containing only a mount array
+lack this evidence and are refused; a person must stop all runtime users and
+repair them before updating. Recovery removes links only, never their target
 directories or a real directory someone put in their place. An unreadable,
 unsafe or obstructed recovery record blocks the operation rather than handing
 the updater a potentially live save link.
 
 After fetching and validating the runtime, prepare configuration and arguments,
-record the planned mounts durably, create links and verify their actual targets.
-Windows uses directory junctions via `FSCTL_SET_REPARSE_POINT`; Unix uses
-directory symlinks. No Windows symbolic-link privilege or Developer Mode is
+create the required named Job Object, record its identity and planned mounts
+durably, create links and verify their actual targets. Job creation failure
+refuses launch before links exist. Mounted Windows processes are assigned
+using `PROC_THREAD_ATTRIBUTE_JOB_LIST` inside `CreateProcessW`, before any game
+code runs; assignment failure fails process creation. The legacy process
+engine fallback is never used for mounted launches.
+Windows uses directory junctions via `FSCTL_SET_REPARSE_POINT`. Mounted
+launches refuse on other platforms until equivalent mandatory ownership and
+recovery are implemented; the platform's Unix symlink primitive alone is not
+sufficient. No Windows symbolic-link privilege or Developer Mode is
 required for the junction operation.
 
 Normal stop, EOF, game crash, failed spawn and preparation failure remove
-created links while retaining save bytes. If cleanup fails, the record remains
+created links only after terminating and confirming exit of every member of
+the owned job, including descendants, while retaining save bytes. If cleanup fails, the record remains
 and the next operation must recover it before fetching. Cleanup diagnostics
 go to stderr.
 
 **An abruptly killed runner cannot execute cleanup code.** Its inherited Job
-Object ownership reaps the game on Windows, while the junction and recovery
-record may remain. The next runner unlinks them under the runtime lock before
+Object initiates process-tree termination on Windows, while the junction and
+recovery record may remain. The next runner confirms tree exit and unlinks
+them under the runtime lock before
 any fetch or start, including a start for a different server. Immediate junction
 removal at the instant of runner death is not claimed. No independent cleanup
 daemon is installed.
@@ -130,13 +146,15 @@ It also corrected old-plan verification defaults and suspect pinned runtimes.
 
 ## Validation and limits
 
-The complete Windows `npm test` run passed: 954 core tests, 262 supervisor tests
-(with two ignored), eight protocol tests, and 27 lifecycle entries (one is the
-fake-game fixture, so 26 substantive tests). The ABI, revision, capability, UI
+The complete Windows `npm test` run passed: 954 core tests, 265 supervisor tests
+(with two ignored), ten protocol/runtime tests, and 28 lifecycle entries (one is
+the fake-game fixture, so 27 substantive tests). The ABI, revision, capability, UI
 bundle, 22 native addon checks and 18 artifact tests also passed. Mutation checks
 proved that disabling cleanup, pre-fetch recovery, runtime exclusion or mount
 validation, or changing the legacy Steam verification default, fails its test;
-mutations were restored. Build checks for the final commit are recorded in the PR.
+mutations were restored. The ownership follow-up also tests mandatory job creation and assignment,
+confirmed tree exit, immediate recovery, and native spawn argument/pipe behavior.
+Build checks are recorded in the PR.
 
 The fake executable reads `Bundles/asset` from its runtime cwd and writes a
 cwd-relative save. Windows tests verify the actual junction, persistence under
@@ -181,3 +199,21 @@ run steamcmd over unresolved links to make the error disappear.
 **Assets load but the world is missing from backups:** check the declared
 mount targets and real writes, not only `saves.paths`. A vendor may have
 additional persistent paths requiring explicit configuration or more mounts.
+
+## Ownership regression coverage
+
+Windows failure injection covers Job Object creation refusal, native process
+creation with an invalid job assignment handle, and an unconfirmable tree exit
+that must leave both junction and journal intact. Immediate hard-kill recovery
+no longer waits for the child's port in test setup. A separate test retains a
+second job handle so the old game definitely survives runner death; recovery
+must terminate it before reporting fetch completion. Native-spawn fixtures
+also check argument quoting, environment propagation and both output pipes.
+Invalid/non-native executables are refused before compatibility-host launch;
+loader errors use thread-local quiet error mode, so failure reports do not
+open a modal Windows dialog or block save cleanup.
+
+The required spawn path uses the documented Windows
+[JOB_LIST process attribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+and [job lifetime rules](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+It does not rely on a port closing or a PID still naming the same process.

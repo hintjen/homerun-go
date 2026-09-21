@@ -492,6 +492,7 @@ dependencies = [
  "homerun-supervisor",
  "serde",
  "serde_json",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
