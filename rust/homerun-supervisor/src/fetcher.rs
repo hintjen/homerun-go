@@ -533,17 +533,14 @@ fn run_streaming(
         .map_err(|_| format!("Homerun could not run {}.", program.display()))?;
 
     let (tx, rx) = std::sync::mpsc::sync_channel(256);
+    // Lossy, and for a sharper reason here than for a game's console: a
+    // Windows username that is not ASCII appears in the paths steamcmd
+    // prints, in the machine's code page rather than UTF-8. Ending the pump
+    // on the first such line means "Success! App" is never seen, and the
+    // fetch fails -- every time, on that machine, for ever.
     fn pump(reader: impl Read + Send + 'static, tx: std::sync::mpsc::SyncSender<String>) {
         std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::BufReader::new(reader)
-                .lines()
-                .map_while(Result::ok)
-            {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
+            crate::process_engine::read_lines_lossy(reader, |line| tx.send(line).is_ok());
         });
     }
     if let Some(stdout) = child.stdout.take() {
@@ -974,6 +971,69 @@ mod tests {
 
     /// Deliberately broad, and deliberately tested as such: a false negative
     /// here means a program agreed to a licence on someone's behalf.
+    // ─── steamcmd output that is not UTF-8 ─────────────────────────────────
+
+    /// Not a test. Stands in for `steamcmd`, and is selected by name rather
+    /// than by environment variable so that nothing has to be set in this
+    /// process to spawn it. `cargo test` skips it because it is ignored.
+    ///
+    /// The bytes are the shape that broke this: steamcmd prints the paths it
+    /// is installing into, and on a machine whose Windows username is not
+    /// ASCII those arrive in the machine's code page rather than UTF-8. With
+    /// the old reader that line ended the pump, `Success! App` was never
+    /// seen, and the fetch failed — every time, on that machine, for ever.
+    #[test]
+    #[ignore = "spawned as a child by the test below"]
+    fn i_am_fake_steamcmd() {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        out.write_all(b"Redirecting stderr to 'C:\\steamcmd\\logs\\stderr.txt'\n")
+            .unwrap();
+        out.write_all(b"Logging directory: 'C:/Users/Fran\xe7ois/Steam/logs'\n")
+            .unwrap();
+        out.write_all(b" Update state (0x61) downloading, progress: 42.13\n")
+            .unwrap();
+        out.write_all(b"Success! App '258550' fully installed.\n")
+            .unwrap();
+        out.flush().unwrap();
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn steamcmd_output_that_is_not_utf8_still_shows_the_line_that_matters() {
+        let program = std::env::current_exe().expect("the test binary must be locatable");
+        let args: Vec<String> = [
+            "--exact",
+            "fetcher::tests::i_am_fake_steamcmd",
+            "--nocapture",
+            "--ignored",
+        ]
+        .iter()
+        .map(|a| (*a).to_string())
+        .collect();
+
+        let ctx = Context {
+            tools_dir: std::env::temp_dir(),
+            on_progress: &|_| {},
+            cancelled: &|| false,
+        };
+        let output = run_streaming(&program, &args, "steamcmd", &ctx)
+            .expect("a program that exits cleanly is not a failure");
+
+        assert!(
+            output.contains("Success! App"),
+            "the pump stopped at the line that is not UTF-8: {output}"
+        );
+        assert!(
+            output.contains('\u{fffd}'),
+            "the bad byte vanished, so this is not the case it was meant to be: {output}"
+        );
+        assert!(
+            !prompt_detected(&output),
+            "an install was mistaken for a prompt: {output}"
+        );
+    }
+
     #[test]
     fn output_asking_someone_to_agree_is_recognised() {
         for asking in [

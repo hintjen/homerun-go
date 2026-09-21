@@ -509,6 +509,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tungstenite",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

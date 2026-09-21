@@ -52,8 +52,17 @@ Windows observes both protocols with one `netstat -ano` call, at most once per
 second after the marker. TCP listener detection uses the unspecified foreign
 endpoint with port zero, not localized state text such as LISTENING/ABHÖREN.
 The monitor still checks cancellation and deadlines every 100 ms between
-observations. This does not verify the socket's bind interface; see the open
-review findings before onboarding a real game.
+observations.
+
+Each observation carries the **local address**, and a port the descriptor
+declares `expose: false` that is observed on anything but loopback stops the
+server through its normal stop ladder and reports `port_exposed`. That is
+checked before the all-ports test, so a private port bound wide is refused the
+first time it is seen rather than after the rest of the server comes up. Ports
+the descriptor exposes are not checked: the tunnel targets loopback, but games
+commonly bind every interface for a published port. The check runs from
+readiness until the server is reported running; a port bound wide later in a
+server's life is not yet observed.
 
 ProcessEngine drains stdout and stderr independently; readiness on stderr
 works even if stdout is quiet. Its original Engine trait callers still receive
@@ -69,6 +78,36 @@ Exit codes are omitted when the existing Engine outcome does not retain them.
 
 A tunnel is a child of this runner and stops with the server. tunnel-started
 means the wireproxy process spawned, not that the remote gateway is reachable.
+It gets the same job object the game does, so a runner that dies abruptly does
+not leave a gateway connection behind with nothing serving it.
+
+**On Windows the game and the tunnel are each owned by a job object.** A
+runner that is hard-killed — an Electron crash, Task Manager, a force-quit —
+closes its handles whether it wants to or not, and the job takes the game and
+everything it started with it. Without that the game kept its ports and its
+save directory, so the next start failed `port_unavailable`, and a start that
+got past the preflight was a second server writing the same world. The stop
+ladder's last rung is `TerminateJobObject` rather than `taskkill /PID n /F`,
+which matters for a launcher-style server: it starts the real server and
+exits, so the pid the runner holds is not the pid doing the work, and even
+`/T` walks parent links the launcher broke on its way out. The runner itself
+is **not** in the job — see `job.rs` for why, and note that the desktop
+detaching from the runner at quit is unaffected by any of this. Nothing about
+Android, iOS or Linux changes: they have process groups and signals already.
+
+**The window this deliberately does not close.** A child is assigned to its
+job immediately after `CreateProcess` returns, not before it runs, so in the
+microseconds between it is in no job and a grandchild started in that window
+would not be a member. For that to matter a vendor's server would have to
+spawn something before its image has finished loading. Closing it means
+`CREATE_SUSPENDED` and a resume that `std::process` gives no thread handle
+for — enumerating the new process's threads to resume them — which trades a
+window nothing has ever fallen through for a failure mode where the game
+never starts at all. **This is a decision, not an oversight** (reviewed and
+agreed alongside the runner-not-in-the-job choice): do not "fix" it without a
+reason better than tidiness.
+
+See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
 ## `prepare.rs`: directories, settings and resources
 
@@ -79,7 +118,9 @@ a refusal rather than an optimistic launch.
 
 Relative cwd/config paths are confined to the server directory. Managed files
 cannot traverse symbolic links. JSON object and properties files merge managed
-keys without erasing unrelated settings. Other descriptor config formats
+keys without erasing unrelated settings. A managed key whose setting is unset
+is **removed** rather than left at the previous launch's value; unmanaged keys,
+comments and layout survive that too. Other descriptor config formats
 (INI, TOML, XML) currently fail with an explicit capability message; implement
 their merge rules before onboarding a game that requires them. The descriptor
 and vendor executable remain trusted bundled inputs, not a sandbox for hostile

@@ -1,5 +1,5 @@
-//! `{setting:…}`, `{port:…}`, `{secret:…}` — and the one rule that makes them
-//! safe.
+//! `{setting:…}`, `{port:…}`, `{secret:…}`, `{bindAddress}` — and the one rule
+//! that makes them safe.
 //!
 //! # Substitution happens once, and never looks at what it produced
 //!
@@ -35,6 +35,15 @@
 //! front of it. [`super::invocation`] does the dropping; this module reports
 //! that a string resolved to nothing.
 //!
+//! # `{bindAddress}` is how a promise becomes an argument
+//!
+//! The descriptor says which ports are `expose: false`, and the host binds
+//! them on loopback only. That was a promise nothing kept: the address was
+//! validated, then dropped, and the game bound wherever it pleased. The
+//! placeholder is what hands the address to the server, and
+//! [`super::validate`] warns about a descriptor with an administrative
+//! console that never uses it.
+//!
 //! # Braces that are not placeholders
 //!
 //! `{{` is a literal `{`. Anything else between braces must be a placeholder
@@ -59,6 +68,16 @@ pub struct Bindings<'a> {
     pub secrets: &'a BTreeMap<String, String>,
     pub server_name: &'a str,
     pub server_dir: &'a str,
+    /// The address the server is being told to bind, for `{bindAddress}`.
+    ///
+    /// The host decides it; today every descriptor-driven launch is
+    /// `127.0.0.1`, because the tunnel connects to loopback and a port the
+    /// descriptor marks `expose: false` has no business anywhere else. It is
+    /// a binding rather than a constant so that the promise is *passed to the
+    /// game* instead of merely being believed about it — a descriptor with no
+    /// `{bindAddress}` in its launch line is a descriptor whose server binds
+    /// wherever it likes.
+    pub bind_address: &'a str,
 }
 
 /// What a string resolved to.
@@ -92,6 +111,9 @@ pub enum Placeholder {
     Secret(String),
     ServerName,
     ServerDir,
+    /// The address the server is told to bind. Host-side only: it is a fact
+    /// about this machine, not about how a player reaches the server.
+    BindAddress,
     /// The gateway address a player connects to. Only meaningful in
     /// `client.joinUrl`, which the API fills in — the engine never resolves
     /// it, and [`fill`] refuses it so that a launch line cannot quietly
@@ -108,6 +130,7 @@ impl Placeholder {
             Placeholder::Secret(n) => format!("{{secret:{n}}}"),
             Placeholder::ServerName => "{serverName}".into(),
             Placeholder::ServerDir => "{serverDir}".into(),
+            Placeholder::BindAddress => "{bindAddress}".into(),
             Placeholder::Host => "{host}".into(),
         }
     }
@@ -180,6 +203,7 @@ fn parse(body: &str, whole: &str) -> Result<Placeholder> {
         None => match body {
             "serverName" => Ok(Placeholder::ServerName),
             "serverDir" => Ok(Placeholder::ServerDir),
+            "bindAddress" => Ok(Placeholder::BindAddress),
             "host" => Ok(Placeholder::Host),
             _ => Err(unknown()),
         },
@@ -262,6 +286,7 @@ pub fn fill(input: &str, bindings: &Bindings) -> Result<Filled> {
                 }
                 Placeholder::ServerName => out.push_str(bindings.server_name),
                 Placeholder::ServerDir => out.push_str(bindings.server_dir),
+                Placeholder::BindAddress => out.push_str(bindings.bind_address),
                 Placeholder::Host => {
                     return Err(Error::Malformed(format!(
                         "this game's descriptor uses {} where the server runs, but the \
@@ -293,6 +318,7 @@ mod tests {
         secrets: BTreeMap<String, String>,
         server_name: String,
         server_dir: String,
+        bind_address: String,
     }
 
     impl Fixture {
@@ -314,6 +340,7 @@ mod tests {
                     .collect(),
                 server_name: "Justin's server".into(),
                 server_dir: "C:\\servers\\abc".into(),
+                bind_address: "127.0.0.1".into(),
             }
         }
 
@@ -324,6 +351,7 @@ mod tests {
                 secrets: &self.secrets,
                 server_name: &self.server_name,
                 server_dir: &self.server_dir,
+                bind_address: &self.bind_address,
             }
         }
     }
@@ -465,6 +493,40 @@ mod tests {
 
         let err = fill("{flavour:x}", &f.bindings()).unwrap_err().to_string();
         assert!(err.contains("{flavour:x}"), "{err}");
+    }
+
+    // ─── the address the server is told to bind ────────────────────────────
+
+    #[test]
+    fn the_bind_address_resolves_where_a_launch_line_asks_for_it() {
+        assert_eq!(text("{bindAddress}"), "127.0.0.1");
+        assert_eq!(
+            text("+server.ip {bindAddress}"),
+            "+server.ip 127.0.0.1"
+        );
+        assert_eq!(text("-bind={bindAddress}:{port:game}"), "-bind=127.0.0.1:28015");
+    }
+
+    /// Player text is never rescanned, and the newest placeholder is no
+    /// exception: a server named `{bindAddress}` stays those characters.
+    #[test]
+    fn a_server_named_after_the_bind_address_is_still_literal_text() {
+        let mut f = Fixture::new();
+        f.settings
+            .insert("hostname".into(), json!("{bindAddress}"));
+        let got = fill("{setting:hostname}", &f.bindings()).unwrap();
+        assert_eq!(got.text().unwrap(), "{bindAddress}");
+    }
+
+    /// Near-misses are unknown placeholders rather than empty strings, the
+    /// same as every other spelling this module does not know.
+    #[test]
+    fn a_misspelled_bind_address_is_refused_rather_than_ignored() {
+        let f = Fixture::new();
+        for input in ["{bindaddress}", "{bind_address}", "{bindAddress:game}"] {
+            let err = fill(input, &f.bindings()).unwrap_err().to_string();
+            assert!(err.contains(input.trim_matches(['{', '}'])), "{input}: {err}");
+        }
     }
 
     #[test]

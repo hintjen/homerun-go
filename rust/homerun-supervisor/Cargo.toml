@@ -59,7 +59,7 @@ backup-engine = ["dep:rustic_core", "dep:rustic_backend", "dep:jiff"]
 # build turns it on. Off by default like the others, but `npm run test:rust`
 # enables it, because its tests are the only coverage process supervision has
 # ever had and they need no device.
-process-engine = ["dep:libc"]
+process-engine = ["dep:libc", "dep:windows-sys"]
 
 # Everything a *descriptor-driven* game needs that `homerun-core::engine`
 # deliberately cannot do: fetch a runtime, verify and unpack it, drive
@@ -267,6 +267,38 @@ homerun-core = { path = "../homerun-core" }
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 android_logger = "0.14"
+
+# Job Objects, and nothing else — see `job.rs` for what they buy and why the
+# alternative was an orphaned game server holding its ports and its saves.
+#
+# There is no portable spelling for this: a Windows process tree is not a
+# process group, `Child::kill` is one process, and `taskkill /T` walks parent
+# links that a launcher-style executable has already broken by exiting. The
+# only thing that reliably owns a subtree on Windows is a Job Object, and the
+# only way to reach one is the Win32 API.
+#
+# Bindings rather than a wrapper, and no C or C++ anywhere in it -- which is
+# not incidental: every Windows desktop target builds with `+crt-static` and
+# `scripts/check-windows-runtime.js` fails the build on a vcruntime import,
+# after a beta shipped binaries that died with 0xC0000135 before `main` on a
+# PC with no Visual C++ Redistributable. kernel32 is part of Windows.
+#
+# `default-features = false` plus three feature groups rather than the lot, so
+# what is compiled is the five functions named in `job.rs`. The version is the
+# one already in both lockfiles through other crates, so this adds a
+# dependency edge and no new crate. Windows-only by target, so no Android, iOS
+# or Linux build resolves it at all; behind `process-engine` as well, because
+# a build with no child processes has nothing to own.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", default-features = false, features = [
+    "Win32_Foundation",
+    # `CreateJobObjectW` takes a SECURITY_ATTRIBUTES pointer, so its binding
+    # is gated on this even though the pointer passed is null.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds an IO_COUNTERS from here.
+    "Win32_System_Threading",
+], optional = true }
 
 # rustic_core as published does not compile for aarch64-apple-ios: the dev_t
 # cfg gates in backend/local_destination.rs list macos and openbsd but not
