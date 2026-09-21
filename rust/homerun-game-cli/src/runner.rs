@@ -6,7 +6,11 @@ use crate::{
 use homerun_core::engine::{self, descriptor::PlayersVia};
 use homerun_supervisor::{
     engine::{Engine, RunOutcome, RunRequest, StopSignal},
-    fetcher, platform,
+    fetcher,
+    // Aliased: `Job` below is this file's fetch/start worker, which is a
+    // different thing entirely from an owned process tree.
+    job::Job as ProcessJob,
+    platform,
     process_engine::ProcessEngine,
     rcon,
 };
@@ -54,7 +58,10 @@ struct Job {
 pub struct Runner {
     out: Output,
     job: Option<Job>,
-    tunnel: Option<(String, Child)>,
+    /// The wireproxy child, and the job that owns it and anything it starts.
+    /// Same ownership the game gets: a runner that is hard-killed must not
+    /// leave a tunnel behind holding a gateway connection nothing is serving.
+    tunnel: Option<(String, Child, Option<ProcessJob>)>,
     console_tasks: Vec<JoinHandle<()>>,
     build: String,
 }
@@ -87,7 +94,7 @@ impl Runner {
         if self.idle() {
             self.stop_tunnel();
         }
-        if let Some((id, child)) = &mut self.tunnel {
+        if let Some((id, child, _)) = &mut self.tunnel {
             if child.try_wait().ok().flatten().is_some() {
                 self.out.send(Event::TunnelFailed {
                     server_id: id.clone(),
@@ -98,8 +105,15 @@ impl Runner {
         }
     }
     fn stop_tunnel(&mut self) {
-        if let Some((_, mut child)) = self.tunnel.take() {
-            let _ = child.kill();
+        if let Some((_, mut child, job)) = self.tunnel.take() {
+            match &job {
+                // Takes wireproxy and anything it started, which
+                // `Child::kill` -- one process, no tree -- would not.
+                Some(job) => job.terminate(),
+                None => {
+                    let _ = child.kill();
+                }
+            }
             let _ = child.wait();
         }
     }
@@ -213,6 +227,7 @@ impl Runner {
                 if !running || self.tunnel.is_some() {
                     self.out.send(Event::TunnelFailed { server_id, message: "Start the server before opening its gateway connection, and open only one connection.".into() });
                 } else {
+                    let job = ProcessJob::kill_on_close();
                     match Process::new(bin_path)
                         .args(["-c", &conf_path])
                         .stdin(Stdio::null())
@@ -221,7 +236,10 @@ impl Runner {
                         .spawn()
                     {
                         Ok(child) => {
-                            self.tunnel = Some((server_id.clone(), child));
+                            if let Some(job) = &job {
+                                job.adopt(&child);
+                            }
+                            self.tunnel = Some((server_id.clone(), child, job));
                             self.out.send(Event::TunnelStarted { server_id });
                         }
                         Err(_) => self.out.send(Event::TunnelFailed {

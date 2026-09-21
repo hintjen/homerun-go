@@ -78,6 +78,23 @@ Exit codes are omitted when the existing Engine outcome does not retain them.
 
 A tunnel is a child of this runner and stops with the server. tunnel-started
 means the wireproxy process spawned, not that the remote gateway is reachable.
+It gets the same job object the game does, so a runner that dies abruptly does
+not leave a gateway connection behind with nothing serving it.
+
+**On Windows the game and the tunnel are each owned by a job object.** A
+runner that is hard-killed — an Electron crash, Task Manager, a force-quit —
+closes its handles whether it wants to or not, and the job takes the game and
+everything it started with it. Without that the game kept its ports and its
+save directory, so the next start failed `port_unavailable`, and a start that
+got past the preflight was a second server writing the same world. The stop
+ladder's last rung is `TerminateJobObject` rather than `taskkill /PID n /F`,
+which matters for a launcher-style server: it starts the real server and
+exits, so the pid the runner holds is not the pid doing the work, and even
+`/T` walks parent links the launcher broke on its way out. The runner itself
+is **not** in the job — see `job.rs` for why, and note that the desktop
+detaching from the runner at quit is unaffected by any of this. Nothing about
+Android, iOS or Linux changes: they have process groups and signals already.
+See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
 ## `prepare.rs`: directories, settings and resources
 

@@ -22,17 +22,71 @@ fn fake_game() {
         return;
     }
     let port: u16 = std::env::var("HOMERUN_TEST_PORT").unwrap().parse().unwrap();
+
+    /// Re-invoke this executable as one more process in the chain.
+    fn spawn_self(port: &str, role: &str) {
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "fake_game", "--nocapture", "--test-threads=1"])
+            .env("HOMERUN_TEST_GAME", "1")
+            .env("HOMERUN_TEST_PORT", port)
+            .env("HOMERUN_TEST_MODE", "silent")
+            // Every role is cleared before one is set. Inheriting the
+            // caller's role makes each process start the next, which is an
+            // unbounded chain rather than the three links intended.
+            .env_remove("HOMERUN_TEST_GRANDCHILD")
+            .env_remove("HOMERUN_TEST_RELAY")
+            .env_remove("HOMERUN_TEST_LINGER")
+            .env_remove("HOMERUN_TEST_BIND")
+            .env(role, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+    }
+
+    // A launcher: start the real thing and leave. It binds nothing, so by the
+    // time a stop arrives the real thing's recorded parent is a process that
+    // no longer exists. `taskkill /T` walks parent links and cannot see past
+    // that; a job object holds what its members started regardless.
+    if std::env::var("HOMERUN_TEST_RELAY").is_ok() {
+        spawn_self(&port.to_string(), "HOMERUN_TEST_LINGER");
+        return;
+    }
+
     // A game that ignores the address it was told to bind. Default loopback,
     // because that is what a well-behaved one does with {bindAddress}.
     let bind = std::env::var("HOMERUN_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into());
     let _socket = TcpListener::bind((bind.as_str(), port)).unwrap();
+
+    // A program that holds a port and outlives whoever started it: nothing
+    // asks it to stop, and it keeps the port either way.
+    if std::env::var("HOMERUN_TEST_LINGER").is_ok() {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+
+    if let Ok(grandchild) = std::env::var("HOMERUN_TEST_GRANDCHILD") {
+        spawn_self(&grandchild, "HOMERUN_TEST_RELAY");
+    }
+
     fs::write("pid", std::process::id().to_string()).unwrap();
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
     }
+    // A server that does not take end-of-stdin as a reason to stop -- which
+    // is most of them, since a dedicated server's stdin being closed is
+    // ordinary. Without this the fake game exits the moment the runner dies,
+    // which would make the orphan test pass for a reason that is nothing to
+    // do with owning anything.
+    if std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("orphan") {
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    let deaf = std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("deaf");
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
-        if line == "quit" {
+        if line == "quit" && !deaf {
             fs::write("saved", "world flushed").unwrap();
             return;
         }
@@ -165,6 +219,100 @@ impl Drop for Host {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// A port nothing is using, learned the only way there is.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Whether the port has actually been let go, which is the thing a player
+/// meets: an orphan holding one makes the next start fail `port_unavailable`.
+fn port_freed(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// Windows only, and not a gap elsewhere. Unix has process groups and
+/// signals; Android's ladder ends in `SIGKILL` to a pid and its servers are
+/// not launcher-style. The Job Object exists because Windows has no
+/// equivalent, so these are the tests for the thing that only Windows needed.
+///
+/// The runner is ended the way Task Manager, an Electron crash and a
+/// force-quit all end it: `TerminateProcess`, with no chance to run any
+/// cleanup at all. Everything it was supervising has to go with it, or the
+/// game is left holding its ports and writing to its save directory -- and
+/// the next start either fails `port_unavailable` or, past the preflight,
+/// becomes a second server on the same world.
+#[test]
+#[cfg(windows)]
+fn an_abrupt_runner_death_takes_the_game_with_it() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("orphan");
+
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+
+    assert!(
+        TcpListener::bind(("127.0.0.1", f.port)).is_err(),
+        "the game is not actually holding its port, so this proves nothing"
+    );
+
+    h.child.kill().unwrap();
+    h.child.wait().unwrap();
+
+    assert!(
+        port_freed(f.port),
+        "the runner was killed and the game kept running on port {}",
+        f.port
+    );
+}
+
+/// A launcher-style server -- which is what a great many vendors ship --
+/// starts the real server and exits, so the pid the runner holds is not the
+/// pid doing the work. `taskkill /PID n /F` ended a process that had already
+/// gone; even `/T` walks parent links the launcher broke on its way out.
+#[test]
+#[cfg(windows)]
+fn a_game_that_starts_another_program_has_all_of_it_stopped() {
+    let f = Fixture::new();
+    let grandchild = free_port();
+    let mut start = f.start();
+    let env = &mut start["descriptor"]["platforms"][platform::HOST]["launch"]["env"];
+    env["HOMERUN_TEST_GRANDCHILD"] = json!(grandchild.to_string());
+    // Deaf, so the console rung is ignored and the ladder climbs to the rung
+    // that cannot be refused -- which is the one under test.
+    env["HOMERUN_TEST_MODE"] = json!("deaf");
+
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    assert!(
+        TcpListener::bind(("127.0.0.1", grandchild)).is_err(),
+        "the grandchild never started, so this proves nothing"
+    );
+
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+
+    assert!(
+        port_freed(grandchild),
+        "the server was stopped and the program it started kept running on port {grandchild}"
+    );
+    h.eof();
 }
 
 #[test]

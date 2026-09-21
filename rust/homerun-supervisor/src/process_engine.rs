@@ -379,6 +379,13 @@ impl ProcessEngine {
             command.env(key, value);
         }
 
+        // Created before the spawn so that a failure to make one is known
+        // before there is a process to own. See `job.rs`: on Windows this is
+        // what stops a hard-killed runner leaving the game behind holding its
+        // ports and its saves, and what makes the kill rung a tree kill. It
+        // is `None` everywhere else, where a pid and a signal already are one.
+        let job = crate::job::Job::kill_on_close().map(Arc::new);
+
         let mut child = match command.spawn() {
             Ok(child) => child,
             // Never reached `on_ready`, so this is a launch that did not
@@ -390,6 +397,18 @@ impl ProcessEngine {
                 ))
             }
         };
+
+        if let Some(job) = &job {
+            if !job.adopt(&child) {
+                // Not fatal: the server is running and the ladder still ends
+                // in a kill. It does mean this launch has the supervision it
+                // had before jobs existed, which is worth saying out loud.
+                log::warn!(
+                    "this server could not be put in a job object, so stopping it may \
+                     leave programs it started behind"
+                );
+            }
+        }
 
         let roster = Arc::new(Mutex::new(RosterState::default()));
         *self.live() = Some(Live {
@@ -428,6 +447,7 @@ impl ProcessEngine {
             stop.clone(),
             self.supervision.ladder.clone(),
             self.console_sender(),
+            job.clone(),
         );
 
         let mut ready = false;
@@ -542,6 +562,7 @@ fn spawn_stop_watcher(
     stop: StopSignal,
     ladder: Vec<Rung>,
     say: ConsoleSender,
+    job: Option<Arc<crate::job::Job>>,
 ) -> StopWatcher {
     let pid = child.id();
     let done = Arc::new(StopSignal::default());
@@ -582,7 +603,15 @@ fn spawn_stop_watcher(
                     }
                 }
                 Action::Terminate => terminate(pid),
-                Action::Kill => kill(pid),
+                // The rung that cannot be refused, and on Windows that now
+                // means the whole subtree. A launcher-style server -- which
+                // is what a great many vendors ship -- has already exited by
+                // this point, so ending its pid ends nothing; the job holds
+                // what it started regardless of re-parenting.
+                Action::Kill => match &job {
+                    Some(job) => job.terminate(),
+                    None => kill(pid),
+                },
             }
 
             let deadline = Instant::now() + Duration::from_millis(rung.wait_ms);
@@ -715,8 +744,12 @@ fn kill(pid: u32) {
 
 #[cfg(not(unix))]
 fn kill(pid: u32) {
+    // `/T` as well as `/F`, for the case where there was no job to own the
+    // subtree. It walks parent links, so a launcher that has already exited
+    // hides its children from it — which is exactly why the job above is the
+    // real answer and this is the fallback.
     let _ = Command::new("taskkill")
-        .args(["/PID", &pid.to_string(), "/F"])
+        .args(["/PID", &pid.to_string(), "/F", "/T"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
