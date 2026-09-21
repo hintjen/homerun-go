@@ -787,7 +787,7 @@ reaches the server process's environment.
 
 **If the lookup fails, the server gets the settings from its last launch.**
 Every successful fetch writes what the core says is worth keeping
-(`minecraft.settings.remember`) to `servers/<id>/homerun-settings.json`, and a
+(`minecraft.settings.remember`) to `servers/<id>/homerun-remembered.json`, and a
 fetch that fails for any reason — no token, a 401 on a stale one, no signal, a
 5xx — reads it back through the same parser. It used to be vanilla-latest, the
 desktop's fallback, and that is what started a vanilla server where a player

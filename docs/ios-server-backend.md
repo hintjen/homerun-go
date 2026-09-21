@@ -451,7 +451,7 @@ says the right thing and the server does not, the mapping in
 fetch failed *and* nothing was remembered from a previous launch — check the
 token and `HomerunAPI.serverSettings`. A fetch that fails for a server that
 has launched before says `using the ones from its last launch` instead and
-runs on `homerun-settings.json` beside the world; a dashboard change made
+runs on `homerun-remembered.json` beside the world; a dashboard change made
 since is not in it until a fetch succeeds.
 
 **Every player is treated as new after an update.** Online mode changed. UUIDs

@@ -113,8 +113,12 @@ object HomerunApi {
      * What a host keeps beside a world for the next launch the API cannot be
      * asked about. Shaped like the API body it was cut from, so [parseSettings]
      * reads it and every field the core stripped comes out null.
+     *
+     * Not `homerun-settings.json`: that name is already taken in the same
+     * directory by what [PumpkinBackend] hands the spawned engine, and it
+     * carries a different shape.
      */
-    private const val MEMORY_FILE = "homerun-settings.json"
+    private const val MEMORY_FILE = "homerun-remembered.json"
 
     /** Mirrors the desktop's whitelist; anything else is treated as vanilla. */
     private val LOADERS = setOf(

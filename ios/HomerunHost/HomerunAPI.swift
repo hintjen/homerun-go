@@ -348,7 +348,7 @@ enum HomerunAPI {
     /// What a host keeps beside a world for the next launch the API cannot be
     /// asked about. Shaped like the API body it was cut from, so `parseSettings`
     /// reads it and every field the core stripped comes out nil.
-    private static let memoryFile = "homerun-settings.json"
+    private static let memoryFile = "homerun-remembered.json"
 
     /// Read a server's settings — from the API, or failing that from the
     /// record the last successful fetch left beside the world — or nil when
