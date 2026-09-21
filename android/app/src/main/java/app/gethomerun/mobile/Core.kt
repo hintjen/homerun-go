@@ -2117,6 +2117,69 @@ object Core {
      * `server.properties` — the desktop computes it twice from two places and
      * the two disagree, which is what silently breaks op-ing.
      */
+    /**
+     * `server.properties` with only the given keys replaced, everything else
+     * as the file had it — `properties.merge`. For a launch with no settings
+     * to write, which still has a bind address to apply.
+     */
+    fun mergeProperties(existing: String, managed: List<Pair<String, String>>): String =
+        call("properties.merge", buildJsonObject {
+            put("existing", existing)
+            put("managed", buildJsonArray {
+                managed.forEach { (k, v) -> add(buildJsonArray { add(k); add(v) }) }
+            })
+        }).jsonPrimitive.content
+
+    /** Where a server binds, and what to tell the player — `minecraft.lan.bind`. */
+    data class LanBind(val address: String, val line: String?)
+
+    /**
+     * Loopback unless the player exposed the server to the local network,
+     * then every interface and a console line saying so. The core's rule so
+     * the desktop, this app and the engines cannot disagree on the default.
+     */
+    fun lanBind(exposed: Boolean, port: Int): LanBind {
+        val reply = call("minecraft.lan.bind", buildJsonObject {
+            put("exposed", exposed)
+            put("port", port)
+        }).jsonObject
+        return LanBind(
+            address = reply["address"]!!.jsonPrimitive.content,
+            line = reply["line"]?.jsonPrimitive?.contentOrNull,
+        )
+    }
+
+    /** The datagram a Java client lists a server from, and where to send it. */
+    data class LanBeacon(val payload: String, val group: String, val port: Int, val intervalMs: Long)
+
+    /** `minecraft.lan.beacon`: the bytes Pumpkin's own broadcaster sends, for the JVM. */
+    fun lanBeacon(motd: String, port: Int): LanBeacon {
+        val reply = call("minecraft.lan.beacon", buildJsonObject {
+            put("motd", motd)
+            put("port", port)
+        }).jsonObject
+        return LanBeacon(
+            payload = reply["payload"]!!.jsonPrimitive.content,
+            group = reply["group"]!!.jsonPrimitive.content,
+            port = reply["port"]!!.jsonPrimitive.int,
+            intervalMs = reply["intervalMs"]!!.jsonPrimitive.long,
+        )
+    }
+
+    /**
+     * The MOTD the core resolved for a server, which is what a LAN list shows.
+     * Null when the settings cannot be resolved; the caller names the server
+     * instead.
+     */
+    fun resolvedMotd(env: JsonObject, gameType: String, loader: String): String? =
+        runCatching {
+            (call("minecraft.settings.fromEnv", buildJsonObject {
+                put("env", env)
+                put("gameType", gameType)
+                put("loader", loader)
+            }) as? JsonObject)?.get("motd")?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
+
     fun onlineMode(settings: HomerunApi.ServerSettings): Boolean? =
         (call("minecraft.settings.fromEnv", buildJsonObject {
             put("env", settings.env)

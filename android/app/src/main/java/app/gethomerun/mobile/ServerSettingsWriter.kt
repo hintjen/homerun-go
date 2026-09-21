@@ -73,6 +73,8 @@ object ServerSettingsWriter {
         env: JsonObject,
         gameType: String,
         port: Int,
+        /** `127.0.0.1`, or `0.0.0.0` when the player exposed the server — the core's answer. */
+        bindAddress: String,
         onLog: (String) -> Unit,
     ) {
         try {
@@ -97,10 +99,11 @@ object ServerSettingsWriter {
                 env = env,
                 gameType = gameType,
                 port = port,
-                // Loopback only. Players reach this server through the gateway
-                // tunnel, and a phone on a shared network has no business
-                // listening on every interface by default.
-                bindAddress = "127.0.0.1",
+                // Loopback by default: players reach this server through the
+                // gateway tunnel, and a phone on a shared network has no
+                // business listening on every interface unless its owner said
+                // so. `Core.lanBind` is where they say so.
+                bindAddress = bindAddress,
                 existing = existing,
                 resolved = resolved,
                 now = TIMESTAMP.format(Date()),

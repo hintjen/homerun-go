@@ -247,6 +247,13 @@ data class ServerConfig(
      * answers the older question.
      */
     val generation: Long? = null,
+    /**
+     * The player exposed this server to the local network: bind every
+     * interface and announce it, rather than loopback and silence. Read from
+     * [LocalNetwork] by the bridge at the moment of the start, so a toggle
+     * flipped while stopped takes effect on the launch that follows.
+     */
+    val localNetwork: Boolean = false,
 )
 
 /**

@@ -1673,6 +1673,10 @@ class BridgeRouter(
                                     // can tell "stopped" from "replaced by a
                                     // newer start" — see `ServerConfig.generation`.
                                     generation = admission.generation,
+                                    // Read now rather than at the toggle, so
+                                    // a flip while stopped lands on the next
+                                    // start — which is when the UI allows it.
+                                    localNetwork = LocalNetwork.isEnabled(context, serverId),
                                 ),
                             )
                             buildJsonObject { put("success", true) }
@@ -1838,13 +1842,24 @@ class BridgeRouter(
             buildJsonObject { if (port == null) put("port", JsonNull) else put("port", port) }
         },
 
-        // Local-network exposure is a router/firewall concern the desktop
-        // solves with UPnP. Nothing to toggle here yet; report the truth.
-        "get-native-local-network" to { _ -> buildJsonObject { put("enabled", false) } },
-        "set-native-local-network" to { _ ->
-            buildJsonObject {
-                put("success", false)
-                put("error", "Local network exposure is not configurable on Android yet.")
+        // The local-network toggle in the shared UI: bind every
+        // interface and announce it, from the next start. Persisted beside
+        // the world — see LocalNetwork.kt.
+        "get-native-local-network" to { params ->
+            val serverId = (params as JsonObject).serverId()
+            buildJsonObject { put("enabled", LocalNetwork.isEnabled(context, serverId)) }
+        },
+        "set-native-local-network" to { params ->
+            val obj = params as JsonObject
+            val enabled = obj["enabled"]?.jsonPrimitive?.booleanOrNull == true
+            try {
+                LocalNetwork.set(context, obj.serverId(), enabled)
+                buildJsonObject { put("success", true) }
+            } catch (err: Exception) {
+                buildJsonObject {
+                    put("success", false)
+                    put("error", "The local network setting could not be saved.")
+                }
             }
         },
         // BRIDGE-CHANNELS-END

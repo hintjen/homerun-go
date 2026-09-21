@@ -119,6 +119,9 @@ impl Engine for PumpkinEngine {
                 .java
                 .address
                 .set_port(request.java_port);
+            if let Some(line) = pumpkin_settings::apply_network(&mut config, request.local_network) {
+                on_line(line);
+            }
 
             // There is no stdin on a phone. Leaving the console enabled makes
             // `start()` block waiting for a readline that can never arrive.

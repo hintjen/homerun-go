@@ -123,10 +123,15 @@ picked" is otherwise a support conversation.
 `online_mode = true` via Pumpkin's default. Flipping it changes every player's
 UUID, so a world keyed by online UUIDs treats everyone as new.
 
-**The bind address is `0.0.0.0`**, where `settings::properties` writes
-`server-ip=127.0.0.1` for the other hosts — so anyone on the same Wi-Fi can
-join an iOS server directly, bypassing the gateway. Pre-existing rather than
-introduced with settings, and still open.
+**The bind address is the player's choice, and loopback by default.** It used
+to be `0.0.0.0` — Pumpkin's own default, which nothing set — so anyone on the
+same Wi-Fi could join an iOS server directly whether or not its owner wanted
+that. Now `localNetwork` on the start request decides
+(`pumpkin_settings::apply_network`, the core's `minecraft::lan::bind`): off
+binds `127.0.0.1`, on binds `0.0.0.0` **and** turns on Pumpkin's own LAN
+broadcast, so a Java client on the Wi-Fi lists the server without being told
+the address. The toggle is the shared UI's "Expose Minecraft server to your
+local network", persisted by `LocalNetwork.swift` beside the world.
 
 ## FFI string ownership — `FFI/HomerunFFI.swift`
 
@@ -249,11 +254,17 @@ worlds through the Files app.
 
 Two ways, and only one of them works from outside the house.
 
-**On the same Wi-Fi**, the host reports its LAN address and port and a friend
-types it into Direct Connect. Appearing automatically in Minecraft's LAN-games
-list is a different thing — it needs Pumpkin's multicast broadcast *and*
-Apple's multicast entitlement, which is a request form with a real approval
-delay. v1 deliberately shows the address instead.
+**On the same Wi-Fi**, with "Expose Minecraft server to your local network"
+on, a Java Edition client lists the server under "Scanning for games on your
+local network" — Pumpkin's multicast broadcast, which the toggle turns on —
+or a friend types the phone's Wi-Fi address (Settings → Wi-Fi → ⓘ) into
+Direct Connect. Nothing in the app shows that address yet. The broadcast
+needs Apple's multicast entitlement (`com.apple.developer.networking.multicast`,
+a request form with a real approval delay) before a datagram leaves the phone;
+until it is granted, Pumpkin binds its socket and every send fails quietly,
+so the toggle exposes the server without listing it. Bedrock clients cannot
+join an iOS server on the LAN at all — crossplay needs a plugin this host
+cannot run.
 
 **From anywhere else**, through the tunnel below. A phone on cellular sits
 behind CGNAT, so there is no port-forwarding fallback the way there is on
@@ -344,9 +355,10 @@ and wireguard-go logs to fd 1 — which the Rust layer redirects into the
 `last_handshake_time_sec` and treats 50 s without one as dead: the same
 threshold, a real signal, and no tunnel noise in the console.
 
-`get-native-local-network` reports enabled and `set-native-local-network`
-accepts without doing anything, because on a phone there is no LAN toggle to
-make — the device is on the player's Wi-Fi or it is not.
+`get-native-local-network` and `set-native-local-network` read and write the
+player's toggle (`LocalNetwork.swift`); it takes effect on the next start,
+which is when the UI allows changing it. They used to report enabled and do
+nothing, while the engine listened on every interface regardless.
 
 ## What this host will not run
 

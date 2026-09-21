@@ -49,6 +49,7 @@ use pumpkin_util::GameMode;
 use uuid::Uuid;
 
 use crate::engine_settings::EngineSettings;
+use homerun_core::minecraft::lan;
 use homerun_core::minecraft::settings::Player;
 
 /// Load Pumpkin's config, surviving a file it cannot parse.
@@ -111,6 +112,28 @@ pub fn host_telemetry(mut telemetry: TelemetryConfig) -> TelemetryConfig {
 }
 
 /// Override the settings this app manages, leaving the rest of the file alone.
+/// Where the Java listener binds, and whether Pumpkin announces it.
+///
+/// Only the address half; the port was set by whoever knew it (the linked
+/// engine from its request, the spawned binary from its `pumpkin.toml`).
+/// Both are the core's decision (`minecraft::lan::bind`): loopback unless the
+/// player exposed the server, and then every interface *and* Pumpkin's own
+/// LAN broadcast, which is the same beacon a host sends for a JVM. Before this
+/// existed neither host set the address at all, and Pumpkin's default is
+/// `0.0.0.0` — every phone was listening on its Wi-Fi without anyone asking.
+///
+/// Returns the console line to print, when there is one.
+pub fn apply_network(config: &mut PumpkinConfig, local_network: bool) -> Option<String> {
+    let java = &mut config.advanced.networking.java;
+    let port = java.address.port();
+    let bind = lan::bind(local_network, port);
+    if let Ok(ip) = bind.address.parse::<std::net::IpAddr>() {
+        java.address.set_ip(ip);
+    }
+    config.advanced.networking.lan_broadcast.enabled = local_network;
+    bind.line
+}
+
 pub fn apply(settings: &EngineSettings, config: &mut PumpkinConfig) {
     let basic = &mut config.basic;
     basic.hardcore = settings.hardcore;
@@ -334,6 +357,32 @@ mod tests {
             std::env::set_current_dir(&self.previous).unwrap();
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    /// Loopback unless exposed — and Pumpkin's default is not loopback, which
+    /// is why this has to be applied on every launch rather than trusted.
+    #[test]
+    fn the_listener_is_loopback_unless_the_player_exposed_it() {
+        let mut config = PumpkinConfig::default();
+        config.advanced.networking.java.address.set_port(25566);
+
+        assert!(apply_network(&mut config, false).is_none(), "the quiet default says nothing");
+        assert_eq!(
+            config.advanced.networking.java.address.to_string(),
+            "127.0.0.1:25566",
+            "the port set before is kept"
+        );
+        assert!(!config.advanced.networking.lan_broadcast.enabled);
+
+        let line = apply_network(&mut config, true).expect("an exposed server says so");
+        assert_eq!(config.advanced.networking.java.address.to_string(), "0.0.0.0:25566");
+        assert!(config.advanced.networking.lan_broadcast.enabled, "announced, not only reachable");
+        assert!(line.contains("0.0.0.0:25566"), "{line}");
+
+        // And back: a toggle turned off must not leave the last launch's bind.
+        apply_network(&mut config, false);
+        assert_eq!(config.advanced.networking.java.address.to_string(), "127.0.0.1:25566");
+        assert!(!config.advanced.networking.lan_broadcast.enabled);
     }
 
     /// Distinct values per field on purpose: equal ones are exactly what lets

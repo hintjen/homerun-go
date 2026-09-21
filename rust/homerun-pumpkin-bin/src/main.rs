@@ -200,25 +200,40 @@ fn apply_host_settings(
     vanilla_data: &mut VanillaData,
 ) {
     let path = exec_dir.join(SETTINGS_FILE);
-    if !path.exists() {
+    let parsed: Option<serde_json::Value> = if !path.exists() {
         warn!("[Homerun] No settings were supplied — the engine's own configuration applies.");
-        return;
+        None
+    } else {
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => match serde_json::from_str(&raw) {
+                Ok(parsed) => Some(parsed),
+                Err(err) => {
+                    warn!("[Homerun] Could not parse the settings ({err}); the engine's own apply.");
+                    None
+                }
+            },
+            Err(err) => {
+                warn!("[Homerun] Could not read the settings ({err}); the engine's own apply.");
+                None
+            }
+        }
+    };
+
+    // The host's bind decision rides in the same file, and is applied whether
+    // or not the rest of it could be: absent is loopback, which is what this
+    // binary should have been doing all along. With no address set, Pumpkin's
+    // own default of `0.0.0.0` was listening on the phone's Wi-Fi whether or
+    // not anyone had asked — and "no settings" must not reopen that.
+    let local_network = parsed
+        .as_ref()
+        .and_then(|p| p.get("localNetwork"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if let Some(line) = pumpkin_settings::apply_network(config, local_network) {
+        info!("{line}");
     }
 
-    let raw = match std::fs::read_to_string(&path) {
-        Ok(raw) => raw,
-        Err(err) => {
-            warn!("[Homerun] Could not read the settings ({err}); the engine's own apply.");
-            return;
-        }
-    };
-    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            warn!("[Homerun] Could not parse the settings ({err}); the engine's own apply.");
-            return;
-        }
-    };
+    let Some(parsed) = parsed else { return };
 
     let env = parsed.get("env").cloned().unwrap_or(serde_json::Value::Null);
     let game_type = parsed

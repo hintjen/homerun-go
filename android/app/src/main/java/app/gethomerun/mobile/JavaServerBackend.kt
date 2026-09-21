@@ -76,6 +76,14 @@ class JavaServerBackend(
      */
     private val launchGate = Mutex()
 
+    /**
+     * The LAN beacon for the running server, when it is exposed. Started at
+     * `announceRunning`, stopped when the process is gone. Not for
+     * PowerNukkitX, whose Bedrock clients do their own discovery and would
+     * otherwise list a server they cannot join.
+     */
+    private val beacon = LocalNetwork.Beacon(context, scope)
+
     /** Where this host has read the supervisor's console up to. */
     private var engineCursor = 0L
 
@@ -574,6 +582,12 @@ class JavaServerBackend(
         if (config.backupContext != null && order.at("restoreWorld")) return
         backups.restore(serverId, dir, config.backupContext)
 
+        // Loopback unless the player exposed the server; the core says which,
+        // and what to tell them. Said before the settings are written because
+        // the address goes into them.
+        val bind = Core.lanBind(config.localNetwork, port)
+        bind.line?.let { note(serverId, it) }
+
         if (config.settingsEnv != null) order.at("writeSettings")
         config.settingsEnv?.let { env ->
             ServerSettingsWriter.apply(
@@ -582,8 +596,23 @@ class JavaServerBackend(
                 env = env,
                 gameType = config.gameType,
                 port = port,
+                bindAddress = bind.address,
                 onLog = { note(serverId, it) },
             )
+        }
+        // With no settings nothing above rewrote `server.properties`, and the
+        // bind still has to land — a toggle turned off must not leave the
+        // last launch's `0.0.0.0` in a file nobody touched. Only these two
+        // keys; the rest of the file stays whatever the server made of it.
+        if (config.settingsEnv == null && !nukkit) {
+            runCatching {
+                val file = File(dir, "server.properties")
+                val existing = if (file.exists()) file.readText() else ""
+                file.writeText(Core.mergeProperties(existing, listOf(
+                    "server-ip" to bind.address,
+                    "server-port" to port.toString(),
+                )))
+            }.onFailure { Log.w(TAG, "$serverId: could not apply the bind address: ${it.message}") }
         }
 
         // After settings and before the spawn, which is where the desktop puts
@@ -734,6 +763,18 @@ class JavaServerBackend(
         // There is a console now, which is what makes a *graceful* stop
         // possible — the core needs to know before it can say so.
         lifecycle.consoleReady(serverId)
+
+        // Announced from here, not from `running`: a device on the Wi-Fi can
+        // join the moment the console is up, tunnel or no tunnel, and the
+        // list is for exactly those devices. Not for PowerNukkitX, whose
+        // Bedrock clients do their own discovery and would otherwise list a
+        // server they cannot join.
+        if (config.localNetwork && !nukkit) {
+            val motd = config.settingsEnv
+                ?.let { Core.resolvedMotd(it, config.gameType, prepared.loader) }
+                ?: config.name
+            beacon.start(serverId, motd, port)
+        }
 
         // A stop that landed while the JVM was booting: the console exists
         // now, so it can be asked politely rather than killed. Reached when
@@ -1043,6 +1084,9 @@ class JavaServerBackend(
      * The reasoning is unchanged; only who noticed has moved.
      */
     private suspend fun serverExited(serverId: String, result: String) {
+        // Nothing to announce any more, whatever the exit meant.
+        beacon.stop()
+
         // The last of the console, including whatever it said on the way down.
         // The pump keeps running past this: an on-stop backup writes `[Backup]`
         // lines for minutes after the JVM is gone, and they are console lines

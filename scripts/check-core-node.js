@@ -257,6 +257,24 @@ const CHECKS = [
     ) === true || "returned false"],
   ["does not match a different digest", () =>
     core.bundleDigestMatches("a".repeat(64), "c".repeat(64)) === false || "returned true"],
+  // The local network: what the desktop binds and what it shouts. The beacon
+  // bytes are the same ones Pumpkin's own broadcaster sends and a Java client
+  // parses, so the desktop must not spell its own.
+  ["a server exposed to the local network binds every interface and says so", () => {
+    const bind = JSON.parse(core.lanBind(true, 25565));
+    return (bind.address === "0.0.0.0" && /0.0.0.0:25565/.test(bind.line || "")) ||
+      JSON.stringify(bind);
+  }],
+  ["a server not exposed binds loopback and says nothing", () => {
+    const bind = JSON.parse(core.lanBind(false, 25565));
+    return (bind.address === "127.0.0.1" && bind.line === undefined) || JSON.stringify(bind);
+  }],
+  ["the LAN beacon is what a Java client lists", () => {
+    const beacon = JSON.parse(core.lanBeacon("§aMy\nServer", 25566));
+    return (beacon.payload === "[MOTD]My Server[/MOTD][AD]25566[/AD]" &&
+      beacon.group === "224.0.2.60" && beacon.port === 4445 && beacon.intervalMs === 1500) ||
+      JSON.stringify(beacon);
+  }],
 ];
 
 let failed = false;

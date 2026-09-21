@@ -34,14 +34,19 @@ enum StartRequest {
     }
 
     /// Build the request. `settings` may be nil, which starts the server on
-    /// the engine's own configuration.
+    /// the engine's own configuration. `localNetwork` is the player's
+    /// "expose to the local network" toggle: the engine binds every interface
+    /// and announces the server when true, loopback and silence when false —
+    /// the rule is `homerun_core::minecraft::lan`'s, applied in Rust.
     static func encode(
-        serverId: String, dataDir: String, port: UInt16, settings: Settings?
+        serverId: String, dataDir: String, port: UInt16, settings: Settings?,
+        localNetwork: Bool = false
     ) -> [String: Any] {
         var request: [String: Any] = [
             "serverId": serverId,
             "dataDir": dataDir,
             "port": Int(port),
+            "localNetwork": localNetwork,
         ]
         if let settings {
             request["settings"] = [

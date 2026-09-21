@@ -166,6 +166,10 @@ extension BridgeRouter {
         // "replaced by a newer start" — see `ServerConfig.generation`.
         config.generation = admission.generation
 
+        // Read now rather than at the toggle, so a flip while stopped lands on
+        // the next start — which is when the UI allows it.
+        config.localNetwork = LocalNetwork.isEnabled(serverId: serverId)
+
         if !token.isEmpty, !apiURL.isEmpty {
             config.resolveTunnel = {
                 // The baseline came with the settings above, so this no longer
@@ -331,12 +335,29 @@ extension BridgeRouter {
     /// LAN play is always on: the device is on the player's Wi-Fi and the
     /// address is how a friend joins. There is nothing to toggle, so this
     /// reports enabled rather than pretending a switch exists.
+    // "Expose Minecraft server to your local network": bind every interface
+    // and announce it, from the next start. Persisted beside the world — see
+    // LocalNetwork.swift. This used to answer `true` and do nothing, while
+    // the engine listened on every interface regardless; now both are the
+    // player's call and the default is loopback.
     func getNativeLocalNetwork(_ params: Any?) async throws -> Any? {
-        ["enabled": true]
+        guard let payload = params as? [String: Any],
+            let serverId = payload["serverId"] as? String
+        else { return ["enabled": false, "error": "Homerun Go could not tell which server was meant."] }
+        return ["enabled": LocalNetwork.isEnabled(serverId: serverId)]
     }
 
     func setNativeLocalNetwork(_ params: Any?) async throws -> Any? {
-        ["success": true]
+        guard let payload = params as? [String: Any],
+            let serverId = payload["serverId"] as? String
+        else { return ["success": false, "error": "Homerun Go could not tell which server was meant."] }
+        let enabled = payload["enabled"] as? Bool ?? false
+        do {
+            try LocalNetwork.set(serverId: serverId, enabled: enabled)
+            return ["success": true]
+        } catch {
+            return ["success": false, "error": "The local network setting could not be saved."]
+        }
     }
 
     // MARK: - Files

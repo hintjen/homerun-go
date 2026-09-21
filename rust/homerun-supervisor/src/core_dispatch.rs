@@ -38,8 +38,8 @@ use serde_json::{json, Value};
 
 use homerun_core::game::Game as _;
 use homerun_core::minecraft::{
-    self, account, argfile, crossplay, hosting, jar, jvm, loader, modjar, modpack, mods, nukkit,
-    ops, settings,
+    self, account, argfile, crossplay, hosting, jar, jvm, lan, loader, modjar, modpack, mods,
+    nukkit, ops, settings,
 };
 use homerun_core::reporting::{app_error, crash, minigame, stats};
 use homerun_core::{
@@ -1732,6 +1732,23 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 optional_text("fallbackMotd").as_deref(),
             );
             serde_json::to_value(resolved).map_err(|e| e.to_string())
+        }
+
+        // --- the local network ---------------------------------------------
+        //
+        // One switch, two effects: where a server binds, and the beacon that
+        // puts it in Minecraft's LAN list. The core owns both decisions; the
+        // host owns the socket. See `minecraft::lan`.
+        "minecraft.lan.bind" => {
+            let exposed = args.get("exposed").and_then(|v| v.as_bool()).unwrap_or(false);
+            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(25565) as u16;
+            serde_json::to_value(lan::bind(exposed, port)).map_err(|e| e.to_string())
+        }
+
+        "minecraft.lan.beacon" => {
+            let motd = optional_text("motd").unwrap_or_default();
+            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(25565) as u16;
+            serde_json::to_value(lan::beacon(&motd, port)).map_err(|e| e.to_string())
         }
 
         "minecraft.settings.properties" => {

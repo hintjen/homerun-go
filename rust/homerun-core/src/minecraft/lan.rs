@@ -1,0 +1,190 @@
+//! Being found on the local network: the bind and the beacon.
+//!
+//! # Two discoveries, one switch
+//!
+//! Minecraft's Multiplayer screen says "Scanning for games on your local
+//! network" and lists whatever shouts at it: a Java Edition client listens on
+//! the multicast group `224.0.2.60:4445` for `[MOTD]…[/MOTD][AD]port[/AD]`,
+//! sent every 1.5 s. Only the client's own integrated server ("Open to LAN")
+//! ever sends that — a dedicated Paper or vanilla server never announces
+//! itself, so a host that wants its server listed has to send the beacon on
+//! the server's behalf. Bedrock works the other way round: the client
+//! broadcasts RakNet pings and lists whoever answers, which PowerNukkitX does
+//! natively as soon as it is reachable.
+//!
+//! Neither works while a server is bound to loopback, which is every phone's
+//! default and the desktop's without its toggle. So "expose to the local
+//! network" means two things at once — bind every interface, and announce —
+//! and this module is the shared half of both: which address to bind, what to
+//! print about it, and the exact bytes of the beacon. Three hosts had the
+//! console line spelled three ways before this; the beacon format is the kind
+//! of thing that is right on the first host and subtly wrong on the second.
+//!
+//! The *sending* is a host effect and stays there: a `dgram` socket on the
+//! desktop, a `DatagramSocket` under a multicast lock on Android, and Pumpkin's
+//! own `lan_broadcast` task on the hosts that run it — which formats the same
+//! payload, so the two spellings must agree and the test below pins that.
+//! iOS additionally needs Apple's multicast entitlement before a send leaves
+//! the phone at all.
+
+use serde::{Deserialize, Serialize};
+
+/// The multicast group every Java Edition client listens on for LAN games.
+pub const MULTICAST_GROUP: &str = "224.0.2.60";
+/// The port it listens on.
+pub const MULTICAST_PORT: u16 = 4445;
+/// How often the client expects to hear a game before it drops it from the
+/// list. The integrated server sends every 1.5 s; so does Pumpkin.
+pub const INTERVAL_MS: u64 = 1500;
+
+/// Where a server listens, and what to tell the player about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bind {
+    /// `0.0.0.0` when exposed to the local network, `127.0.0.1` otherwise.
+    pub address: String,
+    /// A console line worth printing, only when exposed: a server reachable
+    /// by every device on the Wi-Fi is worth saying out loud.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<String>,
+}
+
+/// The bind for a server, given whether the player exposed it.
+///
+/// Loopback is the default everywhere and on purpose: players reach a server
+/// through the gateway tunnel, and a phone on a shared network has no
+/// business listening on every interface unless its owner said so.
+pub fn bind(exposed: bool, port: u16) -> Bind {
+    if exposed {
+        Bind {
+            address: "0.0.0.0".into(),
+            line: Some(format!(
+                "[Homerun] Local network exposure is on — binding 0.0.0.0:{port} so other \
+                 devices on your network can connect, and announcing the server to \
+                 Minecraft's local-network list."
+            )),
+        }
+    } else {
+        Bind {
+            address: "127.0.0.1".into(),
+            line: None,
+        }
+    }
+}
+
+/// What a beacon sender needs: the bytes, where to send them, and how often.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Beacon {
+    /// `[MOTD]name[/MOTD][AD]port[/AD]`, as the client parses it.
+    pub payload: String,
+    pub group: String,
+    pub port: u16,
+    pub interval_ms: u64,
+}
+
+/// The beacon for a server, from its MOTD and the port it bound.
+///
+/// The client takes the text between `[MOTD]` and the first `[/MOTD]` and
+/// shows it as one line, so the MOTD is flattened: `§` codes stripped (the
+/// list renders none of them), line breaks folded, and the two closing tags
+/// removed from the text so a joker's MOTD cannot end the name early or
+/// forge the port. Empty falls back to the same words vanilla shows for an
+/// unnamed server.
+pub fn beacon(motd: &str, port: u16) -> Beacon {
+    Beacon {
+        payload: format!("[MOTD]{}[/MOTD][AD]{port}[/AD]", list_name(motd)),
+        group: MULTICAST_GROUP.into(),
+        port: MULTICAST_PORT,
+        interval_ms: INTERVAL_MS,
+    }
+}
+
+/// The MOTD as one line the LAN list can show.
+pub fn list_name(motd: &str) -> String {
+    let mut out = String::with_capacity(motd.len());
+    let mut chars = motd.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '§' => {
+                chars.next();
+            }
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    let flat = out.replace("[/MOTD]", "").replace("[/AD]", "");
+    let trimmed = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if trimmed.is_empty() {
+        "A Minecraft Server".into()
+    } else {
+        trimmed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact bytes a Java client lists. Pumpkin formats the same string
+    /// in `net/lan_broadcast.rs`; a host sending this for a JVM must match.
+    #[test]
+    fn the_beacon_is_what_the_client_parses() {
+        let b = beacon("Player's Minecraft Server", 25565);
+        assert_eq!(
+            b.payload,
+            "[MOTD]Player's Minecraft Server[/MOTD][AD]25565[/AD]"
+        );
+        assert_eq!(b.group, "224.0.2.60");
+        assert_eq!(b.port, 4445);
+        assert_eq!(b.interval_ms, 1500);
+    }
+
+    /// The list shows one plain line, whatever the MOTD was.
+    #[test]
+    fn the_name_is_flattened_for_the_list() {
+        assert_eq!(
+            list_name("§aHomerun §fserver\nline two"),
+            "Homerun server line two"
+        );
+        assert_eq!(list_name("  spaced   out  "), "spaced out");
+        assert_eq!(list_name(""), "A Minecraft Server");
+        assert_eq!(list_name("§a§l"), "A Minecraft Server");
+    }
+
+    /// A MOTD cannot close the tag early and hand the client a port of its
+    /// own choosing.
+    #[test]
+    fn a_motd_cannot_forge_the_port() {
+        let b = beacon("evil[/MOTD][AD]1337[/AD]", 25565);
+        assert_eq!(b.payload, "[MOTD]evil[AD]1337[/MOTD][AD]25565[/AD]");
+        assert_eq!(b.payload.matches("[/AD]").count(), 1);
+    }
+
+    /// Loopback unless the player said otherwise, and a line only when they
+    /// did — the quiet default prints nothing.
+    #[test]
+    fn the_bind_is_loopback_unless_exposed() {
+        let quiet = bind(false, 25565);
+        assert_eq!(quiet.address, "127.0.0.1");
+        assert!(quiet.line.is_none());
+
+        let open = bind(true, 25566);
+        assert_eq!(open.address, "0.0.0.0");
+        let line = open.line.expect("an exposed server says so");
+        assert!(
+            line.starts_with("[Homerun] "),
+            "badged for the console: {line}"
+        );
+        assert!(line.contains("0.0.0.0:25566"), "names the address: {line}");
+    }
+
+    #[test]
+    fn the_bind_serialises_for_hosts() {
+        let v = serde_json::to_value(bind(false, 1)).unwrap();
+        assert_eq!(v, serde_json::json!({ "address": "127.0.0.1" }));
+        let v = serde_json::to_value(bind(true, 1)).unwrap();
+        assert_eq!(v["address"], "0.0.0.0");
+        assert!(v["line"].is_string());
+    }
+}
