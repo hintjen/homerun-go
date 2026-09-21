@@ -206,6 +206,34 @@ fn stderr_readiness_console_and_eof_save_the_world() {
     );
 }
 
+/// The runner has no API in front of it, so core's backstop is the only
+/// thing between a server name and a game's own argument parser. A name that
+/// *is* a switch must be refused before anything is spawned, not passed along
+/// as one argv element for a `+key value` parser to read as a new switch.
+#[test]
+fn a_server_name_that_is_a_switch_is_refused_before_anything_is_spawned() {
+    let f = Fixture::new();
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["serverName"] = json!("+rcon.web");
+    h.send(start);
+
+    let error = h.until("error");
+    assert_eq!(error["serverId"], "s1");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot start with"),
+        "{error}"
+    );
+    assert!(
+        !f.root.join("server").exists() || !f.root.join("server/settings.json").exists(),
+        "nothing should have been written for a launch that was refused"
+    );
+    h.eof();
+}
+
 /// A setting a player cleared has to leave the managed file. Skipping the key
 /// kept the value from the launch before, so a cleared seed went on
 /// generating the old world with nothing on screen naming the number doing

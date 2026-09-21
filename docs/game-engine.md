@@ -43,7 +43,7 @@ So this is a sibling of `game`, not a subclass of it: its own module, its own
 `engine.*` namespace, and no change to `game.*` at all. Minecraft keeps the
 trait; descriptor-driven games get this.
 
-## The three rules that are about safety
+## The rules that are about safety
 
 Each is enforced in code, and each exists because the working behaviour and
 the safe behaviour are not the same thing.
@@ -102,6 +102,42 @@ installer prompts for terms, that is a stop, not a prompt to answer.
 A game whose dedicated server needs a Steam account that *owns* it is out of
 scope — not a feature request. There is no account we could use that would not
 be either a shared credential or the player's own.
+
+### A player's text is not a switch
+
+`engine::settings::check_text` refuses player text that begins with `+`, `-`
+or `/`, contains a `"`, a control character, a backtick, `${` or `$(`, or runs
+past 256 characters. It runs on every `string` setting and on the server's own
+name, in `resolve`, which is the one call every path makes before a value
+becomes an argument — including the CLI's, which has no API in front of it.
+
+Arguments are a `Vec<String>` from `invocation` to `Command::args`, so a space
+in a value cannot split it in two. That property is real and it is not enough:
+
+- A `+key value` parser — Valve's, Facepunch's — reads **one argv element**
+  that happens to be `+rcon.web` as a new switch rather than as the value of
+  the switch before it. A server named `+rcon.web` turns on the web console
+  on a server whose player chose the name.
+- A game that re-reads the raw command line — Unreal's `-Key=Value`,
+  Facepunch.CommandLine — parses what Windows handed it, not the vector Rust
+  built. Rust quotes for MSVCRT's rules, and a parser that is not MSVCRT can
+  be broken out of with a `"`.
+- A control character reaches a log, a properties file, and a console's
+  stdin, where a newline is a second command.
+
+**One rule, wherever the value lands.** Not a stricter rule for argv than for
+a config file: the same value routinely lands in both, so a per-site rule buys
+precision only for a setting used in exactly one place — and which place that
+is changes when a descriptor is edited, with nothing telling the player their
+name has just become illegal. `{serverName}` decides it outright, being a
+Homerun name that exists before a game is chosen and must be judged the same
+way for every game.
+
+The cost is named rather than hidden: a name may not begin with `+`, `-` or
+`/` and may not contain `"`, so `-=[Clan]=-` is refused where `=[Clan]=-` is
+not. The API enforces the same rule, so a player meets it in a form rather
+than at a launch that fails. A setting with `options` is exempt — its values
+come from the descriptor, which is ours.
 
 ## The descriptor — `descriptor.rs`
 

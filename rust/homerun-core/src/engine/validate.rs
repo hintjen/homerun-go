@@ -324,6 +324,20 @@ fn check_default(setting: &Setting, r: &mut Report) {
         )),
     }
 
+    // The descriptor's own half of a default has to satisfy the rule player
+    // text satisfies, or the refusal lands on a player who typed nothing.
+    // `{serverName}` is stripped first: that part is the player's, and
+    // `settings::resolve` checks it on its own account.
+    if setting.kind == SettingKind::String && setting.options.is_empty() {
+        if let Err(err) = super::settings::check_text(&format!("\"{}\"", setting.key), &stripped) {
+            r.problems.push(format!(
+                "the setting \"{}\" has a default that Homerun would refuse from a \
+                 player: {err}",
+                setting.key
+            ));
+        }
+    }
+
     if !setting.options.is_empty() && !setting.options.contains(&setting.default) {
         r.problems.push(format!(
             "the setting \"{}\" defaults to something that is not one of the choices \
