@@ -26,6 +26,15 @@
  * production's permissions. It is also why `homerun-desktop/` -- with the
  * slash -- is the string the tests look for in dev output: `homerun-desktop`
  * without it is a substring of the dev prefix and matches both.
+ *
+ * # --verify
+ *
+ * Signing rewrites the bytes, so a manifest prepared before it names a digest
+ * the desktop will refuse, and refuse permanently: a checksum mismatch is not
+ * retried. Nothing in the upload path notices. `--verify` re-hashes each file
+ * against the manifest already on disk beside it and exits nonzero on any
+ * disagreement, so a publish job can assert the order it depended on rather
+ * than assume it.
  */
 const { execFileSync } = require("child_process");
 const os = require("os");
@@ -64,7 +73,7 @@ const LAYOUT = {
 
 const USAGE =
   "Usage: node scripts/publish-desktop-artifacts.js " +
-  "[--channel dev|prod] [--only pumpkin|game-runner|core-node]";
+  "[--channel dev|prod] [--only pumpkin|game-runner|core-node] [--verify]";
 
 /** An explicit flag, else the environment, else dev. Never a guess. */
 function resolveChannel(requested, env = {}) {
@@ -78,9 +87,14 @@ function resolveChannel(requested, env = {}) {
 }
 
 function parseArgs(argv, env = {}) {
-  const options = { only: null, channel: null };
+  const options = { only: null, channel: null, verify: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
+    if (arg === "--verify") {
+      if (options.verify) throw new Error(USAGE);
+      options.verify = true;
+      continue;
+    }
     const key = arg === "--only" ? "only" : arg === "--channel" ? "channel" : null;
     if (!key) throw new Error(USAGE);
     const value = argv[++index];
@@ -134,6 +148,44 @@ function prepareArtifacts(dir, selected, metadata = {}, channel = DEFAULT_CHANNE
   return artifacts;
 }
 
+/**
+ * Re-hash what is on disk against the manifest beside it.
+ *
+ * Returns every disagreement rather than the first: a run that signed two
+ * binaries and re-prepared neither should say so once, not twice.
+ */
+function verifyArtifacts(dir, selected, channel = DEFAULT_CHANNEL) {
+  resolveChannel(channel);
+  const problems = [];
+  for (const kind of selected) {
+    const layout = LAYOUT[kind];
+    if (!layout) throw new Error(`Unknown artifact: ${kind}`);
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(path.join(dir, layout.manifest), "utf8"));
+    } catch (error) {
+      problems.push(`${kind}: cannot read ${layout.manifest}: ${error.message}`);
+      continue;
+    }
+    let found;
+    try {
+      found = identify(dir, kind, channel);
+    } catch (error) {
+      problems.push(`${kind}: cannot hash ${layout.file}: ${error.message}`);
+      continue;
+    }
+    // The digest first: it is the one the desktop enforces, and a mismatch
+    // here explains every other field that disagrees below it.
+    if (manifest.sha256 !== found.sha256) {
+      problems.push(`${kind}: manifest sha256 ${manifest.sha256} but ${layout.file} hashes to ${found.sha256} (prepare manifests AFTER signing)`);
+    }
+    if (manifest.build !== found.build) problems.push(`${kind}: manifest build ${manifest.build} but the file's is ${found.build}`);
+    if (manifest.size !== found.bytes.length) problems.push(`${kind}: manifest size ${manifest.size} but ${layout.file} is ${found.bytes.length} bytes`);
+    if (manifest.url !== found.url) problems.push(`${kind}: manifest url ${manifest.url} is not the ${channel} channel's ${found.url}`);
+  }
+  return problems;
+}
+
 // Ask the built engine, not source: the desktop pins clients to this version.
 // Isolate a build lacking the flag, which might otherwise start in the checkout.
 function engineMinecraftVersion(file) {
@@ -185,6 +237,15 @@ function main(args, env = {}) {
   if (fs.existsSync(path.join(dir, LAYOUT["game-runner"].file))) selected.push("game-runner");
   if (options.only) selected = [options.only];
 
+  if (options.verify) {
+    const problems = verifyArtifacts(dir, selected, options.channel);
+    if (problems.length) {
+      throw new Error(`Manifests do not describe the files beside them:\n  ${problems.join("\n  ")}`);
+    }
+    console.log(`Verified ${selected.join(", ")} against their ${options.channel} manifests.`);
+    return;
+  }
+
   const metadata = {};
   for (const kind of selected) {
     if (kind === "core-node") {
@@ -219,4 +280,4 @@ if (require.main === module) {
   try { main(process.argv.slice(2), process.env || {}); }
   catch (error) { console.error(error.message); process.exitCode = 1; }
 }
-module.exports = { prepareArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV };
+module.exports = { prepareArtifacts, verifyArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV };

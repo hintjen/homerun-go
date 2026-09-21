@@ -45,6 +45,24 @@ staging directory to avoid including a stale runner from a previous build.
 Each invocation validates all its inputs before writing any manifests. Upload
 all immutable binaries before changing the corresponding `latest.json` files.
 
+### `--verify`
+
+Nothing in the upload path notices a manifest that was hashed before signing,
+and the desktop refuses a checksum mismatch permanently rather than retrying
+it. `--verify` re-hashes each selected file against the manifest already on
+disk beside it -- digest, build ID, byte length and the channel the `url`
+belongs to -- and exits nonzero on any disagreement, reporting all of them
+rather than the first.
+
+```text
+npm run verify:desktop
+node scripts/publish-desktop-artifacts.js --channel prod --verify
+```
+
+Run it after signing and after re-preparing, immediately before uploading. It
+writes nothing, so it is safe to run at any point. It does not replace
+preparing manifests from signed bytes; it checks that somebody did.
+
 ## Channels: dev and prod
 
 Everything a publish touches hangs off one prefix: the immutable object keys,

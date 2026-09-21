@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 const {
-  prepareArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV,
+  prepareArtifacts, verifyArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV,
 } = require("./publish-desktop-artifacts");
 const { TARGETS } = require("./targets");
 
@@ -74,21 +74,25 @@ test("runner can be prepared without building Pumpkin and targets Windows with s
   assert.equal(TARGETS["game-runner"].artifact, "homerun-game.exe");
 });
 
-function runPublisher(t, args, includeRunner = false, env = {}) {
-  const root = fixture(t);
+// `reuse` is a previous run's root, for the two-invocation sequences: prepare,
+// then verify what that left on disk, the way the publish workflow does.
+function runPublisher(t, args, includeRunner = false, env = {}, reuse = null) {
+  const root = reuse ?? fixture(t);
   const dir = path.join(root, "dist", "desktop");
-  fs.mkdirSync(dir, { recursive: true });
-  fs.copyFileSync(path.join(root, LAYOUT.pumpkin.file), path.join(dir, LAYOUT.pumpkin.file));
-  fs.copyFileSync(path.join(root, LAYOUT["core-node"].file), path.join(dir, LAYOUT["core-node"].file));
-  if (includeRunner) {
-    fs.copyFileSync(path.join(root, LAYOUT["game-runner"].file), path.join(dir, LAYOUT["game-runner"].file));
-    const runnerCrate = path.join(root, "rust", "homerun-game-cli");
-    fs.mkdirSync(runnerCrate, { recursive: true });
-    fs.writeFileSync(path.join(runnerCrate, "Cargo.toml"), 'version = "0.1.0"');
+  if (!reuse) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(path.join(root, LAYOUT.pumpkin.file), path.join(dir, LAYOUT.pumpkin.file));
+    fs.copyFileSync(path.join(root, LAYOUT["core-node"].file), path.join(dir, LAYOUT["core-node"].file));
+    if (includeRunner) {
+      fs.copyFileSync(path.join(root, LAYOUT["game-runner"].file), path.join(dir, LAYOUT["game-runner"].file));
+      const runnerCrate = path.join(root, "rust", "homerun-game-cli");
+      fs.mkdirSync(runnerCrate, { recursive: true });
+      fs.writeFileSync(path.join(runnerCrate, "Cargo.toml"), 'version = "0.1.0"');
+    }
+    const crate = path.join(root, "rust", "homerun-pumpkin-bin");
+    fs.mkdirSync(crate, { recursive: true });
+    fs.writeFileSync(path.join(crate, "Cargo.toml"), 'rev = "123456789abcdef"');
   }
-  const crate = path.join(root, "rust", "homerun-pumpkin-bin");
-  fs.mkdirSync(crate, { recursive: true });
-  fs.writeFileSync(path.join(crate, "Cargo.toml"), 'rev = "123456789abcdef"');
   const entry = { exports: {} };
   let queries = 0;
   function imports(name) {
@@ -115,7 +119,7 @@ function runPublisher(t, args, includeRunner = false, env = {}) {
     require: imports, module: entry, process: processStub,
     console: { log: (line) => logs.push(String(line)), error: (line) => logs.push(String(line)) },
   });
-  return { dir, queries, exitCode: processStub.exitCode, output: logs.join("\n") };
+  return { root, dir, queries, exitCode: processStub.exitCode, output: logs.join("\n") };
 }
 
 test("Pumpkin publication still asks the built engine for its Minecraft version", (t) => {
@@ -217,6 +221,7 @@ test("an unknown channel is refused rather than resolved", (t) => {
   assert.throws(() => resolveChannel("staging", {}), /Unknown channel: staging/);
   assert.throws(() => resolveChannel(null, { [CHANNEL_ENV]: "PROD" }), /Unknown channel: PROD/);
   assert.throws(() => prepareArtifacts(fixture(t), ["game-runner"], metadata, "staging"), /Unknown channel/);
+  assert.throws(() => verifyArtifacts(fixture(t), ["game-runner"], "staging"), /Unknown channel/);
   const byFlag = runPublisher(t, ["--channel", "staging"]);
   assert.equal(byFlag.exitCode, 1);
   assert.match(byFlag.output, /Unknown channel: staging/);
@@ -226,8 +231,51 @@ test("an unknown channel is refused rather than resolved", (t) => {
   assert.equal(manifestsWritten(byEnv.dir).length, 0);
 });
 
+test("--verify refuses a manifest that was hashed before signing", (t) => {
+  const dir = fixture(t);
+  const [artifact] = prepareArtifacts(dir, ["game-runner"], metadata);
+  assert.deepEqual(verifyArtifacts(dir, ["game-runner"]), [], "a freshly prepared manifest describes its file");
+  fs.appendFileSync(artifact.file, " simulated Authenticode signature");
+  const problems = verifyArtifacts(dir, ["game-runner"]);
+  assert.equal(problems.length, 4, "digest, build, size and URL all move with the bytes");
+  assert.match(problems[0], /manifest sha256 .* but homerun-game\.exe hashes to .*prepare manifests AFTER signing/);
+  prepareArtifacts(dir, ["game-runner"], metadata);
+  assert.deepEqual(verifyArtifacts(dir, ["game-runner"]), [], "re-preparing after signing settles it");
+});
+
+test("--verify refuses a manifest prepared for the other channel", (t) => {
+  const dir = fixture(t);
+  prepareArtifacts(dir, ["game-runner"], metadata, "dev");
+  const problems = verifyArtifacts(dir, ["game-runner"], "prod");
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /is not the prod channel's/);
+  assert.deepEqual(verifyArtifacts(dir, ["game-runner"], "dev"), []);
+});
+
+test("--verify reports a missing manifest or file rather than throwing", (t) => {
+  const dir = fixture(t);
+  assert.match(verifyArtifacts(dir, ["game-runner"])[0], /cannot read game-runner-latest\.json/);
+  prepareArtifacts(dir, ["game-runner"], metadata);
+  fs.unlinkSync(path.join(dir, LAYOUT["game-runner"].file));
+  assert.match(verifyArtifacts(dir, ["game-runner"])[0], /cannot hash homerun-game\.exe/);
+});
+
+test("--verify runs through the CLI and exits nonzero on a mismatch", (t) => {
+  const prepared = runPublisher(t, ["--only", "game-runner"], true);
+  assert.equal(prepared.exitCode, 0);
+  const passed = runPublisher(t, ["--only", "game-runner", "--verify"], true, {}, prepared.root);
+  assert.equal(passed.exitCode, 0, "what the previous invocation prepared must verify");
+  assert.match(passed.output, /Verified game-runner against their dev manifests/);
+  const manifest = path.join(prepared.dir, LAYOUT["game-runner"].manifest);
+  const good = JSON.parse(fs.readFileSync(manifest));
+  fs.writeFileSync(manifest, `${JSON.stringify({ ...good, sha256: "0".repeat(64) }, null, 2)}\n`);
+  const failed = runPublisher(t, ["--only", "game-runner", "--verify"], true, {}, prepared.root);
+  assert.equal(failed.exitCode, 1);
+  assert.match(failed.output, /manifest sha256 0{64}/);
+});
+
 test("the usage line refuses arguments it does not understand", (t) => {
-  for (const args of [["--channel"], ["--only"], ["--channel", "dev", "--channel", "prod"], ["--verify"], ["--only", "everything"]]) {
+  for (const args of [["--channel"], ["--only"], ["--channel", "dev", "--channel", "prod"], ["--publish"], ["--verify", "--verify"], ["--only", "everything"]]) {
     const run = runPublisher(t, args);
     assert.equal(run.exitCode, 1, `must refuse: ${args.join(" ")}`);
     assert.equal(manifestsWritten(run.dir).length, 0);
