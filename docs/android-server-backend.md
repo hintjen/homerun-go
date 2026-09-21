@@ -100,6 +100,8 @@ a tunnel that handshakes and carries nothing.
 | may this state change be announced | `mayAnnounce` |
 | must this launch wait for a previous engine | `awaitPreviousExit` |
 | must starting cancel an on-stop backup | `supersedesOnStopBackup` |
+| should this launch give up at its checkpoint | `shouldAbandon`, with the launch's generation |
+| was this launch replaced by a newer start | `superseded` |
 
 State is opaque and lives in the host — it goes in, a new one comes back, like
 a `HandshakeWatch` — so there is no native handle to free. Access is
@@ -115,6 +117,27 @@ moments without this file remembering which those are. Writing that plan out
 found a real disagreement: the launch waits for a previous engine *before*
 restoring a world, because a mobile launch writes the server directory before
 it spawns, and the core's first draft had the wait later.
+
+**A launch carries its own generation**, handed out by `startRequested`'s
+`proceed` and passed back at every checkpoint. A stop during preparation is
+only an *intent* for the launch to find at its next checkpoint, and a start
+arriving during that stop is a restart — which the core admits on purpose,
+and which clears the intent. A launch that asked only "was a stop requested"
+therefore never learned it had been replaced, and on a player's phone the two
+launches ran side by side: same server directory, same runtime unpack. The
+first stamped `runtime-21` complete and exec'd a JVM while the second was
+rewriting `lib/modules` underneath it. With the generation the core answers
+"you were replaced" instead, and the replaced launch gives up *quietly* — it
+cancels its own pending tunnel resolve and pump but announces nothing, because
+`stopped` would flip the card under the start the player just asked for.
+
+The other half is `launchGate`, a mutex the incoming launch waits on until the
+outgoing one has unwound — the preparing-launch analogue of
+`awaitPreviousExit`. Without it the two still share the directory for as long
+as the outgoing launch takes to reach a checkpoint, which is the whole of a
+jar download. `JavaRuntime.ensure` is synchronised as well, so even a caller
+that reaches it twice finds the `.complete` stamp rather than deleting a
+runtime a JVM is loading.
 
 ### Getting a JVM onto the device
 
@@ -1404,6 +1427,14 @@ phone. The three refusals are different and the message says which: Spigot and
 Bukkit are compiled on the device by BuildTools and never will be hosted here
 (Paper runs their plugins), Forge and NeoForge are waiting on argfile
 expansion, and Quilt is out on audience size rather than capability.
+
+**`ClassFormatError: Incompatible magic value 0 in class file sun/nio/cs/…`
+before `main`, in the console.** The JVM read zeroes out of `lib/modules`,
+which means something rewrote the runtime directory while it was being
+loaded. Look for two `unpacking bundled Java N` lines from different tids in
+one launch. That was a restart overlapping the launch it replaced — see *Who
+owns a server* above — and both the generation check and the `ensure` lock
+now prevent it. If it comes back, one of them has been bypassed.
 
 **The jar re-downloads on every start.** `homerun-jar.json` is missing or its
 digest does not match what the endpoint now publishes. For Paper that is

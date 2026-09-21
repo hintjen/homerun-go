@@ -172,6 +172,19 @@ struct ServerConfig {
     /// before that is wiped before anyone reads it. Backends write these
     /// right after that clear, badged.
     var launchNotes: [String] = []
+
+    /// This launch's name for itself, from the core's `proceed` verdict.
+    ///
+    /// A launch hands it back at every checkpoint. A stop that lands while a
+    /// launch is still preparing is only an *intent*, and a start arriving
+    /// during that stop is a restart which clears the intent — so a launch
+    /// that asks only "was a stop requested" never learns it was replaced.
+    /// With the generation the core can say so, and the replaced launch gives
+    /// up quietly instead of finishing beside the one that replaced it.
+    ///
+    /// Nil is a caller that did not go through admission; the core then
+    /// answers the older question.
+    var generation: Int?
 }
 
 /// The settings and identity one launch needs to back itself up.

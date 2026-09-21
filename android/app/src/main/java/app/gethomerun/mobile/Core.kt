@@ -1212,19 +1212,36 @@ object Core {
             /** Starting cancels any on-stop backup of this server still running. */
             val supersedesOnStopBackup: Boolean,
             val intentional: Boolean,
+            /**
+             * After `exited`: the process belonged to a launch a newer start
+             * replaced. After a query that named its launch: that launch has
+             * been replaced, and must give up without tearing anything down.
+             */
             val superseded: Boolean,
             /** Only answered when a state was asked about; true otherwise. */
             val mayAnnounce: Boolean,
+            /**
+             * After `startRequested` answered `proceed`: this launch's name for
+             * itself. Carried through the launch and handed back to
+             * [shouldAbandon] and [abandoned] — see [ServerConfig.generation].
+             */
+            val generation: Long?,
         )
 
         @Synchronized
-        private fun apply(event: String, serverId: String, code: Int? = null): View {
+        private fun apply(
+            event: String,
+            serverId: String,
+            code: Int? = null,
+            generation: Long? = null,
+        ): View {
             val reply = call("lifecycle.apply", buildJsonObject {
                 state?.let { put("lifecycle", it) }
                 put("concurrency", concurrency)
                 put("event", event)
                 put("serverId", serverId)
                 code?.let { put("code", it) }
+                generation?.let { put("generation", it) }
             }).jsonObject
             state = reply["lifecycle"]!!.jsonObject
             return reply.toView()
@@ -1243,6 +1260,7 @@ object Core {
             intentional = this["intentional"]?.jsonPrimitive?.boolean == true,
             superseded = this["superseded"]?.jsonPrimitive?.boolean == true,
             mayAnnounce = this["mayAnnounce"]?.jsonPrimitive?.boolean != false,
+            generation = this["generation"]?.jsonPrimitive?.longOrNull,
         )
 
         private fun JsonObject.ids(key: String): List<String> =
@@ -1276,8 +1294,13 @@ object Core {
             apply("consoleReady", serverId)
         }
 
-        fun abandoned(serverId: String) {
-            apply("abandoned", serverId)
+        /**
+         * A launch gave up before spawning. [generation] is the launch's own;
+         * the core ignores the abandon of a launch a newer start has replaced,
+         * because the entry now describes that newer launch.
+         */
+        fun abandoned(serverId: String, generation: Long? = null) {
+            apply("abandoned", serverId, generation = generation)
         }
 
         /** What the exit meant: state, whether it was asked for, whether it
@@ -1287,12 +1310,17 @@ object Core {
         // --- queries --------------------------------------------------------
 
         @Synchronized
-        private fun query(serverId: String, announcing: String? = null): View =
+        private fun query(
+            serverId: String,
+            announcing: String? = null,
+            generation: Long? = null,
+        ): View =
             call("lifecycle.query", buildJsonObject {
                 state?.let { put("lifecycle", it) }
                 put("concurrency", concurrency)
                 put("serverId", serverId)
                 announcing?.let { put("state", it) }
+                generation?.let { put("generation", it) }
             }).jsonObject.toView()
 
         /** `native-server-active-ids`: running, coming up, or winding down. */
@@ -1300,8 +1328,25 @@ object Core {
 
         fun runningIds(): List<String> = query("").runningIds
 
-        /** True when a launch should give up at its next checkpoint. */
-        fun shouldAbandon(serverId: String): Boolean = query(serverId).shouldAbandon
+        /**
+         * True when a launch should give up at its next checkpoint.
+         *
+         * Ask with the launch's own [generation]. Without it the answer is
+         * only "was a stop requested", and a restart clears that — which is
+         * how a launch stopped mid-download carried on beside the one that
+         * replaced it and spawned a JVM on a runtime the other was still
+         * unpacking.
+         */
+        fun shouldAbandon(serverId: String, generation: Long? = null): Boolean =
+            query(serverId, generation = generation).shouldAbandon
+
+        /**
+         * True when a newer start has replaced this launch. It gives up
+         * quietly: the tunnel, the pump and the announcement all belong to
+         * the launch that replaced it now.
+         */
+        fun superseded(serverId: String, generation: Long): Boolean =
+            query(serverId, generation = generation).superseded
 
         /**
          * True when a previous engine is still alive and this launch must wait

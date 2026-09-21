@@ -120,6 +120,51 @@ APK against an old library. It also passes `-Pabi` for the attached device, whic
 is what arms the check that a Java runtime staged for the *other* architecture
 cannot ship.
 
+### A Windows machine with nothing on it
+
+Done from scratch on 2026-09-21 in about forty minutes; `npm run doctor` said
+18 things were missing. In order, with the traps:
+
+```bash
+winget install EclipseAdoptium.Temurin.21.JDK Python.Python.3.12 Kitware.CMake GoLang.Go
+# cmdline-tools: unzip commandlinetools-win-*.zip to %LOCALAPPDATA%\Android\Sdk\cmdline-tools\latest
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;35.0.0" \
+  "ndk;27.2.12479018" "emulator" "system-images;android-36;google_apis;x86_64"
+avdmanager create avd -n homerun_api36 -k "system-images;android-36;google_apis;x86_64" -d pixel_7
+rustup target add x86_64-linux-android aarch64-linux-android
+```
+
+- **A JRE is not a JDK.** The doctor reports `JDK 17-21 … jre-21` as OK and
+  Gradle then cannot compile. Install the Temurin *JDK* and point `JAVA_HOME`
+  at `jdk-21…`, not `jre-21…`.
+- **`cargo install cargo-ndk` fails on the GNU Rust toolchain** with
+  `error calling dlltool 'dlltool.exe': program not found`, and so does every
+  `cargo ndk` build after it (a host build-dependency uses `raw-dylib`). The
+  self-contained `dlltool.exe` rustup ships does not work either — it wants
+  `as` beside it. Fix both with the NDK's LLVM one: copy
+  `ndk/<ver>/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-dlltool.exe`
+  to a directory as `dlltool.exe` and put that directory **first** on `PATH`.
+  It accepts every flag rustc passes. Get cargo-ndk itself from the prebuilt
+  `cargo-ndk-x86_64-pc-windows-msvc-*.zip` on its GitHub releases.
+- **`PATH` entries must be POSIX in Git Bash.** `$LOCALAPPDATA/...` is
+  `C:\Users\...` and the `C:` splits the variable at the colon; the shim is
+  then "not found" with no other symptom. Use `$(cygpath -u "$LOCALAPPDATA")`.
+- `scripts/stage-jre.py` needs `ANDROID_NDK_HOME` exported (it builds
+  `libandroid-spawn`), and `python3` is not on PATH — call
+  `%LOCALAPPDATA%\Programs\Python\Python312\python.exe` directly.
+- **Stage every Java "latest" can ask for.** With no settings a server is
+  vanilla-latest, and latest moved to Java 25 while only 21 was staged: the
+  launch is refused with "needs Java 25, and this version of the app ships
+  Java 21" and nothing else runs. `stage-jre.py x86_64 --java 21,25`.
+- The Firebase config is a build input the repo does not carry. For a compile
+  or an emulator run that never needs push, a placeholder
+  `prod-android-google-services.json` / `staging-…` at the repo root with both
+  package names (`app.gethomerun.mobile`, `….debug`) satisfies the plugin;
+  push then logs `no FCM token available` and everything else works.
+- `test:swift-syntax` needs Docker Desktop *running*, not merely installed —
+  start it from `%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe`
+  and give it a minute.
+
 ### Building from a git worktree
 
 Everything staged into the app — `jniLibs/`, `assets/web`, `assets/jre-25`

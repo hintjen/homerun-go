@@ -36,7 +36,10 @@ const { execFileSync, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const IMAGE = "swift:5.9";
+// Keep this at or above the newest syntax the host uses. 5.9 could not parse
+// `nonisolated(unsafe)` in Reporting.swift and the check failed on a file
+// nobody had touched, which reads as a broken change rather than a stale pin.
+const IMAGE = "swift:5.10";
 const ROOT = path.resolve(__dirname, "..");
 const IOS = path.join(ROOT, "ios");
 
