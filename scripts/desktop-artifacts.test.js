@@ -8,6 +8,7 @@ const { prepareArtifacts, LAYOUT, PUBLIC_BASE } = require("./publish-desktop-art
 const { TARGETS } = require("./targets");
 
 const metadata = {
+  pumpkin: { minecraftVersion: "1.21.11", protocol: 774 },
   "game-runner": { version: "0.1.0", protocol: 1 },
   "core-node": { version: "0.1.0", abi: 1, sourceBuild: "fixture-revision" },
 };
@@ -69,11 +70,18 @@ test("runner can be prepared without building Pumpkin and targets Windows with s
   assert.equal(TARGETS["game-runner"].artifact, "homerun-game.exe");
 });
 
-test("Pumpkin publication still asks the built engine for its Minecraft version", (t) => {
+function runPublisher(t, args, includeRunner = false) {
   const root = fixture(t);
   const dir = path.join(root, "dist", "desktop");
   fs.mkdirSync(dir, { recursive: true });
   fs.copyFileSync(path.join(root, LAYOUT.pumpkin.file), path.join(dir, LAYOUT.pumpkin.file));
+  fs.copyFileSync(path.join(root, LAYOUT["core-node"].file), path.join(dir, LAYOUT["core-node"].file));
+  if (includeRunner) {
+    fs.copyFileSync(path.join(root, LAYOUT["game-runner"].file), path.join(dir, LAYOUT["game-runner"].file));
+    const runnerCrate = path.join(root, "rust", "homerun-game-cli");
+    fs.mkdirSync(runnerCrate, { recursive: true });
+    fs.writeFileSync(path.join(runnerCrate, "Cargo.toml"), 'version = "0.1.0"');
+  }
   const crate = path.join(root, "rust", "homerun-pumpkin-bin");
   fs.mkdirSync(crate, { recursive: true });
   fs.writeFileSync(path.join(crate, "Cargo.toml"), 'rev = "123456789abcdef"');
@@ -81,6 +89,9 @@ test("Pumpkin publication still asks the built engine for its Minecraft version"
   let queries = 0;
   function imports(name) {
     if (name === "./targets") return { ROOT: root };
+    if (name === path.join(dir, LAYOUT["core-node"].file)) return {
+      coreVersion: () => "0.1.0", coreAbiVersion: () => 1, coreBuildId: () => "fixture-revision",
+    };
     if (name === "child_process") return { execFileSync(file, args, options) {
       assert.equal(file, path.join(dir, LAYOUT.pumpkin.file));
       assert.equal(args.join(" "), "--minecraft-version");
@@ -91,14 +102,38 @@ test("Pumpkin publication still asks the built engine for its Minecraft version"
     return require(name);
   }
   imports.main = entry;
-  const processStub = { argv: ["node", "publish", "--only", "pumpkin"], exitCode: 0 };
+  const processStub = { argv: ["node", "publish", ...args], exitCode: 0 };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "publish-desktop-artifacts.js"), "utf8"), {
     require: imports, module: entry, process: processStub, console: { log() {}, error() {} },
   });
-  assert.equal(processStub.exitCode, 0);
+  return { dir, queries, exitCode: processStub.exitCode };
+}
+
+test("Pumpkin publication still asks the built engine for its Minecraft version", (t) => {
+  const { dir, queries, exitCode } = runPublisher(t, ["--only", "pumpkin"]);
+  assert.equal(exitCode, 0);
   assert.equal(queries, 1, "publication must query the actual Pumpkin binary");
   const manifest = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT.pumpkin.manifest)));
   assert.equal(manifest.minecraftVersion, "1.21.11", "the desktop must retain the version used to choose a compatible client");
   assert.equal(manifest.protocol, 774);
   assert.equal(manifest.rev, "123456789abcdef");
+});
+
+test("the existing bare publish command works without a built runner", (t) => {
+  const { dir, exitCode } = runPublisher(t, []);
+  assert.equal(exitCode, 0, "existing Pumpkin/addon release jobs must not require a new build step");
+  for (const kind of ["pumpkin", "core-node"]) assert.ok(fs.existsSync(path.join(dir, LAYOUT[kind].manifest)));
+  assert.equal(fs.existsSync(path.join(dir, LAYOUT["game-runner"].manifest)), false);
+});
+
+test("bare publication includes an available runner but explicit selection refuses a missing runner", (t) => {
+  const present = runPublisher(t, [], true);
+  assert.equal(present.exitCode, 0);
+  assert.ok(fs.existsSync(path.join(present.dir, LAYOUT["game-runner"].manifest)));
+  const missing = runPublisher(t, ["--only", "game-runner"]);
+  assert.equal(missing.exitCode, 1);
+});
+
+test("Pumpkin metadata cannot be omitted by direct preparation callers", (t) => {
+  assert.throws(() => prepareArtifacts(fixture(t), ["pumpkin"]), /Minecraft version and protocol/);
 });

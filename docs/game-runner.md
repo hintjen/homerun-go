@@ -20,7 +20,11 @@ hex characters of this executable's SHA-256, including any signature.
 The commands are hello, fetch, start, start-tunnel, console, stop, status and
 shutdown. A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad
-JSON is diagnosed without echoing it (it could contain secrets). Commands are
+JSON is diagnosed without echoing it (it could contain secrets). A recognized
+command with missing or incorrectly typed fields emits `descriptor_invalid`
+with a recoverable `serverId`; malformed console requests also complete a
+recoverable `reqId`. No request field values or serde diagnostics are echoed.
+Commands are
 limited to one MiB; an oversized line closes the session rather than retaining
 unbounded input. EOF takes the same cleanup path as shutdown.
 
@@ -43,6 +47,13 @@ with any bind preflight, another process can race the check. Readiness is not
 published until both the marker and the server PID's declared listening ports
 are observed. Ports are emitted before server-started. A missing marker or
 port reaches ready_timeout and follows the game's stop ladder.
+
+Windows observes both protocols with one `netstat -ano` call, at most once per
+second after the marker. TCP listener detection uses the unspecified foreign
+endpoint with port zero, not localized state text such as LISTENING/ABHÖREN.
+The monitor still checks cancellation and deadlines every 100 ms between
+observations. This does not verify the socket's bind interface; see the open
+review findings before onboarding a real game.
 
 ProcessEngine drains stdout and stderr independently; readiness on stderr
 works even if stdout is quiet. Its original Engine trait callers still receive

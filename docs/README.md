@@ -12,6 +12,10 @@ change falls on.
 
 ## Documentation Index
 
+### [Multi-game review follow-up](./multi-game-review-followup.md)
+
+September 21 review fixes, unresolved risks and corrections to validation claims.
+
 ### [Multi-game continuation handoff](./multi-game-engine-handoff.md)
 
 Remote branches, completed engine work, Windows validation, and remaining

@@ -207,6 +207,41 @@ fn stderr_readiness_console_and_eof_save_the_world() {
 }
 
 #[test]
+fn malformed_known_commands_reply_without_starting_and_keep_stdin_usable() {
+    let f = Fixture::new();
+    let mut h = Host::new();
+    let mut missing_dir = f.start();
+    missing_dir.as_object_mut().unwrap().remove("serverDir");
+    let mut null_settings = f.start();
+    null_settings["settings"] = Value::Null;
+    let mut wrong_acceptance = f.start();
+    wrong_acceptance["licenceAccepted"] = json!("true");
+    for command in [
+        missing_dir,
+        null_settings,
+        wrong_acceptance,
+        json!({"cmd":"fetch", "serverId":"s1"}),
+    ] {
+        h.send(command);
+        let error = h.until("error");
+        assert_eq!(error["serverId"], "s1");
+        assert_eq!(error["code"], "descriptor_invalid");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing or invalid fields"));
+        assert!(!error.to_string().contains("do-not-print-this"));
+    }
+    h.send(json!({"cmd":"console", "serverId":"s1", "reqId":"bad-console", "command":null}));
+    h.until("error");
+    assert_eq!(h.until("console-response")["reqId"], "bad-console");
+    h.send(json!({"cmd":"status"}));
+    assert_eq!(h.until("status")["servers"], json!([]));
+    assert!(!f.root.join("server/pid").exists());
+    h.eof();
+}
+
+#[test]
 fn missing_acceptance_wins_over_bad_descriptor_and_never_fetches() {
     let f = Fixture::new();
     let mut h = Host::new();

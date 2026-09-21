@@ -43,6 +43,7 @@
     "android:logs": "node scripts/android-app.js logs",
     "test": "npm run test:core && npm run test:rust && npm run test:game && npm run test:abi && npm run test:pumpkin-rev && npm run test:host-revision && npm run test:capabilities && npm run test:ui-bundle && npm run test:core-node && npm run test:desktop-artifacts",
     "test:game": "cargo test --manifest-path rust/homerun-game-cli/Cargo.toml -- --test-threads=1",
+    "check:pumpkin": "cargo check --manifest-path rust/homerun-pumpkin-bin/Cargo.toml && cargo check --manifest-path rust/homerun-supervisor/Cargo.toml --features pumpkin-engine",
     "test:abi": "node scripts/check-abi.js",
     "test:swift-syntax": "node scripts/check-swift-syntax.js",
     "test:pumpkin-rev": "node scripts/check-pumpkin-rev.js",

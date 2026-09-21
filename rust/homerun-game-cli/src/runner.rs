@@ -396,11 +396,14 @@ fn run(
         thread::spawn(move || {
             let begin = Instant::now();
             let mut sampled = Instant::now();
+            let mut next_port_check = Instant::now();
             while !done.load(Ordering::SeqCst) {
                 if !stop.should_stop()
                     && ready.load(Ordering::SeqCst)
                     && !started.load(Ordering::SeqCst)
+                    && Instant::now() >= next_port_check
                 {
+                    next_port_check = Instant::now() + Duration::from_secs(1);
                     let observed = engine
                         .pid()
                         .map(platform::listening_ports)
@@ -571,6 +574,35 @@ fn player_list(reply: &str) -> Option<Vec<Player>> {
         .collect()
 }
 
+fn report_malformed(out: &Output, line: &[u8]) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) else {
+        eprintln!("Ignoring invalid runner JSON.");
+        return;
+    };
+    let Some(cmd) = value.get("cmd").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if !matches!(
+        cmd,
+        "hello" | "fetch" | "start" | "start-tunnel" | "console" | "stop" | "status" | "shutdown"
+    ) {
+        return;
+    }
+    let id = value.get("serverId").and_then(|v| v.as_str());
+    // Do not echo serde's error or field values: either may contain a secret.
+    let message = format!("The {cmd} request has missing or invalid fields.");
+    out.error(id, fail(codes::DESCRIPTOR_INVALID, &message));
+    if cmd == "console" {
+        if let (Some(id), Some(req_id)) = (id, value.get("reqId").and_then(|v| v.as_str())) {
+            out.send(Event::ConsoleResponse {
+                server_id: id.into(),
+                req_id: Some(req_id.into()),
+                response: message,
+            });
+        }
+    }
+}
+
 pub fn supervise() -> std::result::Result<(), String> {
     let output = Arc::new(Mutex::new(std::io::stdout()));
     let out = Output::new(move |event| {
@@ -578,7 +610,7 @@ pub fn supervise() -> std::result::Result<(), String> {
         let _ = w.write_all(event.line().as_bytes());
         let _ = w.flush();
     });
-    let mut runner = Runner::new(out)?;
+    let mut runner = Runner::new(out.clone())?;
     let (tx, rx) = mpsc::sync_channel(32);
     thread::spawn(move || {
         let mut input = std::io::stdin().lock();
@@ -597,7 +629,7 @@ pub fn supervise() -> std::result::Result<(), String> {
                             break;
                         }
                     }
-                    Err(_) => eprintln!("Ignoring a malformed runner command."),
+                    Err(_) => report_malformed(&out, &line),
                 },
             }
         }

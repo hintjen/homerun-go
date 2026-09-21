@@ -37,7 +37,11 @@ node scripts/publish-desktop-artifacts.js --only game-runner
 node scripts/publish-desktop-artifacts.js --only core-node
 ```
 
-With no arguments, preparation requires all three artifacts including Pumpkin.
+With no arguments, preparation requires Pumpkin and the addon, preserving the
+existing release workflow. It includes the runner only when `homerun-game.exe`
+exists. A workflow building the runner should use `--only game-runner` as an
+explicit gate: that selection fails if the runner is missing. Use a clean
+staging directory to avoid including a stale runner from a previous build.
 Each invocation validates all its inputs before writing any manifests. Upload
 all immutable binaries before changing the corresponding `latest.json` files.
 

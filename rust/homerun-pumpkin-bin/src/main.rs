@@ -101,7 +101,7 @@ async fn main() {
     // First, before the config is read: `PumpkinConfig::load` writes a default
     // `pumpkin.toml` into the CWD, and a version query must leave no trace.
     if std::env::args().skip(1).any(|arg| arg == MINECRAFT_VERSION_FLAG) {
-        println!("{}", homerun_pumpkin_ffi::host_dispatch::pumpkin_serves());
+        println!("{}", homerun_supervisor::host_dispatch::pumpkin_serves());
         return;
     }
 

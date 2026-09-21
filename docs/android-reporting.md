@@ -352,8 +352,8 @@ The desktop is still exposed to both. See `plans/android-parity.md`.
 | `HomerunApi.kt` | `perform`, `serverBody`, `publicIpAddress`, PATCH |
 | `homerun-core/src/reporting/` | crash, stats, minigame — payloads and cadence |
 | `homerun-core/src/reporting/crash.rs` | `HostContext` — the app's half of a crash report, and how it becomes `device_logs` |
-| `homerun-pumpkin-ffi/src/core_dispatch.rs` | `crash_host_context` — the ABI version, the compiled engines, the logcat tail |
-| `homerun-pumpkin-ffi/src/lib.rs` | `refused_start` — a launch refused before the supervisor ran, written to the console |
+| `homerun-supervisor/src/core_dispatch.rs` | `crash_host_context` — the ABI version, the compiled engines, the logcat tail |
+| `homerun-supervisor/src/lib.rs` | `refused_start` — a launch refused before the supervisor ran, written to the console |
 | `homerun-core/src/minecraft/ops.rs` | op/deop/ban/pardon, the list merge |
 | `homerun-core/src/minecraft/slp.rs` | the ping codec |
 | `homerun-supervisor/src/host_dispatch.rs` | the ping socket, the deadline, `server.statsPoll` |

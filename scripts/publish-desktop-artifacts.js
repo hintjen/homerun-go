@@ -24,6 +24,9 @@ function prepareArtifacts(dir, selected, metadata = {}) {
     const bytes = fs.readFileSync(file);
     if (!bytes.length) throw new Error(`Empty artifact: ${file}`);
     const info = metadata[kind] || {};
+    if (kind === "pumpkin" && (!/^\d+(\.\d+){1,2}$/.test(info.minecraftVersion || "") || !Number.isInteger(info.protocol) || info.protocol <= 0)) {
+      throw new Error("Pumpkin must identify its Minecraft version and protocol");
+    }
     if (kind !== "pumpkin" && !info.version) throw new Error(`Missing version for ${kind}`);
     if (kind === "core-node" && (!Number.isInteger(info.abi) || info.abi < 1 || !info.sourceBuild)) {
       throw new Error("Core addon must export its ABI and source build identity");
@@ -86,14 +89,17 @@ function engineMinecraftVersion(file) {
 }
 
 function main(args) {
-  let selected = Object.keys(LAYOUT);
+  const dir = path.join(ROOT, "dist", "desktop");
+  // Existing release jobs only build Pumpkin and the addon. A runner is
+  // required only when explicitly selected, or included when already built.
+  let selected = ["pumpkin", "core-node"];
+  if (fs.existsSync(path.join(dir, LAYOUT["game-runner"].file))) selected.push("game-runner");
   if (args.length) {
     if (args.length !== 2 || args[0] !== "--only" || !Object.hasOwn(LAYOUT, args[1])) {
       throw new Error("Usage: node scripts/publish-desktop-artifacts.js [--only pumpkin|game-runner|core-node]");
     }
     selected = [args[1]];
   }
-  const dir = path.join(ROOT, "dist", "desktop");
   const metadata = {};
   for (const kind of selected) {
     if (kind === "core-node") {

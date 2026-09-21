@@ -1,6 +1,8 @@
 # Multi-game engine continuation handoff
 
-Updated 2026-09-18. This file is portable: use the remote branches below, not
+Updated 2026-09-21. Read [the review follow-up](./multi-game-review-followup.md)
+before treating any completion or test claim as merge readiness.
+This file is portable: use the remote branches below, not
 another machine's checkout paths. Raw session logs are not committed.
 
 ## Start here
@@ -45,12 +47,13 @@ script hashes final bytes and prepares immutable URLs plus manifests:
 `pumpkin/latest.json`. Exact filenames and signing order are documented in
 [desktop-game-artifacts.md](./desktop-game-artifacts.md).
 
-## Verified on Windows
+## September 18 validation on Windows
 
 - `npm test` after consolidation: 908 core tests, 243 supervisor tests (one pre-existing ignored),
-  8 protocol and 11 runner lifecycle tests; existing ABI/revision/capability/UI
+  8 protocol tests and 11 runner integration-test entries (ten substantive
+  scenarios plus the fake-game fixture entry); existing ABI/revision/capability/UI
   bundle checks; 22 real addon smoke checks; artifact tests. All passed.
-  The artifact suite now has six tests, including preservation of Pumpkin's
+  The artifact suite then had six tests, including preservation of Pumpkin's
   Minecraft version probe. iOS and Android bridge conformance checks passed.
 - `npm run rust:game-runner` and `npm run rust:core-node`: release builds passed.
   Both Windows artifacts passed the check for redistributable DLL imports.
@@ -63,6 +66,11 @@ script hashes final bytes and prepares immutable URLs plus manifests:
   hold the crash module's shared guard through runtime shutdown. A deliberately
   removed Pumpkin version query failed its regression test, then passed after
   restoration.
+
+This did not check the Pumpkin binary or `pumpkin-engine` feature. The
+September 21 review found that gap and a compile failure in the merge. For
+current validation and unresolved findings, use the review follow-up linked
+at the top of this document. Keep PR 24 draft pending review.
 
 ## Other sessions' pushed work
 

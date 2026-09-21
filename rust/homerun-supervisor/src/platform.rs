@@ -237,20 +237,15 @@ mod imp {
     /// "the fifth field" therefore works for TCP and silently reads
     /// `*:*` for UDP. The pid is taken as the *last* field instead.
     ///
-    /// Only `LISTENING` TCP rows count. An ESTABLISHED row is a connection
-    /// the server made, not a port a player can reach, and forwarding one
-    /// would publish an outbound socket.
+    /// State labels are localized (for example LISTENING / ABHÖREN).
+    /// With -a (not -q), a TCP listener has an unspecified foreign endpoint
+    /// with port zero. Connected rows have a real foreign endpoint. Identify
+    /// listeners by these numeric fields, never the translated state label.
     pub fn listening_ports(pid: u32) -> Vec<Listening> {
-        let Ok(output) = Command::new("netstat").args(["-ano", "-p", "TCP"]).output() else {
+        let Ok(output) = Command::new("netstat").args(["-ano"]).output() else {
             return Vec::new();
         };
-        let Ok(udp) = Command::new("netstat").args(["-ano", "-p", "UDP"]).output() else {
-            return parse(&String::from_utf8_lossy(&output.stdout), pid);
-        };
-
-        let mut all = parse(&String::from_utf8_lossy(&output.stdout), pid);
-        all.extend(parse(&String::from_utf8_lossy(&udp.stdout), pid));
-        all
+        parse(&String::from_utf8_lossy(&output.stdout), pid)
     }
 
     fn parse(text: &str, pid: u32) -> Vec<Listening> {
@@ -277,7 +272,9 @@ mod imp {
             // A TCP socket that is not listening is a connection this server
             // opened, and publishing one would be publishing an outbound
             // socket. UDP has no state column and every row is a bound port.
-            if protocol == Protocol::Tcp && !line.to_ascii_uppercase().contains("LISTENING") {
+            if protocol == Protocol::Tcp
+                && (fields.len() != 5 || !matches!(fields[2], "0.0.0.0:0" | "[::]:0"))
+            {
                 continue;
             }
 
@@ -293,6 +290,34 @@ mod imp {
     /// Split on the last colon: an IPv6 address is full of them.
     fn port_of(address: &str) -> Option<u16> {
         address.rsplit_once(':')?.1.parse().ok()
+    }
+
+    #[test]
+    fn localized_listeners_exclude_connected_sockets_and_other_pids() {
+        let rows = "TCP 127.0.0.1:28016 0.0.0.0:0 ABHÖREN 42\n\
+                    TCP [::]:28017 [::]:0 LISTENING 42\n\
+                    TCP 127.0.0.1:28018 127.0.0.1:50000 HERGESTELLT 42\n\
+                    TCP 127.0.0.1:28019 0.0.0.0:0 ABHÖREN 43\n\
+                    UDP 0.0.0.0:28015 *:* 42";
+        let found = parse(rows, 42);
+        assert_eq!(
+            found,
+            vec![
+                Listening {
+                    protocol: Protocol::Tcp,
+                    port: 28016
+                },
+                Listening {
+                    protocol: Protocol::Tcp,
+                    port: 28017
+                },
+                Listening {
+                    protocol: Protocol::Udp,
+                    port: 28015
+                },
+            ],
+            "localized TCP listeners and UDP must be observed without publishing connections"
+        );
     }
 
     /// `Get-Process`, for the two numbers that matter.
