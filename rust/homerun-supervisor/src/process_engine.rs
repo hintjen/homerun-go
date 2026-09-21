@@ -910,6 +910,7 @@ mod tests {
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 28015,
             settings: None,
+            local_network: false,
         };
 
         let ready = Arc::new(Mutex::new(false));
@@ -1329,6 +1330,7 @@ mod tests {
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
             settings: None,
+            local_network: false,
         };
 
         let lines = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1398,6 +1400,7 @@ mod tests {
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
             settings: None,
+            local_network: false,
         };
         let ready = Arc::new(Mutex::new(false));
 
@@ -1444,6 +1447,7 @@ mod tests {
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
             settings: None,
+            local_network: false,
         };
         engine.run(
             &request,
@@ -1488,6 +1492,7 @@ mod tests {
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 25565,
             settings: None,
+            local_network: false,
         };
 
         let started = Instant::now();

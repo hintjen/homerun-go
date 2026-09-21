@@ -627,6 +627,20 @@ check("a start request encodes the settings the engine then resolves") {
     return "\(settings.count) settings resolved"
 }
 
+check("the local-network toggle reaches the engine, and is off unless sent") {
+    let off = try preview(
+        StartRequest.encode(
+            serverId: "s1", dataDir: "/tmp/homerun-coretest", port: 25565, settings: nil))
+    try expect(off["localNetwork"] as? Bool == false, "default: \(off)")
+
+    let on = try preview(
+        StartRequest.encode(
+            serverId: "s1", dataDir: "/tmp/homerun-coretest", port: 25565, settings: nil,
+            localNetwork: true))
+    try expect(on["localNetwork"] as? Bool == true, "sent true, engine read: \(on)")
+    return "localNetwork false by default, true when sent"
+}
+
 check("game type reaches the engine, not just the name of the key") {
     // If `gameType` were misspelled this still answers ok, with online mode
     // left at the API's value — which is the whole failure mode being guarded

@@ -332,6 +332,9 @@ struct StartRequest {
     data_dir: String,
     port: u16,
     settings: Option<engine_settings::EngineSettings>,
+    /// `localNetwork` on the wire. Absent is false: loopback, which is what
+    /// every launch was before a host could say otherwise.
+    local_network: bool,
     /// What to run. Absent runs the engine linked into this build, which is
     /// what every iOS launch wants and all that platform can have; present
     /// runs a child process with the argv and environment a host composed.
@@ -380,6 +383,10 @@ fn parse_start_request(raw: &str) -> Result<StartRequest, String> {
     });
 
     Ok(StartRequest {
+        local_network: request
+            .get("localNetwork")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
         invocation: request.get("invocation").filter(|v| !v.is_null()).cloned(),
         server_id: text("serverId")?,
         data_dir: text("dataDir")?,
@@ -432,6 +439,7 @@ pub unsafe extern "C" fn homerun_server_start(request_json: *const c_char) -> *m
             &request.data_dir,
             request.port,
             request.settings,
+            request.local_network,
             engine,
         ) {
             Ok(()) => json!({ "ok": true }).to_string(),
@@ -867,9 +875,15 @@ pub unsafe extern "C" fn homerun_server_settings_preview(
                 "settings": serde_json::to_value(&resolved).unwrap_or(serde_json::Value::Null),
                 "summary": resolved.summary(),
                 "advisories": resolved.advisories(),
+                "localNetwork": request.local_network,
             })
             .to_string(),
-            None => json!({ "ok": true, "settings": serde_json::Value::Null }).to_string(),
+            None => json!({
+                "ok": true,
+                "settings": serde_json::Value::Null,
+                "localNetwork": request.local_network,
+            })
+            .to_string(),
         },
         Some(Err(message)) => err(message),
         None => err("the start request must be a valid UTF-8 string"),

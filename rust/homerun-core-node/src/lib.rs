@@ -72,7 +72,7 @@ use std::panic::{catch_unwind, UnwindSafe};
 use napi_derive::napi;
 
 use homerun_core::bundle;
-use homerun_core::minecraft::console;
+use homerun_core::minecraft::{console, lan};
 
 /// Node addon contract version, distinct from the mobile C FFI ABI.
 pub const CORE_NODE_ABI_VERSION: u32 = 1;
@@ -218,6 +218,34 @@ fn evaluate(manifest: &str, public_key: &str, installed: &str) -> Result<String,
     Ok(reply.to_string())
 }
 
+// --- the local network -------------------------------------------------------
+
+/// Where a server binds when the player exposes it to the local network, and
+/// the console line to print — `{address, line?}` as a JSON string. See
+/// `homerun_core::minecraft::lan`; the phones ask the same question.
+#[napi]
+pub fn lan_bind(exposed: bool, port: u16) -> napi::Result<String> {
+    guarded("lanBind", move || {
+        serde_json::to_string(&lan::bind(exposed, port)).map_err(|e| napi::Error::from_reason(e.to_string()))
+    })
+}
+
+/// The datagram that puts a server in a Java client's "local network" list,
+/// and where and how often to send it — `{payload, group, port, intervalMs}`
+/// as a JSON string.
+///
+/// A dedicated server never announces itself; only the client's integrated
+/// server does. So the host sends this on the server's behalf, and the exact
+/// bytes are the core's so that the desktop and Android send the same thing
+/// Pumpkin's own broadcaster does.
+#[napi]
+pub fn lan_announce(motd: String, port: u16) -> napi::Result<String> {
+    guarded("lanAnnounce", move || {
+        serde_json::to_string(&lan::announcement(&motd, port)).map_err(|e| napi::Error::from_reason(e.to_string()))
+    })
+}
+
+
 /// Run `f`, turning a panic into a thrown JavaScript error instead of an
 /// aborted desktop app. Seeing the message means a bug in native code, not bad
 /// input, and it says so rather than dressing it up as a user-facing failure.
@@ -285,3 +313,4 @@ mod tests {
         );
     }
 }
+

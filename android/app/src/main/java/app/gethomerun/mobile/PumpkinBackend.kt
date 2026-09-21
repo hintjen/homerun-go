@@ -442,6 +442,10 @@ class PumpkinBackend(
             val payload = buildJsonObject {
                 put("env", env)
                 put("gameType", config.gameType)
+                // The bind is the engine's to apply, and it applies the
+                // core's rule: loopback unless this says otherwise, and then
+                // Pumpkin's own LAN broadcast too.
+                put("localNetwork", config.localNetwork)
                 put("resolved", buildJsonArray {
                     resolved.forEach { add(buildJsonObject { put("name", it.name); put("id", it.id) }) }
                 })

@@ -321,7 +321,9 @@ final class PumpkinBackend: ServerBackend {
             }
 
             if try order.at("spawn") {
-                startServerThread(serverId: serverId, port: port, settings: settings)
+                startServerThread(
+                    serverId: serverId, port: port, settings: settings,
+                    localNetwork: config.localNetwork)
                 engineSpawned = true
                 lifecycle.spawned(serverId)
                 startPumps(serverId: serverId)
@@ -561,13 +563,14 @@ final class PumpkinBackend: ServerBackend {
     }
 
     private func startServerThread(
-        serverId: String, port: UInt16, settings: StartRequest.Settings?
+        serverId: String, port: UInt16, settings: StartRequest.Settings?, localNetwork: Bool
     ) {
         let directory = HostStore.serverDirectory(id: serverId).path
 
         let thread = Thread { [weak self] in
             let reply = HomerunFFI.serverStart(
-                serverId: serverId, dataDir: directory, port: port, settings: settings)
+                serverId: serverId, dataDir: directory, port: port, settings: settings,
+                localNetwork: localNetwork)
 
             // Hop back: every property here is main-actor state, and the UI
             // reads it.

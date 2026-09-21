@@ -25,6 +25,12 @@ pub struct RunRequest {
     /// [`crate::server::ServerHost::start`] says so on the console rather than
     /// leaving it silent.
     pub settings: Option<crate::engine_settings::EngineSettings>,
+    /// The player exposed this server to the local network: bind every
+    /// interface and announce it, rather than loopback and silence. The
+    /// decision is `homerun_core::minecraft::lan`'s; an engine that links
+    /// Pumpkin applies it in `pumpkin_settings::apply_network`, and a child
+    /// process was given it by its host already.
+    pub local_network: bool,
 }
 
 /// Signals a running engine to shut down. Shared with the stop path.
@@ -205,6 +211,7 @@ mod tests {
             data_dir: ".".into(),
             java_port: 25565,
             settings: None,
+            local_network: false,
         }
     }
 

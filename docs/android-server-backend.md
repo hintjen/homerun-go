@@ -827,6 +827,46 @@ Vanilla-latest is now only a server this device has never fetched settings
 for. The desktop still falls back to vanilla-latest; carrying this over is
 Homerun Desktop's.
 
+### Being found on the local network — `LocalNetwork`
+
+"Expose Minecraft server to your local network" is a checkbox the shared UI
+shows for every native Java server, backed by `get-` and
+`set-native-local-network`. It used to be decoration here: `get` answered
+false, `set` refused, every JVM and PowerNukkitX server bound `127.0.0.1` —
+and a Pumpkin server on the same phone listened on every interface anyway,
+because nothing set Pumpkin's address and its default is `0.0.0.0`.
+
+Now one switch means two things, off by default. **Bind**: the core's
+`minecraft.lan.bind` answers `127.0.0.1` or `0.0.0.0` and the console line
+to print, and the answer lands in `server-ip` (JVM), `settings.ip`
+(PowerNukkitX) and Pumpkin's `networking.java.address` — the last through the
+same `homerun-settings.json` the spawned engine already reads, and applied
+there whether or not the rest of the file could be, so "no settings" can never
+reopen the old hole. A launch with no settings at all merges just `server-ip`
+and `server-port` into `server.properties` (`properties.merge`), because
+otherwise nothing rewrites the file and a toggle turned off would leave the
+last launch's `0.0.0.0`. **Announce**: a Java client "scanning for games on
+your local network" listens on `224.0.2.60:4445` for
+`[MOTD]…[/MOTD][AD]port[/AD]` every 1.5 s, and only the client's own
+integrated server ever sends it — so `LocalNetwork.Announcer` sends the core's
+datagram (`minecraft.lan.announce`, the same bytes Pumpkin's own broadcaster
+formats) for the JVM from console-ready until the process exits. Pumpkin
+sends its own; PowerNukkitX needs none, because a Bedrock client broadcasts
+the ping and the server answers it.
+
+The announcement holds a `WifiManager.MulticastLock`
+(`CHANGE_WIFI_MULTICAST_STATE`, no prompt) while it runs: the Wi-Fi driver
+drops multicast and broadcast frames nobody asked for, device-wide, which is
+what would otherwise silence a Bedrock client's ping before PowerNukkitX ever
+saw it.
+
+Proven on the x86_64 emulator with `tcpdump` in the guest: on, the JVM logs
+`Starting Minecraft server on 0.0.0.0:25565` and `10.0.2.16 → 224.0.2.60.4445
+[MOTD]Probe[/MOTD][AD]25565[/AD]` leaves `wlan0`; off, `127.0.0.1:25565` and
+not a packet. A real client listing it — a PC on the same Wi-Fi as the phone —
+is the test the emulator cannot do, because its NAT never forwards multicast
+out.
+
 ### Loaders that install themselves — `ServerLoader`
 
 Vanilla and Paper publish a **server jar**: resolve a URL, download it, check a

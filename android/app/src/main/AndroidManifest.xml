@@ -36,6 +36,15 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!--
+      For a server the player exposed to the local network. The Wi-Fi driver
+      drops multicast and broadcast frames nobody asked for, and a Bedrock
+      client finds a server by broadcasting to it, while a Java client is
+      found by a multicast announcement this app sends. Held only while such a
+      server runs — see LocalNetwork.kt. Normal-level: no prompt.
+    -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+
+    <!--
       The one that does prompt, from API 33. It gates the *notification*, not
       the service: denied, hosting still runs at foreground priority and the
       player simply gets no indicator and no Stop button. Requested when the

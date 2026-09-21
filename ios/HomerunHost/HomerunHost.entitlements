@@ -9,8 +9,20 @@
 	     can deliver regardless of which backend the build talks to.
 
 	     Still deliberately absent: com.apple.developer.associated-domains
-	     (M2 adds it for Universal Links) and the multicast entitlement —
-	     v1 shows the IP instead of broadcasting to Minecraft's LAN list. -->
+	     (M2 adds it for Universal Links).
+
+	     Wanted, and waiting on Apple: com.apple.developer.networking.multicast.
+	     "Expose Minecraft server to your local network" turns on Pumpkin's LAN
+	     broadcast (a datagram to 224.0.2.60:4445 every 1.5 s, which is how a
+	     Java client's Multiplayer screen lists a server on the Wi-Fi), and iOS
+	     refuses multicast sends without this entitlement — Pumpkin binds its
+	     socket and every send fails quietly. It is requested through the form
+	     at developer.apple.com/contact/request/networking-multicast, on the
+	     developer account, with a human review. Until it is granted the
+	     toggle exposes the server but does not list it, and the doc says so.
+	     Once granted, add
+	       <key>com.apple.developer.networking.multicast</key><true/>
+	     here and to the App ID's capabilities; nothing in the code changes. -->
 	<key>aps-environment</key>
 	<string>development</string>
 </dict>

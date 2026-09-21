@@ -320,6 +320,7 @@ impl ServerHost {
         data_dir: &str,
         port: u16,
         settings: Option<crate::engine_settings::EngineSettings>,
+        local_network: bool,
         engine: Option<Arc<dyn Engine>>,
     ) -> Result<(), String> {
         {
@@ -388,6 +389,7 @@ impl ServerHost {
             data_dir: data_dir.to_string(),
             java_port: port,
             settings,
+            local_network,
         };
 
         let stop = self.lock().stop.clone();
@@ -652,7 +654,7 @@ mod tests {
         let host = Arc::new(host);
         let runner = {
             let (host, dir) = (Arc::clone(&host), dir.clone());
-            thread::spawn(move || host.start("s1", &dir, port, None, Some(engine)))
+            thread::spawn(move || host.start("s1", &dir, port, None, false, Some(engine)))
         };
 
         // Running is announced by the console, not by the process existing.
@@ -716,7 +718,7 @@ mod tests {
 
         let runner = {
             let host = host.clone();
-            std::thread::spawn(move || host.start("slow", &dir, port, None, None))
+            std::thread::spawn(move || host.start("slow", &dir, port, None, false, None))
         };
 
         // Well inside the engine's startup window.
@@ -751,7 +753,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, false, None));
 
         // Wait for it to come up.
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -802,7 +804,7 @@ mod tests {
         let runner = host.clone();
         let run_dir = dir.clone();
         let handle =
-            thread::spawn(move || runner.start("s1", &run_dir, port, Some(settings), None));
+            thread::spawn(move || runner.start("s1", &run_dir, port, Some(settings), false, None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
@@ -835,7 +837,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, false, None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
@@ -862,7 +864,7 @@ mod tests {
         let held = std::net::TcpListener::bind(("0.0.0.0", 0)).unwrap();
         let port = held.local_addr().unwrap().port();
 
-        let err = host.start("s1", &dir, port, None, None).unwrap_err();
+        let err = host.start("s1", &dir, port, None, false, None).unwrap_err();
         assert!(err.contains(&port.to_string()));
         // Recoverable: the user stops the other server and retries.
         assert_eq!(host.state(), ServerState::Stopped);
@@ -886,7 +888,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, false, None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
@@ -894,7 +896,7 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
 
-        let err = host.start("s2", &dir, free_port(), None, None).unwrap_err();
+        let err = host.start("s2", &dir, free_port(), None, false, None).unwrap_err();
         assert!(err.contains("one at a time"), "got: {err}");
 
         host.stop(Duration::from_secs(5)).unwrap();
@@ -910,7 +912,7 @@ mod tests {
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
 
-        let err = host.start("s1", &dir, free_port(), None, None).unwrap_err();
+        let err = host.start("s1", &dir, free_port(), None, false, None).unwrap_err();
         assert!(err.contains("world corrupted"));
         assert_eq!(host.state(), ServerState::Crashed);
         assert!(host.state().can_transition_to(ServerState::Starting));
@@ -928,7 +930,7 @@ mod tests {
 
         let host = ServerHost::new(Box::new(StubEngine::failing("world corrupted")));
         let dir = temp_dir();
-        let err = host.start("s1", &dir, free_port(), None, None).unwrap_err();
+        let err = host.start("s1", &dir, free_port(), None, false, None).unwrap_err();
 
         assert!(err.contains("world corrupted"), "got: {err}");
         assert!(!err.contains("unrelated"), "stale panic leaked into: {err}");
@@ -960,7 +962,7 @@ mod tests {
             let port = free_port();
             let runner = host.clone();
             let run_dir = dir.clone();
-            let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+            let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, false, None));
 
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             while host.state() != ServerState::Running {
@@ -1002,7 +1004,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, false, None));
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
@@ -1038,7 +1040,7 @@ mod tests {
 
         let runner = host.clone();
         let run_dir = dir.clone();
-        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, None));
+        let handle = thread::spawn(move || runner.start("s1", &run_dir, port, None, false, None));
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while host.state() != ServerState::Running {
             assert!(std::time::Instant::now() < deadline, "never started");

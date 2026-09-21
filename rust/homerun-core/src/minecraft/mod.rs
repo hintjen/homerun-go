@@ -17,6 +17,7 @@ pub mod crossplay;
 pub mod hosting;
 pub mod jar;
 pub mod jvm;
+pub mod lan;
 pub mod loader;
 pub mod minigame;
 pub mod modjar;

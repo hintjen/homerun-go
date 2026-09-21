@@ -185,6 +185,12 @@ struct ServerConfig {
     /// Nil is a caller that did not go through admission; the core then
     /// answers the older question.
     var generation: Int?
+
+    /// The player exposed this server to the local network: bind every
+    /// interface and announce it, rather than loopback and silence. Read from
+    /// `LocalNetwork` by the bridge at the moment of the start, so a toggle
+    /// flipped while stopped takes effect on the launch that follows.
+    var localNetwork = false
 }
 
 /// The settings and identity one launch needs to back itself up.

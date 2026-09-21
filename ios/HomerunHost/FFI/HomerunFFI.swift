@@ -23,11 +23,13 @@ enum HomerunFFI {
     /// `settings` is optional and its absence is not an error — it starts the
     /// server on the engine's own configuration and says so on the console.
     static func serverStart(
-        serverId: String, dataDir: String, port: UInt16, settings: StartRequest.Settings? = nil
+        serverId: String, dataDir: String, port: UInt16, settings: StartRequest.Settings? = nil,
+        localNetwork: Bool = false
     ) -> Reply {
         withRequest(
             StartRequest.encode(
-                serverId: serverId, dataDir: dataDir, port: port, settings: settings),
+                serverId: serverId, dataDir: dataDir, port: port, settings: settings,
+                localNetwork: localNetwork),
             "The server could not be started."
         ) { homerun_server_start($0) }
     }
