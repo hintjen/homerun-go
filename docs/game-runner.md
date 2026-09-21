@@ -17,6 +17,18 @@ NDJSON on stdout. Diagnostics go to stderr. Protocol version 1 matches the
 monorepo's `plans/multi-game-contracts.md`; `ready.build` is the first twelve
 hex characters of this executable's SHA-256, including any signature.
 
+`ready` also carries `features`: the names in `protocol::FEATURES`, which say
+what this build understands that the protocol version does not. The protocol
+version is bumped only on a break, so it cannot describe a descriptor field
+added compatibly -- `launch.cwdBase` and `saves.mounts` arrived without one, and
+a runner published before them agrees to run such a descriptor and then puts the
+world where the host does not know to look. A host compares the two lists and
+refuses the launch instead. `homerun-game --features` prints the same list as a
+JSON array, which is what `scripts/publish-desktop-artifacts.js` asks the built
+binary so a manifest cannot claim a capability the artifact beside it lacks.
+Adding a name is how a descriptor field becomes something a host may rely on;
+removing one is a break.
+
 The commands are hello, fetch, start, start-tunnel, console, stop, status and
 shutdown. A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad

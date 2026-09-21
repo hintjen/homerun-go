@@ -48,9 +48,18 @@ is inferred from the game ID.
 
 `rust/homerun-core/schema/game.v0.json` is regenerated. The monorepo must update
 descriptor-contract section 1 and re-pin `games/schema/game.v0.json` from the
-merged main commit. Deploy a runner with this support before onboarding a
-descriptor that uses these fields: older runners do not understand their
-semantics. No new NDJSON command or error code is introduced by the mount work.
+merged main commit. No new NDJSON command or error code is introduced by the
+mount work.
+
+**Deploy a runner with this support before onboarding a descriptor that uses
+these fields.** That sentence used to be the whole of the protection, and a
+sentence in a document is not one: an older runner reads such a descriptor,
+agrees to run it, and either cannot load the game's assets or writes the world
+outside the folder the host backs up -- silently, with a normal-looking launch.
+The `runtime-mounts` feature name is now what says so out loud. It is in
+`protocol::FEATURES`, it rides in `ready` and in the published manifest, and a
+host that needs it refuses a build that does not advertise it. See
+`docs/game-runner.md`.
 
 Two earlier commits on this branch are separate additive contract changes:
 `engine.doctor` can return an optional `licence` refusal and the CLI emits it

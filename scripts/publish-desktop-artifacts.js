@@ -228,6 +228,45 @@ function engineMinecraftVersion(file) {
   return { minecraftVersion, protocol };
 }
 
+// Ask the built runner, not source, for the same reason as above: the manifest
+// is what a desktop reads to decide whether this build understands a
+// descriptor's runtime layout, and a manifest that says so about a binary that
+// does not is worse than one that says nothing. A build too old to have the
+// flag publishes no features, which is the truthful answer about it.
+function runnerFeatures(file) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "game-runner-features-"));
+  let out;
+  try {
+    out = execFileSync(file, ["--features"], {
+      cwd,
+      encoding: "utf8",
+      timeout: 30_000,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+  } catch (error) {
+    console.error(
+      `\nCould not ask ${path.relative(ROOT, file)} which features it has: ${error.message}\n` +
+        "  It has to run here, so publish from Windows, and from a build that has\n" +
+        "  the --features flag.\n"
+    );
+    process.exit(1);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(out.trim().split(/\r?\n/).pop());
+  } catch {
+    parsed = null;
+  }
+  const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+  if (!Array.isArray(parsed) || parsed.some((f) => typeof f !== "string" || !NAME.test(f))) {
+    console.error(`\nThe runner answered --features with something else:\n  ${out.trim()}\n`);
+    process.exit(1);
+  }
+  return parsed;
+}
+
 function main(args, env = {}) {
   const options = parseArgs(args, env);
   const dir = path.join(ROOT, "dist", "desktop");
@@ -256,7 +295,11 @@ function main(args, env = {}) {
       const cargo = fs.readFileSync(path.join(ROOT, "rust", crate, "Cargo.toml"), "utf8");
       metadata[kind] = kind === "pumpkin"
         ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1], ...engineMinecraftVersion(path.join(dir, LAYOUT.pumpkin.file)) }
-        : { version: cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1], protocol: 1 };
+        : {
+            version: cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1],
+            protocol: 1,
+            features: runnerFeatures(path.join(dir, LAYOUT["game-runner"].file)),
+          };
     }
   }
   const artifacts = prepareArtifacts(dir, selected, metadata, options.channel);

@@ -1,7 +1,7 @@
 //! A single owned server; stdin remains responsive while fetching or running.
 use crate::{
     prepare::{self, fail, Result},
-    protocol::{codes, Command, Event, Player, ServerStatus, PROTOCOL},
+    protocol::{codes, Command, Event, Player, ServerStatus, FEATURES, PROTOCOL},
 };
 use homerun_core::engine::{self, descriptor::PlayersVia};
 use homerun_supervisor::{
@@ -84,6 +84,7 @@ impl Runner {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION").into(),
             build: self.build.clone(),
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
         });
     }
     pub fn idle(&self) -> bool {

@@ -34,6 +34,7 @@ Options:
   --observe-seconds <n>    Probe/verify time after readiness (default 5)
   --evidence <folder>       Default: evidence/<host>
   --json                   Emit the same NDJSON events as supervise
+  --features               Print this build's capability names as JSON
 
 A slug resolves to games/<slug>/game.json. launch stays in the foreground.
 stop requests shutdown of a standalone launch owning that server directory.
@@ -56,6 +57,14 @@ pub fn run() -> std::result::Result<(), String> {
     }
     if verb == "--version" {
         println!("{}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    // Asked of the built binary by the publish script, so a manifest cannot
+    // claim a capability the artifact beside it does not have. One JSON array
+    // on one line, for the same reason Pumpkin's `--minecraft-version` is
+    // parseable: the reader is a script, not a person.
+    if verb == "--features" {
+        println!("{}", serde_json::to_string(crate::protocol::FEATURES).map_err(|e| e.to_string())?);
         return Ok(());
     }
     if verb == "supervise" {

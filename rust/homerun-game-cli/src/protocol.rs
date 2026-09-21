@@ -39,6 +39,32 @@ use serde_json::{Map, Value};
 /// The protocol version this runner speaks.
 pub const PROTOCOL: u32 = 1;
 
+/// What this runner understands that the protocol version does not say.
+///
+/// The protocol version answers "can these two hold a conversation at all",
+/// and it is bumped only on a break. That is the wrong instrument for a
+/// descriptor field added compatibly: `launch.cwdBase` and `saves.mounts`
+/// arrived without a bump, and a runner published before them reads a
+/// descriptor that uses them, agrees to run it, and then puts the game's world
+/// somewhere the host does not know to back up. Nothing in the handshake said
+/// otherwise, because nothing in the handshake could.
+///
+/// So a runner lists what it knows how to honour, a host compares that with
+/// what a descriptor needs, and a mismatch is refused before the game starts.
+/// This is the source of truth: `--features` prints it, `ready` carries it, and
+/// the publish script asks the built binary rather than being told.
+///
+/// Names are lowercase and hyphenated, and one name covers one shipped
+/// capability. Adding to this list is how a descriptor field becomes something
+/// a host may rely on; removing from it is a break.
+pub const FEATURES: &[&str] = &[
+    // Runtime working directories and server-owned save mounts, merged in PR 35
+    // (`docs/runtime-save-mounts.md`): `platforms[host].launch.cwdBase`,
+    // `saves.mounts` and the `{runtimeDir}` placeholder. One name, because they
+    // shipped together and no build has ever had one without the others.
+    "runtime-mounts",
+];
+
 /// What Electron sends.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
@@ -114,6 +140,10 @@ pub enum Event {
     Ready {
         protocol: u32,
         version: String,
+        /// `FEATURES`. Additive: a host that does not read it is unaffected,
+        /// and a host that does treats its absence as "none", which is what a
+        /// runner published before this field was.
+        features: Vec<String>,
         /// The first twelve characters of this executable's own sha256 â€” the
         /// same build id its published manifest carries, so a desktop can say
         /// which runner it is talking to.
@@ -448,10 +478,12 @@ mod tests {
             protocol: PROTOCOL,
             version: "0.1.0".into(),
             build: "abc123def456".into(),
+            features: FEATURES.iter().map(|f| f.to_string()).collect(),
         });
         assert_eq!(ready["event"], "ready");
         assert_eq!(ready["protocol"], 1);
         assert_eq!(ready["build"], "abc123def456");
+        assert_eq!(ready["features"], serde_json::json!(FEATURES));
 
         let progress = rendered(Event::FetchProgress {
             server_id: "s1".into(),
