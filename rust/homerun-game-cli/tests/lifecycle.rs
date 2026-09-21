@@ -206,6 +206,39 @@ fn stderr_readiness_console_and_eof_save_the_world() {
     );
 }
 
+/// A setting a player cleared has to leave the managed file. Skipping the key
+/// kept the value from the launch before, so a cleared seed went on
+/// generating the old world with nothing on screen naming the number doing
+/// it. Everything the file holds that Homerun does not manage stays put.
+#[test]
+fn a_cleared_setting_leaves_its_managed_key_out_of_the_config_file() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.root.join("server")).unwrap();
+    fs::write(
+        f.root.join("server/settings.json"),
+        r#"{"hostname":"from the launch before","keep":"mine"}"#,
+    )
+    .unwrap();
+
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["settings"] = json!({ "hostname": "" });
+    h.send(start);
+    h.until("server-started");
+
+    let config: Value =
+        serde_json::from_slice(&fs::read(f.root.join("server/settings.json")).unwrap()).unwrap();
+    assert!(
+        config.get("hostname").is_none(),
+        "a cleared setting must not keep the previous launch's value: {config}"
+    );
+    assert_eq!(
+        config["keep"], "mine",
+        "a key Homerun does not manage must survive: {config}"
+    );
+    h.eof();
+}
+
 #[test]
 fn malformed_known_commands_reply_without_starting_and_keep_stdin_usable() {
     let f = Fixture::new();

@@ -68,9 +68,21 @@ pub fn compose(descriptor: &GameDescriptor, host: &str, bindings: &Bindings) -> 
                 // tokens. `seed={setting:seed}` loses only itself: there is
                 // no flag in front of it, and the argument before it is
                 // unrelated.
+                //
+                // The flag has to be the token *immediately* before this one
+                // in the descriptor. `sources.last()` is the last argument
+                // still standing, which after an earlier drop is some earlier
+                // token entirely: in
+                // `["-batchmode", "+a", "{setting:n1}", "{setting:n2}"]` with
+                // both settings unset, `{setting:n1}` takes `+a` with it and
+                // then `{setting:n2}` finds `-batchmode` sitting at the end
+                // and takes that too. The index check is what stops a second
+                // drop reaching back past the hole the first one left.
                 if template::is_sole_placeholder(token) {
                     if let Some(&previous) = sources.last() {
-                        if template::looks_like_flag(&launch.args[previous]) {
+                        if previous + 1 == index
+                            && template::looks_like_flag(&launch.args[previous])
+                        {
                             args.pop();
                             sources.pop();
                         }
@@ -237,6 +249,56 @@ mod tests {
             args,
             vec!["+world.offset", "-5"],
             "-5 is a value, not a flag"
+        );
+    }
+
+    /// Two unset settings in a row must not eat an argument that was never
+    /// anybody's value.
+    ///
+    /// The second drop looks at the last argument still standing, and before
+    /// the index check that was `-batchmode` — three tokens away in the
+    /// descriptor, separated from this one by the hole the first drop left.
+    /// A game launched with neither `-batchmode` nor `+a` opens a window on a
+    /// headless machine, which is a failure nobody would trace back to a seed
+    /// nobody set.
+    #[test]
+    fn consecutive_unset_settings_each_drop_only_their_own_flag() {
+        let mut f = Fixture::new();
+        f.settings.insert("n1".into(), Value::Null);
+        f.settings.insert("n2".into(), Value::Null);
+        let d = descriptor(&["-batchmode", "+a", "{setting:n1}", "{setting:n2}"]);
+        let args = compose(&d, "win32-x64", &f.bindings()).unwrap().args;
+        assert_eq!(
+            args,
+            vec!["-batchmode"],
+            "+a is n1's flag and goes with it; -batchmode belongs to nobody"
+        );
+    }
+
+    /// The same reach-back over a longer distance: each pair loses its own
+    /// flag, and the trailing value — which never had one — loses nothing.
+    ///
+    /// By the last token the only argument left standing is the very first
+    /// one, five tokens back. Reaching it is the bug; leaving it is the rule.
+    #[test]
+    fn a_drop_never_reaches_back_past_the_tokens_that_already_went() {
+        let mut f = Fixture::new();
+        for key in ["n1", "n2", "n3"] {
+            f.settings.insert(key.into(), Value::Null);
+        }
+        let d = descriptor(&[
+            "-nographics",
+            "+a",
+            "{setting:n1}",
+            "+b",
+            "{setting:n2}",
+            "{setting:n3}",
+        ]);
+        let args = compose(&d, "win32-x64", &f.bindings()).unwrap().args;
+        assert_eq!(
+            args,
+            vec!["-nographics"],
+            "+a and +b go with their own values; -nographics is not a value's flag"
         );
     }
 

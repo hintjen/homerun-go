@@ -442,6 +442,7 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
         for arg in &launch.args {
             check_placeholders(arg, Site::Host, &setting_keys, &port_names, r);
         }
+        check_dropped_flags(host, &launch.args, r);
         for value in launch.env.values() {
             check_placeholders(value, Site::Host, &setting_keys, &port_names, r);
         }
@@ -468,6 +469,63 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
             }
         }
     }
+}
+
+/// Warn where the flag-dropping rule will take a flag that is nobody's.
+///
+/// [`super::invocation`] drops the token in front of an unset sole
+/// placeholder, because `+server.seed {setting:seed}` has to lose both halves
+/// or leave a flag with no value after it. The rule cannot tell that pair
+/// apart from `-batchmode {setting:seed}`, where `-batchmode` carries no
+/// value and the seed is a bare positional — so on every launch with no seed,
+/// that descriptor silently loses `-batchmode` too. It is inherent to the
+/// rule rather than a bug in it, which is exactly why it should be visible
+/// while someone is writing the file instead of when a headless machine opens
+/// a window.
+///
+/// What tells the two apart is the descriptor author's own naming: a flag
+/// that introduces a setting almost always names it. So this stays quiet when
+/// the flag mentions the setting's key and speaks up when it does not. That
+/// is a guess about spelling, which is why it is a warning and never a
+/// refusal — the cost of a wrong one is a glance, and the cost of no warning
+/// at all is an argument missing from every default launch.
+fn check_dropped_flags(host: &str, args: &[String], r: &mut Report) {
+    for pair in args.windows(2) {
+        let (flag, value) = (&pair[0], &pair[1]);
+        if !template::looks_like_flag(flag) || !template::is_sole_placeholder(value) {
+            continue;
+        }
+        let Ok(found) = template::placeholders(value) else {
+            continue;
+        };
+        let Some(Placeholder::Setting(key)) = found.first() else {
+            continue;
+        };
+        if mentions(flag, key) {
+            continue;
+        }
+        r.warnings.push(format!(
+            "on {host} this game runs \"{flag}\" in front of \"{}\", so when that \
+             setting is not set Homerun leaves out both of them. If \"{flag}\" is a \
+             flag in its own right rather than the one \"{key}\" belongs to, give \
+             \"{key}\" its own flag or a default so it is never unset.",
+            value.trim()
+        ));
+    }
+}
+
+/// Whether a flag token names a setting, ignoring how either is punctuated.
+///
+/// `+server.maxplayers` names `maxPlayers`; `-batchmode` names nothing.
+fn mentions(flag: &str, key: &str) -> bool {
+    let squash = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let key = squash(key);
+    !key.is_empty() && squash(flag).contains(&key)
 }
 
 fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
@@ -650,6 +708,14 @@ mod tests {
         deep_merge(&mut base, &patch);
         let d: GameDescriptor = serde_json::from_value(base).unwrap();
         report(&d).problems
+    }
+
+    fn warnings_of(patch: serde_json::Value) -> Vec<String> {
+        let mut base: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+        deep_merge(&mut base, &patch);
+        let d: GameDescriptor = serde_json::from_value(base).unwrap();
+        report(&d).warnings
     }
 
     fn deep_merge(target: &mut serde_json::Value, patch: &serde_json::Value) {
@@ -853,6 +919,51 @@ mod tests {
             r.warnings.iter().any(|w| w.contains("save may be lost")),
             "{:#?}",
             r.warnings
+        );
+    }
+
+    // ─── the flag-dropping rule, made visible ──────────────────────────────
+
+    /// `-batchmode` is a flag in its own right and the seed after it is a
+    /// bare positional, so every launch without a seed loses `-batchmode`
+    /// as well. The rule cannot tell that from a flag-and-value pair, so
+    /// authoring time is where it has to be said.
+    #[test]
+    fn a_flag_that_is_nobody_s_value_is_warned_about_before_it_disappears() {
+        let warnings = warnings_of(json!({ "platforms": { "win32-x64": { "launch": {
+            "args": ["-batchmode", "{setting:seed}"]
+        }}}}));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("-batchmode") && w.contains("seed")),
+            "{warnings:#?}"
+        );
+    }
+
+    /// And stays quiet for the pair it cannot be, which is the whole reason
+    /// the check reads the descriptor's own naming rather than warning on
+    /// every optional setting in every game.
+    #[test]
+    fn a_flag_that_names_its_setting_is_not_warned_about() {
+        let warnings = warnings_of(json!({ "platforms": { "win32-x64": { "launch": {
+            "args": ["+server.seed", "{setting:seed}",
+                     "+server.maxplayers", "{setting:maxPlayers}"]
+        }}}}));
+        assert!(
+            !warnings.iter().any(|w| w.contains("+server.")),
+            "{warnings:#?}"
+        );
+    }
+
+    /// The pilot is the descriptor every other module is tested against; a
+    /// check that fires on it is a check nobody will read.
+    #[test]
+    fn the_pilot_earns_no_dropped_flag_warning() {
+        let warnings = report(&rust()).warnings;
+        assert!(
+            !warnings.iter().any(|w| w.contains("leaves out both")),
+            "{warnings:#?}"
         );
     }
 

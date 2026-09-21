@@ -226,12 +226,19 @@ pub fn launch(
     })?;
     for config in &d.config {
         let path = confined(server, &config.file)?;
+        // A managed key reflects a setting, so an unset one has to leave the
+        // file rather than keep the value from the launch before. Skipping it
+        // left a cleared seed generating the previous world's map, with
+        // nothing on screen naming the number responsible. Same rule core
+        // applies to an argument, and the same reason.
         let mut keys = Vec::new();
+        let mut cleared = Vec::new();
         for (key, template) in &config.keys {
-            if let Filled::Text(value) = engine::template::fill(template, &bindings)
+            match engine::template::fill(template, &bindings)
                 .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?
             {
-                keys.push((key.clone(), value));
+                Filled::Text(value) => keys.push((key.clone(), value)),
+                Filled::Dropped => cleared.push(key.clone()),
             }
         }
         let existing = match fs::read_to_string(&path) {
@@ -249,11 +256,13 @@ pub fn launch(
                 if keys.iter().any(|(k,v)| k.contains(['\n','\r','=']) || v.contains(['\n','\r'])) {
                     return Err(fail(codes::DESCRIPTOR_INVALID, "A setting contains a newline that this configuration format cannot store."));
                 }
-                homerun_core::properties::merge(&existing, &keys)
+                let kept = homerun_core::properties::remove(&existing, &cleared);
+                homerun_core::properties::merge(&kept, &keys)
             }
             ConfigFormat::Json => {
                 let mut object: serde_json::Map<String, serde_json::Value> = if existing.is_empty() { Default::default() }
                     else { serde_json::from_str(&existing).map_err(|_| fail(codes::SPAWN_FAILED, "The existing game configuration is not a JSON object."))? };
+                for key in &cleared { object.remove(key); }
                 for (key, value) in keys { object.insert(key, value.into()); }
                 serde_json::to_string_pretty(&object).unwrap()
             }

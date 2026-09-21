@@ -80,6 +80,46 @@ pub fn merge(existing: &str, managed: &[(String, String)]) -> String {
     text
 }
 
+/// Take managed keys back out of a file.
+///
+/// The counterpart of [`merge`] for a setting that went from set to unset. A
+/// managed key reflects a setting, so when that setting is cleared the key has
+/// to go rather than keep the value from the launch before — the same rule
+/// [`crate::engine::invocation`] applies to an argument, arrived at for the
+/// same reason. Leaving `level-seed=4213` behind for a player who cleared
+/// their seed is a world generated from a number nothing on screen mentions.
+///
+/// Only the named keys are touched. Comments, blank lines, and everything the
+/// game or the player wrote survive exactly as [`merge`] leaves them.
+pub fn remove(existing: &str, keys: &[String]) -> String {
+    if keys.is_empty() || existing.is_empty() {
+        return existing.to_string();
+    }
+
+    let mut output: Vec<&str> = Vec::new();
+    for line in existing.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            output.push(line);
+            continue;
+        }
+        match trimmed.find('=') {
+            Some(eq) if keys.iter().any(|k| k == trimmed[..eq].trim()) => continue,
+            _ => output.push(line),
+        }
+    }
+
+    while output.last().is_some_and(|l| l.trim().is_empty()) {
+        output.pop();
+    }
+    if output.is_empty() {
+        return String::new();
+    }
+    let mut text = output.join("\n");
+    text.push('\n');
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +148,39 @@ mod tests {
         );
         assert!(file.contains("motd=new"));
         assert!(!file.contains("motd=old"));
+    }
+
+    fn keys(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    /// A setting a player cleared has to leave the file, or the world is
+    /// generated from the value they cleared.
+    #[test]
+    fn a_removed_key_goes_and_takes_nothing_else_with_it() {
+        let existing = "#header\nfirst=1\nlevel-seed=4213\nlast=2\n";
+        assert_eq!(
+            remove(existing, &keys(&["level-seed"])),
+            "#header\nfirst=1\nlast=2\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_key_that_is_not_there_changes_nothing() {
+        let existing = "first=1\nlast=2\n";
+        assert_eq!(remove(existing, &keys(&["level-seed"])), existing);
+        assert_eq!(remove(existing, &[]), existing);
+    }
+
+    /// The same shapes [`merge`] tolerates: padding around the `=`, and a
+    /// commented-out line that merely looks like the key.
+    #[test]
+    fn removal_reads_a_key_the_way_the_merge_writes_one() {
+        let existing = "#level-seed=old\n  level-seed = 4213 \nkeep=1\n";
+        assert_eq!(
+            remove(existing, &keys(&["level-seed"])),
+            "#level-seed=old\nkeep=1\n"
+        );
     }
 
     /// Rewritten where it sits, so the file does not reorder between launches.

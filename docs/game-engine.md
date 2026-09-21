@@ -177,14 +177,37 @@ with no seed in it. The rule, exactly:
 | `"+world.offset", "{setting:offset}"` where offset is `-5` | nothing goes; `-5` is a value, not a flag |
 
 A preceding token is dropped only when the dropped token was *solely* a
-placeholder and the token before it starts with `+` or `-` and carries no
-placeholder of its own. The check is against the descriptor's source token,
-not the emitted argument — otherwise a negative value would be mistaken for
-the flag to remove.
+placeholder, the token before it **in the descriptor** starts with `+` or `-`
+and carries no placeholder of its own, and that token is still standing. The
+check is against the descriptor's source token, not the emitted argument —
+otherwise a negative value would be mistaken for the flag to remove.
+
+"Still standing" is the part that reads like pedantry and is not. Dropping
+looked at the last *emitted* argument, which after an earlier drop is some
+earlier token entirely: `["-batchmode", "+a", "{setting:n1}", "{setting:n2}"]`
+with both settings unset lost `+a` to the first drop and then `-batchmode` to
+the second, because `-batchmode` was what the second drop found at the end of
+the list. A game launched with neither flag opens a window on a headless
+machine, and nothing about that failure points back at a seed nobody set.
+
+The rule cannot tell `+server.seed {setting:seed}` from
+`-batchmode {setting:seed}`, where the flag carries no value of its own and
+the seed is a bare positional — that descriptor really does lose `-batchmode`
+on every launch without a seed. It is inherent to the rule, so `validate`
+warns about it instead: quiet when the flag names the setting, which is how
+descriptor authors spell a flag-and-value pair, and loud when it does not.
+A guess about spelling, hence a warning and never a refusal.
 
 An environment variable has no equivalent: a variable set to the empty string
 is a different thing from one that is not set, so an unset setting leaves its
 variable absent.
+
+A **config file's** managed key does have an equivalent, and it is removal.
+The key reflects the setting, so a setting that went from set to unset takes
+its key out of the file rather than leaving the value from the launch before —
+a cleared seed that kept generating the old world is the failure that decided
+it. `properties::remove` and the JSON branch of the runner's `prepare` do
+that; everything unmanaged in the file survives either way.
 
 ## Ports and the gateway — `ports.rs`
 
@@ -508,8 +531,11 @@ setting drops its flag. If the player really did set it, the API stored it
 empty.
 
 **A launch line is missing an argument entirely.** Look for a `{setting:…}`
-whose value is null. The flag before it goes too — that is the rule, not a
-bug. `engine.invocation` in a test with the same settings will show it.
+whose value is null. The flag *immediately* before it in the descriptor goes
+too — that is the rule, not a bug. `engine.invocation` in a test with the same
+settings will show it. If the missing argument is not next to a null
+placeholder, that is a bug rather than the rule, and `validate`'s warnings are
+where to look first.
 
 **`engine.validate` refuses a descriptor that looks fine.** Read the whole
 list rather than the first line; `validate` collects, and the first problem is

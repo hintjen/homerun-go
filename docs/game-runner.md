@@ -79,7 +79,9 @@ a refusal rather than an optimistic launch.
 
 Relative cwd/config paths are confined to the server directory. Managed files
 cannot traverse symbolic links. JSON object and properties files merge managed
-keys without erasing unrelated settings. Other descriptor config formats
+keys without erasing unrelated settings. A managed key whose setting is unset
+is **removed** rather than left at the previous launch's value; unmanaged keys,
+comments and layout survive that too. Other descriptor config formats
 (INI, TOML, XML) currently fail with an explicit capability message; implement
 their merge rules before onboarding a game that requires them. The descriptor
 and vendor executable remain trusted bundled inputs, not a sandbox for hostile
