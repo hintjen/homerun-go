@@ -516,6 +516,26 @@ Those three answers moved into a `Supervision` the host supplies.
 already used this engine changed; `ProcessEngine::supervised` is the
 descriptor-driven door.
 
+**A console line is decoded lossily, and that is not a nicety.**
+`BufRead::lines()` yields `Err(InvalidData)` for a line that is not UTF-8,
+and `map_while(Result::ok)` — which is what the pump used — reads that as the
+end of the stream. One bad byte therefore ended log capture for the rest of
+the server's life and dropped the pipe. A player whose name is in a legacy
+code page stops `server-log`; before the ready marker it means the server
+never reports ready at all and is killed at the start timeout. So the pump
+reads to the newline, decodes with `from_utf8_lossy`, and carries on. A line
+longer than 16 KiB is cut with a ` [truncated]` marker and the rest of it
+discarded, which is what stops a pipe that turns out not to be carrying lines
+from being a memory problem. Everything else matches `lines()` exactly — one
+trailing newline removed, then one carriage return — because this is the path
+Minecraft's console takes on Android and its parsers were written against
+that. A test asserts the equivalence against `lines()` itself.
+
+The fetcher's steamcmd pump uses the same reader, where the consequence was
+sharper still: steamcmd prints the paths it installs into, so a Windows
+username that is not ASCII meant `Success! App` was never seen and the fetch
+failed every time on that machine.
+
 | | Minecraft | From a descriptor |
 |---|---|---|
 | Ready | `console::is_ready` | a substring the descriptor names |

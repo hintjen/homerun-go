@@ -408,11 +408,7 @@ impl ProcessEngine {
             stream: &'static str,
         ) {
             std::thread::spawn(move || {
-                for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                    if tx.send((line, stream)).is_err() {
-                        break;
-                    }
-                }
+                read_lines_lossy(reader, |line| tx.send((line, stream)).is_ok());
             });
         }
         if let Some(stdout) = child.stdout.take() {
@@ -605,6 +601,93 @@ fn spawn_stop_watcher(
     }
 }
 
+/// The longest console line kept whole, in bytes.
+///
+/// Not a guess about servers: it is a ceiling on what one line can cost when
+/// the pipe turns out not to be carrying lines at all. A game that writes a
+/// megabyte of binary with no newline in it would otherwise be read into one
+/// `Vec` before anything looked at it.
+const MAX_LINE: usize = 16 * 1024;
+
+/// Read a child's output as lines, tolerating bytes that are not UTF-8.
+///
+/// `BufRead::lines()` yields `Err(InvalidData)` for a line that is not UTF-8,
+/// and `map_while(Result::ok)` — which is what this was — treats that as the
+/// end of the stream. So **one** bad byte ended log capture for the rest of
+/// the server's life and dropped the pipe. That is not a hypothetical: a
+/// player with a name in a legacy code page stops `server-log`, and if it
+/// happens before the ready marker the server never reports ready at all and
+/// is killed at the start timeout.
+///
+/// So: read to the newline, decode lossily, and keep going. A line longer
+/// than [`MAX_LINE`] is cut with a marker and the rest of it discarded, which
+/// is what stops a binary blob from being a memory problem.
+///
+/// Otherwise identical to `lines()`, deliberately — this is the path
+/// Minecraft's console takes on Android, and its parsers are written against
+/// what `lines()` produced: one trailing newline removed, then one trailing
+/// carriage return, and nothing else touched. `on_line` returning false stops
+/// the read, which is how a closed channel ends the thread.
+pub(crate) fn read_lines_lossy(
+    reader: impl std::io::Read,
+    mut on_line: impl FnMut(String) -> bool,
+) {
+    let mut reader = BufReader::new(reader);
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        // One byte past the ceiling, so that "no newline yet" and "a line
+        // exactly at the ceiling" are told apart.
+        // Fully qualified: `.take()` on something iterable resolves to
+        // `Iterator::take`, which is a different method entirely.
+        let read = match std::io::Read::take(&mut reader, MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut raw)
+        {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+
+        let overlong = read > MAX_LINE && raw.last() != Some(&b'\n');
+        if overlong {
+            raw.truncate(MAX_LINE);
+        }
+        if raw.last() == Some(&b'\n') {
+            raw.pop();
+            if raw.last() == Some(&b'\r') {
+                raw.pop();
+            }
+        }
+
+        let mut line = String::from_utf8_lossy(&raw).into_owned();
+        if overlong {
+            line.push_str(" [truncated]");
+        }
+        if !on_line(line) {
+            return;
+        }
+        if overlong && !skip_to_newline(&mut reader) {
+            return;
+        }
+    }
+}
+
+/// Throw away the rest of a line that was too long to keep, without ever
+/// holding more than the ceiling in memory. False means end of stream.
+fn skip_to_newline(reader: &mut impl BufRead) -> bool {
+    let mut sink = Vec::new();
+    loop {
+        sink.clear();
+        match std::io::Read::take(&mut *reader, MAX_LINE as u64).read_until(b'\n', &mut sink) {
+            Ok(0) | Err(_) => return false,
+            Ok(_) => {
+                if sink.last() == Some(&b'\n') {
+                    return true;
+                }
+            }
+        }
+    }
+}
+
 /// Ask the process to exit — the rung before the last one.
 #[cfg(unix)]
 fn terminate(pid: u32) {
@@ -694,6 +777,29 @@ mod tests {
                 println!("18:22:01 Server startup complete");
                 println!("18:22:02 Craig has entered the world");
                 // Waits for the descriptor's own verb, not `stop`.
+                loop {
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line.trim() == "quit" {
+                        println!("18:22:09 Saving and shutting down");
+                        break;
+                    }
+                }
+            }
+            // A game whose console is not UTF-8. The bytes below are a name
+            // in a legacy code page, which is what a player called François
+            // produces on a machine that has never heard of UTF-8 -- and the
+            // marker comes *after* it, which is the case that used to kill
+            // the server rather than merely lose a line.
+            "mojibake" => {
+                let mut out = std::io::stdout();
+                out.write_all(b"18:22:00 Loading world\n").unwrap();
+                out.write_all(b"18:22:01 Fran\xe7ois has entered the world\n")
+                    .unwrap();
+                out.write_all(b"18:22:02 Server startup complete\n").unwrap();
+                out.flush().unwrap();
                 loop {
                     let mut line = String::new();
                     if std::io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
@@ -801,6 +907,129 @@ mod tests {
             on_running(&engine, &stop);
             run.join().expect("the run thread must not panic")
         })
+    }
+
+    // ─── a console that is not UTF-8 ───────────────────────────────────────
+    //
+    // `BufRead::lines()` yields `Err(InvalidData)` for a line that is not
+    // UTF-8, and `map_while(Result::ok)` read that as end of stream. One bad
+    // byte therefore ended log capture for the rest of the server's life and
+    // dropped the pipe — and before the ready marker, that is a server that
+    // never reports ready and is killed at the start timeout.
+
+    fn lossy(input: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        read_lines_lossy(input, |line| {
+            out.push(line);
+            true
+        });
+        out
+    }
+
+    #[test]
+    fn a_byte_that_is_not_utf8_costs_its_own_line_and_nothing_after_it() {
+        let got = lossy(b"first\n\xe7 second\nthird\n");
+        assert_eq!(got.len(), 3, "the stream ended early: {got:?}");
+        assert_eq!(got[0], "first");
+        assert!(got[1].ends_with(" second"), "{:?}", got[1]);
+        assert!(got[1].contains('\u{fffd}'), "the bad byte vanished silently");
+        assert_eq!(got[2], "third", "everything after one bad byte was lost");
+    }
+
+    /// Identical to `lines()` on every shape that is not the bug, because
+    /// this is the path Minecraft's console takes on Android and its parsers
+    /// are written against exactly what `lines()` produced.
+    #[test]
+    fn line_endings_are_handled_the_way_lines_handled_them() {
+        for input in [
+            &b"a\r\nb\nc"[..],
+            b"\n\na\n",
+            b"a",
+            b"",
+            b"trailing\r\n",
+            b"a\r\r\n",
+        ] {
+            let mine = lossy(input);
+            let theirs: Vec<String> = BufReader::new(input).lines().map_while(Result::ok).collect();
+            assert_eq!(mine, theirs, "for {input:?}");
+        }
+    }
+
+    /// A pipe that turns out not to be carrying lines must not be read into
+    /// one allocation. The line is cut, marked, and the rest of it dropped —
+    /// and the *next* line still arrives, which is what says the reader
+    /// resynchronised rather than giving up.
+    #[test]
+    fn a_line_with_no_end_to_it_is_cut_rather_than_kept() {
+        let mut input = vec![b'a'; MAX_LINE * 4];
+        input.extend_from_slice(b"\nnext\n");
+
+        let got = lossy(&input);
+        assert_eq!(got.len(), 2, "{:?}", got.iter().map(String::len).collect::<Vec<_>>());
+        assert_eq!(got[0].len(), MAX_LINE + " [truncated]".len());
+        assert!(got[0].ends_with(" [truncated]"), "cut without saying so");
+        assert_eq!(got[1], "next", "the reader did not find the next line");
+    }
+
+    /// The end-to-end case, with a real child process: the bad byte arrives
+    /// *before* the ready marker, so the old reader meant this server never
+    /// became ready at all.
+    #[cfg(feature = "game-engine")]
+    #[test]
+    fn a_console_that_is_not_utf8_still_reaches_the_ready_marker() {
+        let engine = Arc::new(ProcessEngine::supervised(
+            fake_server("mojibake"),
+            descriptor_supervision(ConsoleRoute::Stdin),
+        ));
+        let stop = StopSignal::default();
+        let request = RunRequest {
+            server_id: "s1".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            java_port: 0,
+            settings: None,
+        };
+
+        let ready = Arc::new(Mutex::new(false));
+        let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        std::thread::scope(|scope| {
+            let (e, r, l, s) = (
+                Arc::clone(&engine),
+                Arc::clone(&ready),
+                Arc::clone(&lines),
+                stop.clone(),
+            );
+            let run = scope.spawn(move || {
+                e.run(
+                    &request,
+                    s,
+                    &|line| l.lock().unwrap().push(line),
+                    &|| *r.lock().unwrap() = true,
+                )
+            });
+
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline && !*ready.lock().unwrap() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                *ready.lock().unwrap(),
+                "a server whose console is not UTF-8 never reported ready: {:?}",
+                lines.lock().unwrap()
+            );
+            stop.request_stop();
+            run.join().expect("the run thread must not panic")
+        });
+
+        let lines = lines.lock().unwrap();
+        assert!(
+            lines.iter().any(|l| l.contains("Server startup complete")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("has entered the world")),
+            "the line with the bad byte in it was dropped whole: {lines:?}"
+        );
     }
 
     /// The descriptor's marker is what makes this server ready — and
