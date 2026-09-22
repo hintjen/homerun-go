@@ -45,3 +45,13 @@ rerun the complete lifecycle/supervisor suites with an agreed fixture-prompt str
 and run Rust verify on the new build. Polling detects exposure after bind, not before;
 short-lived endpoints may be missed. UDP inventory includes outbound bound endpoints.
 No published runner, Rust verdict upgrade, integration, or issue closure is implied.
+
+Final compile-only results: Windows release supervisor unit-test artifact compiled
+with `cargo test --no-run --features game-engine`. Runner and lifecycle sources pass
+`cargo check --tests --target x86_64-pc-windows-msvc` in an isolated target directory.
+Alternating the standalone supervisor and CLI manifests in one shared target cache
+caused an E0463 artifact-resolution failure; the isolated check resolved it without
+source workarounds. No test executable was launched for these final checks.
+
+Source is based on merged main 883033cd (including PR 36), proposed in
+[engine draft PR 40](https://github.com/hintjen/homerun-go/pull/40).
