@@ -131,6 +131,24 @@
             "null"
           ]
         },
+        "documents": {
+          "items": {
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "url"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "name": {
           "type": "string"
         },

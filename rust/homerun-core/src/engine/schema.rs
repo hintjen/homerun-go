@@ -94,6 +94,17 @@ pub fn schema() -> Value {
                 "properties": {
                     "name": { "type": "string" },
                     "url": { "type": "string" },
+                    "documents": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "url"],
+                            "properties": {
+                                "name": { "type": "string" },
+                                "url": { "type": "string" }
+                            }
+                        }
+                    },
                     "acceptVia": {
                         "type": ["object", "null"],
                         "required": ["file", "contents"],
@@ -363,6 +374,10 @@ mod tests {
             licence: Some(Licence {
                 name: "Terms".into(),
                 url: "https://example/terms".into(),
+                documents: vec![LicenceDocument {
+                    name: "Terms".into(),
+                    url: "https://example/terms".into(),
+                }],
                 accept_via: Some(AcceptVia {
                     file: "eula.txt".into(),
                     contents: "eula=true\n".into(),
