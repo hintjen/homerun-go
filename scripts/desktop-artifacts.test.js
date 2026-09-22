@@ -11,7 +11,7 @@ const { TARGETS } = require("./targets");
 
 const metadata = {
   pumpkin: { minecraftVersion: "1.21.11", protocol: 774 },
-  "game-runner": { version: "0.1.0", protocol: 1 },
+  "game-runner": { version: "0.1.0", protocol: 1, features: ["runtime-mounts"] },
   "core-node": { version: "0.1.0", abi: 1, sourceBuild: "fixture-revision" },
 };
 function fixture(t) {
@@ -76,7 +76,7 @@ test("runner can be prepared without building Pumpkin and targets Windows with s
 
 // `reuse` is a previous run's root, for the two-invocation sequences: prepare,
 // then verify what that left on disk, the way the publish workflow does.
-function runPublisher(t, args, includeRunner = false, env = {}, reuse = null) {
+function runPublisher(t, args, includeRunner = false, env = {}, reuse = null, runnerAnswer = ["runtime-mounts"]) {
   const root = reuse ?? fixture(t);
   const dir = path.join(root, "dist", "desktop");
   if (!reuse) {
@@ -101,10 +101,15 @@ function runPublisher(t, args, includeRunner = false, env = {}, reuse = null) {
       coreVersion: () => "0.1.0", coreAbiVersion: () => 1, coreBuildId: () => "fixture-revision",
     };
     if (name === "child_process") return { execFileSync(file, args, options) {
-      assert.equal(file, path.join(dir, LAYOUT.pumpkin.file));
-      assert.equal(args.join(" "), "--minecraft-version");
       assert.notEqual(options.cwd, root);
       queries++;
+      // The runner is asked a different question, of a different file.
+      if (file === path.join(dir, LAYOUT["game-runner"].file)) {
+        assert.equal(args.join(" "), "--features");
+        return `${JSON.stringify(runnerAnswer)}\n`;
+      }
+      assert.equal(file, path.join(dir, LAYOUT.pumpkin.file));
+      assert.equal(args.join(" "), "--minecraft-version");
       return '{"minecraftVersion":"1.21.11","protocol":774}\n';
     } };
     return require(name);
@@ -145,6 +150,33 @@ test("bare publication includes an available runner but explicit selection refus
   assert.ok(fs.existsSync(path.join(present.dir, LAYOUT["game-runner"].manifest)));
   const missing = runPublisher(t, ["--only", "game-runner"]);
   assert.equal(missing.exitCode, 1);
+});
+
+test("a runner manifest names the features the built binary reports", (t) => {
+  // Asked of the artifact, never of the source tree: a manifest claiming a
+  // capability the binary beside it does not have is exactly how a desktop
+  // would decide it is safe to hand that build a descriptor it will mishandle.
+  const { dir, exitCode } = runPublisher(t, ["--only", "game-runner"], true);
+  assert.equal(exitCode, 0);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT["game-runner"].manifest)));
+  assert.deepEqual(manifest.features, ["runtime-mounts"]);
+  assert.equal(manifest.protocol, 1);
+  assert.equal(manifest.version, "0.1.0");
+});
+
+test("a runner answering --features with something else is not published", (t) => {
+  for (const answer of [{ runtimeMounts: true }, ["Runtime-Mounts"], ["ok", 7], "runtime-mounts"]) {
+    const { dir, exitCode } = runPublisher(t, ["--only", "game-runner"], true, {}, null, answer);
+    assert.equal(exitCode, 1, `${JSON.stringify(answer)} must not become a manifest`);
+    assert.equal(fs.existsSync(path.join(dir, LAYOUT["game-runner"].manifest)), false);
+  }
+});
+
+test("a runner with no features publishes an empty list, not a missing one", (t) => {
+  const { dir, exitCode } = runPublisher(t, ["--only", "game-runner"], true, {}, null, []);
+  assert.equal(exitCode, 0);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT["game-runner"].manifest)));
+  assert.deepEqual(manifest.features, []);
 });
 
 test("Pumpkin metadata cannot be omitted by direct preparation callers", (t) => {
