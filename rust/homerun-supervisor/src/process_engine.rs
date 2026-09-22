@@ -1042,6 +1042,7 @@ mod tests {
             server_id: "s1".into(),
             data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             java_port: 0,
+            local_network: false,
             settings: None,
         };
 

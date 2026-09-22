@@ -443,6 +443,7 @@ mod tests {
                 server_id: "fixture".into(),
                 data_dir: root.to_string_lossy().into_owned(),
                 java_port: 0,
+                local_network: false,
                 settings: None,
             },
             StopSignal::default(),
