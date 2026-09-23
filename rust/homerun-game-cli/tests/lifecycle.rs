@@ -228,12 +228,17 @@ fn fake_game() {
         if line == "login device" {
             let logins = fs::read_to_string("logins").unwrap_or_default();
             fs::write("logins", format!("{logins}x")).unwrap();
-            println!("Visit: https://example.invalid/device/verify?user_code=GAME42");
-            println!("Enter code: GAME42");
+            // As Hytale's does: every line ends in a colour reset, the bare
+            // address follows the one with the code in it, and success is
+            // announced on two lines.
+            println!("Or visit: https://example.invalid/device/verify?user_code=GAME42\u{1b}[m");
+            println!("Visit: https://example.invalid/device/verify\u{1b}[m");
+            println!("Enter code: GAME42\u{1b}[m");
             std::io::stdout().flush().unwrap();
             thread::spawn(|| {
                 thread::sleep(Duration::from_millis(500));
-                println!("SIGNED IN OK");
+                println!("SIGNED IN OK Mode: device\u{1b}[m");
+                println!("\u{1b}[38;5;46mSIGNED IN OK - details\u{1b}[0m\u{1b}[m");
                 std::io::stdout().flush().unwrap();
             });
             continue;
@@ -1065,6 +1070,32 @@ fn a_server_that_needs_signing_in_is_asked_once_and_the_address_is_passed_on() {
         fs::read_to_string(f.root.join("server/logins")).unwrap(),
         "x",
         "a second \"not signed in\" line must not start a second sign-in"
+    );
+    h.send(json!({"cmd":"status"}));
+    h.until("status");
+    let prompts: Vec<&Value> = h
+        .seen
+        .iter()
+        .filter(|v| v["event"] == "server-sign-in")
+        .collect();
+    for p in &prompts {
+        assert_eq!(
+            p["url"], "https://example.invalid/device/verify?user_code=GAME42",
+            "no escape codes, and the bare address never replaces this one: {p}"
+        );
+    }
+    assert_eq!(
+        prompts.last().unwrap()["code"],
+        "GAME42",
+        "the code carries no escape codes"
+    );
+    assert_eq!(
+        h.seen
+            .iter()
+            .filter(|v| v["event"] == "server-signed-in")
+            .count(),
+        1,
+        "two success lines are one sign-in"
     );
     h.eof();
 }

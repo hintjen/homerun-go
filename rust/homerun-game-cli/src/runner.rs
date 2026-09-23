@@ -38,6 +38,9 @@ struct SignInState {
     /// the server says it is signed in, so a repeated "not signed in" line
     /// cannot start a second sign-in while the first is waiting on the person.
     sent: bool,
+    /// `server-signed-in` has been sent and nothing has said otherwise since.
+    /// Hytale prints its success line twice; the host hears it once.
+    signed_in: bool,
     url: Option<String>,
     code: Option<String>,
 }
@@ -52,21 +55,31 @@ fn observe_sign_in(
 ) {
     let mut st = state.lock().unwrap();
     if !s.done.is_empty() && line.contains(&s.done) {
-        *st = SignInState::default();
-        out.send(Event::ServerSignedIn {
-            server_id: id.into(),
-        });
+        let already = st.signed_in;
+        *st = SignInState {
+            signed_in: true,
+            ..SignInState::default()
+        };
+        if !already {
+            out.send(Event::ServerSignedIn {
+                server_id: id.into(),
+            });
+        }
         return;
     }
     if !s.needed.is_empty() && line.contains(&s.needed) {
         st.needed = true;
+        st.signed_in = false;
     }
     let markers = SignIn {
         url: s.url.clone(),
         code: s.code.clone(),
     };
     let (url, code) = fetcher::sign_in_parts(line, &markers);
-    let changed = (url.is_some() && url != st.url) || (code.is_some() && code != st.code);
+    // The same rule as a downloader's prompt: a bare address never replaces
+    // the one with the code already in it.
+    let url = url.filter(|new| fetcher::replaces_sign_in_url(st.url.as_deref(), new));
+    let changed = url.is_some() || (code.is_some() && code != st.code);
     if url.is_some() {
         st.url = url;
     }
