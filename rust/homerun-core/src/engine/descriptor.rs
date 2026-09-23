@@ -263,6 +263,28 @@ pub struct Platform {
     pub runtime: Runtime,
     #[serde(default)]
     pub launch: Launch,
+    /// Further pieces of the runtime, each fetched into its own folder inside
+    /// the runtime directory.
+    ///
+    /// For a server that needs something its vendor does not ship with it: a
+    /// Java server needs a Java runtime, and the vendor's download is only the
+    /// game. Each component is pinned and verified exactly like `runtime`,
+    /// lives at `<runtime dir>/<name>`, and is fetched before it, so `exe` may
+    /// name a program inside one (`"jre/bin/java"`). Empty for every game
+    /// whose download is the whole server.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<Component>,
+}
+
+/// One further piece of a platform's runtime. See [`Platform::components`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Component {
+    /// Its folder inside the runtime directory: lowercase letters, digits and
+    /// dashes, so it is the same path on every platform and cannot climb out.
+    pub name: String,
+    #[serde(default)]
+    pub runtime: Runtime,
 }
 
 /// Where a game's server comes from.

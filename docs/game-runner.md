@@ -29,6 +29,19 @@ binary so a manifest cannot claim a capability the artifact beside it lacks.
 Adding a name is how a descriptor field becomes something a host may rely on;
 removing one is a break.
 
+### Runtime components (`runtime-components`)
+
+A platform's `components` are further pinned pieces of its runtime, for a
+server whose vendor does not ship everything it needs -- a Java server's JRE is
+the first. Each is planned by `engine::fetch::plan_component` with the same
+rules as `runtime`, lives in `<runtime dir>/<name>` with its own
+`.homerun-build` stamp, and is fetched before the main download, which only
+ever adds files around it. `launch.exe` may name a program inside one
+(`"jre/bin/java"`); that component then answers for whether the program is on
+disk. `fetch-progress` and `fetch-complete` are unchanged: components report
+progress like the main download, and `fetch-complete` names the runtime
+directory. `doctor`'s disk check still sizes only the main download.
+
 The commands are hello, fetch, start, start-tunnel, console, stop, status and
 shutdown. A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad

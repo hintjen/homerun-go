@@ -154,9 +154,55 @@ pub fn plan(
             display_name(descriptor)
         ))
     })?;
-    let runtime = &platform.runtime;
-    let dir = runtime_dir(runtime_root, &descriptor.id);
+    plan_runtime(
+        descriptor,
+        &platform.runtime,
+        runtime_dir(runtime_root, &descriptor.id),
+        present,
+    )
+}
 
+/// Where a component of a game's runtime is cached: its own folder inside
+/// the runtime directory. See [`super::descriptor::Platform::components`].
+pub fn component_dir(game_runtime_dir: &str, name: &str) -> String {
+    // The same join, one level down.
+    runtime_dir(game_runtime_dir, name)
+}
+
+/// Decide how to get one named component of this game's runtime.
+///
+/// The same rules as [`plan`], applied to the component's own pin and its own
+/// folder, with `present` read from that folder. A component is planned and
+/// stamped on its own, so replacing the game's download never re-downloads a
+/// Java runtime that has not changed, and the other way round.
+pub fn plan_component(
+    descriptor: &GameDescriptor,
+    host: &str,
+    runtime_root: &str,
+    name: &str,
+    present: &Present,
+) -> Result<Plan> {
+    let platform = descriptor.platform(host).ok_or_else(|| {
+        Error::Unsupported(format!(
+            "{} cannot be hosted on this computer.",
+            display_name(descriptor)
+        ))
+    })?;
+    let component = platform
+        .components
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| missing(descriptor, "the part of its download it refers to"))?;
+    let dir = component_dir(&runtime_dir(runtime_root, &descriptor.id), name);
+    plan_runtime(descriptor, &component.runtime, dir, present)
+}
+
+fn plan_runtime(
+    descriptor: &GameDescriptor,
+    runtime: &super::descriptor::Runtime,
+    dir: String,
+    present: &Present,
+) -> Result<Plan> {
     match runtime.source {
         RuntimeSource::Direct => {
             let url = runtime
@@ -256,6 +302,64 @@ mod tests {
         build_id: None,
         suspect: false,
     };
+
+    const JRE_SHA: &str = "4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07";
+
+    fn with_jre() -> GameDescriptor {
+        serde_json::from_value(json!({
+            "id": "hytale", "name": "Hytale", "hosts": ["win32-x64"],
+            "platforms": { "win32-x64": {
+                "runtime": { "source": "direct", "url": "https://example.invalid/game.zip",
+                             "sha256": "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+                             "extract": "zip" },
+                "components": [{ "name": "jre", "runtime": {
+                    "source": "direct", "url": "https://example.invalid/jre.zip",
+                    "sha256": JRE_SHA, "extract": "zip" } }],
+                "launch": { "exe": "jre/bin/java" }
+            } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_component_is_planned_into_its_own_folder_with_its_own_pin() {
+        let plan = plan_component(&with_jre(), "win32-x64", "C:\\rt", "jre", &NOTHING).unwrap();
+        assert_eq!(
+            plan,
+            Plan::Direct {
+                dir: "C:\\rt\\hytale\\jre".into(),
+                url: "https://example.invalid/jre.zip".into(),
+                sha256: JRE_SHA.into(),
+                size: None,
+                extract: Extract::Zip,
+            }
+        );
+    }
+
+    #[test]
+    fn a_component_already_on_disk_is_not_fetched_again() {
+        let present = Present {
+            build_id: Some(direct_build_id(JRE_SHA)),
+            suspect: false,
+        };
+        assert!(matches!(
+            plan_component(&with_jre(), "win32-x64", "/rt", "jre", &present).unwrap(),
+            Plan::AlreadyPresent { dir, .. } if dir == "/rt/hytale/jre"
+        ));
+    }
+
+    #[test]
+    fn the_main_runtime_is_planned_as_before_when_components_exist() {
+        assert!(matches!(
+            plan(&with_jre(), "win32-x64", "/rt", &NOTHING).unwrap(),
+            Plan::Direct { dir, .. } if dir == "/rt/hytale"
+        ));
+    }
+
+    #[test]
+    fn an_undeclared_component_is_refused() {
+        assert!(plan_component(&with_jre(), "win32-x64", "/rt", "nope", &NOTHING).is_err());
+    }
 
     #[test]
     fn the_pilot_is_fetched_with_steamcmd_anonymously() {

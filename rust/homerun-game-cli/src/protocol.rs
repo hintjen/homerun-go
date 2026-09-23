@@ -63,6 +63,12 @@ pub const FEATURES: &[&str] = &[
     // `saves.mounts` and the `{runtimeDir}` placeholder. One name, because they
     // shipped together and no build has ever had one without the others.
     "runtime-mounts",
+    // `platforms[host].components`: further pinned pieces of a runtime (a Java
+    // runtime beside a Java server), each fetched into its own folder before
+    // the main download. A runner without it ignores the field and never
+    // fetches them, so the host must refuse such a descriptor on an older
+    // runner rather than launch into a missing program.
+    "runtime-components",
 ];
 
 /// What Electron sends.

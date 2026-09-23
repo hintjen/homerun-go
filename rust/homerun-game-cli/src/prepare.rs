@@ -119,12 +119,39 @@ pub fn fetch(
     stop: &homerun_supervisor::engine::StopSignal,
 ) -> Result<PathBuf> {
     let dir = root.join(&d.id);
+    let host = d.platform(platform::HOST).unwrap();
+    let exe = &host.launch.exe;
+    // A stamp alone does not prove a runtime is whole: the program has to be
+    // there too. When `exe` lives inside a component, that component answers
+    // for it rather than the main download.
+    let exe_part = exe
+        .split('/')
+        .next()
+        .filter(|first| exe.contains('/') && host.components.iter().any(|c| c.name == *first));
+    let exe_missing = !platform::executable(&dir, exe).is_file();
     let mut present = fetcher::present(&dir);
-    if !platform::executable(&dir, &d.platform(platform::HOST).unwrap().launch.exe).is_file() {
+    if exe_part.is_none() && exe_missing {
         present.build_id = None;
     }
     let plan = engine::fetch::plan(d, platform::HOST, &root.to_string_lossy(), &present)
         .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?;
+    let mut parts = Vec::new();
+    for component in &host.components {
+        let mut part_present = fetcher::present(&dir.join(&component.name));
+        if exe_part == Some(component.name.as_str()) && exe_missing {
+            part_present.build_id = None;
+        }
+        parts.push(
+            engine::fetch::plan_component(
+                d,
+                platform::HOST,
+                &root.to_string_lossy(),
+                &component.name,
+                &part_present,
+            )
+            .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?,
+        );
+    }
     let machine = platform::machine_capacity(root);
     let verdict = engine::doctor::doctor(d, &machine, &present, true);
     if !verdict.ok {
@@ -156,6 +183,14 @@ pub fn fetch(
             });
         },
     };
+    // Components first: each lives in its own folder, and the main download
+    // only ever adds files around them, so the order cannot clobber either.
+    for part in &parts {
+        fetcher::fetch(part, &ctx).map_err(|e| fail(codes::FETCH_FAILED, e))?;
+        if stop.should_stop() {
+            return Err(fail(codes::FETCH_FAILED, "The download was cancelled."));
+        }
+    }
     let fetched = fetcher::fetch(&plan, &ctx).map_err(|e| fail(codes::FETCH_FAILED, e))?;
     if stop.should_stop() {
         return Err(fail(codes::FETCH_FAILED, "The download was cancelled."));

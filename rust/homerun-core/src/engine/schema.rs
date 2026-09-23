@@ -51,6 +51,32 @@ pub const SCHEMA_ID: &str = "https://gethomerun.app/schemas/game.v0.json";
 
 /// The descriptor schema, as a JSON Schema 2020-12 document.
 pub fn schema() -> Value {
+    // Shared by a platform's runtime and each of its components.
+    let runtime = json!({
+        "type": "object",
+        "properties": {
+            "source": { "enum": ["direct", "steamcmd"] },
+            "url": { "type": ["string", "null"] },
+            "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "size": { "type": ["integer", "null"], "minimum": 0 },
+            "extract": { "enum": ["none", "zip", null] },
+            "appId": { "type": ["integer", "null"], "minimum": 0 },
+            "buildId": { "type": ["string", "null"] },
+            "sizeMb": { "type": ["integer", "null"], "minimum": 0 }
+        },
+        "allOf": [
+            {
+                "if": { "properties": { "source": { "const": "direct" } },
+                        "required": ["source"] },
+                "then": { "required": ["url", "sha256"] }
+            },
+            {
+                "if": { "properties": { "source": { "const": "steamcmd" } },
+                        "required": ["source"] },
+                "then": { "required": ["appId"] }
+            }
+        ]
+    });
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": SCHEMA_ID,
@@ -179,30 +205,21 @@ pub fn schema() -> Value {
                 "additionalProperties": {
                     "type": "object",
                     "properties": {
-                        "runtime": {
-                            "type": "object",
-                            "properties": {
-                                "source": { "enum": ["direct", "steamcmd"] },
-                                "url": { "type": ["string", "null"] },
-                                "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
-                                "size": { "type": ["integer", "null"], "minimum": 0 },
-                                "extract": { "enum": ["none", "zip", null] },
-                                "appId": { "type": ["integer", "null"], "minimum": 0 },
-                                "buildId": { "type": ["string", "null"] },
-                                "sizeMb": { "type": ["integer", "null"], "minimum": 0 }
-                            },
-                            "allOf": [
-                                {
-                                    "if": { "properties": { "source": { "const": "direct" } },
-                                            "required": ["source"] },
-                                    "then": { "required": ["url", "sha256"] }
-                                },
-                                {
-                                    "if": { "properties": { "source": { "const": "steamcmd" } },
-                                            "required": ["source"] },
-                                    "then": { "required": ["appId"] }
+                        "runtime": runtime.clone(),
+                        "components": {
+                            "type": "array",
+                            "description":
+                                "Further pinned pieces of the runtime, each fetched into \
+                                 <runtime dir>/<name> before runtime, e.g. a Java runtime \
+                                 the vendor does not ship.",
+                            "items": {
+                                "type": "object",
+                                "required": ["name", "runtime"],
+                                "properties": {
+                                    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+                                    "runtime": runtime
                                 }
-                            ]
+                            }
                         },
                         "launch": {
                             "type": "object",
@@ -421,6 +438,19 @@ mod tests {
                         cwd: Some(".".into()),
                         cwd_base: CwdBase::Runtime,
                     },
+                    components: vec![Component {
+                        name: "jre".into(),
+                        runtime: Runtime {
+                            source: RuntimeSource::Direct,
+                            url: Some("https://example/jre.zip".into()),
+                            sha256: Some("b".repeat(64)),
+                            size: Some(2),
+                            extract: Some(Extract::Zip),
+                            app_id: None,
+                            build_id: None,
+                            size_mb: None,
+                        },
+                    }],
                 },
             )]),
             ready: Ready {

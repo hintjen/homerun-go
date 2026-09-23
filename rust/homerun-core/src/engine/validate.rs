@@ -551,27 +551,62 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
             check_placeholders(value, Site::Host, &setting_keys, &port_names, r);
         }
 
-        if platform.runtime.source == super::descriptor::RuntimeSource::Direct {
-            match platform.runtime.sha256.as_deref() {
-                None => r.problems.push(format!(
-                    "this game's {host} download has no checksum, so Homerun cannot \
-                     tell whether what arrives is what was meant."
-                )),
-                Some(digest)
-                    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) =>
-                {
-                    r.problems.push(format!(
-                        "this game's {host} download has a checksum that is not a \
-                         sha256."
-                    ))
-                }
-                Some(_) => {}
+        check_runtime(
+            &platform.runtime,
+            &format!("this game's {host} download"),
+            r,
+        );
+
+        let mut names = HashSet::new();
+        for component in &platform.components {
+            let name = &component.name;
+            if !component_name_is_safe(name) {
+                r.problems.push(format!(
+                    "\"{name}\" cannot name a part of this game's {host} download: use \
+                     lowercase letters, digits and dashes, up to 32 characters."
+                ));
+            } else if !names.insert(name.as_str()) {
+                r.problems.push(format!(
+                    "this game's {host} download names the part \"{name}\" twice."
+                ));
             }
-            if platform.runtime.url.is_none() {
-                r.problems
-                    .push(format!("this game's {host} download has no address."));
-            }
+            check_runtime(
+                &component.runtime,
+                &format!("the \"{name}\" part of this game's {host} download"),
+                r,
+            );
         }
+    }
+}
+
+/// A component's folder name: one fixed segment, the same on every platform.
+fn component_name_is_safe(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 32
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+/// The pin a direct download needs, for a runtime or one of its components.
+fn check_runtime(runtime: &super::descriptor::Runtime, what: &str, r: &mut Report) {
+    if runtime.source != super::descriptor::RuntimeSource::Direct {
+        return;
+    }
+    match runtime.sha256.as_deref() {
+        None => r.problems.push(format!(
+            "{what} has no checksum, so Homerun cannot tell whether what arrives \
+             is what was meant."
+        )),
+        Some(digest) if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) => r
+            .problems
+            .push(format!("{what} has a checksum that is not a sha256.")),
+        Some(_) => {}
+    }
+    if runtime.url.is_none() {
+        r.problems.push(format!("{what} has no address."));
     }
 }
 
@@ -1068,6 +1103,64 @@ mod tests {
 
     fn says(problems: &[String], needle: &str) -> bool {
         problems.iter().any(|p| p.contains(needle))
+    }
+
+    // ─── runtime components ─────────────────────────────────────────────────
+
+    fn with_components(components: serde_json::Value) -> Vec<String> {
+        problems_of(json!({ "platforms": { "win32-x64": { "components": components } } }))
+    }
+
+    const GOOD_SHA: &str = "4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07";
+
+    #[test]
+    fn a_pinned_component_is_accepted() {
+        let problems = with_components(json!([{ "name": "jre", "runtime": {
+            "source": "direct", "url": "https://example.invalid/jre.zip", "sha256": GOOD_SHA } }]));
+        assert!(!says(&problems, "part"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_component_is_pinned_like_the_runtime_itself() {
+        let problems =
+            with_components(json!([{ "name": "jre", "runtime": { "source": "direct" } }]));
+        assert!(
+            says(
+                &problems,
+                "the \"jre\" part of this game's win32-x64 download has no checksum"
+            ),
+            "{problems:?}"
+        );
+        assert!(
+            says(
+                &problems,
+                "the \"jre\" part of this game's win32-x64 download has no address"
+            ),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_component_name_is_one_safe_folder() {
+        for bad in ["", "..", "JRE", "a/b", "a\\b", "-x", "a b", "con:"] {
+            let problems = with_components(json!([{ "name": bad, "runtime": {
+                "source": "direct", "url": "https://x.invalid/a.zip", "sha256": GOOD_SHA } }]));
+            assert!(
+                says(&problems, "cannot name a part"),
+                "{bad:?}: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_component_name_is_used_once() {
+        let part = json!({ "name": "jre", "runtime": {
+            "source": "direct", "url": "https://x.invalid/a.zip", "sha256": GOOD_SHA } });
+        let problems = with_components(json!([part.clone(), part]));
+        assert!(
+            says(&problems, "names the part \"jre\" twice"),
+            "{problems:?}"
+        );
     }
 
     // ─── the three safety checks ───────────────────────────────────────────

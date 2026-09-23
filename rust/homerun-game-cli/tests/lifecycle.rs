@@ -817,6 +817,94 @@ fn a_server_name_that_is_a_switch_is_refused_before_anything_is_spawned() {
     h.eof();
 }
 
+/// Serve `body` over plain HTTP on loopback for a few requests. Loopback only,
+/// so no firewall is involved and nothing leaves the machine.
+fn serve(body: Vec<u8>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming().take(4) {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                request.push(byte[0]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    port
+}
+
+/// A component is downloaded, verified and stamped in its own folder before
+/// the game starts, and can hold the program itself -- a Java server's
+/// `java` lives in its JRE component, not in the vendor's download.
+#[test]
+fn a_component_is_fetched_into_its_own_folder_and_can_hold_the_program() {
+    let mut f = Fixture::new();
+    let name = if cfg!(windows) { "fake.exe" } else { "fake" };
+    let exe = fs::read(f.root.join("runtime/fake").join(name)).unwrap();
+    let digest = fetcher::digest_of(&f.root.join("runtime/fake").join(name)).unwrap();
+    let port = serve(exe);
+    let launch_exe = if cfg!(windows) {
+        "part/fake.exe"
+    } else {
+        "part/fake"
+    };
+    let host = &mut f.d["platforms"][platform::HOST];
+    host["components"] = json!([{ "name": "part", "runtime": {
+        "source": "direct", "url": format!("http://127.0.0.1:{port}/{name}"),
+        "sha256": digest, "extract": "none" } }]);
+    host["launch"]["exe"] = json!(launch_exe);
+
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+
+    let part = f.root.join("runtime/fake/part");
+    assert!(
+        part.join(name).is_file(),
+        "the component's program must be in its own folder"
+    );
+    assert_eq!(
+        fs::read_to_string(part.join(".homerun-build"))
+            .unwrap()
+            .trim(),
+        &digest[..12],
+        "a component carries its own stamp"
+    );
+    assert!(
+        h.seen
+            .iter()
+            .any(|v| v["event"] == "fetch-progress" && v["phase"] == "download"),
+        "the component was downloaded, not assumed: {:?}",
+        h.seen
+    );
+    h.eof();
+}
+
+/// A component whose download does not match its pin is never used.
+#[test]
+fn a_component_that_fails_its_checksum_stops_the_start() {
+    let mut f = Fixture::new();
+    let port = serve(b"not the pinned bytes".to_vec());
+    f.d["platforms"][platform::HOST]["components"] = json!([{ "name": "part", "runtime": {
+        "source": "direct", "url": format!("http://127.0.0.1:{port}/thing.zip"),
+        "sha256": "0".repeat(64), "extract": "zip" } }]);
+
+    let mut h = Host::new();
+    h.send(f.start());
+    let error = h.until("error");
+    assert_eq!(error["code"], "fetch_failed", "{error}");
+    assert!(!f.root.join("runtime/fake/part/.homerun-build").exists());
+    h.eof();
+}
+
 /// A setting a player cleared has to leave the managed file. Skipping the key
 /// kept the value from the launch before, so a cleared seed went on
 /// generating the old world with nothing on screen naming the number doing
