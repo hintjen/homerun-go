@@ -477,8 +477,19 @@
     "settings": {
       "items": {
         "properties": {
+          "createOnly": {
+            "description": "Chosen once, when the server is created: the game reads it only when its world is made. The API refuses a change afterwards. The runner ignores it.",
+            "type": "boolean"
+          },
           "default": {
             "description": "May be null, which drops the setting's flag from the launch line. A string default may contain {serverName} and no other placeholder."
+          },
+          "group": {
+            "description": "A heading to show the setting under. The runner ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "key": {
             "type": "string"
@@ -500,12 +511,33 @@
               "null"
             ]
           },
+          "optionLabels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "What each option is called on screen, keyed by the option. The option is still what is stored and sent. For the UI; the runner ignores it.",
+            "type": "object"
+          },
           "options": {
             "description": "A closed set of choices, for a string setting only. A non-empty list is the only way to say \"pick one of these\" -- there is no enum type. An empty list means the same as no list.",
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "secret": {
+            "description": "A value the UI masks, such as a server password a player chooses. Not a host-generated {secret:<name>}. The runner ignores it.",
+            "type": "boolean"
+          },
+          "showWhen": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "Show the setting only while every named setting holds one of the listed values. Display only; one level deep. The runner ignores it.",
+            "type": "object"
           },
           "type": {
             "enum": [
