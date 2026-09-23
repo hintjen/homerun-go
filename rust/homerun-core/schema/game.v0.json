@@ -14,6 +14,13 @@
         },
         "blurb": {
           "type": "string"
+        },
+        "listed": {
+          "description": "false when Homerun no longer offers new servers of this game. Existing servers keep working. Absent means listed. The runner ignores it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"

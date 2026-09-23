@@ -85,7 +85,14 @@ pub fn schema() -> Value {
                 "properties": {
                     "blurb": { "type": "string" },
                     "accent": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
-                    "art": { "type": "string" }
+                    "art": { "type": "string" },
+                    "listed": {
+                        "type": ["boolean", "null"],
+                        "description":
+                            "false when Homerun no longer offers new servers of this \
+                             game. Existing servers keep working. Absent means listed. \
+                             The runner ignores it."
+                    }
                 }
             },
             "licence": {
@@ -409,6 +416,7 @@ mod tests {
                 blurb: "b".into(),
                 accent: "#CD412B".into(),
                 art: "art/card.png".into(),
+                listed: Some(false),
             },
             licence: Some(Licence {
                 name: "Terms".into(),

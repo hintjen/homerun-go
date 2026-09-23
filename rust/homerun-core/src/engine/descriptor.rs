@@ -133,6 +133,12 @@ pub struct Catalog {
     /// Path inside the game module, relative — `art/card.png`.
     #[serde(default)]
     pub art: String,
+    /// `Some(false)` when Homerun no longer offers new servers of this game.
+    /// It stays in the catalog so existing servers keep working; the API
+    /// refuses a new one and the UI leaves it off the create page. Absent
+    /// means listed. The runner ignores it.
+    #[serde(default)]
+    pub listed: Option<bool>,
 }
 
 /// Terms a person must accept before anything is downloaded.
