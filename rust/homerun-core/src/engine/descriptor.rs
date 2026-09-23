@@ -102,6 +102,11 @@ pub struct GameDescriptor {
     pub console: Console,
     #[serde(default)]
     pub stop: Stop,
+    /// A server that must be signed in to its vendor's service before it
+    /// admits anyone. See [`ServerSignIn`]. `None` for every game that does
+    /// not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_sign_in: Option<ServerSignIn>,
     #[serde(default)]
     pub ports: Vec<Port>,
     #[serde(default)]
@@ -119,6 +124,36 @@ pub struct GameDescriptor {
     /// TODO(per-game-limits)
     #[serde(default)]
     pub limits: Value,
+}
+
+/// A server that has to be signed in to its vendor's service, by the person
+/// hosting it, before it admits players.
+///
+/// Hytale's server boots to ready and then refuses everyone until it has
+/// been signed in: a console command starts a device sign-in, the server
+/// prints an address and a code, and the person approves it in their own
+/// browser. After that the server keeps its own credentials and restores them
+/// on the next start. Every field is a substring of one console line, not a
+/// pattern.
+///
+/// The runner sends `command` itself when the server says it `needed` one,
+/// and passes the address and code on for the host to show. It never answers
+/// a prompt and never sees the person's password.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerSignIn {
+    /// A line meaning the server is not signed in.
+    pub needed: String,
+    /// The console command that starts a sign-in.
+    pub command: String,
+    /// Part of the verification address; the whole `https://` word on a line
+    /// containing it is the address to open.
+    pub url: String,
+    /// Text that comes straight before the code, if the server prints one.
+    #[serde(default)]
+    pub code: String,
+    /// A line meaning the sign-in succeeded.
+    pub done: String,
 }
 
 /// How the game is presented before anyone has one.

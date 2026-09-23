@@ -3,7 +3,10 @@ use crate::{
     prepare::{self, fail, Result},
     protocol::{codes, Command, Event, Player, ServerStatus, FEATURES, PROTOCOL},
 };
-use homerun_core::engine::{self, descriptor::PlayersVia};
+use homerun_core::engine::{
+    self,
+    descriptor::{PlayersVia, ServerSignIn, SignIn},
+};
 use homerun_supervisor::{
     engine::{Engine, RunOutcome, RunRequest, StopSignal},
     fetcher,
@@ -24,6 +27,62 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+
+/// Where a server that must be signed in to its vendor's service has got to.
+/// See `descriptor::ServerSignIn`.
+#[derive(Debug, Default)]
+struct SignInState {
+    /// The server said it is not signed in.
+    needed: bool,
+    /// The sign-in command has been sent for this round. Cleared only when
+    /// the server says it is signed in, so a repeated "not signed in" line
+    /// cannot start a second sign-in while the first is waiting on the person.
+    sent: bool,
+    url: Option<String>,
+    code: Option<String>,
+}
+
+/// Read one console line for the sign-in states it may announce.
+fn observe_sign_in(
+    s: &ServerSignIn,
+    line: &str,
+    state: &Mutex<SignInState>,
+    out: &Output,
+    id: &str,
+) {
+    let mut st = state.lock().unwrap();
+    if !s.done.is_empty() && line.contains(&s.done) {
+        *st = SignInState::default();
+        out.send(Event::ServerSignedIn {
+            server_id: id.into(),
+        });
+        return;
+    }
+    if !s.needed.is_empty() && line.contains(&s.needed) {
+        st.needed = true;
+    }
+    let markers = SignIn {
+        url: s.url.clone(),
+        code: s.code.clone(),
+    };
+    let (url, code) = fetcher::sign_in_parts(line, &markers);
+    let changed = (url.is_some() && url != st.url) || (code.is_some() && code != st.code);
+    if url.is_some() {
+        st.url = url;
+    }
+    if code.is_some() {
+        st.code = code;
+    }
+    if changed {
+        if let Some(url) = &st.url {
+            out.send(Event::ServerSignIn {
+                server_id: id.into(),
+                url: url.clone(),
+                code: st.code.clone(),
+            });
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Output(Arc<dyn Fn(Event) + Send + Sync>);
@@ -421,6 +480,7 @@ fn run(
     let tail = Mutex::new(VecDeque::new());
     let observed_ports = Arc::new(Mutex::new(Vec::new()));
     let network_failure = Arc::new(Mutex::new(None));
+    let sign_in = Arc::new(Mutex::new(SignInState::default()));
     let monitor = {
         let (done, timed_out, exposed, started) = (
             done.clone(),
@@ -503,9 +563,42 @@ fn run(
         );
         let ports = p.ports.clone();
         let observed_ports = observed_ports.clone();
+        let sign_in = sign_in.clone();
         thread::spawn(move || {
             let mut sampled = Instant::now();
             while !done.load(Ordering::SeqCst) {
+                // A server that is up and says it is not signed in is asked to
+                // start a sign-in, once per round. It prints where to sign in,
+                // which observe_sign_in passes on; the person does the rest.
+                if let Some(s) = &d.server_sign_in {
+                    let due = started.load(Ordering::SeqCst) && !stop.should_stop() && {
+                        let mut st = sign_in.lock().unwrap();
+                        let due = st.needed && !st.sent;
+                        if due {
+                            st.sent = true;
+                        }
+                        due
+                    };
+                    if due {
+                        let sent = match &console {
+                            Some(target) => rcon::command(target, &s.command).map(|_| ()),
+                            None => engine.command(&s.command),
+                        };
+                        out.send(Event::ServerLog {
+                            server_id: id.clone(),
+                            line: match sent {
+                                Ok(()) => {
+                                    "Homerun asked the server to sign in to its game account."
+                                        .into()
+                                }
+                                Err(e) => {
+                                    format!("Homerun could not ask the server to sign in: {e}")
+                                }
+                            },
+                            stream: "host".into(),
+                        });
+                    }
+                }
                 if ready.load(Ordering::SeqCst) && !started.load(Ordering::SeqCst) {
                     let all_bound = d.ports.iter().all(|p| {
                         observed_ports
@@ -597,6 +690,9 @@ fn run(
                 lines.pop_front();
             }
             lines.push_back(line.clone());
+            if let Some(s) = &d.server_sign_in {
+                observe_sign_in(s, &line, &sign_in, out, &id);
+            }
             out.send(Event::ServerLog {
                 server_id: id.clone(),
                 line,

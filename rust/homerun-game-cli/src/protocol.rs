@@ -74,6 +74,11 @@ pub const FEATURES: &[&str] = &[
     // person's own sign-in, and the `fetch-sign-in` event that carries its
     // verification address. An older runner refuses the source by name.
     "runtime-vendor-tool",
+    // `serverSignIn`: the runner asks a server that says it is not signed in
+    // to start a sign-in, and passes the address on as `server-sign-in` /
+    // `server-signed-in`. An older runner ignores the block, and the server
+    // runs and admits nobody -- so a host must require this name.
+    "server-sign-in",
 ];
 
 /// What Electron sends.
@@ -193,6 +198,22 @@ pub enum Event {
         url: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         code: Option<String>,
+    },
+    /// A running server is waiting for the person hosting it to sign it in to
+    /// the vendor's service (`serverSignIn`). Shown like `fetch-sign-in`; the
+    /// server admits nobody until `server-signed-in`.
+    #[serde(rename_all = "camelCase")]
+    ServerSignIn {
+        server_id: String,
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
+    /// The server says it is signed in: at the end of a sign-in, and on each
+    /// start where it restored the credentials it kept.
+    #[serde(rename_all = "camelCase")]
+    ServerSignedIn {
+        server_id: String,
     },
     #[serde(rename_all = "camelCase")]
     FetchComplete {
@@ -589,6 +610,20 @@ mod tests {
         });
         assert!(no_code.get("code").is_none(), "absent, not null");
 
+        let server_sign_in = rendered(Event::ServerSignIn {
+            server_id: "s1".into(),
+            url: "https://example.invalid/device?user_code=ABCD".into(),
+            code: Some("ABCD".into()),
+        });
+        assert_eq!(server_sign_in["event"], "server-sign-in");
+        assert_eq!(server_sign_in["serverId"], "s1");
+        assert_eq!(server_sign_in["code"], "ABCD");
+        let signed_in = rendered(Event::ServerSignedIn {
+            server_id: "s1".into(),
+        });
+        assert_eq!(signed_in["event"], "server-signed-in");
+        assert_eq!(signed_in["serverId"], "s1");
+
         let complete = rendered(Event::FetchComplete {
             server_id: "s1".into(),
             runtime_dir: "C:\\rt\\rust".into(),
@@ -718,6 +753,14 @@ mod tests {
                 server_id: "s1".into(),
                 url: "https://example.invalid/device".into(),
                 code: None,
+            },
+            Event::ServerSignIn {
+                server_id: "s1".into(),
+                url: "https://example.invalid/device".into(),
+                code: None,
+            },
+            Event::ServerSignedIn {
+                server_id: "s1".into(),
             },
             Event::ServerLog {
                 server_id: "s1".into(),

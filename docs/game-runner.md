@@ -63,6 +63,25 @@ replaces it the pinned digest stops matching and the fetch fails with a
 checksum error until the descriptor is re-pinned. That is deliberate: an
 executable Homerun runs is one somebody vetted.
 
+### A server that must be signed in (`server-sign-in`)
+
+Some servers boot to ready and then admit nobody until the person hosting
+them signs them in to the vendor's service -- Hytale's does. `serverSignIn`
+names four console-line substrings and a command. When the server prints the
+`needed` line, the runner sends `command` on the console once the server has
+started, and only once per round: a second `needed` line (Hytale prints two)
+does not start a second sign-in while the first waits on the person. Lines
+matching `url` and `code` become **`server-sign-in`** events for the host to
+show; the `done` line becomes **`server-signed-in`** and ends the round. A
+server that restores its own credentials prints `done` at boot, so a host sees
+`server-signed-in` on every such start.
+
+The runner never types an answer and never sees a password; the person signs
+in on the vendor's page. Where the server keeps what it was given is the
+game's business (Hytale: an encrypted file in the server folder, which that
+game's descriptor excludes from backups). If a code expires unused nothing
+retries -- restarting the server starts a fresh round.
+
 The commands are hello, fetch, start, start-tunnel, console, stop, status and
 shutdown. A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad

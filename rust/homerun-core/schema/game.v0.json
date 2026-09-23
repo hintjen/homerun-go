@@ -599,6 +599,41 @@
       "maximum": 0,
       "type": "integer"
     },
+    "serverSignIn": {
+      "description": "A server that must be signed in to its vendor's service before it admits players. Every field is a substring of one console line.",
+      "properties": {
+        "code": {
+          "description": "Text straight before the code, if printed separately.",
+          "type": "string"
+        },
+        "command": {
+          "description": "The console command that starts a sign-in.",
+          "type": "string"
+        },
+        "done": {
+          "description": "A line meaning the sign-in succeeded.",
+          "type": "string"
+        },
+        "needed": {
+          "description": "A line meaning the server is not signed in.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Part of the verification address.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "needed",
+        "command",
+        "url",
+        "done"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
     "settings": {
       "items": {
         "properties": {

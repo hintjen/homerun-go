@@ -76,6 +76,7 @@ pub fn report(descriptor: &GameDescriptor) -> Report {
     check_settings(descriptor, &mut r);
     check_ports(descriptor, &mut r);
     check_lifecycle(descriptor, &mut r);
+    check_server_sign_in(descriptor, &mut r);
     check_bind_address(descriptor, &mut r);
     check_platforms(descriptor, &mut r);
     check_config_and_saves(descriptor, &mut r);
@@ -883,6 +884,36 @@ fn check_servable(d: &GameDescriptor, r: &mut Report) {
     }
 }
 
+/// A server sign-in is driven over the console, so there has to be one, and
+/// the command it sends is a fixed string the descriptor authored.
+fn check_server_sign_in(d: &GameDescriptor, r: &mut Report) {
+    let Some(s) = &d.server_sign_in else {
+        return;
+    };
+    if d.console.via == ConsoleVia::None {
+        r.problems.push(
+            "this game's server has to be signed in over its console, but the descriptor \
+             gives it no console."
+                .into(),
+        );
+    }
+    if s.command.trim().is_empty() || s.command.contains(['\n', '\r', '{', '}']) {
+        r.problems
+            .push("this game's server sign-in command has to be one fixed console line.".into());
+    }
+    for (what, marker) in [
+        ("needs signing in", &s.needed),
+        ("is signed in", &s.done),
+        ("shows where to sign in", &s.url),
+    ] {
+        if marker.trim().is_empty() {
+            r.problems.push(format!(
+                "this game's descriptor does not say how to tell that its server {what}."
+            ));
+        }
+    }
+}
+
 fn check_observe(d: &GameDescriptor, r: &mut Report) {
     match d.observe.players {
         PlayersVia::Rcon => {
@@ -1298,6 +1329,50 @@ mod tests {
         let mut runtime = good_vendor();
         runtime["extract"] = json!("none");
         assert!(says(&vendor_problems(runtime), "has to be unpacked"));
+    }
+
+    fn sign_in_problems(block: serde_json::Value) -> Vec<String> {
+        problems_of(json!({ "serverSignIn": block }))
+    }
+
+    fn good_sign_in() -> serde_json::Value {
+        json!({ "needed": "No server tokens configured", "command": "auth login device",
+                "url": "device/verify", "code": "Enter code: ", "done": "Authentication successful!" })
+    }
+
+    #[test]
+    fn a_complete_server_sign_in_is_accepted() {
+        let problems = sign_in_problems(good_sign_in());
+        assert!(!says(&problems, "sign"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_server_sign_in_command_is_one_fixed_line() {
+        for bad in ["", "auth login\nstop", "auth {setting:x}"] {
+            let mut block = good_sign_in();
+            block["command"] = json!(bad);
+            assert!(
+                says(&sign_in_problems(block), "one fixed console line"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_server_sign_in_says_how_each_state_is_recognised() {
+        let mut block = good_sign_in();
+        block["done"] = json!("");
+        block["url"] = json!("");
+        let problems = sign_in_problems(block);
+        assert!(says(&problems, "is signed in"), "{problems:?}");
+        assert!(says(&problems, "shows where to sign in"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_server_sign_in_needs_a_console() {
+        let problems =
+            problems_of(json!({ "serverSignIn": good_sign_in(), "console": { "via": "none" } }));
+        assert!(says(&problems, "gives it no console"), "{problems:?}");
     }
 
     // ─── the three safety checks ───────────────────────────────────────────

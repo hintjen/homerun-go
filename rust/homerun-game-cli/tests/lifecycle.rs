@@ -155,9 +155,23 @@ fn fake_game() {
         println!("Command line: -batchmode +rcon.password {echo}");
         std::io::stdout().flush().unwrap();
     }
+    // A server that needs signing in says so before and again after it is
+    // ready, as Hytale's does.
+    let needs_sign_in = std::env::var("HOMERUN_TEST_SIGNIN").is_ok();
+    if needs_sign_in {
+        println!("NOT SIGNED IN");
+    }
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
     }
+    if needs_sign_in {
+        thread::spawn(|| {
+            thread::sleep(Duration::from_millis(300));
+            println!("WARN NOT SIGNED IN");
+            std::io::stdout().flush().unwrap();
+        });
+    }
+    std::io::stdout().flush().unwrap();
     if std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("flood-then-widen") {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(1));
@@ -210,6 +224,19 @@ fn fake_game() {
         }
         if line == "crash" {
             std::process::exit(23);
+        }
+        if line == "login device" {
+            let logins = fs::read_to_string("logins").unwrap_or_default();
+            fs::write("logins", format!("{logins}x")).unwrap();
+            println!("Visit: https://example.invalid/device/verify?user_code=GAME42");
+            println!("Enter code: GAME42");
+            std::io::stdout().flush().unwrap();
+            thread::spawn(|| {
+                thread::sleep(Duration::from_millis(500));
+                println!("SIGNED IN OK");
+                std::io::stdout().flush().unwrap();
+            });
+            continue;
         }
         println!("reply: {line}");
         std::io::stdout().flush().unwrap();
@@ -1001,6 +1028,60 @@ fn serve(body: Vec<u8>) -> u16 {
         }
     });
     port
+}
+
+/// A server that must be signed in to its vendor's service says so; the
+/// runner asks it to start a sign-in once, passes the address and code on,
+/// and reports when the server says it is signed in. Hytale says "not signed
+/// in" twice, so a repeated line must not start a second sign-in.
+#[test]
+fn a_server_that_needs_signing_in_is_asked_once_and_the_address_is_passed_on() {
+    let mut f = Fixture::new();
+    f.d["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_SIGNIN"] = json!("1");
+    f.d["serverSignIn"] = json!({
+        "needed": "NOT SIGNED IN", "command": "login device",
+        "url": "device/verify", "code": "Enter code: ", "done": "SIGNED IN OK"
+    });
+
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    let prompt = h.until("server-sign-in");
+    assert_eq!(prompt["serverId"], "s1");
+    assert_eq!(
+        prompt["url"],
+        "https://example.invalid/device/verify?user_code=GAME42"
+    );
+    // The code arrives on its own line, so it may come in a second event.
+    let with_code = if prompt["code"] == "GAME42" {
+        prompt
+    } else {
+        h.until("server-sign-in")
+    };
+    assert_eq!(with_code["code"], "GAME42", "{with_code}");
+    h.until("server-signed-in");
+    thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/logins")).unwrap(),
+        "x",
+        "a second \"not signed in\" line must not start a second sign-in"
+    );
+    h.eof();
+}
+
+/// A server without `serverSignIn` is never sent a sign-in command, whatever
+/// it prints.
+#[test]
+fn a_server_without_a_sign_in_block_is_never_asked() {
+    let mut f = Fixture::new();
+    f.d["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_SIGNIN"] = json!("1");
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    thread::sleep(Duration::from_millis(800));
+    assert!(!f.root.join("server/logins").exists());
+    assert!(!h.seen.iter().any(|v| v["event"] == "server-sign-in"));
+    h.eof();
 }
 
 /// A game whose files only its owner's account can fetch: the runner fetches

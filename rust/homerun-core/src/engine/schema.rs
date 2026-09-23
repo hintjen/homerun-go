@@ -74,6 +74,18 @@ pub fn schema() -> Value {
     });
     // Built apart from the document below to keep `json!` inside its
     // recursion limit.
+    let server_sign_in = json!({
+        "type": ["object", "null"],
+        "description": "A server that must be signed in to its vendor's service before it admits players. Every field is a substring of one console line.",
+        "required": ["needed", "command", "url", "done"],
+        "properties": {
+            "needed": { "type": "string", "description": "A line meaning the server is not signed in." },
+            "command": { "type": "string", "description": "The console command that starts a sign-in." },
+            "url": { "type": "string", "description": "Part of the verification address." },
+            "code": { "type": "string", "description": "Text straight before the code, if printed separately." },
+            "done": { "type": "string", "description": "A line meaning the sign-in succeeded." }
+        }
+    });
     let runtime = json!({
         "type": "object",
         "properties": {
@@ -383,6 +395,7 @@ pub fn schema() -> Value {
                     }
                 }
             },
+            "serverSignIn": server_sign_in,
             "stop": {
                 "type": "object",
                 "properties": {
@@ -587,6 +600,13 @@ mod tests {
                 command: Some("quit".into()),
                 grace_ms: 1,
             },
+            server_sign_in: Some(ServerSignIn {
+                needed: "No server tokens configured".into(),
+                command: "auth login device".into(),
+                url: "device/verify".into(),
+                code: "Enter code: ".into(),
+                done: "Authentication successful!".into(),
+            }),
             ports: vec![Port {
                 name: "game".into(),
                 proto: crate::tunnel::Protocol::Udp,
