@@ -85,6 +85,13 @@ fn fake_game() {
     }
 
     fs::write("pid", std::process::id().to_string()).unwrap();
+    // A vendor that prints its own launch line. Rust does exactly this: its
+    // RCON password is a `+rcon.password` argument and the line is echoed at
+    // startup, so the host would publish it to the player's console.
+    if let Ok(echo) = std::env::var("HOMERUN_TEST_ECHO") {
+        println!("Command line: -batchmode +rcon.password {echo}");
+        std::io::stdout().flush().unwrap();
+    }
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
     }
@@ -1076,6 +1083,54 @@ fn crashes_have_a_tail_and_never_claim_a_requested_stop() {
         .any(|v| v == "FAKE READY"));
     h.send(json!({"cmd":"status"}));
     assert_eq!(h.until("status")["servers"][0]["state"], "crashed");
+    h.eof();
+}
+
+/// The host publishes `server-log` straight into a player's console and files
+/// `tail` with a crash report, so a secret the *game* prints is a secret the
+/// host would hand out. Redaction is the only thing between the two: the
+/// password has to be on the vendor's command line for the vendor to accept
+/// it, and a vendor that echoes it is not doing anything wrong.
+#[test]
+fn a_secret_the_game_echoes_never_leaves_the_runner() {
+    let mut f = Fixture::new();
+    f.d["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_ECHO"] = json!("{secret:rcon}");
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+
+    let logs: Vec<String> = h
+        .seen
+        .iter()
+        .filter(|e| e["event"] == "server-log")
+        .map(|e| e["line"].as_str().unwrap_or_default().to_string())
+        .collect();
+    // The line arrived -- otherwise this passes because nothing was echoed.
+    assert!(
+        logs.iter().any(|l| l.contains("+rcon.password [redacted]")),
+        "the echoed launch line should arrive redacted; saw {logs:?}"
+    );
+    assert!(
+        !logs.iter().any(|l| l.contains("do-not-print-this")),
+        "a secret reached the host as a log line; saw {logs:?}"
+    );
+
+    // The same guarantee through the other sink: the crash tail is filled from
+    // the redacted line, not the raw one.
+    h.send(json!({"cmd":"console","serverId":"s1","command":"crash","reqId":"crash"}));
+    let crash = h.until("server-crashed");
+    let tail = crash["tail"].as_array().unwrap();
+    assert!(
+        tail.iter()
+            .any(|v| v.as_str().unwrap_or_default().contains("[redacted]")),
+        "the crash tail should carry the redacted line; saw {tail:?}"
+    );
+    assert!(
+        !tail
+            .iter()
+            .any(|v| v.as_str().unwrap_or_default().contains("do-not-print-this")),
+        "a secret reached the host in a crash tail; saw {tail:?}"
+    );
     h.eof();
 }
 
