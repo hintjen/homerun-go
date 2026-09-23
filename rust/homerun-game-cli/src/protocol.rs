@@ -297,11 +297,12 @@ pub mod codes {
     /// A desktop built before this code existed shows the message, which is
     /// written for a player and says what happened.
     pub const PORT_EXPOSED: &str = "port_exposed";
+    pub const PORT_INSPECTION_FAILED: &str = "port_inspection_failed";
 
     /// Every one of them, for the test that keeps this list and the
     /// document's in step.
     #[cfg(test)]
-    pub const ALL: [&str; 9] = [
+    pub const ALL: [&str; 10] = [
         LICENCE_NOT_ACCEPTED,
         DESCRIPTOR_INVALID,
         REQUIRES_UNMET,
@@ -311,6 +312,7 @@ pub mod codes {
         READY_TIMEOUT,
         BUSY,
         PORT_EXPOSED,
+        PORT_INSPECTION_FAILED,
     ];
 }
 
@@ -660,6 +662,7 @@ mod tests {
                 "ready_timeout",
                 "busy",
                 "port_exposed",
+                "port_inspection_failed",
             ]
         );
     }

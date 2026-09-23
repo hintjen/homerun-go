@@ -56,25 +56,16 @@ logs and the last-100-lines crash tail.
 The preferred ports are checked together before spawn. Occupied ports fail
 with port_unavailable; this version does not choose replacement ports. As
 with any bind preflight, another process can race the check. Readiness is not
-published until both the marker and the server PID's declared listening ports
+published until both the marker and the owned process tree's declared listening ports
 are observed. Ports are emitted before server-started. A missing marker or
 port reaches ready_timeout and follows the game's stop ladder.
 
-Windows observes both protocols with one `netstat -ano` call, at most once per
-second after the marker. TCP listener detection uses the unspecified foreign
-endpoint with port zero, not localized state text such as LISTENING/ABHÖREN.
-The monitor still checks cancellation and deadlines every 100 ms between
-observations.
-
-Each observation carries the **local address**, and a port the descriptor
-declares `expose: false` that is observed on anything but loopback stops the
-server through its normal stop ladder and reports `port_exposed`. That is
-checked before the all-ports test, so a private port bound wide is refused the
-first time it is seen rather than after the rest of the server comes up. Ports
-the descriptor exposes are not checked: the tunnel targets loopback, but games
-commonly bind every interface for a published port. The check runs from
-readiness until the server is reported running; a port bound wide later in a
-server's life is not yet observed.
+Windows inspects native IPv4/IPv6 TCP and UDP tables for the entire owned Job
+Object, continuously from spawn through shutdown. Inspection runs independently
+of RCON requests. Private ports observed beyond loopback cause immediate tree
+termination and `port_exposed`; an inspection failure causes termination and
+`port_inspection_failed`. Neither refusal waits for the normal save grace.
+See “Continuous network checks” below for probe inventory and limitations.
 
 ProcessEngine drains stdout and stderr independently; readiness on stderr
 works even if stdout is quiet. Its original Engine trait callers still receive
@@ -199,11 +190,44 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 runtime stamp alone is not enough; its executable must exist too.
 
 **Ready marker but no server-started:** a declared port has not been observed
-on the server PID. Child-launcher games need an explicit process-discovery
-extension; do not publish guessed ports to get past the check.
+in the owned Windows process tree (or the root PID on the Linux development
+adapter). Do not publish guessed ports to get past the check.
 
 **Standalone lock left behind:** confirm the old runner and server have exited,
 then remove that folder's `.homerun-runner.lock`. A stale PID is never killed.
 
 **verify passed but joining fails:** verify does not test the gateway or client.
 The evidence says exactly which facts were and were not observed.
+
+## Continuous network checks
+
+On Windows descriptor launches require atomic Job Object membership before game code
+executes. A dedicated watcher samples native IPv4/IPv6 TCP-listener and UDP-endpoint
+tables every 250 ms for all current job members, including descendants. RCON sampling
+runs separately. This is detection and response, not pre-bind network isolation:
+a short-lived endpoint between polls may be missed and scheduler delays remain possible.
+
+Declared private ports must remain loopback throughout startup, running and shutdown.
+A breach emits `port_exposed` and immediately terminates the owned tree, bypassing the
+save grace; unsaved progress may be lost. Failure to inspect sockets or job membership
+emits `port_inspection_failed` and also terminates the tree. These are refusals, never
+successful stops. The Linux development adapter retains server-PID scope and PID termination, reports
+inspection failures and labels that narrower scope in evidence. It does not claim
+Windows Job Object descendant coverage. Other unsupported inspection adapters refuse.
+
+`probe`/`verify` also refuse undeclared non-loopback endpoints. Undeclared loopback
+endpoints are recorded without failing. UDP tables include all bound endpoints; they
+do not distinguish an auxiliary outbound socket from a service. Such endpoints need
+review rather than being silently omitted. Ordinary `launch`/`supervise` enforce
+private ports but do not apply the probe's undeclared-port refusal.
+
+Probe JSON gains `network`: scope, nominal polling interval, timing origin, sample
+count and a bounded inventory of PID/protocol/address/port, declared/confined flags,
+first/last observation and sample counts. Observations are aggregated, not a packet
+trace. Exceeding the distinct-endpoint bound fails verification instead of truncating
+an apparently complete audit. No Windows Firewall rules are created or altered.
+
+The watchdog performs no protocol output. It records refusal, terminates the Job,
+and lets the lifecycle thread deliver the error afterwards. A blocked stdout consumer
+can delay events but cannot leave the violating game alive. On root-process exit the
+owned tree is drained before monitoring ends or a terminal event is published.

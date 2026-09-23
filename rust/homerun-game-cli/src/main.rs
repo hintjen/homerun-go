@@ -1,4 +1,5 @@
 mod cli;
+mod network;
 mod prepare;
 mod protocol;
 mod runner;

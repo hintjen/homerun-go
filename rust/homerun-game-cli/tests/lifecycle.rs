@@ -50,7 +50,10 @@ fn fake_game() {
             .env_remove("HOMERUN_TEST_GRANDCHILD")
             .env_remove("HOMERUN_TEST_RELAY")
             .env_remove("HOMERUN_TEST_LINGER")
-            .env_remove("HOMERUN_TEST_BIND")
+            .env(
+                "HOMERUN_TEST_BIND",
+                std::env::var("HOMERUN_TEST_DESCENDANT_BIND").unwrap_or("127.0.0.1".into()),
+            )
             .env(role, "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -71,7 +74,7 @@ fn fake_game() {
     // A game that ignores the address it was told to bind. Default loopback,
     // because that is what a well-behaved one does with {bindAddress}.
     let bind = std::env::var("HOMERUN_TEST_BIND").unwrap_or_else(|_| "127.0.0.1".into());
-    let _socket = TcpListener::bind((bind.as_str(), port)).unwrap();
+    let mut socket = Some(TcpListener::bind((bind.as_str(), port)).unwrap());
 
     // A program that holds a port and outlives whoever started it: nothing
     // asks it to stop, and it keeps the port either way.
@@ -95,6 +98,18 @@ fn fake_game() {
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
     }
+    if std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("flood-then-widen") {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(1));
+            drop(socket.take());
+            let _wide = TcpListener::bind(("0.0.0.0", port)).unwrap();
+            fs::write("wide-seen", "bound").unwrap();
+            thread::sleep(Duration::from_secs(30));
+        });
+        loop {
+            println!("{}", "flood".repeat(1000));
+        }
+    }
     // A server that does not take end-of-stdin as a reason to stop -- which
     // is most of them, since a dedicated server's stdin being closed is
     // ordinary. Without this the fake game exits the moment the runner dies,
@@ -104,9 +119,31 @@ fn fake_game() {
         thread::sleep(Duration::from_secs(30));
         return;
     }
+    if let Ok(extra_port) = std::env::var("HOMERUN_TEST_EXTRA_PORT") {
+        let extra_bind = std::env::var("HOMERUN_TEST_EXTRA_BIND").unwrap_or("0.0.0.0".into());
+        thread::spawn(move || {
+            // It must appear after readiness so verify cannot pass with a one-shot audit.
+            thread::sleep(Duration::from_millis(750));
+            let _extra =
+                TcpListener::bind((extra_bind.as_str(), extra_port.parse::<u16>().unwrap()))
+                    .unwrap();
+            thread::sleep(Duration::from_secs(30));
+        });
+    }
     let deaf = std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("deaf");
     for line in std::io::stdin().lock().lines() {
         let line = line.unwrap();
+        if line == "widen" {
+            drop(socket.take());
+            socket = Some(TcpListener::bind(("0.0.0.0", port)).unwrap());
+            println!("WIDE NOW");
+        }
+
+        if line == "quit" && std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("wide-on-stop") {
+            drop(socket.take());
+            socket = Some(TcpListener::bind(("0.0.0.0", port)).unwrap());
+            continue;
+        }
         if line == "quit" && !deaf {
             fs::write(&save, "world flushed").unwrap();
             return;
@@ -628,6 +665,11 @@ fn a_game_that_starts_another_program_has_all_of_it_stopped() {
     let f = Fixture::new();
     let grandchild = free_port();
     let mut start = f.start();
+    // Readiness must actually wait for the descendant used by this assertion.
+    start["descriptor"]["ports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"descendant","proto":"tcp","port":grandchild,"expose":false}));
     let env = &mut start["descriptor"]["platforms"][platform::HOST]["launch"]["env"];
     env["HOMERUN_TEST_GRANDCHILD"] = json!(grandchild.to_string());
     // Deaf, so the console rung is ignored and the ladder climbs to the rung
@@ -1143,4 +1185,215 @@ fn incompatible_handshake_shuts_down_and_unknown_commands_do_not() {
     h.send(json!({"cmd":"hello","protocol":999}));
     h.until("shutdown-complete");
     assert!(h.child.wait().unwrap().success());
+}
+
+#[test]
+fn network_private_exposure_without_marker_skips_save_grace() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+    start["descriptor"]["stop"]["graceMs"] = json!(180000);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_BIND"] =
+        json!("0.0.0.0");
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("silent");
+    let mut h = Host::new();
+    let now = Instant::now();
+    h.send(start);
+    assert_eq!(h.until("error")["code"], "port_exposed");
+    h.until("server-crashed");
+    assert!(
+        now.elapsed() < Duration::from_secs(5),
+        "exposure waited for readiness or save grace"
+    );
+    assert!(!h.seen.iter().any(|e| e["event"] == "server-started"));
+    assert!(
+        !f.root.join("server/saved").exists(),
+        "a security refusal must bypass ordinary quit"
+    );
+    assert!(port_freed(f.port));
+    h.eof();
+}
+
+#[test]
+fn network_private_port_widening_after_ready_is_refused() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    h.send(json!({"cmd":"console","serverId":"s1","command":"widen"}));
+    assert_eq!(h.until("error")["code"], "port_exposed");
+    h.until("server-crashed");
+    assert_eq!(
+        h.seen
+            .iter()
+            .filter(|e| e["event"] == "server-started")
+            .count(),
+        1
+    );
+    assert!(port_freed(f.port));
+    h.eof();
+}
+
+#[test]
+fn network_private_port_widening_during_stop_is_refused() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+    start["descriptor"]["stop"]["graceMs"] = json!(180000);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("wide-on-stop");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    let now = Instant::now();
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    assert_eq!(h.until("error")["code"], "port_exposed");
+    h.until("server-crashed");
+    assert!(
+        now.elapsed() < Duration::from_secs(5),
+        "shutdown disabled the network guard"
+    );
+    assert!(
+        !h.seen.iter().any(|e| e["event"] == "server-stopped"),
+        "refusal mislabeled a clean stop"
+    );
+    h.eof();
+}
+
+#[cfg(windows)]
+#[test]
+fn network_private_descendant_is_inspected_and_terminated() {
+    let f = Fixture::new();
+    let extra = free_port();
+    let mut start = f.start();
+    start["descriptor"]["ports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"admin","proto":"tcp","port":extra,"expose":false}));
+    let env = &mut start["descriptor"]["platforms"][platform::HOST]["launch"]["env"];
+    env["HOMERUN_TEST_GRANDCHILD"] = json!(extra.to_string());
+    env["HOMERUN_TEST_DESCENDANT_BIND"] = json!("0.0.0.0");
+    let mut h = Host::new();
+    h.send(start);
+    assert_eq!(h.until("error")["code"], "port_exposed");
+    h.until("server-crashed");
+    assert!(
+        port_freed(extra),
+        "owned descendant retained its exposed socket"
+    );
+    h.eof();
+}
+
+#[test]
+fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
+    for (bind, success) in [("127.0.0.1", true), ("0.0.0.0", false)] {
+        let mut f = Fixture::new();
+        let extra = free_port();
+        let env = &mut f.d["platforms"][platform::HOST]["launch"]["env"];
+        env["HOMERUN_TEST_EXTRA_PORT"] = json!(extra.to_string());
+        env["HOMERUN_TEST_EXTRA_BIND"] = json!(bind);
+        let path = f.root.join("game.json");
+        fs::write(&path, f.d.to_string()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
+            .arg("verify")
+            .arg(path)
+            .args(["--accept-licence", "--observe-seconds", "2", "--json"])
+            .arg("--runtime-root")
+            .arg(f.root.join("runtime"))
+            .arg("--server-dir")
+            .arg(f.root.join("server"))
+            .arg("--evidence")
+            .arg(f.root.join("evidence"))
+            .output()
+            .unwrap();
+        let report: Value =
+            serde_json::from_slice(&fs::read(f.root.join("evidence/probe.json")).unwrap()).unwrap();
+        assert_eq!(result.status.success(), success, "{report}");
+        assert_eq!(report["ok"], success);
+        let row = report["network"]["inventory"]["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["port"] == extra)
+            .expect("undeclared listener absent from evidence");
+        assert_eq!(row["declared"], false);
+        assert_eq!(row["address"], bind);
+        assert_eq!(row["confined"], success);
+        if !success {
+            assert!(report["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["code"] == "port_exposed"));
+        }
+        assert!(port_freed(extra));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn network_refusal_kills_even_when_runner_output_is_not_drained() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["ports"][0]["expose"] = json!(false);
+    start["descriptor"]["stop"]["graceMs"] = json!(180000);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_MODE"] =
+        json!("flood-then-widen");
+    let mut host = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
+        .arg("supervise")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    writeln!(host.stdin.as_mut().unwrap(), "{start}").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while !f.root.join("server/wide-seen").exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    let widened = f.root.join("server/wide-seen").exists();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut closed = false;
+    while Instant::now() < deadline {
+        if TcpListener::bind(("127.0.0.1", f.port)).is_ok() {
+            closed = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    // Always clean the fixture, including when the deliberately broken watchdog fails.
+    let _ = host.kill();
+    let _ = host.wait();
+    assert!(widened, "fixture never bound wide");
+    assert!(
+        closed,
+        "a blocked output pipe prevented the watchdog from closing the exposed socket"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn network_descendants_are_gone_before_clean_stop_is_reported() {
+    let f = Fixture::new();
+    let extra = free_port();
+    let mut start = f.start();
+    start["descriptor"]["ports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"admin","proto":"tcp","port":extra,"expose":false}));
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_GRANDCHILD"] =
+        json!(extra.to_string());
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    assert!(
+        TcpListener::bind(("127.0.0.1", extra)).is_ok(),
+        "runner reported clean stop while an owned descendant still listened"
+    );
+    h.eof();
 }

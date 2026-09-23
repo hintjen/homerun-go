@@ -293,6 +293,8 @@ android_logger = "0.14"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", default-features = false, features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
     # `CreateJobObjectW` takes a SECURITY_ATTRIBUTES pointer, so its binding
     # is gated on this even though the pointer passed is null.
     "Win32_Security",

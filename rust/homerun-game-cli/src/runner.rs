@@ -10,7 +10,6 @@ use homerun_supervisor::{
     // Aliased: `Job` below is this file's fetch/start worker, which is a
     // different thing entirely from an owned process tree.
     job::Job as ProcessJob,
-    platform,
     process_engine::ProcessEngine,
     rcon,
 };
@@ -64,6 +63,7 @@ pub struct Runner {
     tunnel: Option<(String, Child, Option<ProcessJob>)>,
     console_tasks: Vec<JoinHandle<()>>,
     build: String,
+    pub(crate) network: crate::network::Audit,
 }
 
 impl Runner {
@@ -77,6 +77,7 @@ impl Runner {
             tunnel: None,
             console_tasks: vec![],
             build: digest[..12].into(),
+            network: crate::network::Audit::default(),
         })
     }
     pub fn ready(&self) {
@@ -297,11 +298,13 @@ impl Runner {
             console: None,
         }));
         let (s, l, out, server_id) = (stop.clone(), live.clone(), self.out.clone(), id.clone());
+        let audit = self.network.clone();
+        audit.clear();
         let task = thread::Builder::new()
             .name("game-lifecycle".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                let result = run(command, &d, &s, &l, &out);
+                let result = run(command, &d, &s, &l, &out, &audit);
                 if let Err(e) = result {
                     if s.should_stop() {
                         l.lock().unwrap().state = "stopped".into();
@@ -342,6 +345,7 @@ fn run(
     stop: &StopSignal,
     live: &Arc<Mutex<Live>>,
     out: &Output,
+    audit: &crate::network::Audit,
 ) -> Result<()> {
     let (id, root) = match &command {
         Command::Fetch {
@@ -391,6 +395,11 @@ fn run(
     runtime_owner.install(d, &server)?;
     if let Some(job) = runtime_owner.process_job() {
         p.engine.require_job(job);
+    } else {
+        #[cfg(windows)]
+        p.engine.require_job(Arc::new(
+            ProcessJob::required_process().map_err(|e| fail(codes::SPAWN_FAILED, e))?,
+        ));
     }
     let engine = Arc::new(p.engine);
     {
@@ -404,75 +413,110 @@ fn run(
     let exposed = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicBool::new(false));
     let tail = Mutex::new(VecDeque::new());
+    let observed_ports = Arc::new(Mutex::new(Vec::new()));
+    let network_failure = Arc::new(Mutex::new(None));
     let monitor = {
-        let (ready, done, timed_out, exposed, started) = (
-            ready.clone(),
+        let (done, timed_out, exposed, started) = (
             done.clone(),
             timed_out.clone(),
             exposed.clone(),
             started.clone(),
         );
-        let (engine, stop, out, id, live, d) = (
+        let (engine, stop, d) = (engine.clone(), stop.clone(), d.clone());
+        let observed_ports = observed_ports.clone();
+        let network_failure = network_failure.clone();
+        let audit = audit.clone();
+        thread::spawn(move || {
+            let begin = Instant::now();
+
+            let mut next_port_check = Instant::now();
+            while !done.load(Ordering::SeqCst) {
+                if Instant::now() >= next_port_check {
+                    next_port_check = Instant::now() + Duration::from_millis(250);
+                    let snapshot = engine.network_snapshot();
+                    let observed = match snapshot {
+                        Ok(Some(ref endpoints)) => {
+                            if let Err((code, message)) =
+                                audit.check(&d, endpoints, begin.elapsed())
+                            {
+                                exposed.store(true, Ordering::SeqCst);
+                                *network_failure.lock().unwrap() = Some(fail(code, message));
+                                if let Err(e) = engine.terminate_owned_tree() {
+                                    audit.inspection_failed(&e);
+                                    *network_failure.lock().unwrap() =
+                                        Some(fail(codes::PORT_INSPECTION_FAILED, "The game could not be inspected or stopped safely. This run cannot continue."));
+                                }
+                                stop.request_stop();
+                                break;
+                            }
+                            endpoints.iter().map(|(_, l)| *l).collect::<Vec<_>>()
+                        }
+                        Ok(None) => Vec::new(),
+                        Err(e) => {
+                            audit.inspection_failed(&e);
+                            exposed.store(true, Ordering::SeqCst);
+                            *network_failure.lock().unwrap() =
+                                Some(fail(codes::PORT_INSPECTION_FAILED, "The game could not be inspected or stopped safely. This run cannot continue."));
+                            if let Err(e) = engine.terminate_owned_tree() {
+                                audit.inspection_failed(&e);
+                                *network_failure.lock().unwrap() =
+                                    Some(fail(codes::PORT_INSPECTION_FAILED, "The game could not be inspected or stopped safely. This run cannot continue."));
+                            }
+                            stop.request_stop();
+                            break;
+                        }
+                    };
+                    *observed_ports.lock().unwrap() = observed;
+                }
+
+                if !started.load(Ordering::SeqCst)
+                    && !stop.should_stop()
+                    && begin.elapsed()
+                        >= Duration::from_millis(engine::control::ready_timeout_ms(&d))
+                {
+                    timed_out.store(true, Ordering::SeqCst);
+                    stop.request_stop();
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        })
+    };
+    let sampler = {
+        let (engine, stop, out, id, done, started, d, console, ready, live, exposed) = (
             engine.clone(),
             stop.clone(),
             out.clone(),
             id.clone(),
-            live.clone(),
+            done.clone(),
+            started.clone(),
             d.clone(),
+            p.console.clone(),
+            ready.clone(),
+            live.clone(),
+            exposed.clone(),
         );
+        let ports = p.ports.clone();
+        let observed_ports = observed_ports.clone();
         thread::spawn(move || {
-            let begin = Instant::now();
             let mut sampled = Instant::now();
-            let mut next_port_check = Instant::now();
             while !done.load(Ordering::SeqCst) {
-                if !stop.should_stop()
-                    && ready.load(Ordering::SeqCst)
-                    && !started.load(Ordering::SeqCst)
-                    && Instant::now() >= next_port_check
-                {
-                    next_port_check = Instant::now() + Duration::from_secs(1);
-                    let observed = engine
-                        .pid()
-                        .map(platform::listening_ports)
-                        .unwrap_or_default();
-                    // `expose: false` is a promise that a port stays on this
-                    // computer, and until now nothing checked it: the bind
-                    // address was validated and dropped, and the observation
-                    // carried no address to check against. A game that
-                    // ignores `{bindAddress}` -- or a descriptor that never
-                    // passes it -- puts an administrative console on the LAN
-                    // behind one password. Checked before the all-ports test
-                    // rather than after, so a port bound wide is refused the
-                    // first time it is seen rather than waiting for the rest
-                    // of the server to come up.
-                    if let Some((name, address)) = breach(&d, &observed) {
-                        exposed.store(true, Ordering::SeqCst);
-                        out.error(
-                            Some(&id),
-                            fail(
-                                codes::PORT_EXPOSED,
-                                format!(
-                                    "This game opened its \"{name}\" port to your whole \
-                                     network at {address}, and Homerun keeps that port \
-                                     to this computer only. The server has been \
-                                     stopped. This is a fault in how the game was set \
-                                     up rather than anything you did."
-                                ),
-                            ),
-                        );
-                        stop.request_stop();
-                    } else if d.ports.iter().all(|p| {
-                        observed
+                if ready.load(Ordering::SeqCst) && !started.load(Ordering::SeqCst) {
+                    let all_bound = d.ports.iter().all(|p| {
+                        observed_ports
+                            .lock()
+                            .unwrap()
                             .iter()
                             .any(|o| o.port == p.port && o.protocol == p.proto)
-                    }) {
-                        // Serialize stop/readiness transitions: a late marker must
-                        // not move a cancelled launch back to running.
+                    });
+                    if all_bound {
                         let mut l = live.lock().unwrap();
-                        if !stop.should_stop() && !done.load(Ordering::SeqCst) {
+                        if !stop.should_stop()
+                            && !done.load(Ordering::SeqCst)
+                            && !exposed.load(Ordering::SeqCst)
+                        {
                             out.send(Event::ServerPorts {
                                 server_id: id.clone(),
-                                ports: p.ports.clone(),
+                                ports: ports.clone(),
                             });
                             l.state = "running".into();
                             started.store(true, Ordering::SeqCst);
@@ -482,21 +526,7 @@ fn run(
                         }
                     }
                 }
-                if !started.load(Ordering::SeqCst)
-                    && !stop.should_stop()
-                    && begin.elapsed()
-                        >= Duration::from_millis(engine::control::ready_timeout_ms(&d))
-                {
-                    timed_out.store(true, Ordering::SeqCst);
-                    out.error(
-                        Some(&id),
-                        fail(
-                            codes::READY_TIMEOUT,
-                            "The game did not become ready on its declared ports in time.",
-                        ),
-                    );
-                    stop.request_stop();
-                }
+
                 if started.load(Ordering::SeqCst)
                     && !stop.should_stop()
                     && sampled.elapsed() >= Duration::from_secs(2)
@@ -519,7 +549,7 @@ fn run(
                         }
                     } else if matches!(d.observe.players, PlayersVia::Rcon) {
                         if let (Some(target), Some(command)) =
-                            (&p.console, &d.observe.players_command)
+                            (&console, &d.observe.players_command)
                         {
                             if let Ok(reply) =
                                 rcon::command_with_timeout(target, command, Duration::from_secs(2))
@@ -569,15 +599,40 @@ fn run(
         },
         &|| ready.store(true, Ordering::SeqCst),
     );
+    // Root exit does not mean its descendants have exited. Drain ownership before
+    // ending enforcement or publishing any terminal event.
+    #[cfg(windows)]
+    if let Err(e) = engine.terminate_owned_tree() {
+        audit.inspection_failed(&e);
+        exposed.store(true, Ordering::SeqCst);
+        *network_failure.lock().unwrap() = Some(fail(
+            codes::PORT_INSPECTION_FAILED,
+            "The game could not be inspected or stopped safely. This run cannot continue.",
+        ));
+    }
     done.store(true, Ordering::SeqCst);
     let _ = monitor.join();
+    let _ = sampler.join();
+    if let Some(failure) = network_failure.lock().unwrap().take() {
+        out.error(Some(&id), failure);
+    } else if timed_out.load(Ordering::SeqCst) {
+        out.error(
+            Some(&id),
+            fail(
+                codes::READY_TIMEOUT,
+                "The game did not become ready on its declared ports in time.",
+            ),
+        );
+    }
     // A launch Homerun refused is neither a stop the player asked for nor a
     // server that failed to start, so it takes the same road as a ready
     // timeout: the error has already been sent, and what follows must not
     // report a clean stop over the top of it.
     let refused = timed_out.load(Ordering::SeqCst) || exposed.load(Ordering::SeqCst);
     let requested = stop.should_stop() && !refused;
-    if requested || (started.load(Ordering::SeqCst) && matches!(outcome, RunOutcome::Stopped)) {
+    if !refused
+        && (requested || (started.load(Ordering::SeqCst) && matches!(outcome, RunOutcome::Stopped)))
+    {
         live.lock().unwrap().state = "stopped".into();
         out.send(Event::ServerStopped {
             server_id: id,
@@ -601,28 +656,6 @@ fn run(
         });
     }
     Ok(())
-}
-
-/// The first port the descriptor keeps to this computer that the server bound
-/// somewhere else.
-///
-/// `expose: true` ports are deliberately not checked. The gateway tunnel
-/// connects to loopback, so binding wider is unnecessary -- but games
-/// routinely bind `0.0.0.0` for a published port with no way to be told
-/// otherwise, and refusing that would refuse most of the catalogue for a
-/// port that is meant to be reachable anyway. What is worth stopping a server
-/// over is the *private* port: an RCON console on the LAN behind one
-/// password.
-fn breach(
-    d: &engine::GameDescriptor,
-    observed: &[platform::Listening],
-) -> Option<(String, std::net::IpAddr)> {
-    d.ports.iter().filter(|p| !p.expose).find_map(|p| {
-        observed
-            .iter()
-            .find(|o| o.port == p.port && o.protocol == p.proto && !o.is_confined())
-            .map(|o| (p.name.clone(), o.address))
-    })
 }
 
 /// Only report a roster when the reply has an explicit supported shape.

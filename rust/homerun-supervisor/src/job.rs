@@ -119,6 +119,70 @@ impl Job {
         Self::create(None).ok()
     }
 
+    /// Descriptor network enforcement requires ownership before game code executes.
+    pub fn required_process() -> Result<Job, String> {
+        #[cfg(windows)]
+        {
+            Self::create(None).map_err(|e| format!("Cannot own the game process tree: {e}"))
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Checked game process ownership requires Windows.".into())
+        }
+    }
+
+    /// Current job membership, including descendants whose parent already exited.
+    pub fn process_ids(&self) -> Result<Vec<u32>, String> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::{Foundation::ERROR_MORE_DATA, System::JobObjects::*};
+            for capacity in [128usize, 1024, 8192, 65536] {
+                // usize storage provides pointer alignment; the header is two DWORDs.
+                let mut buffer = vec![0usize; 2 + capacity];
+                let bytes = (buffer.len() * std::mem::size_of::<usize>()) as u32;
+                let ptr = buffer
+                    .as_mut_ptr()
+                    .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+                let ok = unsafe {
+                    QueryInformationJobObject(
+                        self.handle,
+                        JobObjectBasicProcessIdList,
+                        ptr.cast(),
+                        bytes,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok != 0 {
+                    let count = unsafe { (*ptr).NumberOfProcessIdsInList } as usize;
+                    if unsafe { (*ptr).NumberOfAssignedProcesses } as usize > count {
+                        continue;
+                    }
+                    if count > capacity {
+                        return Err("Game process list exceeded its buffer.".into());
+                    }
+                    let list =
+                        unsafe { std::slice::from_raw_parts((*ptr).ProcessIdList.as_ptr(), count) };
+                    return list
+                        .iter()
+                        .map(|id| {
+                            u32::try_from(*id)
+                                .map_err(|_| "Invalid game process identifier.".into())
+                        })
+                        .collect();
+                }
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(ERROR_MORE_DATA as i32) {
+                    return Err(format!("Cannot inspect game process ownership: {err}"));
+                }
+            }
+            Err("The game process tree is too large to inspect.".into())
+        }
+        #[cfg(not(windows))]
+        {
+            Err("Checked process ownership requires Windows.".into())
+        }
+    }
+
     /// A named job for a mounted runtime. Unlike the legacy API, failure is fatal.
     pub fn required(name: &str) -> Result<Job, String> {
         #[cfg(windows)]
