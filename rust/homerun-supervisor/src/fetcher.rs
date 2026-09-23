@@ -381,8 +381,8 @@ fn run_tool(
         }
         if let Some(markers) = sign_in {
             let (found_url, found_code) = sign_in_parts(&line, markers);
-            let changed = (found_url.is_some() && found_url != url)
-                || (found_code.is_some() && found_code != code);
+            let found_url = found_url.filter(|new| replaces_sign_in_url(url.as_deref(), new));
+            let changed = found_url.is_some() || (found_code.is_some() && found_code != code);
             if found_url.is_some() {
                 url = found_url;
             }
@@ -424,11 +424,55 @@ fn run_tool(
     Ok(lines)
 }
 
+/// Whether a newly seen sign-in address should replace the one already shown.
+///
+/// Downloaders and servers print the address twice: once with the code
+/// already in it (`.../verify?user_code=...`) and once bare, for typing the
+/// code by hand. The one with the code in it is the better thing to open, so
+/// a bare address never replaces a longer one it is the start of.
+pub fn replaces_sign_in_url(current: Option<&str>, new: &str) -> bool {
+    match current {
+        None => true,
+        Some(current) => current != new && !current.starts_with(new),
+    }
+}
+
+/// A line with terminal escape sequences (colours, resets) removed.
+///
+/// Hytale's server ends every log line with a colour reset even when told the
+/// console is not a terminal, and an address with `\x1b[m` stuck to its end
+/// is not one a browser can open.
+pub fn without_escapes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC [ parameters... final byte in '@'..='~'.
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for f in chars.by_ref() {
+                if ('@'..='~').contains(&f) {
+                    break;
+                }
+            }
+        } else {
+            // Any other escape: drop the single character that follows.
+            chars.next();
+        }
+    }
+    out
+}
+
 /// The verification address and code on one line of a downloader's output.
 pub fn sign_in_parts(
     line: &str,
     markers: &homerun_core::engine::descriptor::SignIn,
 ) -> (Option<String>, Option<String>) {
+    let line = without_escapes(line);
+    let line = line.as_str();
     let url = (!markers.url.is_empty() && line.contains(&markers.url))
         .then(|| {
             line.split_whitespace()
@@ -1341,6 +1385,48 @@ mod tests {
             ),
             (None, None)
         );
+    }
+
+    /// Hytale's server, observed 2026-09-23: every line ends in a colour
+    /// reset, even with `-Dterminal.ansi=false`. The address and code are
+    /// passed on without it.
+    #[test]
+    fn terminal_escapes_are_not_part_of_an_address_or_a_code() {
+        let m = homerun_core::engine::descriptor::SignIn {
+            url: "oauth.accounts.hytale.com/oauth2/device/verify".into(),
+            code: "Enter code: ".into(),
+        };
+        assert_eq!(
+            sign_in_parts(
+                "\u{1b}[m[INFO] [AbstractCommand] Or visit: https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=AbCd\u{1b}[m",
+                &m
+            ).0.as_deref(),
+            Some("https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=AbCd")
+        );
+        assert_eq!(
+            sign_in_parts(
+                "\u{1b}[m[INFO] [AbstractCommand] Enter code: AbCd\u{1b}[m",
+                &m
+            )
+            .1
+            .as_deref(),
+            Some("AbCd")
+        );
+        assert_eq!(without_escapes("\u{1b}[38;5;46mok\u{1b}[0m\u{1b}[m"), "ok");
+    }
+
+    /// The downloader prints the address with the code in it, then bare.
+    /// Observed 2026-09-23: the bare one used to win.
+    #[test]
+    fn a_bare_address_never_replaces_the_one_with_the_code_in_it() {
+        let full = "https://h.example/verify?user_code=AbCd";
+        assert!(replaces_sign_in_url(None, "https://h.example/verify"));
+        assert!(!replaces_sign_in_url(
+            Some(full),
+            "https://h.example/verify"
+        ));
+        assert!(replaces_sign_in_url(Some("https://h.example/verify"), full));
+        assert!(!replaces_sign_in_url(Some(full), full));
     }
     use homerun_core::engine::descriptor::Extract;
     use std::sync::{Arc, Mutex};
