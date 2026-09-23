@@ -77,7 +77,8 @@ steamcmd or manual updater bypassing the runner is outside that protection.
 
 Before any fetch, recover `<runtimeRoot>/.homerun-mounts-<game>.json`. This
 record is outside the directory steamcmd updates. It records a unique named
-Windows Job Object and the mount locations
+Windows Job Object and the mount locations (and, for a vendor runtime, the
+version whose `<runtimeRoot>/<game>/<version>` directory holds them)
 from the previous launch, so cleanup works even when a new descriptor has
 removed or renamed its mounts. Before touching any link, recovery opens that
 exact job, terminates it, and queries until its active process count is zero.

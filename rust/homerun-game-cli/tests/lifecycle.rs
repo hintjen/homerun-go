@@ -993,6 +993,242 @@ fn start_fetches_a_missing_runtime_from_a_local_fixture_server() {
     http.join().unwrap();
 }
 
+/// A vendor archive shaped like Terraria's: everything under one top folder
+/// named for the version's digits.
+fn vendor_zip(exe: &str, body: &[u8]) -> Vec<u8> {
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        writer.add_directory("1458/", options).unwrap();
+        writer.start_file(format!("1458/{exe}"), options).unwrap();
+        writer.write_all(body).unwrap();
+        writer
+            .start_file("1458/Linux/TerrariaServer", options)
+            .unwrap();
+        writer.write_all(b"not this platform").unwrap();
+        writer.finish().unwrap();
+    }
+    buffer.into_inner()
+}
+
+/// Serves each body in turn, one connection each, and records the paths
+/// asked for.
+fn serve_in_turn(bodies: Vec<Vec<u8>>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    thread::spawn(move || {
+        for body in bodies {
+            let Ok((mut client, _)) = listener.accept() else {
+                return;
+            };
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(client.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            log.lock()
+                .unwrap()
+                .push(first.split(' ').nth(1).unwrap_or("").to_string());
+            write!(
+                client,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            client.write_all(&body).unwrap();
+        }
+    });
+    (port, asked)
+}
+
+/// The vendor source end to end: the host names a version, the runner
+/// fetches it from the descriptor's address into its own directory with the
+/// archive's top folder stripped, a second fetch of that version reuses it
+/// without a request, and a vendor that later serves different bytes for
+/// the same version is refused -- with the first download's digest, recorded
+/// on this machine, as the reason.
+#[test]
+fn a_vendor_runtime_is_fetched_per_version_and_a_changed_file_is_refused() {
+    let mut f = Fixture::new();
+    let exe = f.d["platforms"][platform::HOST]["launch"]["exe"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = vendor_zip(&exe, b"version one");
+    let changed = vendor_zip(&exe, b"version one, but not the same bytes");
+    let (port, asked) = serve_in_turn(vec![first.clone(), changed]);
+    f.d["platforms"][platform::HOST]["runtime"] = json!({
+        "source": "vendor",
+        "url": format!("http://127.0.0.1:{port}/api/download/terraria-server-{{versionDigits}}.zip"),
+        "extract": "zip",
+        "stripComponents": 1,
+        "versionSetting": "version"
+    });
+    f.d["settings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"version","type":"string","label":"Version","default":"latest"}));
+    let fetch = |version: Option<&str>| {
+        let mut command = json!({"cmd":"fetch","serverId":"s1","runtimeRoot":f.root.join("runtime"),
+            "descriptor":f.d,"licenceAccepted":true});
+        if let Some(version) = version {
+            command["runtimeVersion"] = json!(version);
+        }
+        command
+    };
+    let version_dir = f.root.join("runtime/fake/1.4.5.8");
+    let record = f.root.join("runtime/fake/.vendor-hashes.json");
+
+    // The host has to say which version; the runner never picks one.
+    for missing_or_bad in [None, Some("latest"), Some("1.4/../../x")] {
+        let mut h = Host::new();
+        h.send(fetch(missing_or_bad));
+        let error = h.until("error");
+        assert_eq!(error["code"], "descriptor_invalid", "{error}");
+        h.eof();
+    }
+    assert!(asked.lock().unwrap().is_empty(), "nothing was requested");
+
+    let mut h = Host::new();
+    h.send(fetch(Some("1.4.5.8")));
+    let complete = h.until("fetch-complete");
+    h.eof();
+    assert_eq!(complete["buildId"], "v1.4.5.8");
+    assert_eq!(
+        fs::canonicalize(complete["runtimeDir"].as_str().unwrap()).unwrap(),
+        fs::canonicalize(&version_dir).unwrap()
+    );
+    assert_eq!(
+        asked.lock().unwrap().as_slice(),
+        ["/api/download/terraria-server-1458.zip"]
+    );
+    assert_eq!(
+        fs::read(version_dir.join(&exe)).unwrap(),
+        b"version one",
+        "the archive's top folder is stripped"
+    );
+    assert!(!version_dir.join("1458").exists());
+    let recorded: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let served = f.root.join("served.zip");
+    fs::write(&served, &first).unwrap();
+    assert_eq!(
+        recorded["1.4.5.8"],
+        fetcher::digest_of(&served).unwrap(),
+        "the first download of a version is what later ones are held to"
+    );
+
+    // Already on disk: no second request. Asked through the standalone CLI,
+    // whose --runtime-version is the same field.
+    let descriptor = f.root.join("game.json");
+    fs::write(&descriptor, f.d.to_string()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
+        .args([
+            "fetch",
+            &descriptor.to_string_lossy(),
+            "--accept-licence",
+            "--json",
+        ])
+        .args(["--runtime-version", "1.4.5.8"])
+        .arg("--runtime-root")
+        .arg(f.root.join("runtime"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(result.status.success(), "{stdout}");
+    let complete: Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|e| e["event"] == "fetch-complete")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert_eq!(complete["buildId"], "v1.4.5.8");
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "a present version is reused"
+    );
+
+    // The version's directory is gone and the vendor now serves other bytes
+    // under the same version.
+    fs::remove_dir_all(&version_dir).unwrap();
+    let mut h = Host::new();
+    h.send(fetch(Some("1.4.5.8")));
+    let error = h.until("error");
+    h.eof();
+    assert_eq!(error["code"], "fetch_failed", "{error}");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("changed") && message.contains("1.4.5.8"),
+        "{message}"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert!(
+        !version_dir.join(&exe).exists(),
+        "a refused download is never unpacked"
+    );
+    assert!(!version_dir.join(".homerun-build").exists());
+    let still: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert_eq!(still, recorded, "a refusal does not rewrite the record");
+}
+
+/// Launching uses the version's directory for everything that names the
+/// runtime: the executable, a `runtime` working directory, `{runtimeDir}`
+/// and save mounts. The fake game asserts its cwd is `{runtimeDir}` and
+/// finds its asset there.
+#[cfg(windows)]
+#[test]
+fn a_vendor_runtime_is_launched_from_its_versions_directory() {
+    let mut f = Fixture::with_runtime_saves();
+    let game = f.root.join("runtime/fake");
+    let version_dir = game.join("1.4.5.8");
+    fs::create_dir_all(&version_dir).unwrap();
+    for entry in fs::read_dir(&game).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path() != version_dir {
+            fs::rename(entry.path(), version_dir.join(entry.file_name())).unwrap();
+        }
+    }
+    fs::write(version_dir.join(".homerun-build"), "v1.4.5.8").unwrap();
+    f.d["platforms"][platform::HOST]["runtime"] = json!({
+        "source": "vendor",
+        // Never reached: the version is already on disk.
+        "url": "http://127.0.0.1:1/terraria-server-{versionDigits}.zip",
+        "extract": "zip",
+        "versionSetting": "version"
+    });
+    f.d["settings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"version","type":"string","label":"Version","default":"latest"}));
+    let mut start = f.start();
+    start["runtimeVersion"] = json!("1.4.5.8");
+    let mut h = Host::new();
+    h.send(start);
+    let complete = h.until("fetch-complete");
+    assert_eq!(complete["buildId"], "v1.4.5.8");
+    h.until("server-started");
+    assert!(platform::is_mount(&version_dir.join("server")));
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/world/world.save")).unwrap(),
+        "boot\n"
+    );
+    h.eof();
+    assert!(
+        !version_dir.join("server").exists(),
+        "the save mount is removed"
+    );
+    assert!(!f.root.join("runtime/.homerun-mounts-fake.json").exists());
+}
+
 /// `doctor` reported every refusal as `requires_unmet`, including "nobody has
 /// accepted the terms". A caller cannot put the licence in front of a person
 /// when all it has been told is that the computer is not ready, and the

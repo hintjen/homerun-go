@@ -48,3 +48,8 @@ strip = true
 # Hold a second job handle in recovery tests to make asynchronous tree death
 # deterministic. Production uses only the supervisor's ownership API.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_SystemServices"] }
+
+[dev-dependencies]
+# Builds the vendor archives the lifecycle tests serve. Already in the graph
+# through the supervisor, so this adds nothing to a build.
+zip = { version = "2", default-features = false, features = ["deflate"] }

@@ -111,22 +111,61 @@ pub fn confined(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+/// The version a vendor runtime is fetched and launched in.
+///
+/// `None` for every other source, whatever was asked for: a version means
+/// nothing to a pinned download or to steamcmd. For a vendor source the
+/// host must name one -- it resolves the player's choice, including
+/// "latest"; the runner never does -- and it must be dotted digits, because
+/// it becomes part of a URL and a directory name.
+pub fn runtime_version(d: &GameDescriptor, requested: Option<&str>) -> Result<Option<String>> {
+    if !engine::fetch::is_vendor(d, platform::HOST) {
+        return Ok(None);
+    }
+    let Some(version) = requested else {
+        return Err(fail(
+            codes::DESCRIPTOR_INVALID,
+            "This game is downloaded in the version a player chooses, and no version \
+             was given. Update Homerun Desktop and try again.",
+        ));
+    };
+    engine::fetch::check_runtime_version(version)
+        .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;
+    Ok(Some(version.to_string()))
+}
+
+/// This game's runtime directory: `<root>/<id>`, or `<root>/<id>/<version>`
+/// for a vendor runtime. The one place the runner asks, so the fetch, the
+/// executable check, a runtime working directory and save mounts agree.
+pub fn install_dir(d: &GameDescriptor, root: &Path, version: Option<&str>) -> Result<PathBuf> {
+    engine::fetch::install_dir(d, platform::HOST, &root.to_string_lossy(), version)
+        .map(PathBuf::from)
+        .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))
+}
+
 pub fn fetch(
     d: &GameDescriptor,
     root: &Path,
+    version: Option<&str>,
     id: &str,
     out: &Output,
     stop: &homerun_supervisor::engine::StopSignal,
 ) -> Result<PathBuf> {
-    let dir = root.join(&d.id);
+    let dir = install_dir(d, root, version)?;
     let mut present = fetcher::present(&dir);
     if !platform::executable(&dir, &d.platform(platform::HOST).unwrap().launch.exe).is_file() {
         present.build_id = None;
     }
-    let plan = engine::fetch::plan(d, platform::HOST, &root.to_string_lossy(), &present)
-        .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?;
+    let plan = engine::fetch::plan_version(
+        d,
+        platform::HOST,
+        &root.to_string_lossy(),
+        &present,
+        version,
+    )
+    .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?;
     let machine = platform::machine_capacity(root);
-    let verdict = engine::doctor::doctor(d, &machine, &present, true);
+    let verdict = engine::doctor::doctor_version(d, &machine, &present, true, version);
     if !verdict.ok {
         return Err(fail(codes::REQUIRES_UNMET, verdict.problems.join(" ")));
     }

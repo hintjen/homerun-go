@@ -1871,11 +1871,16 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                 .get("licenceAccepted")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            serde_json::to_value(engine::doctor::doctor(
+            // Additive: the version a host chose for a vendor runtime, so the
+            // verdict is about that version's directory. Absent for every
+            // other source, and for a caller built before it existed.
+            let version = optional_text("runtimeVersion");
+            serde_json::to_value(engine::doctor::doctor_version(
                 &descriptor,
                 &machine,
                 &present,
                 accepted,
+                version.as_deref(),
             ))
             .map_err(|e| e.to_string())
         }
@@ -1883,9 +1888,16 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
         "engine.fetchPlan" => {
             let descriptor = descriptor_arg(&args, method)?;
             let present = present_arg(&args, method)?;
-            engine::fetch::plan(&descriptor, &text("host")?, &text("runtimeRoot")?, &present)
-                .map_err(|e| e.to_string())
-                .and_then(|plan| serde_json::to_value(plan).map_err(|e| e.to_string()))
+            let version = optional_text("runtimeVersion");
+            engine::fetch::plan_version(
+                &descriptor,
+                &text("host")?,
+                &text("runtimeRoot")?,
+                &present,
+                version.as_deref(),
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|plan| serde_json::to_value(plan).map_err(|e| e.to_string()))
         }
 
         // The API stores every setting as a string; this is where that stops

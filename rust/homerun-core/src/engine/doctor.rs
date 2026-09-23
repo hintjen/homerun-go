@@ -79,6 +79,22 @@ pub fn doctor(
     present: &fetch::Present,
     licence_accepted: bool,
 ) -> Verdict {
+    doctor_version(descriptor, machine, present, licence_accepted, None)
+}
+
+/// [`doctor`], for the version of a vendor runtime the host has chosen.
+///
+/// `present` then describes that version's directory
+/// ([`fetch::install_dir`]), and a version that is not one is a refusal.
+/// Without a version a vendor runtime is judged as not yet downloaded, which
+/// is the cautious answer to the disk question.
+pub fn doctor_version(
+    descriptor: &GameDescriptor,
+    machine: &Machine,
+    present: &fetch::Present,
+    licence_accepted: bool,
+    runtime_version: Option<&str>,
+) -> Verdict {
     let mut problems = Vec::new();
     let mut warnings = Vec::new();
 
@@ -112,9 +128,16 @@ pub fn doctor(
     // Disk is checked against what still has to be downloaded. A machine with
     // the runtime already on it does not need room for it a second time.
     let runtime_present = matches!(
-        fetch::plan(descriptor, &machine.host, "", present),
+        fetch::plan_version(descriptor, &machine.host, "", present, runtime_version),
         Ok(fetch::Plan::AlreadyPresent { .. })
     );
+    if let Some(version) = runtime_version {
+        if fetch::is_vendor(descriptor, &machine.host) {
+            if let Err(err) = fetch::check_runtime_version(version) {
+                problems.push(err.to_string());
+            }
+        }
+    }
     let needed = if runtime_present { 0 } else { requires.disk_mb };
     if needed > 0 && machine.disk_mb > 0 && machine.disk_mb < needed {
         problems.push(format!(
@@ -429,6 +452,30 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("no save mounts")),
             "doctor must warn that runtime-relative saves need redirection"
+        );
+    }
+
+    /// A vendor runtime is on disk per version, so whether it is present is
+    /// a question about the version the host chose -- and a version that is
+    /// not dotted digits is refused here too, before anything is fetched.
+    #[test]
+    fn a_vendor_runtime_is_judged_for_the_version_the_host_chose() {
+        let mut d = rust();
+        let runtime = &mut d.platforms.get_mut("win32-x64").unwrap().runtime;
+        runtime.source = super::super::descriptor::RuntimeSource::Vendor;
+        runtime.url = Some("https://terraria.org/s-{versionDigits}.zip".into());
+        let present = fetch::Present {
+            build_id: Some(fetch::vendor_build_id("1.4.5.8")),
+            suspect: false,
+        };
+        assert!(doctor_version(&d, &capable(), &present, true, Some("1.4.5.8")).runtime_present);
+        assert!(!doctor(&d, &capable(), &present, true).runtime_present);
+        let bad = doctor_version(&d, &capable(), &present, true, Some("../1"));
+        assert!(!bad.ok);
+        assert!(
+            bad.problems.iter().any(|p| p.contains("not a version")),
+            "{:?}",
+            bad.problems
         );
     }
 

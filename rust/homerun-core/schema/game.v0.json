@@ -303,6 +303,34 @@
                     "appId"
                   ]
                 }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "source": {
+                      "const": "vendor"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "extract": {
+                      "const": "zip"
+                    },
+                    "url": {
+                      "pattern": "^https://",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "extract",
+                    "versionSetting"
+                  ]
+                }
               }
             ],
             "properties": {
@@ -327,6 +355,7 @@
                 ]
               },
               "sha256": {
+                "description": "Direct only. A vendor download is not pinned by digest.",
                 "pattern": "^[0-9a-f]{64}$",
                 "type": [
                   "string",
@@ -350,10 +379,27 @@
               "source": {
                 "enum": [
                   "direct",
-                  "steamcmd"
+                  "steamcmd",
+                  "vendor"
+                ]
+              },
+              "stripComponents": {
+                "description": "Leading path components dropped from every zip entry, for an archive nested under one top folder.",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
                 ]
               },
               "url": {
+                "description": "For vendor, an https pattern carrying {version} or {versionDigits} (the version without its dots) in its path, and no other placeholder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "versionSetting": {
+                "description": "Vendor only: the string setting holding the player's choice of version. The host resolves it to one concrete version; the engine never lists them.",
                 "type": [
                   "string",
                   "null"
@@ -531,6 +577,13 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "optionsFrom": {
+            "description": "Where the choices are read from at run time instead of options. Only \"versions\" today: the game's version list, for a vendor runtime's versionSetting. The runner ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "secret": {
             "description": "A value the UI masks, such as a server password a player chooses. Not a host-generated {secret:<name>}. The runner ignores it.",

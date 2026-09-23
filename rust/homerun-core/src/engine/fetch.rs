@@ -41,6 +41,22 @@
 //! The risk this accepts is a runtime that is quietly corrupt in a way Steam
 //! believes is current. That is what the suspect flag and a repair are for,
 //! and it costs one slow start rather than every start.
+//!
+//! # A vendor runtime is one directory per version
+//!
+//! A [`RuntimeSource::Vendor`] runtime is downloaded in the version the
+//! player chose, which the host resolves and passes in -- this module never
+//! lists or resolves versions. Each version lives in its own directory,
+//! `<runtimeRoot>/<id>/<version>`, and is stamped `v<version>`, so a version
+//! already on disk is [`Plan::AlreadyPresent`] and switching back to it is
+//! free. The version is refused unless it is dotted digits
+//! ([`check_runtime_version`]): it becomes part of a URL and of a directory
+//! name, and neither is a place for anything a player could shape.
+//!
+//! What such a runtime is checked against, since no digest can be pinned for
+//! a version released after the descriptor was signed, is described on
+//! [`RuntimeSource::Vendor`]; the per-machine record of first-seen digests
+//! is [`VENDOR_HASHES`], beside the version directories.
 
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +100,26 @@ pub enum Plan {
         #[serde(default)]
         size: Option<u64>,
         extract: Extract,
+        /// Leading path components dropped from each zip entry.
+        #[serde(default)]
+        strip_components: u32,
+    },
+    /// The vendor's own site, in the version the host chose.
+    #[serde(rename_all = "camelCase")]
+    Vendor {
+        /// `<runtimeRoot>/<id>/<version>`.
+        dir: String,
+        /// The descriptor's pattern with the version substituted. Its origin
+        /// is the only one a redirect may lead to.
+        url: String,
+        version: String,
+        #[serde(default)]
+        size: Option<u64>,
+        #[serde(default)]
+        strip_components: u32,
+        /// The file recording the sha256 of the first download of each
+        /// version on this machine: `<runtimeRoot>/<id>/.vendor-hashes.json`.
+        record: String,
     },
     /// Valve's `steamcmd`, anonymous.
     #[serde(rename_all = "camelCase")]
@@ -107,6 +143,7 @@ impl Plan {
         match self {
             Plan::AlreadyPresent { dir, .. }
             | Plan::Direct { dir, .. }
+            | Plan::Vendor { dir, .. }
             | Plan::SteamCmd { dir, .. } => dir,
         }
     }
@@ -125,6 +162,123 @@ pub fn direct_build_id(sha256: &str) -> String {
     sha256.chars().take(12).collect()
 }
 
+/// The placeholder a vendor URL carries for the version as written.
+pub const VERSION_PLACEHOLDER: &str = "{version}";
+/// The placeholder for the version with its dots removed: `1.4.5.8` is
+/// `1458`, which is how Terraria names its server downloads.
+pub const VERSION_DIGITS_PLACEHOLDER: &str = "{versionDigits}";
+/// The per-game file, beside the version directories, recording the sha256
+/// of the first download of each version on this machine.
+pub const VENDOR_HASHES: &str = ".vendor-hashes.json";
+
+/// The build id a vendor runtime is stamped with.
+pub fn vendor_build_id(version: &str) -> String {
+    format!("v{version}")
+}
+
+/// Refuse a runtime version that is not dotted digits.
+///
+/// `^[0-9]+(\.[0-9]+){0,5}$`, and nothing more generous: the version is
+/// substituted into a URL and becomes a directory name, so a `/`, a `..`, a
+/// `?` or a percent sign in it would be somebody else's decision about where
+/// a download comes from or lands.
+pub fn check_runtime_version(version: &str) -> Result<()> {
+    let parts: Vec<&str> = version.split('.').collect();
+    let ok = version.len() <= 64
+        && parts.len() <= 6
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Malformed(format!(
+            "\"{}\" is not a version Homerun can download: a version is numbers \
+             separated by dots, such as 1.4.5.8.",
+            version.chars().take(64).collect::<String>()
+        )))
+    }
+}
+
+/// Whether a vendor address is one Homerun will download from.
+///
+/// HTTPS, always, in a build that ships. A build with debug assertions -- the
+/// test suites, and nothing a player runs -- also accepts plain HTTP to
+/// `127.0.0.1`, so the whole path can be exercised against a local server
+/// without a certificate. Nothing off this machine is reachable that way.
+pub fn vendor_scheme_allowed(url: &str) -> bool {
+    url.starts_with("https://") || (cfg!(debug_assertions) && url.starts_with("http://127.0.0.1:"))
+}
+
+/// Why a vendor URL pattern is not one, or `None` when it is.
+///
+/// It needs a version placeholder, may carry no other, and must keep them
+/// out of the scheme and host: the version decides *which* file, never
+/// *whose* site. Returned as a phrase for [`super::validate`] to put in a
+/// sentence.
+pub fn vendor_url_problem(pattern: &str) -> Option<String> {
+    let Some((_, rest)) = pattern.split_once("://") else {
+        return Some("is not a web address".into());
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    if rest[..authority_end].contains(['{', '}']) {
+        return Some("puts the version in the site's name rather than in the path".into());
+    }
+    let mut seen_version = false;
+    let mut remaining = pattern;
+    while let Some(open) = remaining.find('{') {
+        if remaining[..open].contains('}') {
+            return Some("has a '}' that was never opened".into());
+        }
+        let after = &remaining[open..];
+        let Some(close) = after.find('}') else {
+            return Some("has a '{' that is never closed".into());
+        };
+        let token = &after[..=close];
+        if token == VERSION_PLACEHOLDER || token == VERSION_DIGITS_PLACEHOLDER {
+            seen_version = true;
+        } else {
+            return Some(format!(
+                "uses {token}, and the only placeholders it may use are \
+                 {VERSION_PLACEHOLDER} and {VERSION_DIGITS_PLACEHOLDER}"
+            ));
+        }
+        remaining = &after[close + 1..];
+    }
+    if remaining.contains('}') {
+        return Some("has a '}' that was never opened".into());
+    }
+    if !seen_version {
+        return Some(format!(
+            "does not say where the version goes: it needs {VERSION_PLACEHOLDER} or \
+             {VERSION_DIGITS_PLACEHOLDER}"
+        ));
+    }
+    None
+}
+
+/// A vendor URL pattern with a version filled in.
+pub fn vendor_url(pattern: &str, version: &str) -> Result<String> {
+    check_runtime_version(version)?;
+    if let Some(problem) = vendor_url_problem(pattern) {
+        return Err(Error::Malformed(format!(
+            "this game's download address {problem}. The file is part of the app, so \
+             this is a bug in Homerun rather than something you can fix."
+        )));
+    }
+    let url = pattern
+        .replace(VERSION_DIGITS_PLACEHOLDER, &version.replace('.', ""))
+        .replace(VERSION_PLACEHOLDER, version);
+    if !vendor_scheme_allowed(&url) {
+        return Err(Error::Malformed(
+            "this game's download address is not a secure (https) one, so Homerun \
+             will not download from it."
+                .into(),
+        ));
+    }
+    Ok(url)
+}
+
 /// Where a game's runtime is cached.
 ///
 /// One directory per game, shared by every server of that game on this
@@ -141,12 +295,58 @@ pub fn runtime_dir(runtime_root: &str, id: &str) -> String {
     )
 }
 
+/// Where this game's runtime lives on this machine, for this version.
+///
+/// The one answer to "which directory", so fetching, launching, the
+/// executable check, a `runtime` working directory and save mounts cannot
+/// disagree. `runtime_version` is read only for a vendor runtime, which has
+/// one directory per version and cannot be placed without one.
+pub fn install_dir(
+    descriptor: &GameDescriptor,
+    host: &str,
+    runtime_root: &str,
+    runtime_version: Option<&str>,
+) -> Result<String> {
+    let game = runtime_dir(runtime_root, &descriptor.id);
+    if !is_vendor(descriptor, host) {
+        return Ok(game);
+    }
+    let version = runtime_version.ok_or_else(|| no_version(descriptor))?;
+    check_runtime_version(version)?;
+    Ok(runtime_dir(&game, version))
+}
+
+/// Whether this game's runtime on this host is a vendor download, whose
+/// version the host has to choose.
+pub fn is_vendor(descriptor: &GameDescriptor, host: &str) -> bool {
+    descriptor
+        .platform(host)
+        .is_some_and(|p| p.runtime.source == RuntimeSource::Vendor)
+}
+
 /// Decide how to get this game's server onto this machine.
+///
+/// For a runtime whose version is not chosen by the player. A vendor runtime
+/// is refused here in words; use [`plan_version`].
 pub fn plan(
     descriptor: &GameDescriptor,
     host: &str,
     runtime_root: &str,
     present: &Present,
+) -> Result<Plan> {
+    plan_version(descriptor, host, runtime_root, present, None)
+}
+
+/// [`plan`], with the version the host resolved for a vendor runtime.
+///
+/// `present` must describe [`install_dir`] for the same version. The version
+/// is ignored for every other source.
+pub fn plan_version(
+    descriptor: &GameDescriptor,
+    host: &str,
+    runtime_root: &str,
+    present: &Present,
+    runtime_version: Option<&str>,
 ) -> Result<Plan> {
     let platform = descriptor.platform(host).ok_or_else(|| {
         Error::Unsupported(format!(
@@ -177,6 +377,33 @@ pub fn plan(
                 sha256,
                 size: runtime.size,
                 extract: runtime.extract.unwrap_or_default(),
+                strip_components: runtime.strip_components.unwrap_or(0),
+            })
+        }
+        RuntimeSource::Vendor => {
+            let pattern = runtime
+                .url
+                .as_deref()
+                .ok_or_else(|| missing(descriptor, "a download address"))?;
+            let version = runtime_version.ok_or_else(|| no_version(descriptor))?;
+            let url = vendor_url(pattern, version)?;
+            let version_dir = runtime_dir(&dir, version);
+            let build_id = vendor_build_id(version);
+            // A suspect install is fetched again, and the recorded digest is
+            // what says whether the vendor still serves the same bytes.
+            if present.build_id.as_deref() == Some(build_id.as_str()) && !present.suspect {
+                return Ok(Plan::AlreadyPresent {
+                    dir: version_dir,
+                    build_id,
+                });
+            }
+            Ok(Plan::Vendor {
+                dir: version_dir,
+                url,
+                version: version.to_string(),
+                size: runtime.size,
+                strip_components: runtime.strip_components.unwrap_or(0),
+                record: runtime_dir(&dir, VENDOR_HASHES),
             })
         }
         RuntimeSource::Steamcmd => {
@@ -215,6 +442,15 @@ fn display_name(descriptor: &GameDescriptor) -> String {
     } else {
         descriptor.name.clone()
     }
+}
+
+fn no_version(descriptor: &GameDescriptor) -> Error {
+    Error::Malformed(format!(
+        "{} is downloaded in the version a player chooses, and Homerun was not told \
+         which version to use. This is a bug in Homerun rather than something you \
+         can fix.",
+        display_name(descriptor)
+    ))
 }
 
 fn missing(descriptor: &GameDescriptor, what: &str) -> Error {
@@ -503,6 +739,216 @@ mod tests {
                 .unwrap();
         assert_eq!(skipped["kind"], "alreadyPresent");
         assert!(skipped["buildId"].is_string(), "{skipped}");
+    }
+
+    // ─── a vendor runtime, in the version the host chose ────────────────────
+
+    fn terraria(extra: serde_json::Value) -> GameDescriptor {
+        let mut runtime = json!({
+            "source": "vendor",
+            "url": "https://terraria.org/api/download/pc-dedicated-server/terraria-server-{versionDigits}.zip",
+            "extract": "zip",
+            "stripComponents": 1,
+            "versionSetting": "version"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            runtime[k] = v.clone();
+        }
+        serde_json::from_value(json!({
+            "id": "terraria", "name": "Terraria", "hosts": ["win32-x64"],
+            "settings": [{ "key": "version", "type": "string", "label": "Version",
+                           "default": "latest" }],
+            "platforms": { "win32-x64": { "runtime": runtime,
+                                          "launch": { "exe": "Windows/TerrariaServer" } } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_vendor_runtime_is_fetched_per_version_from_the_descriptors_site() {
+        let plan = plan_version(
+            &terraria(json!({})),
+            "win32-x64",
+            "/rt",
+            &NOTHING,
+            Some("1.4.5.8"),
+        )
+        .unwrap();
+        assert_eq!(
+            plan,
+            Plan::Vendor {
+                dir: "/rt/terraria/1.4.5.8".into(),
+                url:
+                    "https://terraria.org/api/download/pc-dedicated-server/terraria-server-1458.zip"
+                        .into(),
+                version: "1.4.5.8".into(),
+                size: None,
+                strip_components: 1,
+                record: "/rt/terraria/.vendor-hashes.json".into(),
+            }
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert_eq!(json["kind"], "vendor");
+        assert_eq!(
+            json["stripComponents"], 1,
+            "camelCase, like every neighbour"
+        );
+    }
+
+    #[test]
+    fn both_version_placeholders_are_filled() {
+        assert_eq!(
+            vendor_url(
+                "https://x.example/{version}/s-{versionDigits}.zip",
+                "1.4.5.8"
+            )
+            .unwrap(),
+            "https://x.example/1.4.5.8/s-1458.zip"
+        );
+    }
+
+    #[test]
+    fn a_version_already_on_disk_is_not_downloaded_again_unless_suspect() {
+        let present = Present {
+            build_id: Some(vendor_build_id("1.4.5.8")),
+            suspect: false,
+        };
+        assert_eq!(
+            plan_version(
+                &terraria(json!({})),
+                "win32-x64",
+                "C:\\rt",
+                &present,
+                Some("1.4.5.8")
+            )
+            .unwrap(),
+            Plan::AlreadyPresent {
+                dir: "C:\\rt\\terraria\\1.4.5.8".into(),
+                build_id: "v1.4.5.8".into()
+            }
+        );
+        let suspect = Present {
+            suspect: true,
+            ..present
+        };
+        assert!(matches!(
+            plan_version(
+                &terraria(json!({})),
+                "win32-x64",
+                "C:\\rt",
+                &suspect,
+                Some("1.4.5.8")
+            )
+            .unwrap(),
+            Plan::Vendor { .. }
+        ));
+    }
+
+    #[test]
+    fn a_vendor_runtime_with_no_version_is_refused_in_words() {
+        let err = plan(&terraria(json!({})), "win32-x64", "/rt", &NOTHING)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not told which version"), "{err}");
+        let err = install_dir(&terraria(json!({})), "win32-x64", "/rt", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not told which version"), "{err}");
+    }
+
+    /// The version becomes part of a URL and a directory name, so it is
+    /// dotted digits and nothing a player could shape into somewhere else.
+    #[test]
+    fn a_version_that_is_not_dotted_digits_is_refused() {
+        for bad in [
+            "",
+            "latest",
+            "1..2",
+            ".1",
+            "1.",
+            "1.4/../../x",
+            "..",
+            "1.4.5.8?x=1",
+            "1.4%2e5",
+            "1.2.3.4.5.6.7",
+            "１.２",
+            "1 .2",
+            "-1",
+        ] {
+            assert!(check_runtime_version(bad).is_err(), "accepted {bad:?}");
+            assert!(
+                plan_version(
+                    &terraria(json!({})),
+                    "win32-x64",
+                    "/rt",
+                    &NOTHING,
+                    Some(bad)
+                )
+                .is_err(),
+                "planned {bad:?}"
+            );
+            assert!(install_dir(&terraria(json!({})), "win32-x64", "/rt", Some(bad)).is_err());
+        }
+        for good in ["1", "1.4.5.8", "1.2.3.4.5.6", "0.10"] {
+            assert!(check_runtime_version(good).is_ok(), "refused {good:?}");
+        }
+    }
+
+    #[test]
+    fn a_vendor_url_pattern_names_the_version_and_nothing_else() {
+        assert!(vendor_url_problem("https://t.example/s-{versionDigits}.zip").is_none());
+        for (bad, why) in [
+            (
+                "https://t.example/server.zip",
+                "does not say where the version goes",
+            ),
+            ("https://t.example/{setting:x}.zip", "{setting:x}"),
+            ("https://{version}.t.example/s.zip", "site's name"),
+            ("https://t.example/{version.zip", "never closed"),
+            ("https://t.example/}{version}", "never opened"),
+            ("t.example/{version}", "not a web address"),
+        ] {
+            let problem = vendor_url_problem(bad).unwrap_or_default();
+            assert!(problem.contains(why), "{bad}: {problem:?}");
+        }
+    }
+
+    #[test]
+    fn a_vendor_download_that_is_not_https_is_refused() {
+        let err = vendor_url("http://t.example/{version}.zip", "1.2")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("https"), "{err}");
+    }
+
+    #[test]
+    fn only_a_vendor_runtime_is_placed_by_version() {
+        assert_eq!(
+            install_dir(&terraria(json!({})), "win32-x64", "/rt", Some("1.4.5.8")).unwrap(),
+            "/rt/terraria/1.4.5.8"
+        );
+        assert_eq!(
+            install_dir(&direct(json!({})), "win32-x64", "/rt", Some("1.4.5.8")).unwrap(),
+            "/rt/terraria",
+            "a version means nothing to a pinned download"
+        );
+    }
+
+    #[test]
+    fn strip_components_reaches_a_direct_plan_too() {
+        match plan(
+            &direct(json!({ "stripComponents": 2 })),
+            "win32-x64",
+            "/rt",
+            &NOTHING,
+        )
+        .unwrap()
+        {
+            Plan::Direct {
+                strip_components, ..
+            } => assert_eq!(strip_components, 2),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

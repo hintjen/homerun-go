@@ -206,6 +206,14 @@ pub fn schema() -> Value {
                                 "A value the UI masks, such as a server password a \
                                  player chooses. Not a host-generated {secret:<name>}. \
                                  The runner ignores it."
+                        },
+                        "optionsFrom": {
+                            "type": ["string", "null"],
+                            "description":
+                                "Where the choices are read from at run time instead of \
+                                 options. Only \"versions\" today: the game's version \
+                                 list, for a vendor runtime's versionSetting. The runner \
+                                 ignores it."
                         }
                     }
                 }
@@ -228,11 +236,33 @@ pub fn schema() -> Value {
                         "runtime": {
                             "type": "object",
                             "properties": {
-                                "source": { "enum": ["direct", "steamcmd"] },
-                                "url": { "type": ["string", "null"] },
-                                "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+                                "source": { "enum": ["direct", "steamcmd", "vendor"] },
+                                "url": {
+                                    "type": ["string", "null"],
+                                    "description":
+                                        "For vendor, an https pattern carrying {version} or \
+                                         {versionDigits} (the version without its dots) in \
+                                         its path, and no other placeholder."
+                                },
+                                "sha256": {
+                                    "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$",
+                                    "description": "Direct only. A vendor download is not pinned by digest."
+                                },
                                 "size": { "type": ["integer", "null"], "minimum": 0 },
                                 "extract": { "enum": ["none", "zip", null] },
+                                "stripComponents": {
+                                    "type": ["integer", "null"], "minimum": 0,
+                                    "description":
+                                        "Leading path components dropped from every zip \
+                                         entry, for an archive nested under one top folder."
+                                },
+                                "versionSetting": {
+                                    "type": ["string", "null"],
+                                    "description":
+                                        "Vendor only: the string setting holding the \
+                                         player's choice of version. The host resolves it to \
+                                         one concrete version; the engine never lists them."
+                                },
                                 "appId": { "type": ["integer", "null"], "minimum": 0 },
                                 "buildId": { "type": ["string", "null"] },
                                 "sizeMb": { "type": ["integer", "null"], "minimum": 0 }
@@ -247,6 +277,17 @@ pub fn schema() -> Value {
                                     "if": { "properties": { "source": { "const": "steamcmd" } },
                                             "required": ["source"] },
                                     "then": { "required": ["appId"] }
+                                },
+                                {
+                                    "if": { "properties": { "source": { "const": "vendor" } },
+                                            "required": ["source"] },
+                                    "then": {
+                                        "required": ["url", "extract", "versionSetting"],
+                                        "properties": {
+                                            "url": { "type": "string", "pattern": "^https://" },
+                                            "extract": { "const": "zip" }
+                                        }
+                                    }
                                 }
                             ]
                         },
@@ -447,6 +488,7 @@ mod tests {
                 show_when: BTreeMap::from([("mode".to_string(), vec!["hard".to_string()])]),
                 group: Some("Players".into()),
                 secret: true,
+                options_from: Some("versions".into()),
             }],
             requires: Requires {
                 ram_mb: 8192,
@@ -462,6 +504,8 @@ mod tests {
                         sha256: Some("a".repeat(64)),
                         size: Some(1),
                         extract: Some(Extract::Zip),
+                        strip_components: Some(1),
+                        version_setting: Some("version".into()),
                         app_id: Some(258550),
                         build_id: Some("1".into()),
                         size_mb: Some(9000),
