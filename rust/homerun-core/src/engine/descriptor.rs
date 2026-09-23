@@ -238,6 +238,32 @@ pub struct Setting {
     /// A closed set of legal values, when there is one. `string` only.
     #[serde(default)]
     pub options: Vec<Value>,
+
+    // The four below are for the UI and the API. The runner reads none of
+    // them: a setting's value reaches the launch line the same way whatever
+    // they say. They live here because these types are the schema's source
+    // of truth, so the pinned schema can describe every field a descriptor
+    // carries.
+    /// What each option is called on screen, keyed by the option. The
+    /// option is still what is stored and templated.
+    #[serde(default)]
+    pub option_labels: BTreeMap<String, String>,
+    /// Chosen once, when the server is created: the game reads it only when
+    /// its world is made. The API refuses a change afterwards.
+    #[serde(default)]
+    pub create_only: bool,
+    /// Show the setting only while every named setting holds one of the
+    /// listed values. Display only; a hidden setting keeps its value.
+    #[serde(default)]
+    pub show_when: BTreeMap<String, Vec<String>>,
+    /// A heading to show the setting under.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// A value to keep out of sight: the UI masks it, with a way to reveal
+    /// it for the owner. Not a host-generated secret (`{secret:<name>}`); a
+    /// player chooses it and shares it, like a server password.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 /// What a machine must have before it is offered this game.

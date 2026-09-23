@@ -160,6 +160,45 @@ pub fn schema() -> Value {
                                  A non-empty list is the only way to say \"pick one of \
                                  these\" -- there is no enum type. An empty list means \
                                  the same as no list."
+                        },
+                        "optionLabels": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description":
+                                "What each option is called on screen, keyed by the \
+                                 option. The option is still what is stored and sent. \
+                                 For the UI; the runner ignores it."
+                        },
+                        "createOnly": {
+                            "type": "boolean",
+                            "description":
+                                "Chosen once, when the server is created: the game \
+                                 reads it only when its world is made. The API refuses \
+                                 a change afterwards. The runner ignores it."
+                        },
+                        "showWhen": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            },
+                            "description":
+                                "Show the setting only while every named setting holds \
+                                 one of the listed values. Display only; one level \
+                                 deep. The runner ignores it."
+                        },
+                        "group": {
+                            "type": ["string", "null"],
+                            "description":
+                                "A heading to show the setting under. The runner \
+                                 ignores it."
+                        },
+                        "secret": {
+                            "type": "boolean",
+                            "description":
+                                "A value the UI masks, such as a server password a \
+                                 player chooses. Not a host-generated {secret:<name>}. \
+                                 The runner ignores it."
                         }
                     }
                 }
@@ -395,6 +434,11 @@ mod tests {
                 min: Some(1),
                 max: Some(200),
                 options: vec![serde_json::json!("10")],
+                option_labels: BTreeMap::from([("10".to_string(), "Ten".to_string())]),
+                create_only: true,
+                show_when: BTreeMap::from([("mode".to_string(), vec!["hard".to_string()])]),
+                group: Some("Players".into()),
+                secret: true,
             }],
             requires: Requires {
                 ram_mb: 8192,
@@ -504,10 +548,12 @@ mod tests {
         );
     }
 
-    /// Walk an object's property names, skipping the two maps whose keys are
-    /// the descriptor author's rather than ours.
+    /// Walk an object's property names, skipping the maps whose keys are the
+    /// descriptor author's rather than ours.
     fn collect_keys(value: &Value, out: &mut impl FnMut(&str)) {
-        const CALLER_KEYED: [&str; 3] = ["env", "keys", "platforms"];
+        // `optionLabels` is keyed by a setting's options and `showWhen` by
+        // other settings' keys - the author's names, like the other three.
+        const CALLER_KEYED: [&str; 5] = ["env", "keys", "platforms", "optionLabels", "showWhen"];
         match value {
             Value::Object(map) => {
                 for (key, child) in map {
