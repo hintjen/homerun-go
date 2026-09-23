@@ -196,6 +196,25 @@ fn check_identity(d: &GameDescriptor, r: &mut Report) {
                     .into(),
             );
         }
+        for document in &licence.documents {
+            if document.name.is_empty() || document.url.is_empty() {
+                r.problems.push(
+                    "one of the documents in this game's terms does not say what it is                      called or where to read it."
+                        .into(),
+                );
+            }
+        }
+        // The summary link has to be one of the things being accepted. A `url`
+        // that is not among the documents is a fourth document nobody listed,
+        // and it is the one a host with room for a single link would show.
+        if !licence.documents.is_empty()
+            && !licence.documents.iter().any(|d| d.url == licence.url)
+        {
+            r.problems.push(
+                "this game's terms list several documents, but the single link it                  summarises them with is not one of them."
+                    .into(),
+            );
+        }
         if let Some(via) = &licence.accept_via {
             check_path(
                 &via.file,
@@ -855,6 +874,86 @@ mod tests {
     fn the_pilot_is_valid() {
         let r = report(&rust());
         assert!(r.ok(), "{:#?}", r.problems);
+    }
+
+    /// Rust's terms are three documents. One `{name, url}` records one link,
+    /// so two of the three would be named in prose and lost as references --
+    /// and an acceptance record that cannot be resolved back to what was
+    /// accepted is not one.
+    #[test]
+    fn terms_may_be_several_documents() {
+        let mut d = rust();
+        let licence = d.licence.as_mut().unwrap();
+        licence.url = "https://facepunch.com/legal/servers".into();
+        licence.documents = vec![
+            super::super::descriptor::LicenceDocument {
+                name: "Facepunch Terms of Service".into(),
+                url: "https://facepunch.com/legal/tos".into(),
+            },
+            super::super::descriptor::LicenceDocument {
+                name: "Facepunch Community Server and Hosting Guidelines".into(),
+                url: "https://facepunch.com/legal/servers".into(),
+            },
+            super::super::descriptor::LicenceDocument {
+                name: "Steam Subscriber Agreement".into(),
+                url: "https://store.steampowered.com/subscriber_agreement/".into(),
+            },
+        ];
+        let r = report(&d);
+        assert!(r.ok(), "{:#?}", r.problems);
+    }
+
+    /// Absent is not empty-and-broken: every descriptor written before this
+    /// field means "the terms are the one document `name` and `url` describe".
+    #[test]
+    fn no_documents_means_the_terms_are_the_one_document_named() {
+        let d = rust();
+        assert!(d.licence.as_ref().unwrap().documents.is_empty());
+        assert!(report(&d).ok());
+    }
+
+    #[test]
+    fn a_document_without_a_name_or_a_link_is_refused() {
+        for (name, url) in [("", "https://example/a"), ("A", "")] {
+            let mut d = rust();
+            let licence = d.licence.as_mut().unwrap();
+            licence.documents = vec![
+                super::super::descriptor::LicenceDocument {
+                    name: name.into(),
+                    url: url.into(),
+                },
+                super::super::descriptor::LicenceDocument {
+                    name: "Summary".into(),
+                    url: licence.url.clone(),
+                },
+            ];
+            let r = report(&d);
+            assert!(
+                r.problems.iter().any(|p| p.contains("where to read it")),
+                "{:#?}",
+                r.problems
+            );
+        }
+    }
+
+    /// The single link a host shows where it has room for one must be one of
+    /// the documents it summarises. Otherwise it is a fourth document nobody
+    /// listed -- and the one most people would actually read.
+    #[test]
+    fn the_summary_link_must_be_one_of_the_documents() {
+        let mut d = rust();
+        let licence = d.licence.as_mut().unwrap();
+        licence.url = "https://example/somewhere-else".into();
+        licence.documents = vec![super::super::descriptor::LicenceDocument {
+            name: "Terms".into(),
+            url: "https://example/terms".into(),
+        }];
+        let r = report(&d);
+        assert!(
+            r.problems.iter().any(|p| p.contains("is not one of them")),
+            "{:#?}",
+            r.problems
+        );
     }
 
     #[test]

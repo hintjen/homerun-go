@@ -143,11 +143,39 @@ pub struct Licence {
     /// The canonical URL of the terms. Stored with the acceptance, so it is
     /// recoverable later which text was agreed to.
     pub url: String,
+    /// Every document the person is agreeing to, when the terms are more than
+    /// one document.
+    ///
+    /// Some games' terms are a single page and `name` and `url` say all there
+    /// is to say. Others are several: Rust's are the Facepunch Terms of
+    /// Service, the Facepunch Community Server and Hosting Guidelines and the
+    /// Steam Subscriber Agreement, three separately published documents with
+    /// three URLs. Squeezed into one `{name, url}` pair, the names survive as
+    /// prose and two of the three links are simply lost -- so what a person
+    /// accepted cannot be reconstructed from what was recorded, which is the
+    /// one thing an acceptance record exists to do.
+    ///
+    /// Empty means "the terms are the single document `name` and `url`
+    /// describe", which is what every descriptor written before this field
+    /// meant. When it is not empty, `name` and `url` stay the one-line summary
+    /// a host shows where it has room for one, and `url` must be one of these
+    /// documents -- a summary link that is not among the things being accepted
+    /// is a fourth document nobody listed.
+    #[serde(default)]
+    pub documents: Vec<LicenceDocument>,
     /// What the *game* wants written once the person has accepted, if
     /// anything. Minecraft's `eula.txt` is the precedent. `None` means
     /// acceptance is recorded by us and nothing is written into the server.
     #[serde(default)]
     pub accept_via: Option<AcceptVia>,
+}
+
+/// One published document within a game's terms.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LicenceDocument {
+    pub name: String,
+    pub url: String,
 }
 
 /// A file the game itself reads as proof of acceptance.

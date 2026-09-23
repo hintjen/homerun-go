@@ -94,6 +94,20 @@ fact that the runtime is already on disk.
 that were accepted. Those are different claims, and keeping them apart is the
 whole point of the module.
 
+**Terms are often more than one document, and `licence.documents` is where the
+rest go.** Rust's are three -- the Facepunch Terms of Service, the Facepunch
+Community Server and Hosting Guidelines, and the Steam Subscriber Agreement --
+separately published, with three URLs. A single `{name, url}` records one of
+them: the other two survive as prose in the name and their links are lost, so
+what a person accepted cannot be resolved back from what was recorded, which is
+the one job an acceptance record has. `documents` is a list of `{name, url}`;
+an empty one means the terms really are the single document `name` and `url`
+describe, which is what every descriptor written before the field meant. Where
+it is not empty, `name` and `url` stay the one-line summary a host shows when it
+has room for one link, and `url` has to be one of the listed documents --
+otherwise the link most people would actually follow is a fourth document
+nobody listed.
+
 An agent driving the runner stops and asks a human. If a vendor's own
 installer prompts for terms, that is a stop, not a prompt to answer.
 
