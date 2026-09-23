@@ -185,6 +185,14 @@ pub fn fetch(
                     received,
                     total,
                 } => (phase, Some(received), total, None),
+                fetcher::Progress::SignIn { url, code } => {
+                    out.send(Event::FetchSignIn {
+                        server_id: id.into(),
+                        url,
+                        code,
+                    });
+                    return;
+                }
             };
             out.send(Event::FetchProgress {
                 server_id: id.into(),

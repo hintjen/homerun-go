@@ -363,6 +363,58 @@ pub struct Runtime {
     /// Rough install size, for the download UX and the disk check.
     #[serde(default)]
     pub size_mb: Option<u64>,
+
+    // --- tool ---
+    /// The vendor's own downloader, pinned. See [`RuntimeSource::Tool`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<Tool>,
+    /// The downloader's arguments for fetching the server. `{output}` is where
+    /// it must write the archive and `{credentials}` the file it keeps its
+    /// sign-in in; nothing else is templated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// The downloader's arguments for printing the version it would fetch,
+    /// on its last line of output. Empty means every start downloads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_args: Vec<String>,
+    /// How to recognise the downloader asking the person to sign in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignIn>,
+}
+
+/// A vendor's own downloader: a pinned program Homerun runs, not the server.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tool {
+    /// The vendor's URL for the downloader. Never a mirror.
+    pub url: String,
+    /// Lowercase hex, 64 characters. The downloader is an executable like any
+    /// other: unpinned, it is a program nobody can vouch for.
+    pub sha256: String,
+    #[serde(default)]
+    pub extract: Extract,
+    /// The program inside it, relative to where it was unpacked, without a
+    /// platform suffix.
+    pub exe: String,
+}
+
+/// What a downloader prints when it needs the person to sign in.
+///
+/// Both are substrings of one output line, not patterns. The runner passes
+/// what it finds to the host to show; it never answers the prompt itself,
+/// and it never sees the person's password -- they sign in on the vendor's
+/// own page, in their own browser.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignIn {
+    /// Part of the verification address. The whole `https://` word on a line
+    /// containing it is the address to open.
+    #[serde(default)]
+    pub url: String,
+    /// Text that comes straight before the code the person types, if the
+    /// downloader prints one separately.
+    #[serde(default)]
+    pub code: String,
 }
 
 /// The kinds of runtime source this build can fetch.
@@ -387,6 +439,16 @@ pub enum RuntimeSource {
     /// changes the file behind a version it already served is refused, and
     /// nothing is run. See `games/PLATFORM.md`, "Runtime sources".
     Vendor,
+    /// The vendor's own downloader, run on the person's behalf with the
+    /// person's own sign-in.
+    ///
+    /// For a game whose server files only its owner's account can fetch.
+    /// The downloader is pinned by sha256; what it downloads cannot be,
+    /// because the vendor serves only its current build, so the build a
+    /// runtime holds is whatever version the downloader reported. The
+    /// person's credentials stay in the runner's per-machine cache, never in
+    /// a server folder, a backup or anything Homerun's servers see.
+    Tool,
     /// A source added after this build shipped.
     ///
     /// This variant is why [`Runtime`] is not a tagged enum: an unknown

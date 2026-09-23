@@ -60,7 +60,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::descriptor::{Extract, GameDescriptor, RuntimeSource};
+use super::descriptor::{Extract, GameDescriptor, RuntimeSource, SignIn, Tool};
 use crate::{Error, Result};
 
 /// What is already in the runtime directory.
@@ -135,12 +135,32 @@ pub enum Plan {
         #[serde(default = "verify_by_default")]
         verify: bool,
     },
+    /// The vendor's own downloader, pinned, run with the person's sign-in.
+    ///
+    /// Never `AlreadyPresent` at planning time: whether the build on disk is
+    /// current is something only the downloader can say, so the fetcher asks
+    /// it (`version_args`) and skips the download when the answer matches
+    /// `present_build_id`.
+    #[serde(rename_all = "camelCase")]
+    Tool {
+        dir: String,
+        tool: Tool,
+        args: Vec<String>,
+        #[serde(default)]
+        version_args: Vec<String>,
+        #[serde(default)]
+        sign_in: Option<SignIn>,
+        /// What the runtime directory's stamp says it holds, if anything.
+        #[serde(default)]
+        present_build_id: Option<String>,
+    },
 }
 
 impl Plan {
     /// Where the runtime lives once this plan has run.
     pub fn dir(&self) -> &str {
         match self {
+            Plan::Tool { dir, .. } => dir,
             Plan::AlreadyPresent { dir, .. }
             | Plan::Direct { dir, .. }
             | Plan::Vendor { dir, .. }
@@ -428,6 +448,25 @@ pub fn plan_version(
                 verify: present.build_id.is_none() || present.suspect,
             })
         }
+        RuntimeSource::Tool => {
+            let tool = runtime
+                .tool
+                .clone()
+                .ok_or_else(|| missing(descriptor, "the downloader to use"))?;
+            if runtime.args.is_empty() {
+                return Err(missing(descriptor, "how to run its downloader"));
+            }
+            Ok(Plan::Tool {
+                dir,
+                tool,
+                args: runtime.args.clone(),
+                version_args: runtime.version_args.clone(),
+                sign_in: runtime.sign_in.clone(),
+                // A runtime someone suspects is damaged is fetched again,
+                // whatever version it claims to be.
+                present_build_id: present.build_id.clone().filter(|_| !present.suspect),
+            })
+        }
         RuntimeSource::Unknown => Err(Error::Unsupported(format!(
             "{} is downloaded in a way this version of Homerun does not know about. \
              Updating Homerun should fix it.",
@@ -492,6 +531,91 @@ mod tests {
         build_id: None,
         suspect: false,
     };
+
+    const JRE_SHA: &str = "4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07";
+
+    fn vendor(extra: serde_json::Value) -> GameDescriptor {
+        let mut runtime = json!({
+            "source": "tool",
+            "tool": { "url": "https://downloader.example/dl.zip", "sha256": JRE_SHA,
+                      "extract": "zip", "exe": "dl" },
+            "args": ["-download-path", "{output}", "-credentials-path", "{credentials}"],
+            "versionArgs": ["-print-version"],
+            "signIn": { "url": "device/verify", "code": "Authorization code: " },
+            "extract": "zip"
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            runtime[k] = v.clone();
+        }
+        serde_json::from_value(json!({
+            "id": "hytale", "name": "Hytale", "hosts": ["win32-x64"],
+            "platforms": { "win32-x64": { "runtime": runtime, "launch": { "exe": "jre/bin/java" } } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_vendor_downloader_is_always_asked_and_told_what_is_installed() {
+        let present = Present {
+            build_id: Some("2026.09.08-abc".into()),
+            suspect: false,
+        };
+        match plan(&vendor(json!({})), "win32-x64", "/rt", &present).unwrap() {
+            Plan::Tool {
+                dir,
+                args,
+                version_args,
+                sign_in,
+                present_build_id,
+                ..
+            } => {
+                assert_eq!(dir, "/rt/hytale");
+                assert_eq!(
+                    args[1], "{output}",
+                    "placeholders are the fetcher's to fill"
+                );
+                assert_eq!(version_args, vec!["-print-version".to_string()]);
+                assert_eq!(sign_in.unwrap().code, "Authorization code: ");
+                assert_eq!(present_build_id.as_deref(), Some("2026.09.08-abc"));
+            }
+            other => panic!("a vendor download is never assumed current: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_suspect_vendor_runtime_is_fetched_again() {
+        let present = Present {
+            build_id: Some("2026.09.08-abc".into()),
+            suspect: true,
+        };
+        assert!(matches!(
+            plan(&vendor(json!({})), "win32-x64", "/rt", &present).unwrap(),
+            Plan::Tool {
+                present_build_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_vendor_source_without_its_downloader_is_refused() {
+        assert!(plan(
+            &vendor(json!({ "tool": null })),
+            "win32-x64",
+            "/rt",
+            &NOTHING
+        )
+        .is_err());
+        assert!(plan(&vendor(json!({ "args": [] })), "win32-x64", "/rt", &NOTHING).is_err());
+    }
+
+    #[test]
+    fn a_vendor_plan_round_trips_for_the_bridge() {
+        let plan = plan(&vendor(json!({})), "win32-x64", "/rt", &NOTHING).unwrap();
+        let text = serde_json::to_value(&plan).unwrap();
+        assert_eq!(text["kind"], "tool");
+        assert_eq!(serde_json::from_value::<Plan>(text).unwrap(), plan);
+    }
 
     #[test]
     fn the_pilot_is_fetched_with_steamcmd_anonymously() {

@@ -584,6 +584,68 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
                  unpacks, and it is not unpacked as an archive."
             ));
         }
+        if platform.runtime.source == super::descriptor::RuntimeSource::Tool {
+            check_vendor_tool(host, &platform.runtime, r);
+        }
+    }
+}
+
+/// A vendor's downloader is an executable Homerun runs, so it is pinned like
+/// any download, and its arguments may only say where to write and where the
+/// sign-in lives -- never anything a player chose.
+fn check_vendor_tool(host: &str, runtime: &super::descriptor::Runtime, r: &mut Report) {
+    const ALLOWED: [&str; 2] = ["{output}", "{credentials}"];
+    match &runtime.tool {
+        None => r.problems.push(format!(
+            "this game's {host} download uses the vendor's downloader but does not say \
+             which one."
+        )),
+        Some(tool) => {
+            if tool.sha256.len() != 64 || !tool.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+                r.problems.push(format!(
+                    "this game's {host} downloader has no sha256, so Homerun cannot tell \
+                     whether the program it runs is the one that was meant."
+                ));
+            }
+            if tool.url.is_empty() {
+                r.problems
+                    .push(format!("this game's {host} downloader has no address."));
+            }
+            if tool.exe.is_empty() || tool.exe.contains('{') {
+                r.problems.push(format!(
+                    "this game's {host} downloader does not name a fixed program to run."
+                ));
+            } else {
+                check_path(&tool.exe, &format!("the {host} downloader's program"), r);
+            }
+        }
+    }
+    if runtime.args.is_empty() {
+        r.problems.push(format!(
+            "this game's {host} download does not say how to run its downloader."
+        ));
+    } else if !runtime.args.iter().any(|a| a.contains("{output}")) {
+        r.problems.push(format!(
+            "this game's {host} downloader is never told where to write the game \
+             ({{output}})."
+        ));
+    }
+    for arg in runtime.args.iter().chain(&runtime.version_args) {
+        let mut rest = arg.clone();
+        for allowed in ALLOWED {
+            rest = rest.replace(allowed, "");
+        }
+        if rest.contains('{') || rest.contains('}') {
+            r.problems.push(format!(
+                "\"{arg}\" in this game's {host} downloader arguments uses something other \
+                 than {{output}} or {{credentials}}."
+            ));
+        }
+    }
+    if runtime.extract != Some(super::descriptor::Extract::Zip) {
+        r.problems.push(format!(
+            "this game's {host} downloader's result has to be unpacked (\"extract\": \"zip\")."
+        ));
     }
 }
 
@@ -1169,6 +1231,73 @@ mod tests {
 
     fn says(problems: &[String], needle: &str) -> bool {
         problems.iter().any(|p| p.contains(needle))
+    }
+
+    const GOOD_SHA: &str = "4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07";
+
+    fn vendor_problems(runtime: serde_json::Value) -> Vec<String> {
+        problems_of(json!({ "platforms": { "win32-x64": { "runtime": runtime } } }))
+    }
+
+    fn good_vendor() -> serde_json::Value {
+        json!({
+            "source": "tool", "appId": null,
+            "tool": { "url": "https://dl.invalid/dl.zip", "sha256": GOOD_SHA, "extract": "zip", "exe": "dl" },
+            "args": ["-download-path", "{output}", "-credentials-path", "{credentials}"],
+            "versionArgs": ["-print-version", "-credentials-path", "{credentials}"],
+            "extract": "zip"
+        })
+    }
+
+    #[test]
+    fn a_pinned_vendor_downloader_is_accepted() {
+        let problems = vendor_problems(good_vendor());
+        assert!(!says(&problems, "downloader"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_vendor_downloader_is_pinned_like_any_download() {
+        let mut runtime = good_vendor();
+        runtime["tool"]["sha256"] = json!("not-a-digest");
+        assert!(says(&vendor_problems(runtime), "downloader has no sha256"));
+    }
+
+    #[test]
+    fn a_vendor_downloader_must_be_told_where_to_write() {
+        let mut runtime = good_vendor();
+        runtime["args"] = json!(["-credentials-path", "{credentials}"]);
+        assert!(says(&vendor_problems(runtime), "never told where to write"));
+    }
+
+    #[test]
+    fn a_vendor_downloader_takes_no_other_placeholders() {
+        // Player data must never reach the command line of a program Homerun runs.
+        let mut runtime = good_vendor();
+        runtime["args"] = json!(["{output}", "{setting:hostname}"]);
+        assert!(says(&vendor_problems(runtime), "uses something other than"));
+        let mut runtime = good_vendor();
+        runtime["versionArgs"] = json!(["{secret:rcon}"]);
+        assert!(says(&vendor_problems(runtime), "uses something other than"));
+    }
+
+    #[test]
+    fn a_vendor_downloader_names_a_fixed_program() {
+        let mut runtime = good_vendor();
+        runtime["tool"]["exe"] = json!("{setting:x}");
+        assert!(says(
+            &vendor_problems(runtime),
+            "does not name a fixed program"
+        ));
+        let mut runtime = good_vendor();
+        runtime["tool"] = json!(null);
+        assert!(says(&vendor_problems(runtime), "does not say which one"));
+    }
+
+    #[test]
+    fn a_vendor_download_is_unpacked() {
+        let mut runtime = good_vendor();
+        runtime["extract"] = json!("none");
+        assert!(says(&vendor_problems(runtime), "has to be unpacked"));
     }
 
     // ─── the three safety checks ───────────────────────────────────────────

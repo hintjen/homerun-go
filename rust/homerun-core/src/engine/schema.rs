@@ -51,6 +51,102 @@ pub const SCHEMA_ID: &str = "https://gethomerun.app/schemas/game.v0.json";
 
 /// The descriptor schema, as a JSON Schema 2020-12 document.
 pub fn schema() -> Value {
+    // Built apart from the document below to keep `json!` inside its
+    // recursion limit.
+    let tool = json!({
+        "type": "object",
+        "description": "Tool only: the vendor's own downloader, pinned. Run with the person's own sign-in; never a mirror.",
+        "required": ["url", "sha256", "exe"],
+        "properties": {
+            "url": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "extract": { "enum": ["none", "zip"] },
+            "exe": { "type": "string" }
+        }
+    });
+    let sign_in = json!({
+        "type": "object",
+        "description": "Tool only: substrings that identify the downloader's sign-in prompt.",
+        "properties": {
+            "url": { "type": "string" },
+            "code": { "type": "string" }
+        }
+    });
+    // Built apart from the document below to keep `json!` inside its
+    // recursion limit.
+    let runtime = json!({
+        "type": "object",
+        "properties": {
+            "source": { "enum": ["direct", "steamcmd", "vendor", "tool"] },
+            "url": {
+                "type": ["string", "null"],
+                "description":
+                    "For vendor, an https pattern carrying {version} or \
+                     {versionDigits} (the version without its dots) in \
+                     its path, and no other placeholder."
+            },
+            "sha256": {
+                "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$",
+                "description": "Direct only. A vendor download is not pinned by digest."
+            },
+            "size": { "type": ["integer", "null"], "minimum": 0 },
+            "extract": { "enum": ["none", "zip", null] },
+            "stripComponents": {
+                "type": ["integer", "null"], "minimum": 0,
+                "description":
+                    "Leading path components dropped from every zip \
+                     entry, for an archive nested under one top folder."
+            },
+            "versionSetting": {
+                "type": ["string", "null"],
+                "description":
+                    "Vendor only: the string setting holding the \
+                     player's choice of version. The host resolves it to \
+                     one concrete version; the engine never lists them."
+            },
+            "appId": { "type": ["integer", "null"], "minimum": 0 },
+            "buildId": { "type": ["string", "null"] },
+            "sizeMb": { "type": ["integer", "null"], "minimum": 0 },
+            "tool": tool,
+            "args": {
+                "type": "array", "items": { "type": "string" },
+                "description": "Tool only: the downloader's arguments. Only {output} and {credentials} are templated."
+            },
+            "versionArgs": {
+                "type": "array", "items": { "type": "string" },
+                "description": "Tool only: arguments that print the current version on the last line of output."
+            },
+            "signIn": sign_in
+        },
+        "allOf": [
+            {
+                "if": { "properties": { "source": { "const": "tool" } },
+                        "required": ["source"] },
+                "then": { "required": ["tool", "args"] }
+            },
+            {
+                "if": { "properties": { "source": { "const": "direct" } },
+                        "required": ["source"] },
+                "then": { "required": ["url", "sha256"] }
+            },
+            {
+                "if": { "properties": { "source": { "const": "steamcmd" } },
+                        "required": ["source"] },
+                "then": { "required": ["appId"] }
+            },
+            {
+                "if": { "properties": { "source": { "const": "vendor" } },
+                        "required": ["source"] },
+                "then": {
+                    "required": ["url", "extract", "versionSetting"],
+                    "properties": {
+                        "url": { "type": "string", "pattern": "^https://" },
+                        "extract": { "const": "zip" }
+                    }
+                }
+            }
+        ]
+    });
     json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": SCHEMA_ID,
@@ -233,64 +329,7 @@ pub fn schema() -> Value {
                 "additionalProperties": {
                     "type": "object",
                     "properties": {
-                        "runtime": {
-                            "type": "object",
-                            "properties": {
-                                "source": { "enum": ["direct", "steamcmd", "vendor"] },
-                                "url": {
-                                    "type": ["string", "null"],
-                                    "description":
-                                        "For vendor, an https pattern carrying {version} or \
-                                         {versionDigits} (the version without its dots) in \
-                                         its path, and no other placeholder."
-                                },
-                                "sha256": {
-                                    "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$",
-                                    "description": "Direct only. A vendor download is not pinned by digest."
-                                },
-                                "size": { "type": ["integer", "null"], "minimum": 0 },
-                                "extract": { "enum": ["none", "zip", null] },
-                                "stripComponents": {
-                                    "type": ["integer", "null"], "minimum": 0,
-                                    "description":
-                                        "Leading path components dropped from every zip \
-                                         entry, for an archive nested under one top folder."
-                                },
-                                "versionSetting": {
-                                    "type": ["string", "null"],
-                                    "description":
-                                        "Vendor only: the string setting holding the \
-                                         player's choice of version. The host resolves it to \
-                                         one concrete version; the engine never lists them."
-                                },
-                                "appId": { "type": ["integer", "null"], "minimum": 0 },
-                                "buildId": { "type": ["string", "null"] },
-                                "sizeMb": { "type": ["integer", "null"], "minimum": 0 }
-                            },
-                            "allOf": [
-                                {
-                                    "if": { "properties": { "source": { "const": "direct" } },
-                                            "required": ["source"] },
-                                    "then": { "required": ["url", "sha256"] }
-                                },
-                                {
-                                    "if": { "properties": { "source": { "const": "steamcmd" } },
-                                            "required": ["source"] },
-                                    "then": { "required": ["appId"] }
-                                },
-                                {
-                                    "if": { "properties": { "source": { "const": "vendor" } },
-                                            "required": ["source"] },
-                                    "then": {
-                                        "required": ["url", "extract", "versionSetting"],
-                                        "properties": {
-                                            "url": { "type": "string", "pattern": "^https://" },
-                                            "extract": { "const": "zip" }
-                                        }
-                                    }
-                                }
-                            ]
-                        },
+                        "runtime": runtime,
                         "launch": {
                             "type": "object",
                             "required": ["exe"],
@@ -509,6 +548,18 @@ mod tests {
                         app_id: Some(258550),
                         build_id: Some("1".into()),
                         size_mb: Some(9000),
+                        tool: Some(Tool {
+                            url: "https://example/downloader.zip".into(),
+                            sha256: "c".repeat(64),
+                            extract: Extract::Zip,
+                            exe: "downloader".into(),
+                        }),
+                        args: vec!["-download-path".into(), "{output}".into()],
+                        version_args: vec!["-print-version".into()],
+                        sign_in: Some(SignIn {
+                            url: "device/verify".into(),
+                            code: "Authorization code: ".into(),
+                        }),
                     },
                     launch: Launch {
                         exe: "S.exe".into(),

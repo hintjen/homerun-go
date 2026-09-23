@@ -273,6 +273,24 @@
                 "if": {
                   "properties": {
                     "source": {
+                      "const": "tool"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "tool",
+                    "args"
+                  ]
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "source": {
                       "const": "direct"
                     }
                   },
@@ -341,6 +359,13 @@
                   "null"
                 ]
               },
+              "args": {
+                "description": "Tool only: the downloader's arguments. Only {output} and {credentials} are templated.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
               "buildId": {
                 "type": [
                   "string",
@@ -362,6 +387,18 @@
                   "null"
                 ]
               },
+              "signIn": {
+                "description": "Tool only: substrings that identify the downloader's sign-in prompt.",
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
               "size": {
                 "minimum": 0,
                 "type": [
@@ -380,7 +417,8 @@
                 "enum": [
                   "direct",
                   "steamcmd",
-                  "vendor"
+                  "vendor",
+                  "tool"
                 ]
               },
               "stripComponents": {
@@ -391,12 +429,46 @@
                   "null"
                 ]
               },
+              "tool": {
+                "description": "Tool only: the vendor's own downloader, pinned. Run with the person's own sign-in; never a mirror.",
+                "properties": {
+                  "exe": {
+                    "type": "string"
+                  },
+                  "extract": {
+                    "enum": [
+                      "none",
+                      "zip"
+                    ]
+                  },
+                  "sha256": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "url",
+                  "sha256",
+                  "exe"
+                ],
+                "type": "object"
+              },
               "url": {
                 "description": "For vendor, an https pattern carrying {version} or {versionDigits} (the version without its dots) in its path, and no other placeholder.",
                 "type": [
                   "string",
                   "null"
                 ]
+              },
+              "versionArgs": {
+                "description": "Tool only: arguments that print the current version on the last line of output.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
               },
               "versionSetting": {
                 "description": "Vendor only: the string setting holding the player's choice of version. The host resolves it to one concrete version; the engine never lists them.",
