@@ -156,12 +156,97 @@ fn fake_game() {
     }
 }
 
+/// One runtime, at one path per machine, for fixtures whose game listens on
+/// every interface on purpose.
+///
+/// Windows Firewall asks about a program the first time it listens beyond
+/// loopback, and it remembers the answer by the program's *path*. A fresh
+/// per-test copy is a fresh path, so every wide-binding test raised a prompt
+/// on every run. The tests only need the listener to exist -- they pass
+/// whether the prompt is allowed or cancelled -- so running those games from a
+/// single fixed path leaves at most one prompt, ever.
+///
+/// Why a whole shared runtime root rather than only a shared exe: the engine
+/// resolves `launch.exe` inside `<runtimeRoot>/<id>` and rightly refuses
+/// absolute or escaping paths, and a directory junction does not help because
+/// Windows reports (and the firewall keys on) the path the process was
+/// launched through, not the junction's target. The runner holds an exclusive
+/// lease on a runtime root, so the fixtures sharing this one are serialised by
+/// `.fixture.lock` -- across threads and across concurrent `cargo test` runs.
+/// Only launch-only fixtures use it: anything that stamps, breaks, fetches
+/// into or mounts through its runtime keeps its own per-test copy.
+///
+/// The copy is refreshed (copy to a temp name, then rename) only when its
+/// digest differs from this test binary. If it cannot be replaced -- another
+/// build's game is still running from it -- or the lock is not had in time,
+/// the fixture falls back to a per-test copy for that test rather than fail.
+struct FixedGame {
+    runtime: PathBuf,
+    _lock: fs::File,
+}
+impl FixedGame {
+    #[cfg(windows)]
+    fn acquire() -> Option<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let runtime = std::env::temp_dir().join("homerun-runner-fake-game");
+        let dir = runtime.join("fake");
+        fs::create_dir_all(&dir).ok()?;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let lock = loop {
+            let opened = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(runtime.join(".fixture.lock"));
+            match opened {
+                Ok(file) => break file,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+                Err(_) => return None,
+            }
+        };
+        let source = std::env::current_exe().ok()?;
+        let digest = fetcher::digest_of(&source).ok()?;
+        let exe = dir.join("fake.exe");
+        if fetcher::digest_of(&exe).ok().as_deref() != Some(digest.as_str()) {
+            let staging = dir.join(format!("fake.exe.{}.tmp", std::process::id()));
+            if fs::copy(&source, &staging)
+                .and_then(|_| fs::rename(&staging, &exe))
+                .is_err()
+            {
+                let _ = fs::remove_file(&staging);
+                return None;
+            }
+        }
+        fs::write(dir.join(".homerun-build"), &digest[..12]).ok()?;
+        Some(Self {
+            runtime,
+            _lock: lock,
+        })
+    }
+    /// The prompt is a Windows Firewall behaviour; elsewhere nothing changes.
+    #[cfg(not(windows))]
+    fn acquire() -> Option<Self> {
+        None
+    }
+}
+
 struct Fixture {
     root: PathBuf,
+    /// `<root>/runtime`, or the fixed runtime for `binding_wide` fixtures.
+    runtime: PathBuf,
     d: Value,
     port: u16,
+    // Dropped after `Drop` below, i.e. once the test's runner has exited.
+    _fixed: Option<FixedGame>,
 }
 impl Fixture {
+    /// A fixture whose game binds beyond loopback. It launches from the one
+    /// fixed path (see `FixedGame`) and must not change its runtime.
+    fn binding_wide() -> Self {
+        Self::create(FixedGame::acquire())
+    }
     fn with_runtime_saves() -> Self {
         let mut f = Self::new();
         let launch = &mut f.d["platforms"][platform::HOST]["launch"];
@@ -174,26 +259,37 @@ impl Fixture {
         f
     }
     fn new() -> Self {
+        Self::create(None)
+    }
+    fn create(fixed: Option<FixedGame>) -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "homerun-runner-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
-        fs::create_dir_all(root.join("runtime/fake")).unwrap();
+        fs::create_dir_all(&root).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
         let name = if cfg!(windows) { "fake.exe" } else { "fake" };
-        fs::copy(
-            std::env::current_exe().unwrap(),
-            root.join("runtime/fake").join(name),
-        )
-        .unwrap();
-        let digest = fetcher::digest_of(&root.join("runtime/fake").join(name)).unwrap();
-        fs::write(root.join("runtime/fake/.homerun-build"), &digest[..12]).unwrap();
+        let runtime = match &fixed {
+            Some(fixed) => fixed.runtime.clone(),
+            None => {
+                let runtime = root.join("runtime");
+                fs::create_dir_all(runtime.join("fake")).unwrap();
+                fs::copy(
+                    std::env::current_exe().unwrap(),
+                    runtime.join("fake").join(name),
+                )
+                .unwrap();
+                runtime
+            }
+        };
+        let digest = fetcher::digest_of(&runtime.join("fake").join(name)).unwrap();
+        fs::write(runtime.join("fake/.homerun-build"), &digest[..12]).unwrap();
         let d = json!({
             "id":"fake", "name":"Test server", "hosts":[platform::HOST],
             "platforms":{(platform::HOST):{
@@ -207,11 +303,17 @@ impl Fixture {
             "config":[{"file":"settings.json","format":"json","keys":{"hostname":"{setting:hostname}"}}],
             "settings":[{"key":"hostname","type":"string","default":"{serverName}"}]
         });
-        Self { root, d, port }
+        Self {
+            root,
+            runtime,
+            d,
+            port,
+            _fixed: fixed,
+        }
     }
     fn start(&self) -> Value {
         json!({"cmd":"start","serverId":"s1","descriptor":self.d,
-        "runtimeRoot":self.root.join("runtime"), "serverDir":self.root.join("server"),
+        "runtimeRoot":self.runtime, "serverDir":self.root.join("server"),
         "serverName":"{secret:rcon}","settings":{},"secrets":{"rcon":"do-not-print-this"},"licenceAccepted":true})
     }
 }
@@ -744,7 +846,7 @@ fn stderr_readiness_console_and_eof_save_the_world() {
 /// rather than leave an administrative console reachable from outside.
 #[test]
 fn a_private_port_bound_to_every_interface_stops_the_server() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_BIND"] =
@@ -1189,7 +1291,7 @@ fn incompatible_handshake_shuts_down_and_unknown_commands_do_not() {
 
 #[test]
 fn network_private_exposure_without_marker_skips_save_grace() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["stop"]["graceMs"] = json!(180000);
@@ -1217,7 +1319,7 @@ fn network_private_exposure_without_marker_skips_save_grace() {
 
 #[test]
 fn network_private_port_widening_after_ready_is_refused() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     let mut h = Host::new();
@@ -1239,7 +1341,7 @@ fn network_private_port_widening_after_ready_is_refused() {
 
 #[test]
 fn network_private_port_widening_during_stop_is_refused() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["stop"]["graceMs"] = json!(180000);
@@ -1266,7 +1368,7 @@ fn network_private_port_widening_during_stop_is_refused() {
 #[cfg(windows)]
 #[test]
 fn network_private_descendant_is_inspected_and_terminated() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let extra = free_port();
     let mut start = f.start();
     start["descriptor"]["ports"]
@@ -1290,7 +1392,7 @@ fn network_private_descendant_is_inspected_and_terminated() {
 #[test]
 fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
     for (bind, success) in [("127.0.0.1", true), ("0.0.0.0", false)] {
-        let mut f = Fixture::new();
+        let mut f = Fixture::binding_wide();
         let extra = free_port();
         let env = &mut f.d["platforms"][platform::HOST]["launch"]["env"];
         env["HOMERUN_TEST_EXTRA_PORT"] = json!(extra.to_string());
@@ -1302,7 +1404,7 @@ fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
             .arg(path)
             .args(["--accept-licence", "--observe-seconds", "2", "--json"])
             .arg("--runtime-root")
-            .arg(f.root.join("runtime"))
+            .arg(&f.runtime)
             .arg("--server-dir")
             .arg(f.root.join("server"))
             .arg("--evidence")
@@ -1336,7 +1438,7 @@ fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
 #[cfg(windows)]
 #[test]
 fn network_refusal_kills_even_when_runner_output_is_not_drained() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["stop"]["graceMs"] = json!(180000);
