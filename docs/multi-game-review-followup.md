@@ -91,9 +91,10 @@ footnote.
   Steam buildId is incorrectly treated as a beta branch.
 - No artifact `--verify` mode checks manifests against post-signing files.
   Signing must still precede manifest preparation.
-- Exit codes are omitted; protocol mismatch emits no event; JSON config values
-  remain strings and null leaves existing keys; console replies are not
-  redacted and embedded newlines can become multiple stdin commands.
+- Exit codes are omitted; protocol mismatch emits no event; console replies are
+  not redacted and embedded newlines can become multiple stdin commands.
+  (JSON config values keeping their type, dotted paths reaching nested members,
+  and a null setting removing its key: done for #50, `homerun_core::json_config`.)
 - Readiness/presence substring matching can be spoofed by chat; batch-script
   executable paths are not refused. Review both against real descriptors.
 - Restore useful lost process-engine comments where the control flow needs

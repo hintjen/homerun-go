@@ -55,6 +55,7 @@ use std::collections::BTreeMap;
 
 use super::settings::{render, Resolved};
 use crate::{Error, Result};
+use serde_json::Value;
 
 /// Everything a placeholder can refer to.
 ///
@@ -325,6 +326,29 @@ pub fn fill(input: &str, bindings: &Bindings) -> Result<Filled> {
     })
 }
 
+/// Resolve a config value into JSON, keeping a setting's type.
+///
+/// A value that is exactly one `{setting:…}` placeholder, whose setting
+/// resolved to a number or a boolean, is that number or boolean -- not its
+/// spelling. Anything else is text, exactly as [`fill`] makes it. `None`
+/// means the value dropped out (an unset setting), which removes the key.
+///
+/// Games that read typed JSON refuse a number written as a string: Hytale's
+/// server stopped at config load on `"MaxPlayers": "10"`. Text around the
+/// placeholder (`"{setting:x} players"`) is the descriptor asking for text,
+/// and gets it.
+pub fn fill_value(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
+    if let Ok([Piece::Placeholder(Placeholder::Setting(key))]) = scan(input).as_deref() {
+        if let Some(value @ (Value::Number(_) | Value::Bool(_))) = bindings.settings.get(key) {
+            return Ok(Some(value.clone()));
+        }
+    }
+    Ok(match fill(input, bindings)? {
+        Filled::Text(text) => Some(Value::String(text)),
+        Filled::Dropped => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -398,6 +422,45 @@ mod tests {
             Filled::Text(t) => t,
             Filled::Dropped => panic!("{input} unexpectedly dropped"),
         }
+    }
+
+    // ─── typed config values ───────────────────────────────────────────────
+
+    fn value(input: &str) -> Option<Value> {
+        let f = Fixture::new();
+        fill_value(input, &f.bindings()).unwrap()
+    }
+
+    #[test]
+    fn a_sole_int_or_bool_setting_keeps_its_type_in_a_config_value() {
+        // Hytale refused "MaxPlayers": "10" at config load.
+        assert_eq!(value("{setting:maxPlayers}"), Some(json!(25)));
+        assert_eq!(value("{setting:pve}"), Some(json!(true)));
+    }
+
+    #[test]
+    fn a_string_setting_or_surrounding_text_stays_text() {
+        assert_eq!(value("{setting:hostname}"), Some(json!("Ruined Keep")));
+        assert_eq!(
+            value("{setting:maxPlayers} players"),
+            Some(json!("25 players"))
+        );
+        assert_eq!(value("{port:game}"), Some(json!("28015")));
+    }
+
+    #[test]
+    fn an_unset_setting_drops_a_config_value_as_it_drops_an_argument() {
+        assert_eq!(value("{setting:seed}"), None);
+    }
+
+    #[test]
+    fn a_typed_value_is_still_never_rescanned() {
+        let mut f = Fixture::new();
+        f.settings.insert("hostname".into(), json!("{secret:rcon}"));
+        assert_eq!(
+            fill_value("{setting:hostname}", &f.bindings()).unwrap(),
+            Some(json!("{secret:rcon}"))
+        );
     }
 
     // ─── the property the module exists for ────────────────────────────────

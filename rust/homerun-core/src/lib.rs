@@ -54,6 +54,7 @@ pub mod device_ws;
 // the module header.
 pub mod engine;
 pub mod game;
+pub mod json_config;
 pub mod launch;
 pub mod lifecycle;
 pub mod link;

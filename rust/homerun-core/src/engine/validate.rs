@@ -38,7 +38,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use super::descriptor::{
-    ConsoleVia, GameDescriptor, PlayersVia, Setting, SettingKind, StopVia, SCHEMA_VERSION,
+    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, PlayersVia, Setting, SettingKind,
+    StopVia, SCHEMA_VERSION,
 };
 use super::settings::SERVER_NAME_PLACEHOLDER;
 use super::template::{self, Placeholder};
@@ -641,6 +642,9 @@ fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
         for value in file.keys.values() {
             check_placeholders(value, Site::Host, &setting_keys, &port_names, r);
         }
+        if matches!(file.format, ConfigFormat::Json) {
+            check_json_keys(file, r);
+        }
     }
 
     for path in &d.saves.paths {
@@ -652,6 +656,30 @@ fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
              be backed up."
                 .into(),
         );
+    }
+}
+
+/// Managed JSON keys are dotted paths (`crate::json_config`). A path with an
+/// empty segment reaches nothing, and two paths where one is a prefix of the
+/// other ask for the same member to be both a value and a group of values.
+fn check_json_keys(file: &ConfigFile, r: &mut Report) {
+    for key in file.keys.keys() {
+        if crate::json_config::segments(key).is_none() {
+            r.problems.push(format!(
+                "\"{key}\" in {} is not a setting path: parts are separated by single dots.",
+                file.file
+            ));
+        }
+    }
+    for a in file.keys.keys() {
+        for b in file.keys.keys() {
+            if b.len() > a.len() && b.starts_with(a.as_str()) && b.as_bytes()[a.len()] == b'.' {
+                r.problems.push(format!(
+                    "{} sets both \"{a}\" and \"{b}\", so \"{a}\" would have to be a value and a group of values at once.",
+                    file.file
+                ));
+            }
+        }
     }
 }
 
@@ -1104,6 +1132,47 @@ mod tests {
     }
 
     // ─── paths ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_config_keys_must_be_usable_paths() {
+        let problems = problems_of(
+            json!({ "config": [{ "file": "config.json", "format": "json",
+            "keys": { "a..b": "x", "Defaults.": "y" } }] }),
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|p| p.contains("not a setting path"))
+                .count(),
+            2,
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_json_key_cannot_be_both_a_value_and_a_group() {
+        let problems = problems_of(
+            json!({ "config": [{ "file": "config.json", "format": "json",
+            "keys": { "Defaults": "x", "Defaults.GameMode": "y" } }] }),
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("a value and a group")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn dotted_keys_are_fine_in_json_and_not_checked_as_paths_elsewhere() {
+        let ok = problems_of(
+            json!({ "config": [{ "file": "config.json", "format": "json",
+            "keys": { "Defaults.GameMode": "x", "MaxPlayers": "y" } }] }),
+        );
+        assert!(
+            !ok.iter()
+                .any(|p| p.contains("setting path") || p.contains("a group")),
+            "{ok:?}"
+        );
+    }
 
     #[test]
     fn a_path_that_leaves_the_server_folder_is_refused() {
