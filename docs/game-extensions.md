@@ -202,9 +202,12 @@ One prompt is open at a time, because one server runs at a time. There is no
 overall time limit — a person may take as long as they like — and a Stop is
 how they decline. Every prompt ends with `prompt-closed`, answered or not.
 
-An answer that is not one of the options is refused (`descriptor_invalid`,
-with the server id). An answer for a prompt that is already closed is not an
-error: a person who clicks as the server stops has done nothing wrong.
+An answer that is not one of the options is refused with its own code,
+`prompt_invalid`, and the prompt stays open. It is not `descriptor_invalid`:
+that code with a server id is what a failed start looks like, and a host
+reading it that way would give up on a start still waiting for a good answer.
+An answer for a prompt that is already closed is not an error: a person who
+clicks as the server stops has done nothing wrong.
 
 ### `fixture.rs`
 
@@ -283,18 +286,27 @@ Every addition is generic; nothing names a game.
 | Event | `signed-in` | `serverId`, `purpose` |
 | Event | `prompt` | `serverId`, `promptId`, `kind: "choice"`, `title`, `message?`, `options: [{value, label}]` |
 | Event | `prompt-closed` | `serverId`, `promptId` |
-| Event | `extension-status` | `extension`, `signedIn?`, `account?` |
-| Command | `prompt-answer` | `serverId`, `promptId`, `value` |
-| Command | `extension-status` | `extension`, `runtimeRoot` |
-| Command | `extension-forget` | `extension`, `runtimeRoot` — refused with `busy` while a server is fetching or running |
+| Event | `extension-status` | `extension`, `signedIn?`, `account?`, `reqId?` |
+| Event | `error` | gains an optional `reqId`: the request it refuses, when that request carried one |
+| Command | `prompt-answer` | `serverId`, `promptId`, `value` — a value not among the options is refused with `prompt_invalid` |
+| Command | `extension-status` | `extension`, `runtimeRoot`, `reqId?` |
+| Command | `extension-forget` | `extension`, `runtimeRoot`, `reqId?` — refused with `busy` while a server is fetching or running |
 
 `runtimeRoot` on the two extension commands is the one `fetch` and `start`
 are given: the machine store is found beside the runtimes. Without it the
 command is refused (`descriptor_invalid`) rather than guessed at.
 
+**`reqId` pairs an extension request with its answer.** A host may send one on
+`extension-status` or `extension-forget`; it comes back on the
+`extension-status` answer and on any `error` refusing the request -- including
+one too malformed to parse, whose `reqId` is still read off it. Without it a
+host has to pair answers by the order the runner handles commands, and a
+serverless `busy` from "stop before signing out" would be indistinguishable
+from any other. A request with no `reqId` gets none back.
+
 Error codes: `sign_in_required`, `sign_in_expired`, `account_not_allowed`,
-`vendor_unavailable`, `extension_failed`. Each arrives with a message written
-for a player; the code is what a host branches on.
+`vendor_unavailable`, `extension_failed`, `prompt_invalid`. Each arrives with a
+message written for a player; the code is what a host branches on.
 
 Features: `ready.features` and `homerun-game --features` carry `extensions`
 (the mechanism, these events and commands) and one `extension:<name>` per
@@ -454,8 +466,8 @@ the rotation demands it.
 
 **A `prompt` never gets an answer.** The host has to reply with
 `prompt-answer` carrying the same `serverId` and `promptId`, and a `value`
-from the options. A wrong value is an `error`; a stale `promptId` is silently
-ignored.
+from the options. A wrong value is an `error` with code `prompt_invalid`, and
+the prompt stays open; a stale `promptId` is silently ignored.
 
 **Hytale: every start asks the person to sign in.** The refresh token was not
 kept or no longer works. `extension-status` for `hytale` says whether one is

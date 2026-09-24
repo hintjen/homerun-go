@@ -179,6 +179,10 @@ pub enum Command {
         extension: String,
         #[serde(default)]
         runtime_root: String,
+        /// Echoed on the answer, or on the `error` refusing it, so a host
+        /// can pair them without relying on the order commands are handled.
+        #[serde(default)]
+        req_id: Option<String>,
     },
     /// Delete what a game's extension keeps on this machine: "Sign out".
     /// Answered by `extension-status`, or an `error`.
@@ -187,6 +191,9 @@ pub enum Command {
         extension: String,
         #[serde(default)]
         runtime_root: String,
+        /// As on `extension-status`.
+        #[serde(default)]
+        req_id: Option<String>,
     },
     /// The person's choice for an open `prompt`. `value` must be one of the
     /// prompt's options.
@@ -319,6 +326,11 @@ pub enum Event {
         /// **A sentence a player can read.** Never a diagnostic: no `errno`,
         /// no `unwrap`, no `panicked at`. The `homerun-go` rule.
         message: String,
+        /// The `reqId` of the request this refuses, when it carried one.
+        /// Additive: absent on every error that answers nothing in
+        /// particular, which is all of them before this field existed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     /// Someone has to sign in, in their own browser, for this server to go
     /// on: open `url`, and type `code` if the URL does not already carry it.
@@ -370,6 +382,9 @@ pub enum Event {
         signed_in: Option<bool>,
         #[serde(skip_serializing_if = "Option::is_none")]
         account: Option<String>,
+        /// The request's `reqId`, when it carried one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        req_id: Option<String>,
     },
     ShutdownComplete,
 }
@@ -440,11 +455,17 @@ pub mod codes {
     pub const VENDOR_UNAVAILABLE: &str = "vendor_unavailable";
     /// The extension itself failed: a bug in Homerun, not the player's doing.
     pub const EXTENSION_FAILED: &str = "extension_failed";
+    /// A `prompt-answer` that is not one of the prompt's options. Its own code
+    /// because it carries the server's id, and `descriptor_invalid` with a
+    /// server id is what a failed start looks like: a host reading it that way
+    /// would give up on a start that is still waiting for a good answer. The
+    /// prompt stays open.
+    pub const PROMPT_INVALID: &str = "prompt_invalid";
 
     /// Every one of them, for the test that keeps this list and the
     /// document's in step.
     #[cfg(test)]
-    pub const ALL: [&str; 15] = [
+    pub const ALL: [&str; 16] = [
         LICENCE_NOT_ACCEPTED,
         DESCRIPTOR_INVALID,
         REQUIRES_UNMET,
@@ -460,6 +481,7 @@ pub mod codes {
         ACCOUNT_NOT_ALLOWED,
         VENDOR_UNAVAILABLE,
         EXTENSION_FAILED,
+        PROMPT_INVALID,
     ];
 }
 
@@ -800,7 +822,9 @@ mod tests {
             server_id: Some("s1".into()),
             code: codes::BUSY.into(),
             message: "This computer is already running a server.".into(),
+            req_id: None,
         });
+        assert!(error.get("reqId").is_none(), "absent, not null");
         assert_eq!(error["event"], "error");
         assert_eq!(error["code"], "busy");
 
@@ -873,6 +897,7 @@ mod tests {
                 "account_not_allowed",
                 "vendor_unavailable",
                 "extension_failed",
+                "prompt_invalid",
             ]
         );
     }
@@ -884,6 +909,7 @@ mod tests {
             Command::ExtensionStatus {
                 extension: "hytale".into(),
                 runtime_root: "C:\\rt".into(),
+                req_id: None,
             }
         );
         assert_eq!(
@@ -891,6 +917,17 @@ mod tests {
             Command::ExtensionForget {
                 extension: "hytale".into(),
                 runtime_root: String::new(),
+                req_id: None,
+            }
+        );
+        assert_eq!(
+            parse(
+                r#"{"cmd":"extension-status","extension":"hytale","runtimeRoot":"/rt","reqId":"x1"}"#
+            ),
+            Command::ExtensionStatus {
+                extension: "hytale".into(),
+                runtime_root: "/rt".into(),
+                req_id: Some("x1".into()),
             }
         );
         assert_eq!(
@@ -964,10 +1001,21 @@ mod tests {
             line(Event::ExtensionStatus {
                 extension: "hytale".into(),
                 signed_in: Some(true),
-                account: Some("Operator".into())
+                account: Some("Operator".into()),
+                req_id: Some("x1".into()),
             }),
             serde_json::json!({"event":"extension-status","extension":"hytale",
-                "signedIn":true,"account":"Operator"})
+                "signedIn":true,"account":"Operator","reqId":"x1"})
+        );
+        // An error answering a request says which; any other has no reqId.
+        assert_eq!(
+            line(Event::Error {
+                server_id: None,
+                code: codes::BUSY.into(),
+                message: "Stop the server first.".into(),
+                req_id: Some("x2".into()),
+            })["reqId"],
+            "x2"
         );
     }
 

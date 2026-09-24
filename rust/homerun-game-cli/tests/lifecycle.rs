@@ -2527,6 +2527,38 @@ mod extensions {
         h.eof();
     }
 
+    /// A `reqId` comes back on the answer and on every refusal -- including a
+    /// request too malformed to parse -- so a host pairs them by id, not by
+    /// the order the runner happens to handle commands in.
+    #[test]
+    fn extension_requests_are_answered_with_their_req_id() {
+        let f = Fixture::new();
+        let mut h = Host::new();
+        h.send(json!({"cmd":"extension-status","extension":"fixture",
+            "runtimeRoot":f.runtime,"reqId":"r1"}));
+        assert_eq!(h.until("extension-status")["reqId"], "r1");
+        h.send(json!({"cmd":"extension-forget","extension":"fixture",
+            "runtimeRoot":f.runtime,"reqId":"r2"}));
+        assert_eq!(h.until("extension-status")["reqId"], "r2");
+
+        h.send(json!({"cmd":"extension-status","extension":"not-built",
+            "runtimeRoot":f.runtime,"reqId":"r3"}));
+        let refused = h.until("error");
+        assert_eq!(
+            (refused["code"].as_str(), refused["reqId"].as_str()),
+            (Some("requires_unmet"), Some("r3"))
+        );
+        h.send(json!({"cmd":"extension-status","extension":"fixture","reqId":"r4"}));
+        assert_eq!(h.until("error")["reqId"], "r4", "no runtimeRoot");
+        h.send(json!({"cmd":"extension-status","reqId":"r5"}));
+        assert_eq!(h.until("error")["reqId"], "r5", "too malformed to parse");
+
+        // Without a reqId, nothing is invented.
+        h.send(json!({"cmd":"extension-status","extension":"fixture","runtimeRoot":f.runtime}));
+        assert!(h.until("extension-status").get("reqId").is_none());
+        h.eof();
+    }
+
     /// A remembered sign-in is sealed on disk, reported by status without a
     /// server running, and gone after sign-out.
     #[test]
@@ -2577,7 +2609,9 @@ mod extensions {
         let id = prompt["promptId"].clone();
         h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"gamma"}));
         let refused = h.until("error");
-        assert_eq!(refused["code"], "descriptor_invalid");
+        // Its own code: `descriptor_invalid` with a server id is what a failed
+        // start looks like, and this start is still waiting for an answer.
+        assert_eq!(refused["code"], "prompt_invalid");
         assert_eq!(refused["serverId"], "s1");
         h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"beta"}));
         assert_eq!(h.until("prompt-closed")["promptId"], id);
@@ -2674,8 +2708,14 @@ mod extensions {
         let mut h = Host::new();
         h.send(f.start());
         h.until("server-started");
-        h.send(json!({"cmd":"extension-forget","extension":"fixture","runtimeRoot":f.runtime}));
-        assert_eq!(h.until("error")["code"], "busy");
+        h.send(json!({"cmd":"extension-forget","extension":"fixture",
+            "runtimeRoot":f.runtime,"reqId":"f1"}));
+        let busy = h.until("error");
+        assert_eq!(busy["code"], "busy");
+        assert_eq!(
+            busy["reqId"], "f1",
+            "told apart from a busy start by its reqId"
+        );
         h.send(json!({"cmd":"stop","serverId":"s1"}));
         h.until("server-stopped");
         h.eof();

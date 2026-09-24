@@ -196,7 +196,8 @@ pub fn run() -> std::result::Result<(), String> {
                     Event::Error {
                         server_id: Some(id.clone()),
                         code: code.into(),
-                        message: message.clone()
+                        message: message.clone(),
+                        req_id: None,
                     }
                     .line()
                 );
@@ -220,7 +221,8 @@ pub fn run() -> std::result::Result<(), String> {
                 Event::Error {
                     server_id: Some(id.clone()),
                     code: code.into(),
-                    message: message.clone()
+                    message: message.clone(),
+                    req_id: None,
                 }
                 .line()
             );

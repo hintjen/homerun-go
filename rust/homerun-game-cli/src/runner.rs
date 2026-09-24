@@ -36,10 +36,15 @@ impl Output {
         (self.0)(event)
     }
     pub fn error(&self, id: Option<&str>, failure: prepare::Failure) {
+        self.refuse(id, None, failure);
+    }
+    /// An error refusing one request, carrying its `reqId` when it had one.
+    pub fn refuse(&self, id: Option<&str>, req_id: Option<String>, failure: prepare::Failure) {
         self.send(Event::Error {
             server_id: id.map(str::to_owned),
             code: failure.0.into(),
             message: failure.1,
+            req_id,
         });
     }
 }
@@ -150,11 +155,12 @@ impl Runner {
             Command::ExtensionStatus {
                 extension,
                 runtime_root,
+                req_id,
             } => match machine_root(&runtime_root)
-                .and_then(|root| extensions::status(&extension, &root))
+                .and_then(|root| extensions::status(&extension, &root, req_id.clone()))
             {
                 Ok(event) => self.out.send(event),
-                Err(e) => self.out.error(None, e),
+                Err(e) => self.out.refuse(None, req_id, e),
             },
             Command::PromptAnswer {
                 server_id,
@@ -170,10 +176,12 @@ impl Runner {
             Command::ExtensionForget {
                 extension,
                 runtime_root,
+                req_id,
             } => {
                 if !self.idle() {
-                    self.out.error(
+                    self.out.refuse(
                         None,
+                        req_id,
                         fail(
                             codes::BUSY,
                             "Stop the server before signing out of its game's account.",
@@ -181,10 +189,10 @@ impl Runner {
                     );
                 } else {
                     match machine_root(&runtime_root)
-                        .and_then(|root| extensions::forget(&extension, &root))
+                        .and_then(|root| extensions::forget(&extension, &root, req_id.clone()))
                     {
                         Ok(event) => self.out.send(event),
-                        Err(e) => self.out.error(None, e),
+                        Err(e) => self.out.refuse(None, req_id, e),
                     }
                 }
             }
@@ -858,7 +866,16 @@ fn report_malformed(out: &Output, line: &[u8]) {
     let id = value.get("serverId").and_then(|v| v.as_str());
     // Do not echo serde's error or field values: either may contain a secret.
     let message = format!("The {cmd} request has missing or invalid fields.");
-    out.error(id, fail(codes::DESCRIPTOR_INVALID, &message));
+    // The requests that pair by `reqId` get it back on their refusal too.
+    let req_id = matches!(cmd, "extension-status" | "extension-forget")
+        .then(|| {
+            value
+                .get("reqId")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
+        .flatten();
+    out.refuse(id, req_id, fail(codes::DESCRIPTOR_INVALID, &message));
     if cmd == "console" {
         if let (Some(id), Some(req_id)) = (id, value.get("reqId").and_then(|v| v.as_str())) {
             out.send(Event::ConsoleResponse {

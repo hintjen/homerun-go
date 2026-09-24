@@ -727,7 +727,11 @@ impl Worker {
 
 /// `extension-status`. `runtime_root` is the one `fetch` and `start` are
 /// given: the machine store lives beside the runtimes, as steamcmd does.
-pub fn status(name: &str, runtime_root: &Path) -> std::result::Result<Event, Failure> {
+pub fn status(
+    name: &str,
+    runtime_root: &Path,
+    req_id: Option<String>,
+) -> std::result::Result<Event, Failure> {
     let (extension, spec) = find(name).ok_or_else(|| missing(name))?;
     let ctx = machine_context(spec, runtime_root);
     let status = catch_unwind(AssertUnwindSafe(|| extension.status(&ctx))).unwrap_or_default();
@@ -735,15 +739,20 @@ pub fn status(name: &str, runtime_root: &Path) -> std::result::Result<Event, Fai
         extension: name.into(),
         signed_in: status.signed_in,
         account: status.account,
+        req_id,
     })
 }
 
 /// `extension-forget`: forget, then report the status that leaves.
-pub fn forget(name: &str, runtime_root: &Path) -> std::result::Result<Event, Failure> {
+pub fn forget(
+    name: &str,
+    runtime_root: &Path,
+    req_id: Option<String>,
+) -> std::result::Result<Event, Failure> {
     let (extension, spec) = find(name).ok_or_else(|| missing(name))?;
     let ctx = machine_context(spec, runtime_root);
     match catch_unwind(AssertUnwindSafe(|| extension.forget(&ctx))) {
-        Ok(Ok(())) => status(name, runtime_root),
+        Ok(Ok(())) => status(name, runtime_root, req_id),
         Ok(Err(e)) => Err(e.failure()),
         Err(_) => Err(fail(
             codes::EXTENSION_FAILED,
