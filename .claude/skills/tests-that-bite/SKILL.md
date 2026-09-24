@@ -118,6 +118,23 @@ Do not use `git checkout` to restore — it discards everything else you have
 been working on. Always re-run green afterwards, and confirm the file is
 actually back before committing.
 
+Three traps, each hit for real:
+
+- **A broken guard can make a test hang instead of fail.** Remove "a Stop ends
+  the wait" and a test that waits for the Stop waits forever — the suite never
+  finishes, so nothing says the guard is gone. Run the call under test on its
+  own thread and fail on a timeout (`recv_timeout`), and give any scripted
+  mutation run a timeout too (`subprocess.run(..., timeout=…)`).
+- **An interrupted mutation run leaves the mutation in place.** Nothing
+  restores the file when the run is killed. Before anything else, grep for
+  the mutated line and put it back, then kill the stuck test binary
+  (`target\debug\deps\<crate>-*.exe`) and its `cargo` parents.
+- **Git Bash heredocs on Windows can eat backslashes.** A `\` line
+  continuation in a Rust string sent through `python - <<'EOF'` arrived as a
+  run of spaces in the message. Write patch scripts to a file and run the
+  file; afterwards, grep the diff for `"[^"]*\S {5,}\S` to catch a string that
+  lost its continuation.
+
 ## When the suite was green and the bug shipped anyway
 
 That is information about the suite, not just about the bug. Before fixing,

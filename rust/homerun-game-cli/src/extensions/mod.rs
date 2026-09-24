@@ -41,6 +41,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     panic::{catch_unwind, AssertUnwindSafe},
+    path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -66,6 +67,21 @@ use crate::{
 
 #[cfg(feature = "test-extensions")]
 mod fixture;
+mod prompt;
+mod store;
+
+pub use prompt::{Choice, Prompt, Prompts};
+pub use store::{MachineStore, ServerStore};
+// What an extension builds its requests from. Part of the interface whether
+// or not today's extensions use every name.
+#[allow(unused_imports)]
+pub use homerun_supervisor::vendor_http::{Method, Request, Response};
+
+use homerun_supervisor::vendor_http::{self, Policy};
+
+/// `http()` also reaches `http://127.0.0.1`, for the lifecycle tests' fake
+/// vendor. Never in a release build.
+const LOOPBACK_HTTP: bool = cfg!(feature = "test-extensions");
 
 /// How long [`Run::on_stop`] may take, in total, before the runner stops
 /// waiting for it.
@@ -236,6 +252,10 @@ pub struct StartContext<'a> {
     server_id: &'a str,
     stop: &'a StopSignal,
     out: &'a Output,
+    machine: MachineStore,
+    server: ServerStore,
+    policy: Policy,
+    prompts: &'a Prompts,
 }
 
 impl StartContext<'_> {
@@ -281,6 +301,23 @@ impl StartContext<'_> {
             purpose,
         });
     }
+    /// This extension's sealed document on this machine.
+    pub fn machine_store(&self) -> &MachineStore {
+        &self.machine
+    }
+    /// This server's plain document for this extension. Not for secrets.
+    pub fn server_store(&self) -> &ServerStore {
+        &self.server
+    }
+    /// HTTPS to a host the spec names. Ends early for a stop.
+    pub fn http(&self, request: &Request) -> std::result::Result<Response, ExtError> {
+        http(request, &self.policy, &|| self.stop.should_stop())
+    }
+    /// Ask the person to choose, and wait for the answer or a stop.
+    pub fn prompt(&self, prompt: Prompt) -> std::result::Result<String, ExtError> {
+        self.prompts
+            .ask(self.server_id, prompt, self.stop, self.out)
+    }
 }
 
 /// `on_stop`'s view of the world.
@@ -289,6 +326,9 @@ pub struct StopContext {
     server_id: String,
     deadline: Instant,
     out: Output,
+    machine: MachineStore,
+    server: ServerStore,
+    policy: Policy,
 }
 
 impl StopContext {
@@ -306,16 +346,30 @@ impl StopContext {
     pub fn note(&self, message: impl Into<String>) {
         self.out.send(host_line(&self.server_id, message.into()));
     }
+    pub fn machine_store(&self) -> &MachineStore {
+        &self.machine
+    }
+    pub fn server_store(&self) -> &ServerStore {
+        &self.server
+    }
+    /// HTTPS to a host the spec names, abandoned when the budget runs out.
+    pub fn http(&self, request: &Request) -> std::result::Result<Response, ExtError> {
+        http(request, &self.policy, &|| self.time_left().is_zero())
+    }
 }
 
 /// `forget` and `status`'s view: no server, only the extension itself.
 pub struct MachineContext {
     spec: &'static ExtensionSpec,
+    machine: MachineStore,
 }
 
 impl MachineContext {
     pub fn name(&self) -> &'static str {
         self.spec.name
+    }
+    pub fn machine_store(&self) -> &MachineStore {
+        &self.machine
     }
 }
 
@@ -361,16 +415,23 @@ pub struct Active {
     actions: Option<mpsc::SyncSender<Action>>,
     worker: Option<JoinHandle<()>>,
     stopping_seen: AtomicBool,
+    machine: MachineStore,
+    server: ServerStore,
+    policy: Policy,
 }
 
 /// Call the descriptor's extension's `begin`, if it has one.
 ///
 /// `Ok(None)` for a game with no extension, which is most of them.
+#[allow(clippy::too_many_arguments)]
 pub fn begin(
     d: &GameDescriptor,
     server_id: &str,
+    runtime_root: &Path,
+    server_dir: &Path,
     stop: &StopSignal,
     out: &Output,
+    prompts: &Prompts,
 ) -> Result<Option<Active>> {
     let Some(named) = &d.extension else {
         return Ok(None);
@@ -392,6 +453,9 @@ pub fn begin(
         Value::Null => Value::Object(Default::default()),
         other => other.clone(),
     };
+    let machine = MachineStore::new(&crate::prepare::tools_dir(runtime_root), spec.name);
+    let server = ServerStore::new(server_dir, spec.name);
+    let policy = policy(spec, &config);
     let begun = {
         let mut ctx = StartContext {
             spec,
@@ -400,6 +464,10 @@ pub fn begin(
             server_id,
             stop,
             out,
+            machine: machine.clone(),
+            server: server.clone(),
+            policy: policy.clone(),
+            prompts,
         };
         match catch_unwind(AssertUnwindSafe(|| extension.begin(&mut ctx))) {
             Ok(Ok(begun)) => begun,
@@ -437,6 +505,9 @@ pub fn begin(
         actions: None,
         worker: None,
         stopping_seen: AtomicBool::new(false),
+        machine,
+        server,
+        policy,
     }))
 }
 
@@ -519,6 +590,9 @@ impl Active {
             server_id: self.server_id.clone(),
             deadline: Instant::now() + STOP_BUDGET,
             out: out.clone(),
+            machine: self.machine.clone(),
+            server: self.server.clone(),
+            policy: self.policy.clone(),
         };
         let run = self.run.clone();
         let name = self.spec.name;
@@ -647,13 +721,12 @@ impl Worker {
 
 // ─── commands that need no server ──────────────────────────────────────────
 
-/// `extension-status`.
-pub fn status(name: &str) -> std::result::Result<Event, Failure> {
+/// `extension-status`. `runtime_root` is the one `fetch` and `start` are
+/// given: the machine store lives beside the runtimes, as steamcmd does.
+pub fn status(name: &str, runtime_root: &Path) -> std::result::Result<Event, Failure> {
     let (extension, spec) = find(name).ok_or_else(|| missing(name))?;
-    let status = catch_unwind(AssertUnwindSafe(|| {
-        extension.status(&MachineContext { spec })
-    }))
-    .unwrap_or_default();
+    let ctx = machine_context(spec, runtime_root);
+    let status = catch_unwind(AssertUnwindSafe(|| extension.status(&ctx))).unwrap_or_default();
     Ok(Event::ExtensionStatus {
         extension: name.into(),
         signed_in: status.signed_in,
@@ -662,17 +735,23 @@ pub fn status(name: &str) -> std::result::Result<Event, Failure> {
 }
 
 /// `extension-forget`: forget, then report the status that leaves.
-pub fn forget(name: &str) -> std::result::Result<Event, Failure> {
+pub fn forget(name: &str, runtime_root: &Path) -> std::result::Result<Event, Failure> {
     let (extension, spec) = find(name).ok_or_else(|| missing(name))?;
-    match catch_unwind(AssertUnwindSafe(|| {
-        extension.forget(&MachineContext { spec })
-    })) {
-        Ok(Ok(())) => status(name),
+    let ctx = machine_context(spec, runtime_root);
+    match catch_unwind(AssertUnwindSafe(|| extension.forget(&ctx))) {
+        Ok(Ok(())) => status(name, runtime_root),
         Ok(Err(e)) => Err(e.failure()),
         Err(_) => Err(fail(
             codes::EXTENSION_FAILED,
             "Homerun could not sign out of this game's account. Try again.",
         )),
+    }
+}
+
+fn machine_context(spec: &'static ExtensionSpec, runtime_root: &Path) -> MachineContext {
+    MachineContext {
+        spec,
+        machine: MachineStore::new(&crate::prepare::tools_dir(runtime_root), spec.name),
     }
 }
 
@@ -707,6 +786,30 @@ fn sign_in_event(
     })
 }
 
+fn policy(spec: &ExtensionSpec, config: &Value) -> Policy {
+    Policy {
+        hosts: (spec.hosts)(config),
+        loopback_http: LOOPBACK_HTTP,
+    }
+}
+
+fn http(
+    request: &Request,
+    policy: &Policy,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<Response, ExtError> {
+    vendor_http::send(request, policy, cancelled).map_err(|failure| match failure {
+        vendor_http::Failure::NotAllowed => ExtError::new(
+            codes::EXTENSION_FAILED,
+            "This game tried to reach a site Homerun does not trust, so it was not contacted.",
+        ),
+        vendor_http::Failure::Cancelled => ExtError::cancelled(),
+        vendor_http::Failure::Unreachable(message) => {
+            ExtError::new(codes::VENDOR_UNAVAILABLE, message)
+        }
+    })
+}
+
 fn host_line(server_id: &str, line: String) -> Event {
     Event::ServerLog {
         server_id: server_id.into(),
@@ -731,6 +834,194 @@ fn wait(stop: &StopSignal, duration: Duration) -> bool {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// A runtime root of its own, under a fresh temporary directory, so each
+    /// test's machine store is its own.
+    fn runtime_root() -> std::path::PathBuf {
+        use std::sync::atomic::AtomicUsize;
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "homerun-ext-contract-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        root.join("runtime")
+    }
+
+    // ─── contract: every registered extension, not only the fixture ───────
+
+    /// Sign-out means signed out, for every extension there is.
+    #[cfg(windows)]
+    #[test]
+    fn every_extension_is_signed_out_after_forget() {
+        for extension in registry() {
+            let spec = specs::spec(extension.name()).unwrap();
+            let root = runtime_root();
+            let ctx = machine_context(spec, &root);
+            extension.forget(&ctx).unwrap();
+            assert_ne!(
+                extension.status(&ctx).signed_in,
+                Some(true),
+                "{}",
+                extension.name()
+            );
+            assert!(
+                !crate::prepare::tools_dir(&root)
+                    .join("extensions")
+                    .join(extension.name())
+                    .join("store.bin")
+                    .exists(),
+                "{} left its store behind",
+                extension.name()
+            );
+        }
+    }
+
+    /// `status` answers even with nothing kept and nothing running.
+    #[test]
+    fn every_extension_answers_status_on_a_fresh_machine() {
+        for extension in registry() {
+            let spec = specs::spec(extension.name()).unwrap();
+            let _ = extension.status(&machine_context(spec, &runtime_root()));
+        }
+    }
+
+    // ─── the harness: an extension driven without a runner ────────────────
+
+    #[cfg(all(windows, feature = "test-extensions"))]
+    mod harness {
+        use super::*;
+        use serde_json::json;
+        use std::sync::Mutex as StdMutex;
+
+        struct Harness {
+            spec: &'static ExtensionSpec,
+            config: Value,
+            descriptor: GameDescriptor,
+            stop: StopSignal,
+            out: Output,
+            seen: Arc<StdMutex<Vec<Event>>>,
+            prompts: Prompts,
+            root: std::path::PathBuf,
+        }
+
+        impl Harness {
+            fn new(config: Value) -> Self {
+                let seen = Arc::new(StdMutex::new(Vec::new()));
+                let s = seen.clone();
+                Self {
+                    spec: specs::spec("fixture").unwrap(),
+                    config,
+                    descriptor: GameDescriptor::default(),
+                    stop: StopSignal::default(),
+                    out: Output::new(move |e| s.lock().unwrap().push(e)),
+                    seen,
+                    prompts: Prompts::default(),
+                    root: runtime_root(),
+                }
+            }
+
+            fn begin(&self) -> std::result::Result<Begun, ExtError> {
+                let mut ctx = StartContext {
+                    spec: self.spec,
+                    config: &self.config,
+                    descriptor: &self.descriptor,
+                    server_id: "s1",
+                    stop: &self.stop,
+                    out: &self.out,
+                    machine: MachineStore::new(&crate::prepare::tools_dir(&self.root), "fixture"),
+                    server: ServerStore::new(&self.root.join("server"), "fixture"),
+                    policy: policy(self.spec, &self.config),
+                    prompts: &self.prompts,
+                };
+                registry()
+                    .into_iter()
+                    .find(|e| e.name() == "fixture")
+                    .unwrap()
+                    .begin(&mut ctx)
+            }
+
+            /// Answer the next prompt with `value`, from another thread.
+            fn answer_with(&self, value: &'static str) -> JoinHandle<()> {
+                let (prompts, seen) = (self.prompts.clone(), self.seen.clone());
+                thread::spawn(move || loop {
+                    let open = seen.lock().unwrap().iter().rev().find_map(|e| match e {
+                        Event::Prompt { prompt_id, .. } => Some(prompt_id.clone()),
+                        _ => None,
+                    });
+                    if let Some(id) = open {
+                        prompts.answer("s1", &id, value.into()).unwrap();
+                        return;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                })
+            }
+        }
+
+        #[test]
+        fn a_prompt_is_asked_once_per_server_and_its_answer_supplied() {
+            let h = Harness::new(json!({ "host": "vendor.example", "askProfile": ["a", "b"] }));
+            let answering = h.answer_with("b");
+            let begun = h.begin().unwrap();
+            answering.join().unwrap();
+            assert_eq!(begun.supplied["profile"], "b");
+            // Asked once: the second run remembers the answer, and asks nothing.
+            let prompts_before = h.seen.lock().unwrap().len();
+            assert_eq!(h.begin().unwrap().supplied["profile"], "b");
+            assert_eq!(h.seen.lock().unwrap().len(), prompts_before);
+        }
+
+        #[test]
+        fn a_remembered_sign_in_survives_between_runs_and_is_forgotten_on_sign_out() {
+            let h = Harness::new(json!({ "host": "vendor.example", "remember": true }));
+            h.begin().unwrap();
+            h.begin().unwrap();
+            let store = MachineStore::new(&crate::prepare::tools_dir(&h.root), "fixture");
+            assert_eq!(store.read().unwrap().unwrap()["starts"], 2);
+            let ctx = machine_context(h.spec, &h.root);
+            let fixture = registry()
+                .into_iter()
+                .find(|e| e.name() == "fixture")
+                .unwrap();
+            assert_eq!(fixture.status(&ctx).signed_in, Some(true));
+            fixture.forget(&ctx).unwrap();
+            assert_eq!(fixture.status(&ctx).signed_in, Some(false));
+        }
+
+        /// The output pump's budget: an observer that returned slowly would
+        /// stall `server-log`. Ten thousand lines in well under a second.
+        #[test]
+        fn an_observer_keeps_up_with_a_line_storm() {
+            let h = Harness::new(json!({
+                "host": "vendor.example", "consoleOn": "never", "command": "x"
+            }));
+            let mut run = h.begin().unwrap().run;
+            let begun = Instant::now();
+            for i in 0..10_000 {
+                run.on_line(&format!("[world] generating chunk {i}"), "stdout");
+            }
+            assert!(
+                begun.elapsed() < Duration::from_secs(1),
+                "{:?}",
+                begun.elapsed()
+            );
+        }
+
+        #[test]
+        fn http_to_a_host_the_spec_does_not_name_is_refused_in_words() {
+            let h = Harness::new(json!({
+                "host": "vendor.example", "vendorUrl": "https://evil.example/hello"
+            }));
+            let error = h.begin().err().unwrap();
+            assert_eq!(error.code, codes::EXTENSION_FAILED);
+            assert!(
+                error.message.contains("does not trust"),
+                "{}",
+                error.message
+            );
+        }
+    }
 
     /// The two halves are registered separately; this holds them together.
     #[test]

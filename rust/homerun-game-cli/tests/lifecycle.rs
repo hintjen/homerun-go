@@ -1989,7 +1989,7 @@ mod extensions {
         );
         assert!(never_spawned(&f));
         // Still answering: the panic stayed inside the extension.
-        h.send(json!({"cmd":"extension-status","extension":"fixture"}));
+        h.send(json!({"cmd":"extension-status","extension":"fixture","runtimeRoot":f.runtime}));
         h.until("extension-status");
         h.eof();
     }
@@ -2084,24 +2084,169 @@ mod extensions {
 
     #[test]
     fn extension_status_and_sign_out_need_no_server() {
+        let f = Fixture::new();
         let mut h = Host::new();
-        h.send(json!({"cmd":"extension-status","extension":"fixture"}));
+        h.send(json!({"cmd":"extension-status","extension":"fixture","runtimeRoot":f.runtime}));
         let status = h.until("extension-status");
         assert_eq!(
             status,
-            json!({"event":"extension-status","extension":"fixture",
-                "signedIn":false,"account":"fixture account"})
+            json!({"event":"extension-status","extension":"fixture","signedIn":false})
         );
-        h.send(json!({"cmd":"extension-forget","extension":"fixture"}));
-        assert_eq!(h.until("extension-status")["extension"], "fixture");
+        h.send(json!({"cmd":"extension-forget","extension":"fixture","runtimeRoot":f.runtime}));
+        assert_eq!(h.until("extension-status")["signedIn"], false);
 
-        h.send(json!({"cmd":"extension-status","extension":"not-built"}));
+        h.send(json!({"cmd":"extension-status","extension":"not-built","runtimeRoot":f.runtime}));
         let error = h.until("error");
         assert_eq!(error["code"], "requires_unmet");
         assert!(error.get("serverId").is_none());
 
+        // The machine store is found from the runtime root; without one,
+        // the request is refused rather than guessed at.
+        h.send(json!({"cmd":"extension-status","extension":"fixture"}));
+        assert_eq!(h.until("error")["code"], "descriptor_invalid");
         h.send(json!({"cmd":"extension-status"}));
         assert_eq!(h.until("error")["code"], "descriptor_invalid");
+        h.eof();
+    }
+
+    /// A remembered sign-in is sealed on disk, reported by status without a
+    /// server running, and gone after sign-out.
+    #[test]
+    fn a_remembered_sign_in_is_sealed_reported_and_forgotten() {
+        let f = with_extension(json!({ "remember": true }));
+        let mut h = Host::new();
+        h.send(f.start());
+        h.until("server-started");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+
+        let sealed = f.root.join("extensions/fixture/store.bin");
+        let bytes = fs::read(&sealed).expect("the sign-in was kept beside the runtimes");
+        assert!(
+            !String::from_utf8_lossy(&bytes).contains("fixture account"),
+            "kept sealed, not in the clear"
+        );
+        h.send(json!({"cmd":"extension-status","extension":"fixture","runtimeRoot":f.runtime}));
+        assert_eq!(
+            h.until("extension-status"),
+            json!({"event":"extension-status","extension":"fixture",
+                "signedIn":true,"account":"fixture account"})
+        );
+        h.send(json!({"cmd":"extension-forget","extension":"fixture","runtimeRoot":f.runtime}));
+        assert_eq!(h.until("extension-status")["signedIn"], false);
+        assert!(!sealed.exists());
+        assert!(
+            !f.root.join("server/extensions").exists(),
+            "nothing of the machine store lands in the server folder"
+        );
+        h.eof();
+    }
+
+    /// A choice only the person can make: asked once per server, answered
+    /// with one of the options, remembered for the next start.
+    #[test]
+    fn a_prompt_is_answered_once_and_remembered() {
+        let f = with_extension(json!({ "askProfile": ["alpha", "beta"] }));
+        let mut h = Host::new();
+        h.send(f.start());
+        let prompt = h.until("prompt");
+        assert_eq!(prompt["kind"], "choice");
+        assert_eq!(prompt["title"], "Which profile hosts this server?");
+        assert_eq!(
+            prompt["options"],
+            json!([{"value":"alpha","label":"Profile alpha"},{"value":"beta","label":"Profile beta"}])
+        );
+        let id = prompt["promptId"].clone();
+        h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"gamma"}));
+        let refused = h.until("error");
+        assert_eq!(refused["code"], "descriptor_invalid");
+        assert_eq!(refused["serverId"], "s1");
+        h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"beta"}));
+        assert_eq!(h.until("prompt-closed")["promptId"], id);
+        h.until("server-started");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        let kept: Value = serde_json::from_slice(
+            &fs::read(f.root.join("server/.homerun/extensions/fixture.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(kept["profile"], "beta");
+
+        let before = h.seen.len();
+        h.send(f.start());
+        h.until("server-started");
+        assert!(
+            !h.seen[before..].iter().any(|v| v["event"] == "prompt"),
+            "asked again"
+        );
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        h.eof();
+    }
+
+    /// A Stop is how a person declines to answer: the prompt closes and the
+    /// game is never started.
+    #[test]
+    fn a_stop_while_a_prompt_is_open_closes_it_and_starts_nothing() {
+        let f = with_extension(json!({ "askProfile": ["alpha", "beta"] }));
+        let mut h = Host::new();
+        h.send(f.start());
+        let id = h.until("prompt")["promptId"].clone();
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        assert_eq!(h.until("prompt-closed")["promptId"], id);
+        h.until("server-stopped");
+        assert!(never_spawned(&f));
+        // A late answer is not an error: the prompt is simply gone.
+        h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"alpha"}));
+        h.send(json!({"cmd":"status"}));
+        h.until("status");
+        assert!(
+            position(&h, |v| v["event"] == "error").is_none(),
+            "{:?}",
+            h.seen
+        );
+        h.eof();
+    }
+
+    /// The vendor is reached over the one HTTP path extensions have, in
+    /// `begin` and again in `on_stop`, before the host hears the server
+    /// stopped.
+    #[test]
+    fn the_vendor_is_reached_in_begin_and_again_on_stop() {
+        let (port, asked) = serve_in_turn(vec![b"hello from the vendor".to_vec(), vec![]]);
+        let f = with_extension(json!({
+            "vendorUrl": format!("http://127.0.0.1:{port}/hello"),
+            "vendorOnStop": format!("http://127.0.0.1:{port}/session")
+        }));
+        let mut h = Host::new();
+        h.send(f.start());
+        loop {
+            let progress = h.until("fetch-progress");
+            if progress["phase"] == "extension" {
+                assert_eq!(progress["message"], "vendor said: hello from the vendor");
+                break;
+            }
+        }
+        h.until("server-started");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        let told = position(&h, |v| v["line"] == "vendor told: 200").expect("on_stop reached it");
+        let stopped = position(&h, |v| v["event"] == "server-stopped").unwrap();
+        assert!(told < stopped);
+        assert_eq!(*asked.lock().unwrap(), vec!["/hello", "/session"]);
+        h.eof();
+    }
+
+    /// A vendor that cannot be reached fails the start with the code a host
+    /// can say "try again later" for, and nothing is spawned.
+    #[test]
+    fn an_unreachable_vendor_fails_the_start_as_vendor_unavailable() {
+        let port = free_port();
+        let f = with_extension(json!({ "vendorUrl": format!("http://127.0.0.1:{port}/hello") }));
+        let mut h = Host::new();
+        h.send(f.start());
+        assert_eq!(h.until("error")["code"], "vendor_unavailable");
+        assert!(never_spawned(&f));
         h.eof();
     }
 
@@ -2111,7 +2256,7 @@ mod extensions {
         let mut h = Host::new();
         h.send(f.start());
         h.until("server-started");
-        h.send(json!({"cmd":"extension-forget","extension":"fixture"}));
+        h.send(json!({"cmd":"extension-forget","extension":"fixture","runtimeRoot":f.runtime}));
         assert_eq!(h.until("error")["code"], "busy");
         h.send(json!({"cmd":"stop","serverId":"s1"}));
         h.until("server-stopped");

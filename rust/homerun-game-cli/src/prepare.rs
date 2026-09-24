@@ -137,6 +137,13 @@ pub fn runtime_version(d: &GameDescriptor, requested: Option<&str>) -> Result<Op
 /// This game's runtime directory: `<root>/<id>`, or `<root>/<id>/<version>`
 /// for a vendor runtime. The one place the runner asks, so the fetch, the
 /// executable check, a runtime working directory and save mounts agree.
+/// Where per-machine tools and state live for runtimes under `root`: its
+/// parent, beside the runtimes rather than inside any of them. steamcmd, a
+/// vendor's downloader and every extension's machine store go here.
+pub fn tools_dir(root: &Path) -> PathBuf {
+    root.parent().unwrap_or(root).to_path_buf()
+}
+
 pub fn install_dir(d: &GameDescriptor, root: &Path, version: Option<&str>) -> Result<PathBuf> {
     engine::fetch::install_dir(d, platform::HOST, &root.to_string_lossy(), version)
         .map(PathBuf::from)
@@ -175,7 +182,7 @@ pub fn fetch(
         return Err(fail(codes::REQUIRES_UNMET, "This computer's available resources could not be checked. Check disk access and try again."));
     }
     let ctx = fetcher::Context {
-        tools_dir: root.parent().unwrap_or(root).to_path_buf(),
+        tools_dir: tools_dir(root),
         cancelled: &|| stop.should_stop(),
         on_progress: &|progress| {
             let (phase, received, total, message) = match progress {

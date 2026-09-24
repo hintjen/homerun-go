@@ -26,6 +26,12 @@ September 21 review fixes, unresolved risks and corrections to validation claims
 Remote branches, completed engine work, Windows validation, and remaining
 desktop integration and real-game onboarding work.
 
+### [Game extensions](./game-extensions.md)
+
+Code only one game needs, compiled into the runner and chosen by name from its
+descriptor: the pure half in the core, the hooks in the runner, the sealed
+store, vendor HTTPS, sign-in and prompt events, testing, and how to write one.
+
 ### [The desktop game runner](./game-runner.md)
 
 The standalone CLI and Electron's NDJSON supervisor: ownership, cancellation,
