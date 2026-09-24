@@ -253,8 +253,25 @@ Seals bytes to this computer's current user with Windows DPAPI
 (`CryptProtectData`, UI forbidden). The extension's name is mixed in as
 DPAPI's optional entropy, so one extension's file moved into another's folder
 does not open. **Elsewhere it refuses** rather than fall back to a plain
-file: the runner is Windows-first, and the day it hosts extensions on another
-platform, that platform's keychain goes here.
+file: the runner is Windows-first.
+
+**Every sealed value starts with one scheme byte** (`Scheme`; `1` is DPAPI).
+It is there so the backend can change without making anyone sign in again:
+`scheme_of` says how a value was sealed, `current` says how this build seals,
+and a value in an older scheme is opened and written back in the current one
+on the next save (`MachineStore::update` always re-seals). A scheme this build
+does not know is refused in words that say a newer Homerun wrote it, rather
+than read as damage.
+
+**Other platforms, when they come.** Keystores (macOS Keychain, Linux Secret
+Service, iOS Keychain, Android Keystore) hold small items, while DPAPI holds
+nothing and has no size limit, so the expected shape is envelope encryption:
+a random key per extension in the keystore, the document encrypted with it on
+disk, as a new `Scheme`. `seal`/`open` and every caller stay as they are.
+Still to decide then: whether headless Linux, which usually has no Secret
+Service, refuses (the default) or offers an explicit owner-only-file mode;
+and, for phones, the host supplies the key over the FFI, since their
+keystores are reachable from Kotlin and Swift rather than Rust.
 
 ## The protocol
 
