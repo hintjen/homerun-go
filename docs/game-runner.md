@@ -109,69 +109,22 @@ See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
 ## Game extensions: `src/extensions/`
 
-What only one game needs lives in that game's extension; the argument, and
-the pure half each extension also has, is `docs/game-engine.md` §
-*Extensions*. This is the half that runs.
+The runner runs a descriptor's extension: `begin` after the fetch and before
+the launch is composed (it may wait on a person, and ends on a Stop), then
+observers on every line and state change, and `on_stop` within 10 s before the
+terminal event. It enforces, for every extension, the rules an extension must
+not get wrong: sign-in URLs only on the spec's hosts, supplied secrets
+redacted, panics contained, console commands rate limited, a vendor reached
+only over `vendor_http`, and what is kept sealed to this user.
 
-**The shape.** `GameExtension` is one game's extension, registered by name in
-`extensions::registry()` and alive for the whole process. Its `begin` starts
-one run and returns a `Run`, which owns that run's state:
-
-| Hook | When | Thread | May block? |
-|---|---|---|---|
-| `begin` | after fetch, before config is written or the launch composed | lifecycle | yes, watching `ctx.stopping()` |
-| `Run::on_line` | every output line, already redacted | output pump | no: returns `Action`s |
-| `Run::on_state` | `Started` (with `server-started`), `Stopping` (first stop seen) | sampler | no: returns `Action`s |
-| `Run::on_stop` | after the tree has exited, **before** the terminal event | its own | up to `STOP_BUDGET` (10 s), then abandoned |
-| `forget`, `status` | the commands below, no server needed | main | briefly |
-
-An `Action` is `Console`, `SignIn`, `SignedIn`, `Note` or `Fail`. A worker
-thread carries them out, so the output pump never waits on a console or a
-vendor.
-
-**What `begin` supplies reaches the launch** through `{extension:<key>}`, and
-every key has to be one the spec declares or the start fails with
-`extension_failed` — an undeclared key never said whether it is secret.
-Which values are secret is the spec's answer, and those join the host's
-secrets in the redaction applied to `server-log` and the crash tail.
-
-**The rules, enforced here so no extension can get them wrong:**
-
-- **A sign-in URL is shown only if `url_allowed` passes** against the spec's
-  hosts. Otherwise `begin` gets an error (and the start fails with
-  `extension_failed`), or an observer's `SignIn` is dropped and logged.
-- **A panic never takes the runner down.** In `begin` it fails the start with
-  `extension_failed`; in an observer it switches that run's observers and
-  `on_stop` off, and is logged once to stderr.
-- **Console commands are rate limited:** one per second per run, and the same
-  command is not sent again within 30 s. A server that says "not signed in"
-  on every tick must not start a sign-in on every tick.
-- **`Fail` stops the server as a refusal,** the same road as `port_exposed`:
-  the extension's error is sent, then `server-crashed`, never
-  `server-stopped`.
-- **A failed launch still gets `on_stop`** (as `Crashed`), because `begin` may
-  have made something to undo before the launch could not go ahead.
-
-**Protocol additions.** Events `sign-in {serverId, purpose, url, code?,
-expiresInSecs?}` and `signed-in {serverId, purpose}`, where `purpose` is
-`download` or `server`; `extension-status {extension, signedIn?, account?}`,
-the answer to the commands `extension-status {extension}` and
-`extension-forget {extension}` — the second refused with `busy` while a
-server is fetching or running. Error codes `sign_in_required`,
+The commands `extension-status`, `extension-forget` and `prompt-answer`, and
+the events `sign-in`, `signed-in`, `prompt`, `prompt-closed` and
+`extension-status`, belong to it, as do the codes `sign_in_required`,
 `sign_in_expired`, `account_not_allowed`, `vendor_unavailable` and
-`extension_failed`. `ready.features` (and `homerun-game --features`) gains
-`extensions` and one `extension:<name>` per registered extension, from the
-registry rather than a hand-kept list.
+`extension_failed`.
 
-**The reference extension.** `fixture` (`src/extensions/fixture.rs`, with its
-pure half in the core) exists only with the `test-extensions` feature, which
-`npm run test:game` turns on and no release build does. Its config picks the
-behaviour a lifecycle test wants — sign in, wait for a stop, panic, drive the
-console, fail — and it is the example a new extension starts from.
-
-**Not here yet:** a per-machine credential store, HTTP with the spec's host
-allowlist, and `prompt` / `prompt-answer`. Those are the next change, and are
-what a real extension's sign-in needs.
+**`docs/game-extensions.md` is the page for all of it.** It is not repeated
+here so the two cannot drift.
 
 ## Vendor runtimes: `runtimeVersion` and `--runtime-version`
 
@@ -278,8 +231,7 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 | `src/runner.rs` | Worker ownership, events, tunnels, stdin and EOF cleanup |
 | `src/prepare.rs` | Validation, fetch, invocation and confined configuration writes |
 | `src/cli.rs` | Arguments, local ownership, stop requests and probe evidence |
-| `src/extensions/mod.rs` | Game extensions: the hooks, their context, the action worker, the registry |
-| `src/extensions/fixture.rs` | The test-only reference extension (`test-extensions` feature) |
+| `src/extensions/` | Game extensions; files listed in `docs/game-extensions.md` |
 | `tests/lifecycle.rs` | A self-reinvoking fake game, local HTTP and real subprocess tests |
 | `rust/homerun-supervisor/src/process_engine.rs` | Process lifecycle and independent pipe draining |
 | `rust/homerun-supervisor/src/fetcher.rs` | Cancellable effects, including a silent download peer |

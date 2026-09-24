@@ -65,6 +65,9 @@ pub struct Runner {
     console_tasks: Vec<JoinHandle<()>>,
     build: String,
     pub(crate) network: crate::network::Audit,
+    /// The open extension prompt, if any: answered from here, waited on by
+    /// the lifecycle thread.
+    prompts: extensions::Prompts,
 }
 
 impl Runner {
@@ -79,6 +82,7 @@ impl Runner {
             console_tasks: vec![],
             build: digest[..12].into(),
             network: crate::network::Audit::default(),
+            prompts: extensions::Prompts::default(),
         })
     }
     pub fn ready(&self) {
@@ -143,13 +147,30 @@ impl Runner {
                 }
             }
             Command::Unknown => eprintln!("Ignoring a command this runner does not recognize."),
-            Command::ExtensionStatus { extension } => match extensions::status(&extension) {
+            Command::ExtensionStatus {
+                extension,
+                runtime_root,
+            } => match machine_root(&runtime_root)
+                .and_then(|root| extensions::status(&extension, &root))
+            {
                 Ok(event) => self.out.send(event),
                 Err(e) => self.out.error(None, e),
             },
+            Command::PromptAnswer {
+                server_id,
+                prompt_id,
+                value,
+            } => {
+                if let Err(e) = self.prompts.answer(&server_id, &prompt_id, value) {
+                    self.out.error(Some(&server_id), e);
+                }
+            }
             // Refused while that game is fetching or running: its extension
             // may be mid-way through using what this would delete.
-            Command::ExtensionForget { extension } => {
+            Command::ExtensionForget {
+                extension,
+                runtime_root,
+            } => {
                 if !self.idle() {
                     self.out.error(
                         None,
@@ -159,7 +180,9 @@ impl Runner {
                         ),
                     );
                 } else {
-                    match extensions::forget(&extension) {
+                    match machine_root(&runtime_root)
+                        .and_then(|root| extensions::forget(&extension, &root))
+                    {
                         Ok(event) => self.out.send(event),
                         Err(e) => self.out.error(None, e),
                     }
@@ -323,11 +346,12 @@ impl Runner {
         let (s, l, out, server_id) = (stop.clone(), live.clone(), self.out.clone(), id.clone());
         let audit = self.network.clone();
         audit.clear();
+        let prompts = self.prompts.clone();
         let task = thread::Builder::new()
             .name("game-lifecycle".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                let result = run(command, &d, &s, &l, &out, &audit);
+                let result = run(command, &d, &s, &l, &out, &audit, &prompts);
                 if let Err(e) = result {
                     if s.should_stop() {
                         l.lock().unwrap().state = "stopped".into();
@@ -369,6 +393,7 @@ fn run(
     live: &Arc<Mutex<Live>>,
     out: &Output,
     audit: &crate::network::Audit,
+    prompts: &extensions::Prompts,
 ) -> Result<()> {
     let (id, root, version) = match &command {
         Command::Fetch {
@@ -414,7 +439,7 @@ fn run(
     let server = prepare::absolute(&server_dir)?;
     // The game's extension, if it has one, goes first: it may need a person
     // to sign in, and what it supplies is part of the launch line below.
-    let mut extension = extensions::begin(d, &id, stop, out)?;
+    let mut extension = extensions::begin(d, &id, &root, &server, stop, out, prompts)?;
     let supplied = extension
         .as_ref()
         .map(|e| e.supplied().clone())
@@ -758,6 +783,18 @@ fn run(
     Ok(())
 }
 
+/// The runtime root an extension command names, which is where its machine
+/// store is found.
+fn machine_root(runtime_root: &str) -> Result<std::path::PathBuf> {
+    if runtime_root.is_empty() {
+        return Err(fail(
+            codes::DESCRIPTOR_INVALID,
+            "This request needs the runtimeRoot that fetch and start are given.",
+        ));
+    }
+    prepare::absolute(runtime_root)
+}
+
 /// Only report a roster when the reply has an explicit supported shape.
 /// No UUID fabrication; unknown vendor formats remain unknown.
 fn player_list(reply: &str) -> Option<Vec<Player>> {
@@ -808,6 +845,7 @@ fn report_malformed(out: &Output, line: &[u8]) {
             | "shutdown"
             | "extension-status"
             | "extension-forget"
+            | "prompt-answer"
     ) {
         return;
     }

@@ -153,13 +153,30 @@ pub enum Command {
     Shutdown,
     /// What a game's extension keeps on this machine, e.g. whether it is
     /// signed in. Answered by `extension-status`.
+    ///
+    /// `runtimeRoot` is the one `fetch` and `start` are given: an
+    /// extension's machine store lives beside the runtimes.
+    #[serde(rename_all = "camelCase")]
     ExtensionStatus {
         extension: String,
+        #[serde(default)]
+        runtime_root: String,
     },
     /// Delete what a game's extension keeps on this machine: "Sign out".
     /// Answered by `extension-status`, or an `error`.
+    #[serde(rename_all = "camelCase")]
     ExtensionForget {
         extension: String,
+        #[serde(default)]
+        runtime_root: String,
+    },
+    /// The person's choice for an open `prompt`. `value` must be one of the
+    /// prompt's options.
+    #[serde(rename_all = "camelCase")]
+    PromptAnswer {
+        server_id: String,
+        prompt_id: String,
+        value: String,
     },
     /// A command added after this runner shipped.
     ///
@@ -304,6 +321,27 @@ pub enum Event {
     SignedIn {
         server_id: String,
         purpose: crate::extensions::Purpose,
+    },
+    /// A game's extension asks the person to choose. The host shows its one
+    /// choice dialog and answers with `prompt-answer`. Always followed by
+    /// `prompt-closed`.
+    #[serde(rename_all = "camelCase")]
+    Prompt {
+        server_id: String,
+        prompt_id: String,
+        /// `choice`, the only kind so far.
+        kind: String,
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        options: Vec<crate::extensions::Choice>,
+    },
+    /// The prompt is over -- answered, or abandoned by a stop. A host takes
+    /// its dialog down.
+    #[serde(rename_all = "camelCase")]
+    PromptClosed {
+        server_id: String,
+        prompt_id: String,
     },
     /// The answer to `extension-status` and `extension-forget`.
     #[serde(rename_all = "camelCase")]
@@ -804,15 +842,25 @@ mod tests {
     #[test]
     fn the_extension_commands_parse() {
         assert_eq!(
-            parse(r#"{"cmd":"extension-status","extension":"hytale"}"#),
+            parse(r#"{"cmd":"extension-status","extension":"hytale","runtimeRoot":"C:\\rt"}"#),
             Command::ExtensionStatus {
-                extension: "hytale".into()
+                extension: "hytale".into(),
+                runtime_root: "C:\\rt".into(),
             }
         );
         assert_eq!(
             parse(r#"{"cmd":"extension-forget","extension":"hytale"}"#),
             Command::ExtensionForget {
-                extension: "hytale".into()
+                extension: "hytale".into(),
+                runtime_root: String::new(),
+            }
+        );
+        assert_eq!(
+            parse(r#"{"cmd":"prompt-answer","serverId":"s1","promptId":"prompt-1","value":"a"}"#),
+            Command::PromptAnswer {
+                server_id: "s1".into(),
+                prompt_id: "prompt-1".into(),
+                value: "a".into(),
             }
         );
     }
@@ -850,6 +898,29 @@ mod tests {
                 purpose: Purpose::Server
             }),
             serde_json::json!({"event":"signed-in","serverId":"s1","purpose":"server"})
+        );
+        assert_eq!(
+            line(Event::Prompt {
+                server_id: "s1".into(),
+                prompt_id: "prompt-1".into(),
+                kind: "choice".into(),
+                title: "Which profile?".into(),
+                message: None,
+                options: vec![crate::extensions::Choice {
+                    value: "a".into(),
+                    label: "Alpha".into()
+                }],
+            }),
+            serde_json::json!({"event":"prompt","serverId":"s1","promptId":"prompt-1",
+                "kind":"choice","title":"Which profile?",
+                "options":[{"value":"a","label":"Alpha"}]})
+        );
+        assert_eq!(
+            line(Event::PromptClosed {
+                server_id: "s1".into(),
+                prompt_id: "prompt-1".into()
+            }),
+            serde_json::json!({"event":"prompt-closed","serverId":"s1","promptId":"prompt-1"})
         );
         assert_eq!(
             line(Event::ExtensionStatus {

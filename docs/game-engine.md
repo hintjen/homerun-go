@@ -342,70 +342,19 @@ the rung below rather than inventing a polite rung that would only time out.
 
 ## Extensions — `extensions/`
 
-Some games need a little code that is theirs alone: a vendor's own sign-in
-API, a token that rotates, a console flow only that game prints. Growing the
-schema for each of those is how an engine fills up with fields that have one
-user and can never be removed — PR 60's `serverSignIn` was one. An extension
-is where that code goes instead.
+What only one game needs — a vendor's sign-in API, a rotating token — lives in
+that game's extension, compiled into the runner and chosen by name from the
+descriptor (`"extension": { "name", "config" }`). Its pure half is here: an
+`ExtensionSpec` per extension (config validation, the values it supplies
+through `{extension:<key>}`, the hosts it may reach), the registry, and
+`url_allowed`, the one check every URL a person is shown goes through.
+`validate` refuses an extension this build lacks, an `{extension:<key>}` the
+extension does not supply, a secret one anywhere but `launch.env`, and any in
+`client.joinUrl`.
 
-**A descriptor chooses one by name; it never supplies one.**
-
-```json
-"extension": { "name": "hytale", "config": { "…": "data only that extension reads" } }
-```
-
-The code is compiled into the signed runner. A descriptor is signed data too,
-but an extension sits next to account tokens, so the rule is the one
-`console.rcon.protocol` already follows: data chooses among what was built,
-and nothing is loaded at run time.
-
-**Two halves, the same split as the rest of the engine.** The pure half lives
-here, one module per extension, and is an `ExtensionSpec`:
-
-| Field | Answers |
-|---|---|
-| `name` | what `extension.name` says |
-| `supplies` | every key `{extension:<key>}` may name, and which are secret |
-| `validate` | problems with this game's `extension.config` |
-| `hosts` | where the extension may reach over HTTPS, and send a person to sign in |
-| `config_schema` | its config's JSON Schema, spliced into `game.v0.json` |
-
-The effects half (the hooks: waiting on a person, console commands, and
-later HTTP) lives in the runner; `docs/game-runner.md` § *Game extensions*
-is its page. A descriptor naming an extension this build does not have is
-refused as needing a newer Homerun.
-
-**`{extension:<key>}` is how an extension's output reaches the launch.** It is
-deliberately not `{secret:…}`. The host generates every secret
-(`engine.secrets` lists them), and an extension's values are not the host's
-to generate; keeping the namespaces apart also means a host secret and an
-extension value can never collide. `validate` checks:
-
-- the name is registered in this build, and the config passes the
-  extension's own `validate`;
-- every `{extension:<key>}` names a key the extension supplies, and the
-  descriptor names an extension at all;
-- a **secret** key appears only in `launch.env`. Argv is readable by every
-  process on the machine, and a config file sits in a folder that is backed
-  up;
-- nothing an extension supplies appears in `client.joinUrl`.
-
-**`url_allowed` is the one check every URL a person is shown goes through.**
-`https://` only, no userinfo, no port, and the host compared on whole labels:
-for `hytale.com`, `accounts.hytale.com` passes and `hytale.com.evil.net`,
-`evilhytale.com` and `evil.net@accounts.hytale.com` do not. It is here rather
-than in each extension so a sign-in link can never point somewhere the
-descriptor did not name, whatever a vendor's program printed.
-
-**The registry is two lists.** `PUBLISHED` is what a release build carries and
-the only thing the schema describes; `registry()` adds the test-only
-reference extension, `fixture`, under `cfg(test)` or the `test-extensions`
-feature. `PUBLISHED` is empty today: this is the interface, and Hytale's
-sign-in is its first planned user.
-
-**When something moves out of an extension.** The day a second game needs
-what one extension does, it becomes a primitive or a descriptor field, and the
-first extension switches to it in the same change.
+**`docs/game-extensions.md` is the page for all of it** — both halves, the
+primitives, the protocol, testing, and how to write one. It is not repeated
+here so the two cannot drift.
 
 ## The JSON Schema — `schema.rs`
 
@@ -719,8 +668,7 @@ test.
 | `validate.rs` | every fault in a descriptor, collected, in sentences |
 | `settings.rs` | the API's strings coerced and bounds-checked |
 | `template.rs` | placeholders, single-pass; the security property |
-| `extensions/mod.rs` | `ExtensionSpec`, the registry, and `url_allowed` |
-| `extensions/fixture.rs` | the test-only reference extension, never published |
+| `extensions/` | the pure half of game extensions; see `docs/game-extensions.md` |
 | `invocation.rs` | argv, env and cwd, with unset settings dropped |
 | `fetch.rs` | Direct / SteamCmd / AlreadyPresent |
 | `control.rs` | readiness, presence, console kind, stop ladder |
@@ -738,6 +686,8 @@ And in `homerun-supervisor`, behind `game-engine`:
 | `rcon.rs` | Valve's binary RCON and Facepunch's WebSocket dialect |
 | `platform.rs` | every OS assumption in the crate, in one place |
 | `process_engine.rs` | `Supervision` — readiness, roster, console and stop, per game |
+| `vendor_http.rs` | HTTPS to a game extension's allowed hosts only (`docs/game-extensions.md`) |
+| `local_secret.rs` | DPAPI sealing for what a game extension keeps (`docs/game-extensions.md`) |
 | `testdata/rust.json` | the pilot's descriptor, used as a fixture throughout |
 
 ## Triage
