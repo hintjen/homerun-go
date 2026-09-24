@@ -221,7 +221,15 @@ fn vendor_tool(
             phase: "download",
             message: "getting the game's downloader".to_string(),
         });
-        direct(&tool_dir, &tool.url, &tool.sha256, None, tool.extract, 0, ctx)?;
+        direct(
+            &tool_dir,
+            &tool.url,
+            &tool.sha256,
+            None,
+            tool.extract,
+            0,
+            ctx,
+        )?;
     }
     let program = crate::platform::executable(&tool_dir, &tool.exe);
     if !program.is_file() {
