@@ -127,9 +127,16 @@ pub fn doctor_version(
 
     // Disk is checked against what still has to be downloaded. A machine with
     // the runtime already on it does not need room for it a second time.
+    // A vendor-downloader runtime is never `AlreadyPresent` at planning time
+    // (only the downloader knows whether it is current), but one that is
+    // installed does not need room for a whole second copy either.
     let runtime_present = matches!(
         fetch::plan_version(descriptor, &machine.host, "", present, runtime_version),
         Ok(fetch::Plan::AlreadyPresent { .. })
+            | Ok(fetch::Plan::Tool {
+                present_build_id: Some(_),
+                ..
+            })
     );
     if let Some(version) = runtime_version {
         if fetch::is_vendor(descriptor, &machine.host) {

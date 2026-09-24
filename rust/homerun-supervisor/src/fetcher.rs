@@ -61,6 +61,13 @@ pub enum Progress {
         received: u64,
         total: Option<u64>,
     },
+    /// A vendor's downloader is waiting for the person to sign in: open `url`
+    /// and, if there is one, enter `code`. Sent again whenever either
+    /// changes. Nothing here answers it; the person does, in their browser.
+    SignIn { url: String, code: Option<String> },
+    /// The downloader finished after asking the person to sign in, so the
+    /// sign-in worked: a host takes its card down.
+    SignedIn,
 }
 
 /// What a completed fetch left on disk.
@@ -148,7 +155,363 @@ pub fn fetch(plan: &Plan, ctx: &Context) -> Result<Fetched, String> {
             build_id,
             verify,
         } => steamcmd(Path::new(dir), *app_id, build_id.as_deref(), *verify, ctx),
+        Plan::Tool {
+            dir,
+            tool,
+            args,
+            version_args,
+            sign_in,
+            present_build_id,
+        } => vendor_tool(
+            Path::new(dir),
+            tool,
+            args,
+            version_args,
+            sign_in.as_ref(),
+            present_build_id.as_deref(),
+            ctx,
+        ),
     }
+}
+
+// ─── a vendor's own downloader ──────────────────────────────────────────────
+//
+// For a game whose server files only its owner's account can fetch. The
+// downloader is pinned and verified like any direct download, then run with
+// the person's own sign-in: it prints a verification address and code, the
+// host shows them, and the person approves it in their own browser. Homerun
+// never sees a password and never answers the prompt.
+//
+// The credentials the downloader keeps live beside `steamcmd` in the tools
+// directory, one file per game -- never in a server folder, so never in a
+// backup, and never anywhere Homerun's servers read. This module does not
+// open that file; it only tells the downloader where it is.
+//
+// What the downloader fetches cannot be pinned: the vendor serves only its
+// current build, and a game whose client and server must match exactly is
+// unplayable on anything older. So the build a runtime holds is the version
+// the downloader reported, and every fetch asks first. If asking fails (no
+// network) and something is installed, what is installed is used.
+
+/// The placeholders a downloader's arguments may use, and nothing else.
+const OUTPUT: &str = "{output}";
+const CREDENTIALS: &str = "{credentials}";
+
+fn vendor_tool(
+    dir: &Path,
+    tool: &homerun_core::engine::descriptor::Tool,
+    args: &[String],
+    version_args: &[String],
+    sign_in: Option<&homerun_core::engine::descriptor::SignIn>,
+    present_build_id: Option<&str>,
+    ctx: &Context,
+) -> Result<Fetched, String> {
+    let game = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "game".into());
+
+    // The downloader itself: pinned, verified and unpacked once per pin.
+    let tool_dir = ctx.tools_dir.join("tools").join(format!(
+        "{game}-{}",
+        &tool.sha256[..tool.sha256.len().min(12)]
+    ));
+    if present(&tool_dir).build_id.as_deref()
+        != Some(homerun_core::engine::fetch::direct_build_id(&tool.sha256).as_str())
+        || !crate::platform::executable(&tool_dir, &tool.exe).is_file()
+    {
+        (ctx.on_progress)(Progress::Note {
+            phase: "download",
+            message: "getting the game's downloader".to_string(),
+        });
+        direct(
+            &tool_dir,
+            &tool.url,
+            &tool.sha256,
+            None,
+            tool.extract,
+            0,
+            ctx,
+        )?;
+    }
+    let program = crate::platform::executable(&tool_dir, &tool.exe);
+    if !program.is_file() {
+        return Err("the game's downloader did not contain the program it should.".to_string());
+    }
+
+    let credentials_dir = ctx.tools_dir.join("credentials");
+    fs::create_dir_all(&credentials_dir).map_err(|_| cannot_write(&credentials_dir))?;
+    let credentials = credentials_dir.join(format!("{game}.json"));
+    fs::create_dir_all(dir).map_err(|_| cannot_write(dir))?;
+    let output = dir.join(".download.zip");
+    let fill = |list: &[String]| -> Vec<String> {
+        list.iter()
+            .map(|a| {
+                a.replace(OUTPUT, &output.to_string_lossy())
+                    .replace(CREDENTIALS, &credentials.to_string_lossy())
+            })
+            .collect()
+    };
+
+    // Ask which build is current. It may ask the person to sign in first.
+    let mut version = None;
+    if !version_args.is_empty() {
+        match run_tool(&program, &fill(version_args), &tool_dir, sign_in, ctx) {
+            Ok(lines) => {
+                version = lines
+                    .iter()
+                    .rev()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty())
+                    .map(str::to_string);
+            }
+            Err(e) if (ctx.cancelled)() => return Err(e),
+            Err(e) => {
+                if let Some(installed) = present_build_id {
+                    (ctx.on_progress)(Progress::Note {
+                        phase: "download",
+                        message: format!(
+                            "could not check for a newer version ({e}); using the one installed"
+                        ),
+                    });
+                    return Ok(Fetched {
+                        dir: dir.to_path_buf(),
+                        build_id: installed.to_string(),
+                    });
+                }
+                return Err(e);
+            }
+        }
+        if let (Some(v), Some(installed)) = (&version, present_build_id) {
+            if v == installed {
+                return Ok(Fetched {
+                    dir: dir.to_path_buf(),
+                    build_id: installed.to_string(),
+                });
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&output);
+    run_tool(&program, &fill(args), &tool_dir, sign_in, ctx)?;
+    if !output.is_file() {
+        return Err(
+            "the game's downloader finished without leaving the game's files where Homerun \
+             asked for them."
+                .to_string(),
+        );
+    }
+    let build_id = match version {
+        Some(v) => v,
+        None => homerun_core::engine::fetch::direct_build_id(&digest_of(&output)?),
+    };
+    (ctx.on_progress)(Progress::Note {
+        phase: "extract",
+        message: "unpacking".to_string(),
+    });
+    extract_zip(&output, dir, ctx)?;
+    let _ = fs::remove_file(&output);
+    stamp(dir, &build_id)?;
+    Ok(Fetched {
+        dir: dir.to_path_buf(),
+        build_id,
+    })
+}
+
+/// Run a vendor's downloader to completion, reporting its output and any
+/// sign-in it asks for. Returns its output lines; a non-zero exit is an error.
+fn run_tool(
+    program: &Path,
+    args: &[String],
+    cwd: &Path,
+    sign_in: Option<&homerun_core::engine::descriptor::SignIn>,
+    ctx: &Context,
+) -> Result<Vec<String>, String> {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        // Nothing is ever typed into it. A downloader that wants an answer on
+        // its console gets end-of-file, like steamcmd does.
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "Homerun could not run the game's downloader.".to_string())?;
+
+    let (tx, rx) = std::sync::mpsc::sync_channel(256);
+    for reader in [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            crate::process_engine::read_lines_lossy(reader, |line| tx.send(line).is_ok());
+        });
+    }
+    drop(tx);
+
+    let mut lines = Vec::new();
+    let mut url: Option<String> = None;
+    let mut code: Option<String> = None;
+    loop {
+        if (ctx.cancelled)() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(cancelled());
+        }
+        let line = match rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(line) => line,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                continue;
+            }
+        };
+        // The same rule as steamcmd: an agreement prompt ends the run.
+        if prompt_detected(&line) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                "the game's downloader asked for agreement to terms, which a person has to \
+                 give themselves. Run the vendor's downloader yourself once, then try again."
+                    .to_string(),
+            );
+        }
+        if let Some(markers) = sign_in {
+            let (found_url, found_code) = sign_in_parts(&line, markers);
+            let found_url = found_url.filter(|new| replaces_sign_in_url(url.as_deref(), new));
+            let changed = found_url.is_some() || (found_code.is_some() && found_code != code);
+            if found_url.is_some() {
+                url = found_url;
+            }
+            if found_code.is_some() {
+                code = found_code;
+            }
+            if changed {
+                if let Some(u) = &url {
+                    (ctx.on_progress)(Progress::SignIn {
+                        url: u.clone(),
+                        code: code.clone(),
+                    });
+                }
+            }
+        }
+        (ctx.on_progress)(Progress::Note {
+            phase: "download",
+            message: line.clone(),
+        });
+        if lines.len() >= 200 {
+            lines.remove(0);
+        }
+        lines.push(line);
+    }
+    let status = child
+        .wait()
+        .map_err(|_| "the game's downloader could not be waited for.".to_string())?;
+    if !status.success() {
+        return Err(format!(
+            "the game's downloader stopped with an error{}",
+            lines
+                .iter()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| format!(": {}", l.trim()))
+                .unwrap_or_else(|| ".".to_string())
+        ));
+    }
+    // A downloader that asked for a sign-in and then finished cleanly was
+    // signed in; the card that asked can go.
+    if url.is_some() {
+        (ctx.on_progress)(Progress::SignedIn);
+    }
+    Ok(lines)
+}
+
+/// Whether a newly seen sign-in address should replace the one already shown.
+///
+/// Downloaders and servers print the address twice: once with the code
+/// already in it (`.../verify?user_code=...`) and once bare, for typing the
+/// code by hand. The one with the code in it is the better thing to open, so
+/// a bare address never replaces a longer one it is the start of.
+pub fn replaces_sign_in_url(current: Option<&str>, new: &str) -> bool {
+    match current {
+        None => true,
+        Some(current) => current != new && !current.starts_with(new),
+    }
+}
+
+/// A line with terminal escape sequences (colours, resets) removed.
+///
+/// Hytale's server ends every log line with a colour reset even when told the
+/// console is not a terminal, and an address with `\x1b[m` stuck to its end
+/// is not one a browser can open.
+pub fn without_escapes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // CSI: ESC [ parameters... final byte in '@'..='~'.
+        if chars.peek() == Some(&'[') {
+            chars.next();
+            for f in chars.by_ref() {
+                if ('@'..='~').contains(&f) {
+                    break;
+                }
+            }
+        } else {
+            // Any other escape: drop the single character that follows.
+            chars.next();
+        }
+    }
+    out
+}
+
+/// The verification address and code on one line of a downloader's output.
+pub fn sign_in_parts(
+    line: &str,
+    markers: &homerun_core::engine::descriptor::SignIn,
+) -> (Option<String>, Option<String>) {
+    let line = without_escapes(line);
+    let line = line.as_str();
+    // On the marker's own host, not merely mentioning the marker: see
+    // `engine::fetch::sign_in_host`.
+    let hosts: Vec<String> = homerun_core::engine::fetch::sign_in_host(&markers.url)
+        .into_iter()
+        .collect();
+    let url = (!markers.url.is_empty() && line.contains(&markers.url))
+        .then(|| {
+            line.split_whitespace()
+                .find(|word| {
+                    word.contains(&markers.url)
+                        && homerun_core::engine::extensions::url_allowed(word, &hosts)
+                })
+                .map(str::to_string)
+        })
+        .flatten();
+    let code = (!markers.code.is_empty())
+        .then(|| {
+            line.find(&markers.code)
+                .map(|at| line[at + markers.code.len()..].trim().to_string())
+                .filter(|c| !c.is_empty() && !c.contains(char::is_whitespace))
+        })
+        .flatten();
+    (url, code)
 }
 
 // ─── a pinned URL ───────────────────────────────────────────────────────────
@@ -975,6 +1338,148 @@ fn host_of(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── a vendor's downloader asking the person to sign in ────────────────
+
+    fn hytale_markers() -> homerun_core::engine::descriptor::SignIn {
+        homerun_core::engine::descriptor::SignIn {
+            url: "oauth.accounts.hytale.com/oauth2/device/verify".into(),
+            code: "Authorization code: ".into(),
+        }
+    }
+
+    /// The shapes Hytale's downloader printed on 2026-09-23 (code redacted).
+    #[test]
+    fn the_verification_address_and_code_are_read_off_their_lines() {
+        let m = hytale_markers();
+        assert_eq!(
+            sign_in_parts("Please visit the following URL to authenticate:", &m),
+            (None, None)
+        );
+        assert_eq!(
+            sign_in_parts(
+                "https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=AbCd1234",
+                &m
+            ),
+            (
+                Some(
+                    "https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=AbCd1234"
+                        .into()
+                ),
+                None
+            )
+        );
+        assert_eq!(
+            sign_in_parts("Authorization code: AbCd1234", &m),
+            (None, Some("AbCd1234".into()))
+        );
+    }
+
+    #[test]
+    fn only_an_https_address_is_ever_offered_to_open() {
+        let m = hytale_markers();
+        assert_eq!(
+            sign_in_parts(
+                "see http://oauth.accounts.hytale.com/oauth2/device/verify",
+                &m
+            )
+            .0,
+            None
+        );
+        assert_eq!(
+            sign_in_parts("file://oauth.accounts.hytale.com/oauth2/device/verify", &m).0,
+            None
+        );
+    }
+
+    /// A line can mention the marker without pointing at the marker's site:
+    /// in a query string, or on a lookalike host. Neither is offered.
+    #[test]
+    fn a_link_that_only_mentions_the_marker_is_not_offered() {
+        let m = hytale_markers();
+        for line in [
+            "Visit https://evil.example/?next=oauth.accounts.hytale.com/oauth2/device/verify",
+            "https://evil.example/oauth.accounts.hytale.com/oauth2/device/verify",
+            "https://oauth.accounts.hytale.com.evil.example/oauth.accounts.hytale.com/oauth2/device/verify",
+            "https://x@oauth.accounts.hytale.com/oauth2/device/verify",
+        ] {
+            assert_eq!(sign_in_parts(line, &m).0, None, "{line}");
+        }
+        // A marker with no host in it offers nothing at all.
+        let hostless = homerun_core::engine::descriptor::SignIn {
+            url: "oauth2/device/verify".into(),
+            code: String::new(),
+        };
+        assert_eq!(
+            sign_in_parts(
+                "https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=A",
+                &hostless
+            )
+            .0,
+            None
+        );
+    }
+
+    #[test]
+    fn a_code_with_spaces_after_it_is_not_a_code() {
+        let m = hytale_markers();
+        assert_eq!(sign_in_parts("Authorization code: is required", &m).1, None);
+        assert_eq!(sign_in_parts("Authorization code: ", &m).1, None);
+    }
+
+    #[test]
+    fn no_markers_means_nothing_is_offered() {
+        let m = homerun_core::engine::descriptor::SignIn::default();
+        assert_eq!(
+            sign_in_parts(
+                "https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=A",
+                &m
+            ),
+            (None, None)
+        );
+    }
+
+    /// Hytale's server, observed 2026-09-23: every line ends in a colour
+    /// reset, even with `-Dterminal.ansi=false`. The address and code are
+    /// passed on without it.
+    #[test]
+    fn terminal_escapes_are_not_part_of_an_address_or_a_code() {
+        let m = homerun_core::engine::descriptor::SignIn {
+            url: "oauth.accounts.hytale.com/oauth2/device/verify".into(),
+            code: "Enter code: ".into(),
+        };
+        assert_eq!(
+            sign_in_parts(
+                "\u{1b}[m[INFO] [AbstractCommand] Or visit: https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=AbCd\u{1b}[m",
+                &m
+            ).0.as_deref(),
+            Some("https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=AbCd")
+        );
+        assert_eq!(
+            sign_in_parts(
+                "\u{1b}[m[INFO] [AbstractCommand] Enter code: AbCd\u{1b}[m",
+                &m
+            )
+            .1
+            .as_deref(),
+            Some("AbCd")
+        );
+        assert_eq!(without_escapes("\u{1b}[38;5;46mok\u{1b}[0m\u{1b}[m"), "ok");
+    }
+
+    /// The downloader prints the address with the code in it, then bare.
+    /// Observed 2026-09-23: the bare one used to win.
+    #[test]
+    fn a_bare_address_never_replaces_the_one_with_the_code_in_it() {
+        let full = "https://h.example/verify?user_code=AbCd";
+        assert!(replaces_sign_in_url(None, "https://h.example/verify"));
+        assert!(!replaces_sign_in_url(
+            Some(full),
+            "https://h.example/verify"
+        ));
+        assert!(replaces_sign_in_url(Some("https://h.example/verify"), full));
+        assert!(!replaces_sign_in_url(Some(full), full));
+    }
     use homerun_core::engine::descriptor::Extract;
     use std::sync::{Arc, Mutex};
 
@@ -995,6 +1500,8 @@ mod tests {
                 .iter()
                 .map(|p| match p {
                     Progress::Note { phase, .. } | Progress::Bytes { phase, .. } => *phase,
+                    Progress::SignIn { .. } => "sign-in",
+                    Progress::SignedIn => "signed-in",
                 })
                 .collect()
         }

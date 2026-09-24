@@ -284,6 +284,25 @@ pub fn fetch(
                     received,
                     total,
                 } => (phase, Some(received), total, None),
+                // The same generic events a game's extension sends, so a host
+                // has one sign-in card whatever is asking.
+                fetcher::Progress::SignIn { url, code } => {
+                    out.send(Event::SignIn {
+                        server_id: id.into(),
+                        purpose: crate::extensions::Purpose::Download,
+                        url,
+                        code,
+                        expires_in_secs: None,
+                    });
+                    return;
+                }
+                fetcher::Progress::SignedIn => {
+                    out.send(Event::SignedIn {
+                        server_id: id.into(),
+                        purpose: crate::extensions::Purpose::Download,
+                    });
+                    return;
+                }
             };
             out.send(Event::FetchProgress {
                 server_id: id.into(),

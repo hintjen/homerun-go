@@ -14,6 +14,66 @@ use std::{
     time::{Duration, Instant},
 };
 
+// Reinvoke this test executable as a vendor's downloader. It behaves like
+// Hytale's: with no credentials it prints a verification address and code
+// (and here "the person" signs in at once by writing the file), it prints the
+// current version on request, and otherwise writes the game's archive where
+// it was told. Arguments are `key=value` words, which libtest treats as
+// filters that match nothing, so they reach this function untouched.
+#[test]
+fn fake_tool() {
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |prefix: &str| {
+        args.iter()
+            .find_map(|a| a.strip_prefix(prefix).map(String::from))
+    };
+    let Some(credentials) = arg("creds=") else {
+        return;
+    };
+    let credentials = PathBuf::from(credentials);
+    // libtest has already printed "test fake_tool ... " with no newline; a
+    // real downloader's output starts on a line of its own.
+    println!();
+    if !credentials.exists() {
+        println!("Please visit the following URL to authenticate:");
+        println!("https://example.invalid/oauth2/device/verify?user_code=TEST1234");
+        println!("Authorization code: TEST1234");
+        fs::write(
+            &credentials,
+            r#"{"token":"only the downloader reads this"}"#,
+        )
+        .unwrap();
+    }
+    std::io::stdout().flush().unwrap();
+    if args.iter().any(|a| a == "offline") {
+        println!("could not reach the vendor");
+        std::process::exit(3);
+    }
+    if args.iter().any(|a| a == "version") {
+        println!("2026.09.23-fake");
+        std::io::stdout().flush().unwrap();
+        // Exit before libtest prints its summary, so the version is the last line.
+        std::process::exit(0);
+    }
+    if let Some(output) = arg("out=") {
+        let downloads = credentials.with_file_name("downloads");
+        let count: u32 = fs::read_to_string(&downloads)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+            .unwrap_or(0);
+        fs::write(&downloads, (count + 1).to_string()).unwrap();
+        let mut zip = zip::ZipWriter::new(fs::File::create(&output).unwrap());
+        zip.start_file(
+            "server-files/marker.txt",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(b"from the vendor").unwrap();
+        zip.finish().unwrap();
+        std::process::exit(0);
+    }
+}
+
 // Reinvoke this test executable as a real game. No vendor software or licence
 // acceptance is involved. Its save proves the runner sent quit, not just kill.
 #[test]
@@ -1047,6 +1107,158 @@ fn a_game_that_needs_java_is_refused_when_the_host_sends_none() {
             .contains("did not provide one"),
         "{error}"
     );
+    h.eof();
+}
+
+/// Serve `body` over plain HTTP on loopback for a few requests. Loopback only,
+/// so no firewall is involved and nothing leaves the machine.
+fn serve(body: Vec<u8>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming().take(4) {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                request.push(byte[0]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
+        }
+    });
+    port
+}
+
+/// A game whose files only its owner's account can fetch: the runner fetches
+/// the vendor's pinned downloader, passes on its sign-in prompt, unpacks what
+/// it downloads, stamps it with the version the downloader reported -- and on
+/// the next start asks again, finds nothing newer, and downloads nothing.
+#[test]
+fn a_vendor_downloader_signs_in_downloads_and_is_skipped_once_current() {
+    let mut f = Fixture::new();
+    let name = if cfg!(windows) { "fake.exe" } else { "fake" };
+    let tool = f.root.join("runtime/fake").join(name);
+    let digest = fetcher::digest_of(&tool).unwrap();
+    let port = serve(fs::read(&tool).unwrap());
+    let libtest = ["--exact", "fake_tool", "--nocapture", "--test-threads=1"];
+    let args: Vec<&str> = libtest
+        .iter()
+        .copied()
+        .chain(["out={output}", "creds={credentials}"])
+        .collect();
+    let version_args: Vec<&str> = libtest
+        .iter()
+        .copied()
+        .chain(["version", "creds={credentials}"])
+        .collect();
+    f.d["platforms"][platform::HOST]["runtime"] = json!({
+        "source": "tool",
+        "tool": { "url": format!("http://127.0.0.1:{port}/{name}"), "sha256": digest,
+                  "extract": "none", "exe": "fake" },
+        "args": args,
+        "versionArgs": version_args,
+        "signIn": { "url": "example.invalid/oauth2/device/verify", "code": "Authorization code: " },
+        "extract": "zip"
+    });
+
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    let sign_in: Vec<&Value> = h.seen.iter().filter(|v| v["event"] == "sign-in").collect();
+    assert!(
+        sign_in.iter().any(|v| v["url"]
+            == "https://example.invalid/oauth2/device/verify?user_code=TEST1234"
+            && v["code"] == "TEST1234"
+            && v["purpose"] == "download"),
+        "the host must be shown where to sign in: {sign_in:?}"
+    );
+    // The same generic card an extension uses, closed once the downloader
+    // finished signed in.
+    let shown = h.seen.iter().position(|v| v["event"] == "sign-in").unwrap();
+    let closed = h
+        .seen
+        .iter()
+        .position(|v| v["event"] == "signed-in" && v["purpose"] == "download")
+        .expect("the sign-in card is closed");
+    assert!(shown < closed);
+    assert_eq!(
+        fs::read_to_string(f.root.join("runtime/fake/server-files/marker.txt")).unwrap(),
+        "from the vendor"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("runtime/fake/.homerun-build"))
+            .unwrap()
+            .trim(),
+        "2026.09.23-fake",
+        "a vendor build is known by the version its downloader reported"
+    );
+    assert!(
+        f.root.join("credentials/fake.json").is_file(),
+        "the sign-in lives in the runner's cache, beside steamcmd"
+    );
+    assert!(
+        !f.root.join("server/credentials").exists() && !f.root.join("server/fake.json").exists()
+    );
+    assert!(
+        !f.root.join("runtime/fake/.download.zip").exists(),
+        "the archive is not kept"
+    );
+    h.eof();
+
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    assert!(
+        !h.seen.iter().any(|v| v["event"] == "sign-in"),
+        "a saved sign-in is reused"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("credentials/downloads"))
+            .unwrap()
+            .trim(),
+        "1",
+        "a current install is not downloaded again"
+    );
+    h.eof();
+}
+
+/// Offline, a vendor's downloader cannot say what is current. A server that
+/// is installed still starts on what is installed, rather than a network
+/// outage stopping a game that needs nothing new.
+#[test]
+fn an_installed_vendor_build_is_used_when_the_downloader_cannot_check() {
+    let mut f = Fixture::new();
+    let name = if cfg!(windows) { "fake.exe" } else { "fake" };
+    let tool = f.root.join("runtime/fake").join(name);
+    let digest = fetcher::digest_of(&tool).unwrap();
+    let port = serve(fs::read(&tool).unwrap());
+    fs::create_dir_all(f.root.join("credentials")).unwrap();
+    fs::write(f.root.join("credentials/fake.json"), "{}").unwrap();
+    f.d["platforms"][platform::HOST]["runtime"] = json!({
+        "source": "tool",
+        "tool": { "url": format!("http://127.0.0.1:{port}/{name}"), "sha256": digest,
+                  "extract": "none", "exe": "fake" },
+        "args": ["--exact", "fake_tool", "--nocapture", "--test-threads=1", "out={output}", "creds={credentials}"],
+        "versionArgs": ["--exact", "fake_tool", "--nocapture", "--test-threads=1", "offline", "creds={credentials}"],
+        "extract": "zip"
+    });
+
+    let mut h = Host::new();
+    h.send(f.start());
+    h.until("server-started");
+    assert!(
+        !f.root.join("credentials/downloads").exists(),
+        "nothing is downloaded when the check fails and a build is installed"
+    );
+    assert!(h.seen.iter().any(|v| v["event"] == "fetch-progress"
+        && v["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("using the one installed"))));
     h.eof();
 }
 

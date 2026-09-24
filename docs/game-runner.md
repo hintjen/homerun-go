@@ -29,6 +29,46 @@ binary so a manifest cannot claim a capability the artifact beside it lacks.
 Adding a name is how a descriptor field becomes something a host may rely on;
 removing one is a break.
 
+### A vendor's own downloader (`runtime-vendor-tool`)
+
+`runtime.source: "tool"` is for a game whose server files only its owner's
+account can fetch -- Hytale is the first. The descriptor pins the vendor's
+downloader (`runtime.tool`: url, sha256, extract, exe); the runner fetches and
+verifies it into `<tools dir>/tools/<game>-<sha12>/` like any direct download,
+then runs it with `runtime.args`. Only `{output}` (where to write the archive)
+and `{credentials}` (the downloader's own sign-in file) are substituted, and
+`validate` refuses any other placeholder, so nothing a player chose reaches its
+command line.
+
+The first time, the downloader asks the person to sign in. Lines matching
+`runtime.signIn` become the generic **`sign-in`** event with `purpose:
+"download"` (`url`, and `code` when the downloader prints one separately) --
+the same event a game's extension sends, so a host has one sign-in card. The
+person approves in their own browser and the download continues; once the
+downloader finishes signed in, **`signed-in`** closes the card. A link is
+offered only if it is `https://` on the host the `signIn.url` marker starts
+with (or a subdomain of it) -- not merely if it mentions the marker, which a
+query string can -- so `validate` refuses a marker that does not start with a
+host name. Nothing is typed into the
+downloader, and an agreement prompt ends the run exactly as it does for
+steamcmd. The sign-in file lives at `<tools dir>/credentials/<game>.json` --
+beside steamcmd, never in a server folder, so never in a backup -- and the
+runner never reads it.
+
+What the downloader fetches cannot be pinned: the vendor serves only its
+current build. So every fetch first runs `runtime.versionArgs`; the last line
+of output is the version. If it matches the runtime's stamp nothing is
+downloaded; otherwise the archive is downloaded to `{output}`, unpacked into
+the runtime directory and stamped with that version. If the check fails and a
+build is installed, the installed build is used (an outage should not stop a
+server that needs nothing new). Unpacking adds and overwrites; it does not
+delete files a newer build dropped.
+
+The downloader's own URL is unversioned for Hytale, so when the vendor
+replaces it the pinned digest stops matching and the fetch fails with a
+checksum error until the descriptor is re-pinned. That is deliberate: an
+executable Homerun runs is one somebody vetted.
+
 The commands are hello, fetch, start, start-tunnel, console, stop, status,
 shutdown, extension-status and extension-forget (see *Game extensions*). A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad

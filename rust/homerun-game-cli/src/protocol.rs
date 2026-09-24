@@ -79,6 +79,10 @@ pub const FEATURES: &[&str] = &[
     // because a runner that reads the source but not the field -- or the
     // reverse -- cannot run such a game.
     "vendor-runtime",
+    // `runtime.source: "tool"`: a pinned vendor downloader run with the
+    // person's own sign-in, shown through the generic `sign-in` event with
+    // `purpose: "download"`. An older runner refuses the source by name.
+    "runtime-vendor-tool",
     // `requires.java` and `launch.program: "java"`, with `javaPath` on `fetch`
     // and `start`: the server runs on a Java the host supplies and the runner
     // checks. An older runner ignores both fields and has no program to run,
@@ -817,6 +821,13 @@ mod tests {
                 received: None,
                 total: None,
                 message: None,
+            },
+            Event::SignIn {
+                server_id: "s1".into(),
+                purpose: crate::extensions::Purpose::Download,
+                url: "https://example.invalid/device".into(),
+                code: None,
+                expires_in_secs: None,
             },
             Event::ServerLog {
                 server_id: "s1".into(),
