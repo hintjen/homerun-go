@@ -18,10 +18,17 @@ use std::{
 struct Record {
     mounts: Vec<Mount>,
     job: String,
+    /// The vendor runtime version whose directory the mounts were made in.
+    /// Absent for every other source, and in a record written before
+    /// runtimes could be versioned: both mean `<root>/<id>` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
 }
 
 pub struct Runtime {
     pub dir: PathBuf,
+    /// The vendor runtime version `dir` holds, if it is one.
+    version: Option<String>,
     journal: PathBuf,
     mounts: Vec<Mount>,
     job: Option<Arc<Job>>,
@@ -30,13 +37,16 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn acquire(d: &GameDescriptor, root: &Path) -> Result<Self> {
-        Self::acquire_with(d, root, Job::recover)
+    /// `version` is the vendor runtime's, already checked by
+    /// `prepare::runtime_version`; `None` for every other source.
+    pub fn acquire(d: &GameDescriptor, root: &Path, version: Option<&str>) -> Result<Self> {
+        Self::acquire_with(d, root, version, Job::recover)
     }
 
     fn acquire_with(
         d: &GameDescriptor,
         root: &Path,
+        version: Option<&str>,
         recover: impl FnOnce(&str) -> std::result::Result<(), String>,
     ) -> Result<Self> {
         fs::create_dir_all(root)
@@ -49,8 +59,22 @@ impl Runtime {
         })?;
         let lock = confined(&root, &format!(".homerun-runtime-{}.lock", d.id))?;
         let lease = RuntimeLease::acquire(&lock).map_err(|e| fail(codes::BUSY, e))?;
+        // The lock and the journal stay per game, not per version: one
+        // runner at a time owns a game's runtimes, whichever version it runs.
+        let game = confined(&root, &d.id)?;
+        let dir_for = |version: Option<&str>| -> Result<PathBuf> {
+            match version {
+                None => Ok(game.clone()),
+                Some(v) => {
+                    homerun_core::engine::fetch::check_runtime_version(v)
+                        .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?;
+                    confined(&game, v)
+                }
+            }
+        };
         let mut owned = Self {
-            dir: confined(&root, &d.id)?,
+            dir: dir_for(version)?,
+            version: version.map(str::to_string),
             journal: confined(&root, &format!(".homerun-mounts-{}.json", d.id))?,
             mounts: vec![],
             job: None,
@@ -69,10 +93,15 @@ impl Runtime {
                         ));
                     }
                 }
+                // The mounts are in the directory of the version that made
+                // them, which need not be the one being launched now.
+                let recorded_dir = dir_for(record.version.as_deref())?;
                 // Do not arm Drop cleanup until the entire old tree is gone.
                 recover(&record.job).map_err(|e| fail(codes::FETCH_FAILED, e))?;
+                let current = std::mem::replace(&mut owned.dir, recorded_dir);
                 owned.mounts = record.mounts;
                 owned.cleanup()?;
+                owned.dir = current;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => {
@@ -171,6 +200,7 @@ impl Runtime {
         let bytes = serde_json::to_vec(&Record {
             mounts: d.saves.mounts.clone(),
             job: name,
+            version: self.version.clone(),
         })
         .unwrap();
         let mut record = fs::OpenOptions::new()
@@ -273,11 +303,12 @@ mod tests {
                     server: "world".into(),
                 }],
                 job: "Global\\HomerunSave-test-unconfirmed".into(),
+                version: None,
             })
             .unwrap(),
         )
         .unwrap();
-        let result = Runtime::acquire_with(&d, &root.join("runtime"), |_| {
+        let result = Runtime::acquire_with(&d, &root.join("runtime"), None, |_| {
             Err("injected exit query failure".into())
         });
         assert!(
@@ -300,6 +331,56 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// A journal from a vendor runtime names the version whose directory
+    /// its mounts are in, and recovery looks there -- not in the version
+    /// being launched now, and not in the game's own directory. A real
+    /// directory where the record says a link is makes recovery refuse, which
+    /// is how this can see where it looked.
+    #[test]
+    fn recovery_looks_in_the_version_directory_the_journal_names() {
+        let root = std::env::temp_dir().join(format!("versioned-recovery-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("runtime/fake/1.4.5.8/server")).unwrap();
+        let d: GameDescriptor = serde_json::from_value(serde_json::json!({"id":"fake"})).unwrap();
+        let journal = root.join("runtime/.homerun-mounts-fake.json");
+        let write = |version: Option<&str>| {
+            fs::write(
+                &journal,
+                serde_json::to_vec(&Record {
+                    mounts: vec![Mount {
+                        runtime: "server".into(),
+                        server: "world".into(),
+                    }],
+                    job: "Global\\HomerunSave-test-versioned".into(),
+                    version: version.map(str::to_string),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        };
+
+        write(Some("1.4.5.8"));
+        let result = Runtime::acquire_with(&d, &root.join("runtime"), Some("1.4.6.0"), |_| Ok(()));
+        assert!(
+            result.is_err(),
+            "recovery did not look in the recorded version's directory"
+        );
+        assert!(
+            root.join("runtime/fake/1.4.5.8/server").is_dir(),
+            "nothing was removed"
+        );
+
+        // A journal from before versions means the game's own directory,
+        // which has nothing at `server`: recovery completes.
+        write(None);
+        let runtime = Runtime::acquire_with(&d, &root.join("runtime"), Some("1.4.6.0"), |_| Ok(()))
+            .expect("an old journal names the unversioned directory");
+        assert!(runtime.dir.ends_with("fake/1.4.6.0") || runtime.dir.ends_with("fake\\1.4.6.0"));
+        assert!(!journal.exists());
+        drop(runtime);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn job_creation_failure_leaves_no_mount_or_recovery_record() {
         let root = std::env::temp_dir().join(format!("mounted-job-failure-{}", std::process::id()));
@@ -310,7 +391,7 @@ mod tests {
             "id":"fake", "saves":{"mounts":[{"runtime":"server", "server":"world"}]}
         }))
         .unwrap();
-        let mut runtime = Runtime::acquire(&d, &root.join("runtime")).unwrap();
+        let mut runtime = Runtime::acquire(&d, &root.join("runtime"), None).unwrap();
         let result = runtime.install_with(&d, &root.join("server"), |_| {
             Err("injected job creation failure".into())
         });

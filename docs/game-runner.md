@@ -41,6 +41,9 @@ ever adds files around it. `launch.exe` may name a program inside one
 disk. `fetch-progress` and `fetch-complete` are unchanged: components report
 progress like the main download, and `fetch-complete` names the runtime
 directory. `doctor`'s disk check still sizes only the main download.
+With a `vendor` runtime the runtime directory is the chosen version's, so
+each version gets its own copy of every component; a component itself is
+always pinned and never a `vendor` download, which `validate` refuses.
 
 The commands are hello, fetch, start, start-tunnel, console, stop, status and
 shutdown. A new process announces ready, and hello repeats the announcement.
@@ -120,6 +123,37 @@ quit is unaffected.
 
 See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
+## Vendor runtimes: `runtimeVersion` and `--runtime-version`
+
+A descriptor whose `platforms[host].runtime.source` is `vendor` downloads the
+game's server from the vendor's own site in a version the player chose. The
+host resolves that choice -- including "latest" -- to one concrete version
+and sends it as `runtimeVersion` on `fetch` and `start`; standalone, it is
+`--runtime-version <v>` on fetch, launch, probe, verify and doctor. The runner
+never lists or picks versions. A vendor descriptor with no version is refused
+with `descriptor_invalid`, as is a version that is not dotted digits
+(`^[0-9]+(\.[0-9]+){0,5}$`): it becomes part of a URL and a directory name.
+Other sources ignore the field. Both the source and the field are covered by
+the `vendor-runtime` feature name, so a host refuses such a game on a runner
+that does not advertise it.
+
+Each version has its own runtime directory, `<runtimeRoot>/<id>/<version>`,
+stamped `v<version>`; the fetch, the executable check, a `runtime` working
+directory, `{runtimeDir}` and save mounts all use it. The lock and the save
+mount journal stay per game, and the journal records which version's
+directory its mounts were made in, so recovery unlinks them there.
+
+The download itself is not pinned by digest, so the fetcher holds it to what
+can be checked: HTTPS to the descriptor's address, no redirect off that
+origin, a body exactly as long as announced (and as `size`), every archive
+member's CRC, `stripComponents` for an archive nested under one top folder,
+and no traversal. The sha256 of the first download of each version is
+recorded per machine in `<runtimeRoot>/<id>/.vendor-hashes.json`, and every
+later download of that version must match it. When it does not, the fetch
+fails with `fetch_failed` saying the vendor's file for that version changed,
+and nothing is unpacked or run. Deleting the record is how a person who has
+checked the new file tells this machine to trust it.
+
 ## `prepare.rs`: directories, settings and resources
 
 For cwd-relative assets, `launch.cwdBase: "runtime"` selects the shared runtime
@@ -155,6 +189,7 @@ slug resolved as `games/<slug>/game.json`.
 ```text
 homerun-game doctor games/example/game.json --json
 homerun-game fetch games/example/game.json --accept-licence --json
+homerun-game fetch games/terraria/game.json --accept-licence --runtime-version 1.4.5.8
 homerun-game launch games/example/game.json --accept-licence --server-dir servers/example
 homerun-game stop --server-dir servers/example
 homerun-game probe games/example/game.json --accept-licence --observe-seconds 10
@@ -205,6 +240,11 @@ runtime stamp alone is not enough; its executable must exist too.
 **Ready marker but no server-started:** a declared port has not been observed
 in the owned Windows process tree (or the root PID on the Linux development
 adapter). Do not publish guessed ports to get past the check.
+
+**"The vendor's file for that version changed":** the bytes served for a
+version this machine has already downloaded differ from the first download.
+Nothing was run. Find out why before deleting that version's entry from
+`<runtimeRoot>/<id>/.vendor-hashes.json`.
 
 **Standalone lock left behind:** confirm the old runner and server have exited,
 then remove that folder's `.homerun-runner.lock`. A stale PID is never killed.

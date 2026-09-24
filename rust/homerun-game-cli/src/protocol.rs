@@ -69,6 +69,13 @@ pub const FEATURES: &[&str] = &[
     // fetches them, so the host must refuse such a descriptor on an older
     // runner rather than launch into a missing program.
     "runtime-components",
+    // A runtime fetched from the vendor's own site in the version the host
+    // chose: `platforms[host].runtime.source: "vendor"` with its `url`
+    // pattern, `stripComponents` and `versionSetting`, and the `runtimeVersion`
+    // field on `fetch` and `start` that carries the chosen version. One name,
+    // because a runner that reads the source but not the field -- or the
+    // reverse -- cannot run such a game.
+    "vendor-runtime",
 ];
 
 /// What Electron sends.
@@ -89,6 +96,13 @@ pub enum Command {
         /// acceptance â€” see `homerun_core::engine::licence`.
         #[serde(default)]
         licence_accepted: bool,
+        /// The concrete version of a vendor runtime, which the host resolved
+        /// from the player's choice (including "latest"). Required for a
+        /// `vendor` source and ignored for every other; see
+        /// `homerun_core::engine::fetch::check_runtime_version` for what a
+        /// version may look like. Feature `vendor-runtime`.
+        #[serde(default)]
+        runtime_version: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Start {
@@ -110,6 +124,10 @@ pub enum Command {
         bind_address: Option<String>,
         #[serde(default)]
         licence_accepted: bool,
+        /// As on `Fetch`: the vendor runtime's version, and the directory the
+        /// server is launched from.
+        #[serde(default)]
+        runtime_version: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     StartTunnel {
@@ -367,15 +385,26 @@ mod tests {
                 descriptor: serde_json::json!({ "id": "rust" }),
                 runtime_root: "C:\\rt".into(),
                 licence_accepted: true,
+                runtime_version: None,
             }
         );
+
+        match parse(
+            r#"{"cmd":"fetch","serverId":"s1","descriptor":{"id":"terraria"},
+                "runtimeRoot":"/rt","licenceAccepted":true,"runtimeVersion":"1.4.5.8"}"#,
+        ) {
+            Command::Fetch {
+                runtime_version, ..
+            } => assert_eq!(runtime_version.as_deref(), Some("1.4.5.8")),
+            other => panic!("{other:?}"),
+        }
 
         let start = parse(
             r#"{"cmd":"start","serverId":"s1","descriptor":{"id":"rust"},
                 "serverDir":"C:\\servers\\s1","runtimeRoot":"C:\\rt",
                 "serverName":"Keep","settings":{"maxPlayers":"10"},
                 "secrets":{"rcon":"x"},"bindAddress":"127.0.0.1",
-                "licenceAccepted":true}"#,
+                "licenceAccepted":true,"runtimeVersion":"1.4.5.8"}"#,
         );
         match start {
             Command::Start {
@@ -386,8 +415,10 @@ mod tests {
                 secrets,
                 bind_address,
                 licence_accepted,
+                runtime_version,
                 ..
             } => {
+                assert_eq!(runtime_version.as_deref(), Some("1.4.5.8"));
                 assert_eq!(server_id, "s1");
                 assert_eq!(server_dir, "C:\\servers\\s1");
                 assert_eq!(server_name, "Keep");
@@ -450,6 +481,31 @@ mod tests {
             panic!("expected a start");
         };
         assert!(!licence_accepted, "absent must mean not accepted");
+    }
+
+    /// A host refuses a vendor-sourced game on a runner that does not
+    /// advertise this, so it has to be advertised by exactly this name --
+    /// and a runner that dropped `runtime-mounts` would be a break.
+    #[test]
+    fn this_runner_advertises_the_vendor_runtime() {
+        assert!(FEATURES.contains(&"runtime-mounts"));
+        assert!(FEATURES.contains(&"vendor-runtime"));
+    }
+
+    /// Absent is the answer for every source but vendor, and for a desktop
+    /// built before the field.
+    #[test]
+    fn a_start_without_a_runtime_version_has_none() {
+        let Command::Start {
+            runtime_version, ..
+        } = parse(
+            r#"{"cmd":"start","serverId":"s1","descriptor":{},"serverDir":"/s",
+                "runtimeRoot":"/rt"}"#,
+        )
+        else {
+            panic!("expected a start");
+        };
+        assert!(runtime_version.is_none());
     }
 
     /// Either side may be newer. Neither may fall over because of it.

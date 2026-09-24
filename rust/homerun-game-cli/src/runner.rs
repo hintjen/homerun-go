@@ -347,21 +347,27 @@ fn run(
     out: &Output,
     audit: &crate::network::Audit,
 ) -> Result<()> {
-    let (id, root) = match &command {
+    let (id, root, version) = match &command {
         Command::Fetch {
             server_id,
             runtime_root,
+            runtime_version,
             ..
         }
         | Command::Start {
             server_id,
             runtime_root,
+            runtime_version,
             ..
-        } => (server_id.clone(), prepare::absolute(runtime_root)?),
+        } => (
+            server_id.clone(),
+            prepare::absolute(runtime_root)?,
+            prepare::runtime_version(d, runtime_version.as_deref())?,
+        ),
         _ => unreachable!(),
     };
-    let mut runtime_owner = crate::runtime::Runtime::acquire(d, &root)?;
-    let runtime = prepare::fetch(d, &root, &id, out, stop)?;
+    let mut runtime_owner = crate::runtime::Runtime::acquire(d, &root, version.as_deref())?;
+    let runtime = prepare::fetch(d, &root, version.as_deref(), &id, out, stop)?;
     let Command::Start {
         server_dir,
         server_name,

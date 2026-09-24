@@ -133,6 +133,12 @@ pub struct Catalog {
     /// Path inside the game module, relative — `art/card.png`.
     #[serde(default)]
     pub art: String,
+    /// `Some(false)` when Homerun no longer offers new servers of this game.
+    /// It stays in the catalog so existing servers keep working; the API
+    /// refuses a new one and the UI leaves it off the create page. Absent
+    /// means listed. The runner ignores it.
+    #[serde(default)]
+    pub listed: Option<bool>,
 }
 
 /// Terms a person must accept before anything is downloaded.
@@ -238,6 +244,38 @@ pub struct Setting {
     /// A closed set of legal values, when there is one. `string` only.
     #[serde(default)]
     pub options: Vec<Value>,
+
+    // The ones below are for the UI and the API. The runner reads none of
+    // them: a setting's value reaches the launch line the same way whatever
+    // they say. They live here because these types are the schema's source
+    // of truth, so the pinned schema can describe every field a descriptor
+    // carries.
+    /// What each option is called on screen, keyed by the option. The
+    /// option is still what is stored and templated.
+    #[serde(default)]
+    pub option_labels: BTreeMap<String, String>,
+    /// Chosen once, when the server is created: the game reads it only when
+    /// its world is made. The API refuses a change afterwards.
+    #[serde(default)]
+    pub create_only: bool,
+    /// Show the setting only while every named setting holds one of the
+    /// listed values. Display only; a hidden setting keeps its value.
+    #[serde(default)]
+    pub show_when: BTreeMap<String, Vec<String>>,
+    /// A heading to show the setting under.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// A value to keep out of sight: the UI masks it, with a way to reveal
+    /// it for the owner. Not a host-generated secret (`{secret:<name>}`); a
+    /// player chooses it and shares it, like a server password.
+    #[serde(default)]
+    pub secret: bool,
+    /// Where the setting's choices come from when they are read at run time
+    /// rather than listed in `options`. The only value today is `versions`:
+    /// the game's list of versions, for the setting a vendor runtime's
+    /// `versionSetting` names. For the UI; the runner ignores it.
+    #[serde(default)]
+    pub options_from: Option<String>,
 }
 
 /// What a machine must have before it is offered this game.
@@ -300,18 +338,42 @@ pub struct Runtime {
     #[serde(default)]
     pub source: RuntimeSource,
 
-    // --- direct ---
+    // --- direct and vendor ---
     /// Vendor URL. **Ours is never a mirror**: we do not redistribute a game.
+    ///
+    /// For a [`RuntimeSource::Vendor`] runtime this is a pattern: it carries
+    /// `{version}` or `{versionDigits}` (the version with its dots removed),
+    /// and nothing else in braces. See [`super::fetch::vendor_url`].
     #[serde(default)]
     pub url: Option<String>,
     /// Lowercase hex, 64 characters. Not optional for a direct source — an
-    /// unpinned download is an executable we cannot vouch for.
+    /// unpinned download is an executable we cannot vouch for. Not used by a
+    /// vendor source, whose versions are chosen after the descriptor is
+    /// signed; see [`RuntimeSource::Vendor`] for what stands in for it.
     #[serde(default)]
     pub sha256: Option<String>,
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]
     pub extract: Option<Extract>,
+    /// Leading path components to drop from every archive entry when a zip
+    /// is unpacked, like `tar --strip-components`. For an archive that nests
+    /// everything under one top folder -- Terraria's `1458/` -- so that
+    /// `launch.exe` does not have to name a folder that changes with every
+    /// version. An entry with no components left is skipped (and still
+    /// checked). `None` is zero.
+    #[serde(default)]
+    pub strip_components: Option<u32>,
+
+    // --- vendor ---
+    /// The `string` setting that holds the player's choice of version.
+    ///
+    /// The host reads it and resolves it -- including a choice such as
+    /// "latest" -- to one concrete version, which it hands to the runner
+    /// explicitly. The engine never lists or resolves versions; it only
+    /// checks that this names a setting the descriptor declares.
+    #[serde(default)]
+    pub version_setting: Option<String>,
 
     // --- steamcmd ---
     #[serde(default)]
@@ -335,6 +397,18 @@ pub enum RuntimeSource {
     /// Valve's `steamcmd`, **anonymous login only**. A game that needs an
     /// account that owns it is out of scope, not a feature request.
     Steamcmd,
+    /// The vendor's own HTTPS site, named by the signed descriptor, in the
+    /// version a player chose.
+    ///
+    /// No digest can be pinned for a version released after the descriptor
+    /// was signed, so what stands in for one is: the address is fixed by the
+    /// descriptor (and a redirect off its origin is refused), each download
+    /// is checked for length and every archive member's CRC, and the sha256
+    /// of the first download of a version is recorded on this machine and
+    /// required of every later download of that version. A vendor that
+    /// changes the file behind a version it already served is refused, and
+    /// nothing is run. See `games/PLATFORM.md`, "Runtime sources".
+    Vendor,
     /// A source added after this build shipped.
     ///
     /// This variant is why [`Runtime`] is not a tagged enum: an unknown
@@ -830,6 +904,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(StopVia::Interrupt).unwrap(),
             "interrupt"
+        );
+        assert_eq!(
+            serde_json::to_value(RuntimeSource::Vendor).unwrap(),
+            "vendor"
         );
         assert_eq!(serde_json::to_value(Extract::Zip).unwrap(), "zip");
         assert_eq!(

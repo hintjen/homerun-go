@@ -55,11 +55,33 @@ pub fn schema() -> Value {
     let runtime = json!({
         "type": "object",
         "properties": {
-            "source": { "enum": ["direct", "steamcmd"] },
-            "url": { "type": ["string", "null"] },
-            "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "source": { "enum": ["direct", "steamcmd", "vendor"] },
+            "url": {
+                "type": ["string", "null"],
+                "description":
+                    "For vendor, an https pattern carrying {version} or \
+                     {versionDigits} (the version without its dots) in \
+                     its path, and no other placeholder."
+            },
+            "sha256": {
+                "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$",
+                "description": "Direct only. A vendor download is not pinned by digest."
+            },
             "size": { "type": ["integer", "null"], "minimum": 0 },
             "extract": { "enum": ["none", "zip", null] },
+            "stripComponents": {
+                "type": ["integer", "null"], "minimum": 0,
+                "description":
+                    "Leading path components dropped from every zip \
+                     entry, for an archive nested under one top folder."
+            },
+            "versionSetting": {
+                "type": ["string", "null"],
+                "description":
+                    "Vendor only: the string setting holding the \
+                     player's choice of version. The host resolves it to \
+                     one concrete version; the engine never lists them."
+            },
             "appId": { "type": ["integer", "null"], "minimum": 0 },
             "buildId": { "type": ["string", "null"] },
             "sizeMb": { "type": ["integer", "null"], "minimum": 0 }
@@ -74,6 +96,17 @@ pub fn schema() -> Value {
                 "if": { "properties": { "source": { "const": "steamcmd" } },
                         "required": ["source"] },
                 "then": { "required": ["appId"] }
+            },
+            {
+                "if": { "properties": { "source": { "const": "vendor" } },
+                        "required": ["source"] },
+                "then": {
+                    "required": ["url", "extract", "versionSetting"],
+                    "properties": {
+                        "url": { "type": "string", "pattern": "^https://" },
+                        "extract": { "const": "zip" }
+                    }
+                }
             }
         ]
     });
@@ -111,7 +144,14 @@ pub fn schema() -> Value {
                 "properties": {
                     "blurb": { "type": "string" },
                     "accent": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
-                    "art": { "type": "string" }
+                    "art": { "type": "string" },
+                    "listed": {
+                        "type": ["boolean", "null"],
+                        "description":
+                            "false when Homerun no longer offers new servers of this \
+                             game. Existing servers keep working. Absent means listed. \
+                             The runner ignores it."
+                    }
                 }
             },
             "licence": {
@@ -186,6 +226,53 @@ pub fn schema() -> Value {
                                  A non-empty list is the only way to say \"pick one of \
                                  these\" -- there is no enum type. An empty list means \
                                  the same as no list."
+                        },
+                        "optionLabels": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description":
+                                "What each option is called on screen, keyed by the \
+                                 option. The option is still what is stored and sent. \
+                                 For the UI; the runner ignores it."
+                        },
+                        "createOnly": {
+                            "type": "boolean",
+                            "description":
+                                "Chosen once, when the server is created: the game \
+                                 reads it only when its world is made. The API refuses \
+                                 a change afterwards. The runner ignores it."
+                        },
+                        "showWhen": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            },
+                            "description":
+                                "Show the setting only while every named setting holds \
+                                 one of the listed values. Display only; one level \
+                                 deep. The runner ignores it."
+                        },
+                        "group": {
+                            "type": ["string", "null"],
+                            "description":
+                                "A heading to show the setting under. The runner \
+                                 ignores it."
+                        },
+                        "secret": {
+                            "type": "boolean",
+                            "description":
+                                "A value the UI masks, such as a server password a \
+                                 player chooses. Not a host-generated {secret:<name>}. \
+                                 The runner ignores it."
+                        },
+                        "optionsFrom": {
+                            "type": ["string", "null"],
+                            "description":
+                                "Where the choices are read from at run time instead of \
+                                 options. Only \"versions\" today: the game's version \
+                                 list, for a vendor runtime's versionSetting. The runner \
+                                 ignores it."
                         }
                     }
                 }
@@ -210,14 +297,25 @@ pub fn schema() -> Value {
                             "type": "array",
                             "description":
                                 "Further pinned pieces of the runtime, each fetched into \
-                                 <runtime dir>/<name> before runtime, e.g. a Java runtime \
+                                 <runtime dir>/<name> before runtime (for a vendor \
+                                 runtime, the chosen version's directory), e.g. a Java runtime \
                                  the vendor does not ship.",
                             "items": {
                                 "type": "object",
                                 "required": ["name", "runtime"],
                                 "properties": {
                                     "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
-                                    "runtime": runtime
+                                    "runtime": {
+                                        "allOf": [runtime],
+                                        "properties": {
+                                            "source": {
+                                                "enum": ["direct", "steamcmd"],
+                                                "description":
+                                                    "A part is always pinned; only the \
+                                                     runtime itself may be a vendor download."
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         },
@@ -387,6 +485,7 @@ mod tests {
                 blurb: "b".into(),
                 accent: "#CD412B".into(),
                 art: "art/card.png".into(),
+                listed: Some(false),
             },
             licence: Some(Licence {
                 name: "Terms".into(),
@@ -412,6 +511,12 @@ mod tests {
                 min: Some(1),
                 max: Some(200),
                 options: vec![serde_json::json!("10")],
+                option_labels: BTreeMap::from([("10".to_string(), "Ten".to_string())]),
+                create_only: true,
+                show_when: BTreeMap::from([("mode".to_string(), vec!["hard".to_string()])]),
+                group: Some("Players".into()),
+                secret: true,
+                options_from: Some("versions".into()),
             }],
             requires: Requires {
                 ram_mb: 8192,
@@ -427,6 +532,8 @@ mod tests {
                         sha256: Some("a".repeat(64)),
                         size: Some(1),
                         extract: Some(Extract::Zip),
+                        strip_components: Some(1),
+                        version_setting: Some("version".into()),
                         app_id: Some(258550),
                         build_id: Some("1".into()),
                         size_mb: Some(9000),
@@ -446,6 +553,8 @@ mod tests {
                             sha256: Some("b".repeat(64)),
                             size: Some(2),
                             extract: Some(Extract::Zip),
+                            strip_components: Some(1),
+                            version_setting: Some("version".into()),
                             app_id: None,
                             build_id: None,
                             size_mb: None,
@@ -534,10 +643,12 @@ mod tests {
         );
     }
 
-    /// Walk an object's property names, skipping the two maps whose keys are
-    /// the descriptor author's rather than ours.
+    /// Walk an object's property names, skipping the maps whose keys are the
+    /// descriptor author's rather than ours.
     fn collect_keys(value: &Value, out: &mut impl FnMut(&str)) {
-        const CALLER_KEYED: [&str; 3] = ["env", "keys", "platforms"];
+        // `optionLabels` is keyed by a setting's options and `showWhen` by
+        // other settings' keys - the author's names, like the other three.
+        const CALLER_KEYED: [&str; 5] = ["env", "keys", "platforms", "optionLabels", "showWhen"];
         match value {
             Value::Object(map) => {
                 for (key, child) in map {

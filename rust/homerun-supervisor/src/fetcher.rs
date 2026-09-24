@@ -116,7 +116,32 @@ pub fn fetch(plan: &Plan, ctx: &Context) -> Result<Fetched, String> {
             sha256,
             size,
             extract,
-        } => direct(Path::new(dir), url, sha256, *size, *extract, ctx),
+            strip_components,
+        } => direct(
+            Path::new(dir),
+            url,
+            sha256,
+            *size,
+            *extract,
+            *strip_components,
+            ctx,
+        ),
+        Plan::Vendor {
+            dir,
+            url,
+            version,
+            size,
+            strip_components,
+            record,
+        } => vendor(
+            Path::new(dir),
+            url,
+            version,
+            *size,
+            *strip_components,
+            Path::new(record),
+            ctx,
+        ),
         Plan::SteamCmd {
             dir,
             app_id,
@@ -134,6 +159,7 @@ fn direct(
     expected: &str,
     size: Option<u64>,
     extract: homerun_core::engine::descriptor::Extract,
+    strip_components: u32,
     ctx: &Context,
 ) -> Result<Fetched, String> {
     use homerun_core::engine::descriptor::Extract;
@@ -144,7 +170,7 @@ fn direct(
     // a multi-gigabyte transfer again. It is never the finished artefact: the
     // rename happens only after the digest matches.
     let part = dir.join(".download.part");
-    download(url, &part, size, ctx)?;
+    download(url, &part, size, None, ctx)?;
 
     (ctx.on_progress)(Progress::Note {
         phase: "verify",
@@ -169,7 +195,7 @@ fn direct(
                 phase: "extract",
                 message: "unpacking".to_string(),
             });
-            extract_zip(&part, dir, ctx)?;
+            extract_zip_stripped(&part, dir, strip_components, ctx)?;
             let _ = fs::remove_file(&part);
         }
         Extract::None => {
@@ -194,11 +220,163 @@ fn direct(
     })
 }
 
+// ─── the vendor's own site, in a version the host chose ─────────────────────
+
+/// The per-machine record of what each version's download hashed to the
+/// first time, keyed by version.
+type VendorHashes = std::collections::BTreeMap<String, String>;
+
+/// Fetch one version of a runtime from the vendor's own site.
+///
+/// No digest can be pinned for a version released after the descriptor was
+/// signed, so this checks what can be checked and remembers the rest:
+///
+///  - the address is the descriptor's, over HTTPS, and a redirect to any
+///    other origin is refused rather than followed;
+///  - the bytes that arrive are as many as the server said it would send,
+///    and as many as `size` says when the descriptor gives one;
+///  - every archive member is read to its end so its CRC is checked, and
+///    nothing is unpacked outside the version's directory;
+///  - the sha256 of the first download of each version is recorded in
+///    `record`, and every later download of that version must match it. A
+///    vendor that changed the file behind a version is refused before
+///    anything is unpacked, let alone run.
+///
+/// The record is written only after the download has been unpacked, so a
+/// download that failed any other check is never what later ones are held
+/// to.
+fn vendor(
+    dir: &Path,
+    url: &str,
+    version: &str,
+    size: Option<u64>,
+    strip_components: u32,
+    record: &Path,
+    ctx: &Context,
+) -> Result<Fetched, String> {
+    // The plan already refused these; a plan can also arrive as JSON from a
+    // host, so they are refused again where the bytes are fetched.
+    homerun_core::engine::fetch::check_runtime_version(version).map_err(|e| e.to_string())?;
+    if !homerun_core::engine::fetch::vendor_scheme_allowed(url) {
+        return Err(
+            "this game's download address is not a secure (https) one, so Homerun \
+             will not download from it."
+                .to_string(),
+        );
+    }
+    let origin = reqwest::Url::parse(url)
+        .map_err(|_| "this game's download address is not one Homerun can read.".to_string())?;
+
+    // Read before anything is fetched: a record that cannot be read is
+    // refused rather than treated as empty, which would forget every
+    // version this machine has already seen.
+    let mut known = read_vendor_hashes(record)?;
+
+    fs::create_dir_all(dir).map_err(|_| cannot_write(dir))?;
+
+    // Never resumed. A resumed transfer would be hashed as one file made of
+    // two responses, and the first download of a version is the one every
+    // later download is held to.
+    let part = dir.join(".download.part");
+    let _ = fs::remove_file(&part);
+    download(url, &part, None, Some(&origin), ctx)?;
+
+    if let Some(size) = size {
+        let arrived = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+        if arrived != size {
+            let _ = fs::remove_file(&part);
+            return Err(format!(
+                "the download from {} was not the size this game's server should be, \
+                 so Homerun has not used it. Trying again usually fixes this.",
+                host_of(url)
+            ));
+        }
+    }
+
+    (ctx.on_progress)(Progress::Note {
+        phase: "verify",
+        message: "checking the download".to_string(),
+    });
+    let actual = digest_of(&part)?;
+    let first = match known.get(version) {
+        Some(expected) if !expected.eq_ignore_ascii_case(&actual) => {
+            let _ = fs::remove_file(&part);
+            return Err(format!(
+                "the file {} serves for version {version} is not the one this computer \
+                 downloaded for that version before. The vendor's file for that version \
+                 changed, so Homerun has not unpacked or run it.",
+                host_of(url)
+            ));
+        }
+        Some(_) => false,
+        None => true,
+    };
+
+    (ctx.on_progress)(Progress::Note {
+        phase: "extract",
+        message: "unpacking".to_string(),
+    });
+    // Nothing in this directory is a runtime until it is stamped again: an
+    // unpack interrupted after this point must not look finished.
+    let _ = fs::remove_file(dir.join(STAMP));
+    let unpacked = extract_zip_stripped(&part, dir, strip_components, ctx);
+    let _ = fs::remove_file(&part);
+    unpacked?;
+
+    if first {
+        known.insert(version.to_string(), actual);
+        write_vendor_hashes(record, &known)?;
+    }
+
+    let build_id = homerun_core::engine::fetch::vendor_build_id(version);
+    stamp(dir, &build_id)?;
+    Ok(Fetched {
+        dir: dir.to_path_buf(),
+        build_id,
+    })
+}
+
+fn read_vendor_hashes(record: &Path) -> Result<VendorHashes, String> {
+    match fs::read(record) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
+            format!(
+                "Homerun's record of this game's downloads ({}) cannot be read, so it \
+                 cannot tell whether a download is the one it saw before. Nothing was \
+                 downloaded.",
+                record.display()
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(VendorHashes::new()),
+        Err(_) => Err(cannot_read(record)),
+    }
+}
+
+/// Written beside itself and renamed into place, so an interruption leaves
+/// the old record or the new one and never half of either.
+fn write_vendor_hashes(record: &Path, known: &VendorHashes) -> Result<(), String> {
+    if let Some(parent) = record.parent() {
+        fs::create_dir_all(parent).map_err(|_| cannot_write(parent))?;
+    }
+    let staged = record.with_extension("json.part");
+    let text = serde_json::to_vec_pretty(known).map_err(|_| cannot_write(record))?;
+    fs::write(&staged, text).map_err(|_| cannot_write(record))?;
+    fs::rename(&staged, record).map_err(|_| {
+        let _ = fs::remove_file(&staged);
+        cannot_write(record)
+    })
+}
+
 /// Stream a URL to a file, resuming a `.part` that is already there.
+///
+/// `same_origin`, when given, is the only origin a redirect may lead to; a
+/// redirect anywhere else ends the download instead of being followed. The
+/// scheme is part of the origin, so an HTTPS address cannot be redirected to
+/// plain HTTP either.
 fn download(
     url: &str,
     part: &Path,
     expected_size: Option<u64>,
+    same_origin: Option<&reqwest::Url>,
     ctx: &Context,
 ) -> Result<(), String> {
     let already = fs::metadata(part).map(|m| m.len()).unwrap_or(0);
@@ -212,7 +390,7 @@ fn download(
         if already > size {
             // Longer than it should be: not a prefix of anything. Start over.
             let _ = fs::remove_file(part);
-            return download(url, part, expected_size, ctx);
+            return download(url, part, expected_size, same_origin, ctx);
         }
     }
 
@@ -226,8 +404,24 @@ fn download(
     runtime.block_on(async {
         tokio::select! {
            result = async {
+        let redirects = match same_origin {
+            None => reqwest::redirect::Policy::default(),
+            Some(origin) => {
+                let origin = origin.origin();
+                reqwest::redirect::Policy::custom(move |attempt| {
+                    if attempt.previous().len() >= 10 {
+                        attempt.error("too many redirects")
+                    } else if attempt.url().origin() == origin {
+                        attempt.follow()
+                    } else {
+                        attempt.error("redirected off the vendor's site")
+                    }
+                })
+            }
+        };
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
+            .redirect(redirects)
             .build()
             .map_err(|_| "Homerun could not start a download on this computer.".to_string())?;
 
@@ -236,10 +430,28 @@ fn download(
             request = request.header(reqwest::header::RANGE, format!("bytes={already}-"));
         }
 
-        let mut response = request
-            .send()
-            .await
-            .map_err(|_| format!("Homerun could not reach {}.", host_of(url)))?;
+        let mut response = request.send().await.map_err(|err| {
+            if err.is_redirect() && same_origin.is_some() {
+                format!(
+                    "{} tried to send this download somewhere other than its own site, \
+                     so Homerun has not followed it.",
+                    host_of(url)
+                )
+            } else {
+                format!("Homerun could not reach {}.", host_of(url))
+            }
+        })?;
+        if let Some(origin) = same_origin {
+            // The policy above already refused anything else; this is the
+            // check that does not depend on how a redirect was followed.
+            if response.url().origin() != origin.origin() {
+                return Err(format!(
+                    "{} tried to send this download somewhere other than its own \
+                     site, so Homerun has not followed it.",
+                    host_of(url)
+                ));
+            }
+        }
 
         if !response.status().is_success() {
             return Err(format!(
@@ -265,6 +477,10 @@ fn download(
         };
 
         let mut received = if resuming { already } else { 0 };
+        let started_at = received;
+        // What the server said it would send. A body that ends short of it
+        // is a truncated file, whatever the connection claims.
+        let announced = response.content_length();
         let total = response
             .content_length()
             .map(|len| len + if resuming { already } else { 0 })
@@ -299,6 +515,13 @@ fn download(
         }
 
         file.flush().map_err(|_| cannot_write(part))?;
+        if announced.is_some_and(|len| received - started_at != len) {
+            return Err(format!(
+                "the download from {} ended before the whole file arrived. Trying \
+                 again usually fixes this.",
+                host_of(url)
+            ));
+        }
         (ctx.on_progress)(Progress::Bytes {
             phase: "download",
             received,
@@ -341,6 +564,24 @@ pub fn digest_of(path: &Path) -> Result<String, String> {
 
 /// Unpack a zip into a directory, refusing anything that would land outside.
 pub fn extract_zip(archive: &Path, into: &Path, ctx: &Context) -> Result<(), String> {
+    extract_zip_stripped(archive, into, 0, ctx)
+}
+
+/// [`extract_zip`], dropping `strip` leading path components from every
+/// entry first -- for an archive that nests everything under one top folder,
+/// such as Terraria's `1458/`.
+///
+/// Every file entry is read to its last byte, including one that stripping
+/// leaves with no name and is skipped: the zip library checks an entry's CRC
+/// only when it reaches the end, so an entry that is not read to the end is
+/// an entry that was never checked. A mismatch is a refusal, not a warning.
+/// Traversal is judged on the entry's full name, before anything is dropped.
+pub fn extract_zip_stripped(
+    archive: &Path,
+    into: &Path,
+    strip: u32,
+    ctx: &Context,
+) -> Result<(), String> {
     let file = fs::File::open(archive).map_err(|_| cannot_read(archive))?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|_| "the download is not an archive Homerun can open.".to_string())?;
@@ -366,7 +607,32 @@ pub fn extract_zip(archive: &Path, into: &Path, ctx: &Context) -> Result<(), Str
             ));
         };
 
-        let target = into.join(relative);
+        // `enclosed_name` allows a `..` that stays inside, such as `a/../b`.
+        // Dropping the leading `a` would turn that into `../b`, one level
+        // above the directory -- where the record of this game's downloads
+        // lives. So a name that is not plain components is refused whenever
+        // anything is being dropped from it.
+        if strip > 0
+            && relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(format!(
+                "the archive contains a file ({}) that would be written outside \
+                 this server's folder, so Homerun has not unpacked it.",
+                entry.name()
+            ));
+        }
+        let stripped: PathBuf = relative.components().skip(strip as usize).collect();
+        if stripped.as_os_str().is_empty() {
+            // Nothing left to name it by. Still read, so it is still checked.
+            if !entry.is_dir() {
+                copy_checked(&mut entry, &mut std::io::sink(), &relative, into)?;
+            }
+            continue;
+        }
+
+        let target = into.join(stripped);
         if entry.is_dir() {
             fs::create_dir_all(&target).map_err(|_| cannot_write(&target))?;
             continue;
@@ -376,7 +642,11 @@ pub fn extract_zip(archive: &Path, into: &Path, ctx: &Context) -> Result<(), Str
         }
 
         let mut out = fs::File::create(&target).map_err(|_| cannot_write(&target))?;
-        std::io::copy(&mut entry, &mut out).map_err(|_| cannot_write(&target))?;
+        copy_checked(&mut entry, &mut out, &relative, &target).map_err(|err| {
+            // Not left behind looking like a file that arrived.
+            drop(fs::remove_file(&target));
+            err
+        })?;
 
         // An archive built on Windows records no Unix mode, so a server
         // binary unpacked on Linux routinely arrives without its execute bit.
@@ -390,6 +660,32 @@ pub fn extract_zip(archive: &Path, into: &Path, ctx: &Context) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+/// Copy one archive entry to its end, telling a damaged entry (a read that
+/// fails, which is how the zip library reports a CRC mismatch) apart from a
+/// disk that would not take it.
+fn copy_checked(
+    entry: &mut impl Read,
+    out: &mut impl Write,
+    name: &Path,
+    target: &Path,
+) -> Result<(), String> {
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        let read = entry.read(&mut buffer).map_err(|_| {
+            format!(
+                "the archive is damaged: {} did not match its checksum, so Homerun \
+                 has not used it. Trying again usually fixes this.",
+                name.display()
+            )
+        })?;
+        if read == 0 {
+            return Ok(());
+        }
+        out.write_all(&buffer[..read])
+            .map_err(|_| cannot_write(target))?;
+    }
 }
 
 // ─── steamcmd ───────────────────────────────────────────────────────────────
@@ -528,7 +824,7 @@ fn steamcmd_binary(ctx: &Context) -> Result<PathBuf, String> {
     // What makes that acceptable is that it is HTTPS direct from Valve and
     // it is the same file Steam's own documentation tells a person to fetch.
     let archive = dir.join("steamcmd.zip");
-    download(STEAMCMD_WINDOWS, &archive, None, ctx)?;
+    download(STEAMCMD_WINDOWS, &archive, None, None, ctx)?;
     extract_zip(&archive, &dir, ctx)?;
     let _ = fs::remove_file(&archive);
 
@@ -800,6 +1096,7 @@ mod tests {
             sha256: expected.clone(),
             size: None,
             extract: Extract::None,
+            strip_components: 0,
         };
 
         let fetched = fetch(&plan, &ctx).expect("the download must succeed");
@@ -827,6 +1124,7 @@ mod tests {
             sha256: "0".repeat(64),
             size: None,
             extract: Extract::None,
+            strip_components: 0,
         };
         let err = fetch(&plan, &ctx).unwrap_err();
         assert!(err.contains("did not arrive intact"), "{err}");
@@ -862,6 +1160,7 @@ mod tests {
             sha256: expected.clone(),
             size: Some(body.len() as u64),
             extract: Extract::None,
+            strip_components: 0,
         };
 
         fetch(&plan, &ctx).expect("a resumed download must still verify");
@@ -896,6 +1195,7 @@ mod tests {
             sha256: expected,
             size: Some(body.len() as u64),
             extract: Extract::None,
+            strip_components: 0,
         };
         fetch(&plan, &ctx).expect("a complete part needs no network");
     }
@@ -1168,6 +1468,7 @@ mod tests {
             sha256: "0".repeat(64),
             size: None,
             extract: Extract::None,
+            strip_components: 0,
         };
         let err = fetch(&plan, &ctx).unwrap_err();
         assert!(err.contains("stopped"), "{err}");
@@ -1184,6 +1485,7 @@ mod tests {
             sha256: "0".repeat(64),
             size: None,
             extract: Extract::None,
+            strip_components: 0,
         };
         let err = fetch(&plan, &ctx).unwrap_err();
         assert!(err.contains("127.0.0.1:1"), "{err}");
@@ -1202,6 +1504,7 @@ mod tests {
                 sha256: "0".repeat(64),
                 size: None,
                 extract: Extract::None,
+                strip_components: 0,
             },
             &ctx,
         )
@@ -1219,5 +1522,406 @@ mod tests {
         let dir = scratch("halfway");
         fs::write(dir.join("server.exe"), b"partial").unwrap();
         assert!(present(&dir).build_id.is_none());
+    }
+
+    // ─── the vendor's own site, in a version the host chose ─────────────────
+
+    /// A loopback server that answers each connection with the next canned
+    /// response, whole. Returns its base address.
+    fn serve_raw(responses: Vec<Vec<u8>>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("loopback");
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                use std::io::BufRead;
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let _ = stream.write_all(&response);
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn ok(body: &[u8]) -> Vec<u8> {
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    }
+
+    fn terraria_zip(marker: &[u8]) -> Vec<u8> {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            writer.add_directory("1458/", options).unwrap();
+            writer
+                .start_file("1458/Linux/TerrariaServer.exe", options)
+                .unwrap();
+            writer.write_all(marker).unwrap();
+            writer
+                .start_file("1458/Windows/serverconfig.txt", options)
+                .unwrap();
+            writer.write_all(b"config").unwrap();
+            writer.finish().unwrap();
+        }
+        buffer.into_inner()
+    }
+
+    struct VendorCase {
+        root: PathBuf,
+        dir: PathBuf,
+        record: PathBuf,
+    }
+
+    fn vendor_case(name: &str) -> VendorCase {
+        let root = scratch(name);
+        VendorCase {
+            dir: root.join("terraria").join("1.4.5.8"),
+            record: root.join("terraria").join(".vendor-hashes.json"),
+            root,
+        }
+    }
+
+    fn vendor_plan(case: &VendorCase, url: String, version: &str, size: Option<u64>) -> Plan {
+        Plan::Vendor {
+            dir: case
+                .root
+                .join("terraria")
+                .join(version)
+                .to_string_lossy()
+                .into_owned(),
+            url,
+            version: version.into(),
+            size,
+            strip_components: 1,
+            record: case.record.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn recorded(case: &VendorCase) -> std::collections::BTreeMap<String, String> {
+        serde_json::from_slice(&fs::read(&case.record).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_first_vendor_download_is_unpacked_stripped_recorded_and_stamped() {
+        let case = vendor_case("vendor-first");
+        let body = terraria_zip(b"server v1");
+        let base = serve_raw(vec![ok(&body)]);
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+
+        let fetched = fetch(
+            &vendor_plan(&case, format!("{base}/s-1458.zip"), "1.4.5.8", None),
+            &ctx,
+        )
+        .expect("a first download is trusted");
+        assert_eq!(fetched.build_id, "v1.4.5.8");
+        assert_eq!(present(&case.dir).build_id.as_deref(), Some("v1.4.5.8"));
+        assert_eq!(
+            fs::read(case.dir.join("Linux/TerrariaServer.exe")).unwrap(),
+            b"server v1",
+            "the top folder is stripped"
+        );
+        assert!(case.dir.join("Windows/serverconfig.txt").exists());
+        assert!(!case.dir.join("1458").exists());
+        assert!(!case.dir.join(".download.part").exists());
+        assert_eq!(recorded(&case)["1.4.5.8"], digest_of_bytes(&body));
+        assert!(recorder.phases().contains(&"verify"));
+        assert!(recorder.phases().contains(&"extract"));
+    }
+
+    fn digest_of_bytes(body: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(body);
+        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Trust on first use, per machine: the same version must be the same
+    /// bytes every time after, and a vendor that swapped the file behind a
+    /// version it already served is refused before anything is unpacked.
+    #[test]
+    fn a_changed_file_behind_a_version_already_seen_is_refused() {
+        let case = vendor_case("vendor-changed");
+        let first = terraria_zip(b"server v1");
+        let same = first.clone();
+        let changed = terraria_zip(b"server v1, quietly different");
+        let base = serve_raw(vec![ok(&first), ok(&same), ok(&changed)]);
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        let plan = vendor_plan(&case, format!("{base}/s.zip"), "1.4.5.8", None);
+
+        fetch(&plan, &ctx).expect("first");
+        fs::remove_dir_all(&case.dir).unwrap();
+        fetch(&plan, &ctx).expect("the same bytes again are the same version");
+
+        fs::remove_dir_all(&case.dir).unwrap();
+        let err = fetch(&plan, &ctx).unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        assert!(err.contains("1.4.5.8"), "{err}");
+        assert!(present(&case.dir).build_id.is_none(), "nothing was stamped");
+        assert!(
+            !case.dir.join("Linux/TerrariaServer.exe").exists(),
+            "nothing was unpacked"
+        );
+        assert!(!case.dir.join(".download.part").exists());
+        assert_eq!(
+            recorded(&case)["1.4.5.8"],
+            digest_of_bytes(&first),
+            "the record keeps what was seen first"
+        );
+    }
+
+    #[test]
+    fn each_version_is_recorded_on_its_own() {
+        let case = vendor_case("vendor-two");
+        let (a, b) = (terraria_zip(b"a"), terraria_zip(b"b"));
+        let base = serve_raw(vec![ok(&a), ok(&b)]);
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        fetch(
+            &vendor_plan(&case, format!("{base}/a.zip"), "1.4.5.8", None),
+            &ctx,
+        )
+        .unwrap();
+        fetch(
+            &vendor_plan(&case, format!("{base}/b.zip"), "1.4.5.9", None),
+            &ctx,
+        )
+        .unwrap();
+        let record = recorded(&case);
+        assert_eq!(record["1.4.5.8"], digest_of_bytes(&a));
+        assert_eq!(record["1.4.5.9"], digest_of_bytes(&b));
+        assert!(case
+            .root
+            .join("terraria/1.4.5.9/Linux/TerrariaServer.exe")
+            .exists());
+    }
+
+    #[test]
+    fn a_vendor_download_that_ends_early_is_refused_and_not_recorded() {
+        let case = vendor_case("vendor-short");
+        let body = terraria_zip(b"server");
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len() + 100
+        )
+        .into_bytes();
+        response.extend_from_slice(&body);
+        let base = serve_raw(vec![response]);
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        let err = fetch(
+            &vendor_plan(&case, format!("{base}/s.zip"), "1.4.5.8", None),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("ended before") || err.contains("interrupted"),
+            "{err}"
+        );
+        assert!(
+            !case.record.exists(),
+            "a failed download is never the reference"
+        );
+        assert!(present(&case.dir).build_id.is_none());
+    }
+
+    #[test]
+    fn a_vendor_download_of_the_wrong_size_is_refused() {
+        let case = vendor_case("vendor-size");
+        let body = terraria_zip(b"server");
+        let base = serve_raw(vec![ok(&body)]);
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        let err = fetch(
+            &vendor_plan(
+                &case,
+                format!("{base}/s.zip"),
+                "1.4.5.8",
+                Some(body.len() as u64 + 1),
+            ),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("not the size"), "{err}");
+        assert!(!case.record.exists());
+    }
+
+    #[test]
+    fn a_redirect_off_the_vendors_site_is_refused_and_one_on_it_is_followed() {
+        // Another port is another origin.
+        let elsewhere = serve_raw(vec![ok(&terraria_zip(b"not the vendor"))]);
+        let case = vendor_case("vendor-redirect-off");
+        let base = serve_raw(vec![format!(
+            "HTTP/1.1 302 Found\r\nLocation: {elsewhere}/evil.zip\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+        )
+        .into_bytes()]);
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        let err = fetch(
+            &vendor_plan(&case, format!("{base}/s.zip"), "1.4.5.8", None),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("somewhere other than its own site"), "{err}");
+        assert!(!case.record.exists());
+
+        let case = vendor_case("vendor-redirect-on");
+        // Same origin: the first response points at a path on the same site.
+        let body = terraria_zip(b"moved");
+        let base = serve_raw(vec![
+            b"HTTP/1.1 302 Found\r\nLocation: /moved.zip\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .to_vec(),
+            ok(&body),
+        ]);
+        fetch(
+            &vendor_plan(&case, format!("{base}/s.zip"), "1.4.5.8", None),
+            &ctx,
+        )
+        .expect("a redirect within the vendor's own site is followed");
+        assert_eq!(
+            fs::read(case.dir.join("Linux/TerrariaServer.exe")).unwrap(),
+            b"moved"
+        );
+    }
+
+    #[test]
+    fn a_vendor_address_that_is_not_https_is_refused_without_a_request() {
+        let case = vendor_case("vendor-http");
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        let err = fetch(
+            &vendor_plan(
+                &case,
+                "http://terraria.org/s-1458.zip".into(),
+                "1.4.5.8",
+                None,
+            ),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("https"), "{err}");
+        assert!(recorder.phases().is_empty(), "nothing was attempted");
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_read_is_refused_rather_than_forgotten() {
+        let case = vendor_case("vendor-record");
+        fs::create_dir_all(case.record.parent().unwrap()).unwrap();
+        fs::write(&case.record, b"{ not json").unwrap();
+        let recorder = Recorder::new();
+        let ctx = context(&case.root, &recorder, &NEVER);
+        let err = fetch(
+            &vendor_plan(&case, "http://127.0.0.1:1/s.zip".into(), "1.4.5.8", None),
+            &ctx,
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot be read"), "{err}");
+        assert_eq!(fs::read(&case.record).unwrap(), b"{ not json");
+    }
+
+    // ─── stripping, and every member's CRC ──────────────────────────────────
+
+    #[test]
+    fn strip_components_drops_the_top_folder_and_keeps_the_rest() {
+        let dir = scratch("strip");
+        let archive = dir.join("a.zip");
+        fs::write(&archive, terraria_zip(b"bin")).unwrap();
+        let out = dir.join("out");
+        let recorder = Recorder::new();
+        let ctx = context(&dir, &recorder, &NEVER);
+        extract_zip_stripped(&archive, &out, 1, &ctx).unwrap();
+        assert_eq!(
+            fs::read(out.join("Linux/TerrariaServer.exe")).unwrap(),
+            b"bin"
+        );
+        assert!(!out.join("1458").exists());
+
+        let two = dir.join("two");
+        extract_zip_stripped(&archive, &two, 2, &ctx).unwrap();
+        assert_eq!(fs::read(two.join("TerrariaServer.exe")).unwrap(), b"bin");
+        assert_eq!(fs::read(two.join("serverconfig.txt")).unwrap(), b"config");
+    }
+
+    /// `a/../b` stays inside when nothing is dropped, and would be `../b` --
+    /// beside the record of downloads -- once `a` is.
+    #[test]
+    fn stripping_cannot_turn_a_harmless_dot_dot_into_an_escape() {
+        let dir = scratch("strip-escape");
+        let archive = dir.join("evil.zip");
+        fs::write(&archive, zip_with(&[("1458/../x.txt", b"up one")])).unwrap();
+        let out = dir.join("out");
+        let recorder = Recorder::new();
+        let ctx = context(&dir, &recorder, &NEVER);
+        let err = extract_zip_stripped(&archive, &out, 1, &ctx).unwrap_err();
+        assert!(err.contains("outside"), "{err}");
+        assert!(!dir.join("x.txt").exists());
+    }
+
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (name, body) in entries {
+                writer.start_file(*name, options).unwrap();
+                writer.write_all(body).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        buffer.into_inner()
+    }
+
+    fn flip(bytes: &mut [u8], marker: &[u8]) {
+        let at = bytes
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .expect("the marker is stored as written");
+        bytes[at] ^= 0x01;
+    }
+
+    /// A member whose bytes do not match its CRC is refused -- including one
+    /// that stripping leaves with no name, which is still read to its end.
+    #[test]
+    fn a_member_that_fails_its_crc_is_refused_even_when_it_is_stripped_away() {
+        let dir = scratch("crc");
+        let recorder = Recorder::new();
+        let ctx = context(&dir, &recorder, &NEVER);
+
+        let mut damaged = stored_zip(&[
+            ("1458/ok.txt", b"fine"),
+            ("1458/server.bin", b"MARKER-server-bytes"),
+        ]);
+        flip(&mut damaged, b"MARKER-server-bytes");
+        let archive = dir.join("damaged.zip");
+        fs::write(&archive, &damaged).unwrap();
+        let err = extract_zip_stripped(&archive, &dir.join("out"), 1, &ctx).unwrap_err();
+        assert!(err.contains("damaged"), "{err}");
+        assert!(
+            !dir.join("out/server.bin").exists(),
+            "a member that failed its check is not left looking whole"
+        );
+
+        let mut top = stored_zip(&[("README-MARKER", b"TOPLEVEL-MARKER"), ("1458/a", b"a")]);
+        flip(&mut top, b"TOPLEVEL-MARKER");
+        let archive = dir.join("top.zip");
+        fs::write(&archive, &top).unwrap();
+        let err = extract_zip_stripped(&archive, &dir.join("top"), 1, &ctx).unwrap_err();
+        assert!(err.contains("damaged"), "{err}");
     }
 }

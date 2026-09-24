@@ -14,6 +14,13 @@
         },
         "blurb": {
           "type": "string"
+        },
+        "listed": {
+          "description": "false when Homerun no longer offers new servers of this game. Existing servers keep working. Absent means listed. The runner ignores it.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -223,7 +230,7 @@
       "additionalProperties": {
         "properties": {
           "components": {
-            "description": "Further pinned pieces of the runtime, each fetched into <runtime dir>/<name> before runtime, e.g. a Java runtime the vendor does not ship.",
+            "description": "Further pinned pieces of the runtime, each fetched into <runtime dir>/<name> before runtime (for a vendor runtime, the chosen version's directory), e.g. a Java runtime the vendor does not ship.",
             "items": {
               "properties": {
                 "name": {
@@ -233,97 +240,156 @@
                 "runtime": {
                   "allOf": [
                     {
-                      "if": {
-                        "properties": {
-                          "source": {
-                            "const": "direct"
+                      "allOf": [
+                        {
+                          "if": {
+                            "properties": {
+                              "source": {
+                                "const": "direct"
+                              }
+                            },
+                            "required": [
+                              "source"
+                            ]
+                          },
+                          "then": {
+                            "required": [
+                              "url",
+                              "sha256"
+                            ]
                           }
                         },
-                        "required": [
-                          "source"
-                        ]
-                      },
-                      "then": {
-                        "required": [
-                          "url",
-                          "sha256"
-                        ]
-                      }
-                    },
-                    {
-                      "if": {
-                        "properties": {
-                          "source": {
-                            "const": "steamcmd"
+                        {
+                          "if": {
+                            "properties": {
+                              "source": {
+                                "const": "steamcmd"
+                              }
+                            },
+                            "required": [
+                              "source"
+                            ]
+                          },
+                          "then": {
+                            "required": [
+                              "appId"
+                            ]
                           }
                         },
-                        "required": [
-                          "source"
-                        ]
+                        {
+                          "if": {
+                            "properties": {
+                              "source": {
+                                "const": "vendor"
+                              }
+                            },
+                            "required": [
+                              "source"
+                            ]
+                          },
+                          "then": {
+                            "properties": {
+                              "extract": {
+                                "const": "zip"
+                              },
+                              "url": {
+                                "pattern": "^https://",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "url",
+                              "extract",
+                              "versionSetting"
+                            ]
+                          }
+                        }
+                      ],
+                      "properties": {
+                        "appId": {
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "buildId": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "extract": {
+                          "enum": [
+                            "none",
+                            "zip",
+                            null
+                          ]
+                        },
+                        "sha256": {
+                          "description": "Direct only. A vendor download is not pinned by digest.",
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "size": {
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "sizeMb": {
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "source": {
+                          "enum": [
+                            "direct",
+                            "steamcmd",
+                            "vendor"
+                          ]
+                        },
+                        "stripComponents": {
+                          "description": "Leading path components dropped from every zip entry, for an archive nested under one top folder.",
+                          "minimum": 0,
+                          "type": [
+                            "integer",
+                            "null"
+                          ]
+                        },
+                        "url": {
+                          "description": "For vendor, an https pattern carrying {version} or {versionDigits} (the version without its dots) in its path, and no other placeholder.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "versionSetting": {
+                          "description": "Vendor only: the string setting holding the player's choice of version. The host resolves it to one concrete version; the engine never lists them.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
                       },
-                      "then": {
-                        "required": [
-                          "appId"
-                        ]
-                      }
+                      "type": "object"
                     }
                   ],
                   "properties": {
-                    "appId": {
-                      "minimum": 0,
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    },
-                    "buildId": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "extract": {
-                      "enum": [
-                        "none",
-                        "zip",
-                        null
-                      ]
-                    },
-                    "sha256": {
-                      "pattern": "^[0-9a-f]{64}$",
-                      "type": [
-                        "string",
-                        "null"
-                      ]
-                    },
-                    "size": {
-                      "minimum": 0,
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    },
-                    "sizeMb": {
-                      "minimum": 0,
-                      "type": [
-                        "integer",
-                        "null"
-                      ]
-                    },
                     "source": {
+                      "description": "A part is always pinned; only the runtime itself may be a vendor download.",
                       "enum": [
                         "direct",
                         "steamcmd"
                       ]
-                    },
-                    "url": {
-                      "type": [
-                        "string",
-                        "null"
-                      ]
                     }
-                  },
-                  "type": "object"
+                  }
                 }
               },
               "required": [
@@ -408,6 +474,34 @@
                     "appId"
                   ]
                 }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "source": {
+                      "const": "vendor"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "extract": {
+                      "const": "zip"
+                    },
+                    "url": {
+                      "pattern": "^https://",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "extract",
+                    "versionSetting"
+                  ]
+                }
               }
             ],
             "properties": {
@@ -432,6 +526,7 @@
                 ]
               },
               "sha256": {
+                "description": "Direct only. A vendor download is not pinned by digest.",
                 "pattern": "^[0-9a-f]{64}$",
                 "type": [
                   "string",
@@ -455,10 +550,27 @@
               "source": {
                 "enum": [
                   "direct",
-                  "steamcmd"
+                  "steamcmd",
+                  "vendor"
+                ]
+              },
+              "stripComponents": {
+                "description": "Leading path components dropped from every zip entry, for an archive nested under one top folder.",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
                 ]
               },
               "url": {
+                "description": "For vendor, an https pattern carrying {version} or {versionDigits} (the version without its dots) in its path, and no other placeholder.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "versionSetting": {
+                "description": "Vendor only: the string setting holding the player's choice of version. The host resolves it to one concrete version; the engine never lists them.",
                 "type": [
                   "string",
                   "null"
@@ -589,8 +701,19 @@
     "settings": {
       "items": {
         "properties": {
+          "createOnly": {
+            "description": "Chosen once, when the server is created: the game reads it only when its world is made. The API refuses a change afterwards. The runner ignores it.",
+            "type": "boolean"
+          },
           "default": {
             "description": "May be null, which drops the setting's flag from the launch line. A string default may contain {serverName} and no other placeholder."
+          },
+          "group": {
+            "description": "A heading to show the setting under. The runner ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "key": {
             "type": "string"
@@ -612,12 +735,40 @@
               "null"
             ]
           },
+          "optionLabels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "What each option is called on screen, keyed by the option. The option is still what is stored and sent. For the UI; the runner ignores it.",
+            "type": "object"
+          },
           "options": {
             "description": "A closed set of choices, for a string setting only. A non-empty list is the only way to say \"pick one of these\" -- there is no enum type. An empty list means the same as no list.",
             "items": {
               "type": "string"
             },
             "type": "array"
+          },
+          "optionsFrom": {
+            "description": "Where the choices are read from at run time instead of options. Only \"versions\" today: the game's version list, for a vendor runtime's versionSetting. The runner ignores it.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "secret": {
+            "description": "A value the UI masks, such as a server password a player chooses. Not a host-generated {secret:<name>}. The runner ignores it.",
+            "type": "boolean"
+          },
+          "showWhen": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "Show the setting only while every named setting holds one of the listed values. Display only; one level deep. The runner ignores it.",
+            "type": "object"
           },
           "type": {
             "enum": [

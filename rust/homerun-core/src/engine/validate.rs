@@ -38,7 +38,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use super::descriptor::{
-    ConsoleVia, GameDescriptor, PlayersVia, Setting, SettingKind, StopVia, SCHEMA_VERSION,
+    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, PlayersVia, Setting, SettingKind,
+    StopVia, SCHEMA_VERSION,
 };
 use super::settings::SERVER_NAME_PLACEHOLDER;
 use super::template::{self, Placeholder};
@@ -575,7 +576,87 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
                 &format!("the \"{name}\" part of this game's {host} download"),
                 r,
             );
+            if component.runtime.source == super::descriptor::RuntimeSource::Vendor {
+                r.problems.push(format!(
+                    "the \"{name}\" part of this game's {host} download comes from the \
+                     vendor's site, and a part has to be pinned: only the download itself \
+                     may follow the version a player chose."
+                ));
+            }
         }
+        if platform.runtime.source == super::descriptor::RuntimeSource::Vendor {
+            check_vendor(d, host, &platform.runtime, r);
+        }
+        if platform.runtime.strip_components.unwrap_or(0) > 0
+            && platform.runtime.extract != Some(super::descriptor::Extract::Zip)
+        {
+            r.problems.push(format!(
+                "this game's {host} download says to drop folders from the archive it \
+                 unpacks, and it is not unpacked as an archive."
+            ));
+        }
+    }
+}
+
+/// A download from the vendor's own site, in the version a player chose.
+///
+/// The address is the one thing the signed descriptor fixes, so it is held
+/// to more than a direct download's: secure, on the vendor's own site, with
+/// the version somewhere in its path and nothing else templated into it.
+fn check_vendor(
+    d: &GameDescriptor,
+    host: &str,
+    runtime: &super::descriptor::Runtime,
+    r: &mut Report,
+) {
+    use super::fetch::{vendor_scheme_allowed, vendor_url_problem};
+
+    match runtime.url.as_deref() {
+        None => r
+            .problems
+            .push(format!("this game's {host} download has no address.")),
+        Some(url) => {
+            if !vendor_scheme_allowed(url) {
+                r.problems.push(format!(
+                    "this game's {host} download address is not a secure (https) one, \
+                     so Homerun would not download from it."
+                ));
+            }
+            if let Some(problem) = vendor_url_problem(url) {
+                r.problems
+                    .push(format!("this game's {host} download address {problem}."));
+            }
+        }
+    }
+    if runtime.extract != Some(super::descriptor::Extract::Zip) {
+        r.problems.push(format!(
+            "this game's {host} download comes from the vendor's site in a version a \
+             player chooses, and Homerun can only unpack those when they are zip \
+             archives."
+        ));
+    }
+    match runtime.version_setting.as_deref() {
+        None => r.problems.push(format!(
+            "this game's {host} download comes in a version a player chooses, and the \
+             descriptor does not say which setting holds that choice."
+        )),
+        Some(key) => match d.setting(key) {
+            None => r.problems.push(format!(
+                "this game's {host} download takes its version from a setting called \
+                 \"{key}\", which this game does not declare."
+            )),
+            Some(setting) if setting.kind != SettingKind::String => r.problems.push(format!(
+                "this game's {host} download takes its version from the setting \
+                     \"{key}\", and that setting has to be text."
+            )),
+            Some(_) => {}
+        },
+    }
+    if runtime.sha256.is_some() {
+        r.warnings.push(format!(
+            "this game's {host} download comes in a version a player chooses, so the \
+             checksum it gives is not used."
+        ));
     }
 }
 
@@ -676,6 +757,9 @@ fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
         for value in file.keys.values() {
             check_placeholders(value, Site::Host, &setting_keys, &port_names, r);
         }
+        if matches!(file.format, ConfigFormat::Json) {
+            check_json_keys(file, r);
+        }
     }
 
     for path in &d.saves.paths {
@@ -687,6 +771,30 @@ fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
              be backed up."
                 .into(),
         );
+    }
+}
+
+/// Managed JSON keys are dotted paths (`crate::json_config`). A path with an
+/// empty segment reaches nothing, and two paths where one is a prefix of the
+/// other ask for the same member to be both a value and a group of values.
+fn check_json_keys(file: &ConfigFile, r: &mut Report) {
+    for key in file.keys.keys() {
+        if crate::json_config::segments(key).is_none() {
+            r.problems.push(format!(
+                "\"{key}\" in {} is not a setting path: parts are separated by single dots.",
+                file.file
+            ));
+        }
+    }
+    for a in file.keys.keys() {
+        for b in file.keys.keys() {
+            if b.len() > a.len() && b.starts_with(a.as_str()) && b.as_bytes()[a.len()] == b'.' {
+                r.problems.push(format!(
+                    "{} sets both \"{a}\" and \"{b}\", so \"{a}\" would have to be a value and a group of values at once.",
+                    file.file
+                ));
+            }
+        }
     }
 }
 
@@ -1153,6 +1261,20 @@ mod tests {
     }
 
     #[test]
+    fn a_component_is_never_a_vendor_download() {
+        let problems = with_components(json!([{ "name": "jre", "runtime": {
+            "source": "vendor", "url": "https://x.invalid/{version}.zip",
+            "extract": "zip", "versionSetting": "version" } }]));
+        assert!(
+            says(
+                &problems,
+                "the \"jre\" part of this game's win32-x64 download comes from the vendor's site"
+            ),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
     fn a_component_name_is_used_once() {
         let part = json!({ "name": "jre", "runtime": {
             "source": "direct", "url": "https://x.invalid/a.zip", "sha256": GOOD_SHA } });
@@ -1197,6 +1319,47 @@ mod tests {
     }
 
     // ─── paths ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn json_config_keys_must_be_usable_paths() {
+        let problems = problems_of(
+            json!({ "config": [{ "file": "config.json", "format": "json",
+            "keys": { "a..b": "x", "Defaults.": "y" } }] }),
+        );
+        assert_eq!(
+            problems
+                .iter()
+                .filter(|p| p.contains("not a setting path"))
+                .count(),
+            2,
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_json_key_cannot_be_both_a_value_and_a_group() {
+        let problems = problems_of(
+            json!({ "config": [{ "file": "config.json", "format": "json",
+            "keys": { "Defaults": "x", "Defaults.GameMode": "y" } }] }),
+        );
+        assert!(
+            problems.iter().any(|p| p.contains("a value and a group")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn dotted_keys_are_fine_in_json_and_not_checked_as_paths_elsewhere() {
+        let ok = problems_of(
+            json!({ "config": [{ "file": "config.json", "format": "json",
+            "keys": { "Defaults.GameMode": "x", "MaxPlayers": "y" } }] }),
+        );
+        assert!(
+            !ok.iter()
+                .any(|p| p.contains("setting path") || p.contains("a group")),
+            "{ok:?}"
+        );
+    }
 
     #[test]
     fn a_path_that_leaves_the_server_folder_is_refused() {
@@ -1494,6 +1657,98 @@ mod tests {
             !warnings.iter().any(|w| w.contains("leaves out both")),
             "{warnings:#?}"
         );
+    }
+
+    // ─── a download from the vendor's own site ─────────────────────────────
+
+    fn vendor_patch(runtime: serde_json::Value) -> serde_json::Value {
+        let mut base = json!({
+            "source": "vendor",
+            "url": "https://terraria.org/api/download/pc-dedicated-server/terraria-server-{versionDigits}.zip",
+            "extract": "zip",
+            "stripComponents": 1,
+            "versionSetting": "version"
+        });
+        deep_merge(&mut base, &runtime);
+        json!({
+            "settings": [
+                { "key": "hostname", "type": "string", "label": "Server name", "default": "{serverName}" },
+                { "key": "maxPlayers", "type": "int", "label": "Max players", "default": 10, "min": 1, "max": 200 },
+                { "key": "worldSize", "type": "int", "label": "Map size", "default": 3000, "min": 1000, "max": 6000 },
+                { "key": "seed", "type": "int", "label": "Seed", "default": null },
+                { "key": "version", "type": "string", "label": "Version", "default": "latest" }
+            ],
+            "platforms": { "win32-x64": { "runtime": base } }
+        })
+    }
+
+    #[test]
+    fn a_vendor_download_named_by_version_is_valid() {
+        let p = problems_of(vendor_patch(json!({})));
+        assert!(p.is_empty(), "{p:#?}");
+    }
+
+    #[test]
+    fn a_vendor_download_must_be_https_with_a_version_in_its_path() {
+        let p = problems_of(vendor_patch(
+            json!({ "url": "http://terraria.org/{version}.zip" }),
+        ));
+        assert!(says(&p, "not a secure (https) one"), "{p:#?}");
+        let p = problems_of(vendor_patch(
+            json!({ "url": "https://terraria.org/server.zip" }),
+        ));
+        assert!(says(&p, "does not say where the version goes"), "{p:#?}");
+        let p = problems_of(vendor_patch(
+            json!({ "url": "https://terraria.org/{version}/{setting:hostname}.zip" }),
+        ));
+        assert!(says(&p, "the only placeholders"), "{p:#?}");
+        let p = problems_of(vendor_patch(json!({ "url": null })));
+        assert!(says(&p, "has no address"), "{p:#?}");
+    }
+
+    #[test]
+    fn a_vendor_download_must_be_a_zip() {
+        for extract in [json!("none"), json!(null)] {
+            let p = problems_of(vendor_patch(json!({ "extract": extract })));
+            assert!(says(&p, "zip archives"), "{p:#?}");
+        }
+    }
+
+    #[test]
+    fn a_vendor_download_names_the_text_setting_that_holds_its_version() {
+        let p = problems_of(vendor_patch(json!({ "versionSetting": null })));
+        assert!(says(&p, "which setting holds that choice"), "{p:#?}");
+        let p = problems_of(vendor_patch(json!({ "versionSetting": "release" })));
+        assert!(
+            says(&p, "\"release\", which this game does not declare"),
+            "{p:#?}"
+        );
+        let p = problems_of(vendor_patch(json!({ "versionSetting": "maxPlayers" })));
+        assert!(says(&p, "has to be text"), "{p:#?}");
+    }
+
+    #[test]
+    fn a_checksum_on_a_vendor_download_is_warned_about_as_unused() {
+        let mut base: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+        deep_merge(
+            &mut base,
+            &vendor_patch(json!({ "sha256": "a".repeat(64) })),
+        );
+        let r = report(&serde_json::from_value(base).unwrap());
+        assert!(r.ok(), "{:#?}", r.problems);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("not used")),
+            "{:#?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn dropping_folders_from_something_that_is_not_unpacked_is_refused() {
+        let p = problems_of(json!({ "platforms": { "win32-x64": { "runtime": {
+            "stripComponents": 1 } } } }));
+        assert!(says(&p, "not unpacked as an archive"), "{p:#?}");
     }
 
     // ─── secrets ───────────────────────────────────────────────────────────

@@ -111,14 +111,47 @@ pub fn confined(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(p)
 }
 
+/// The version a vendor runtime is fetched and launched in.
+///
+/// `None` for every other source, whatever was asked for: a version means
+/// nothing to a pinned download or to steamcmd. For a vendor source the
+/// host must name one -- it resolves the player's choice, including
+/// "latest"; the runner never does -- and it must be dotted digits, because
+/// it becomes part of a URL and a directory name.
+pub fn runtime_version(d: &GameDescriptor, requested: Option<&str>) -> Result<Option<String>> {
+    if !engine::fetch::is_vendor(d, platform::HOST) {
+        return Ok(None);
+    }
+    let Some(version) = requested else {
+        return Err(fail(
+            codes::DESCRIPTOR_INVALID,
+            "This game is downloaded in the version a player chooses, and no version \
+             was given. Update Homerun Desktop and try again.",
+        ));
+    };
+    engine::fetch::check_runtime_version(version)
+        .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;
+    Ok(Some(version.to_string()))
+}
+
+/// This game's runtime directory: `<root>/<id>`, or `<root>/<id>/<version>`
+/// for a vendor runtime. The one place the runner asks, so the fetch, the
+/// executable check, a runtime working directory and save mounts agree.
+pub fn install_dir(d: &GameDescriptor, root: &Path, version: Option<&str>) -> Result<PathBuf> {
+    engine::fetch::install_dir(d, platform::HOST, &root.to_string_lossy(), version)
+        .map(PathBuf::from)
+        .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))
+}
+
 pub fn fetch(
     d: &GameDescriptor,
     root: &Path,
+    version: Option<&str>,
     id: &str,
     out: &Output,
     stop: &homerun_supervisor::engine::StopSignal,
 ) -> Result<PathBuf> {
-    let dir = root.join(&d.id);
+    let dir = install_dir(d, root, version)?;
     let host = d.platform(platform::HOST).unwrap();
     let exe = &host.launch.exe;
     // A stamp alone does not prove a runtime is whole: the program has to be
@@ -133,8 +166,14 @@ pub fn fetch(
     if exe_part.is_none() && exe_missing {
         present.build_id = None;
     }
-    let plan = engine::fetch::plan(d, platform::HOST, &root.to_string_lossy(), &present)
-        .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?;
+    let plan = engine::fetch::plan_version(
+        d,
+        platform::HOST,
+        &root.to_string_lossy(),
+        &present,
+        version,
+    )
+    .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?;
     let mut parts = Vec::new();
     for component in &host.components {
         let mut part_present = fetcher::present(&dir.join(&component.name));
@@ -148,12 +187,13 @@ pub fn fetch(
                 &root.to_string_lossy(),
                 &component.name,
                 &part_present,
+                version,
             )
             .map_err(|e| fail(codes::FETCH_FAILED, e.to_string()))?,
         );
     }
     let machine = platform::machine_capacity(root);
-    let verdict = engine::doctor::doctor(d, &machine, &present, true);
+    let verdict = engine::doctor::doctor_version(d, &machine, &present, true, version);
     if !verdict.ok {
         return Err(fail(codes::REQUIRES_UNMET, verdict.problems.join(" ")));
     }
@@ -287,11 +327,19 @@ pub fn launch(
         // nothing on screen naming the number responsible. Same rule core
         // applies to an argument, and the same reason.
         let mut keys = Vec::new();
+        let mut typed = Vec::new();
         let mut cleared = Vec::new();
         for (key, template) in &config.keys {
-            match engine::template::fill(template, &bindings)
-                .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?
-            {
+            let invalid = |e: homerun_core::Error| fail(codes::DESCRIPTOR_INVALID, e.to_string());
+            if matches!(config.format, ConfigFormat::Json) {
+                // JSON keeps a setting's type: a number stays a number.
+                match engine::template::fill_value(template, &bindings).map_err(invalid)? {
+                    Some(value) => typed.push((key.clone(), value)),
+                    None => cleared.push(key.clone()),
+                }
+                continue;
+            }
+            match engine::template::fill(template, &bindings).map_err(invalid)? {
                 Filled::Text(value) => keys.push((key.clone(), value)),
                 Filled::Dropped => cleared.push(key.clone()),
             }
@@ -314,13 +362,8 @@ pub fn launch(
                 let kept = homerun_core::properties::remove(&existing, &cleared);
                 homerun_core::properties::merge(&kept, &keys)
             }
-            ConfigFormat::Json => {
-                let mut object: serde_json::Map<String, serde_json::Value> = if existing.is_empty() { Default::default() }
-                    else { serde_json::from_str(&existing).map_err(|_| fail(codes::SPAWN_FAILED, "The existing game configuration is not a JSON object."))? };
-                for key in &cleared { object.remove(key); }
-                for (key, value) in keys { object.insert(key, value.into()); }
-                serde_json::to_string_pretty(&object).unwrap()
-            }
+            ConfigFormat::Json => homerun_core::json_config::merge(&existing, &typed, &cleared)
+                .map_err(|e| fail(codes::SPAWN_FAILED, format!("This server's configuration cannot be updated: {e}.")))?,
             _ => return Err(fail(codes::DESCRIPTOR_INVALID, "This runner supports JSON and properties configuration files. This game's format needs an engine extension.")),
         };
         write(&path, &contents)?;

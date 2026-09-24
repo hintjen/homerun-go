@@ -111,8 +111,8 @@ packaging and full Windows integration remain unverified.
 ## Limits that must stay visible
 
 INI/TOML/XML config merging and A2S player queries are not implemented. The
-runner supports JSON/properties configuration and specific JSON RCON roster
-shapes. Unsupported config formats refuse explicitly. A launcher whose child
+runner supports JSON/properties configuration (JSON keys are dotted paths and
+keep an int/bool setting's type) and specific JSON RCON roster shapes. Unsupported config formats refuse explicitly. A launcher whose child
 owns the listening sockets needs process-discovery support. Port preflight
 refuses occupied preferred ports rather than choosing replacements.
 

@@ -156,12 +156,97 @@ fn fake_game() {
     }
 }
 
+/// One runtime, at one path per machine, for fixtures whose game listens on
+/// every interface on purpose.
+///
+/// Windows Firewall asks about a program the first time it listens beyond
+/// loopback, and it remembers the answer by the program's *path*. A fresh
+/// per-test copy is a fresh path, so every wide-binding test raised a prompt
+/// on every run. The tests only need the listener to exist -- they pass
+/// whether the prompt is allowed or cancelled -- so running those games from a
+/// single fixed path leaves at most one prompt, ever.
+///
+/// Why a whole shared runtime root rather than only a shared exe: the engine
+/// resolves `launch.exe` inside `<runtimeRoot>/<id>` and rightly refuses
+/// absolute or escaping paths, and a directory junction does not help because
+/// Windows reports (and the firewall keys on) the path the process was
+/// launched through, not the junction's target. The runner holds an exclusive
+/// lease on a runtime root, so the fixtures sharing this one are serialised by
+/// `.fixture.lock` -- across threads and across concurrent `cargo test` runs.
+/// Only launch-only fixtures use it: anything that stamps, breaks, fetches
+/// into or mounts through its runtime keeps its own per-test copy.
+///
+/// The copy is refreshed (copy to a temp name, then rename) only when its
+/// digest differs from this test binary. If it cannot be replaced -- another
+/// build's game is still running from it -- or the lock is not had in time,
+/// the fixture falls back to a per-test copy for that test rather than fail.
+struct FixedGame {
+    runtime: PathBuf,
+    _lock: fs::File,
+}
+impl FixedGame {
+    #[cfg(windows)]
+    fn acquire() -> Option<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let runtime = std::env::temp_dir().join("homerun-runner-fake-game");
+        let dir = runtime.join("fake");
+        fs::create_dir_all(&dir).ok()?;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let lock = loop {
+            let opened = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(runtime.join(".fixture.lock"));
+            match opened {
+                Ok(file) => break file,
+                Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+                Err(_) => return None,
+            }
+        };
+        let source = std::env::current_exe().ok()?;
+        let digest = fetcher::digest_of(&source).ok()?;
+        let exe = dir.join("fake.exe");
+        if fetcher::digest_of(&exe).ok().as_deref() != Some(digest.as_str()) {
+            let staging = dir.join(format!("fake.exe.{}.tmp", std::process::id()));
+            if fs::copy(&source, &staging)
+                .and_then(|_| fs::rename(&staging, &exe))
+                .is_err()
+            {
+                let _ = fs::remove_file(&staging);
+                return None;
+            }
+        }
+        fs::write(dir.join(".homerun-build"), &digest[..12]).ok()?;
+        Some(Self {
+            runtime,
+            _lock: lock,
+        })
+    }
+    /// The prompt is a Windows Firewall behaviour; elsewhere nothing changes.
+    #[cfg(not(windows))]
+    fn acquire() -> Option<Self> {
+        None
+    }
+}
+
 struct Fixture {
     root: PathBuf,
+    /// `<root>/runtime`, or the fixed runtime for `binding_wide` fixtures.
+    runtime: PathBuf,
     d: Value,
     port: u16,
+    // Dropped after `Drop` below, i.e. once the test's runner has exited.
+    _fixed: Option<FixedGame>,
 }
 impl Fixture {
+    /// A fixture whose game binds beyond loopback. It launches from the one
+    /// fixed path (see `FixedGame`) and must not change its runtime.
+    fn binding_wide() -> Self {
+        Self::create(FixedGame::acquire())
+    }
     fn with_runtime_saves() -> Self {
         let mut f = Self::new();
         let launch = &mut f.d["platforms"][platform::HOST]["launch"];
@@ -174,26 +259,37 @@ impl Fixture {
         f
     }
     fn new() -> Self {
+        Self::create(None)
+    }
+    fn create(fixed: Option<FixedGame>) -> Self {
         static N: AtomicUsize = AtomicUsize::new(0);
         let root = std::env::temp_dir().join(format!(
             "homerun-runner-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::SeqCst)
         ));
-        fs::create_dir_all(root.join("runtime/fake")).unwrap();
+        fs::create_dir_all(&root).unwrap();
         let port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port();
         let name = if cfg!(windows) { "fake.exe" } else { "fake" };
-        fs::copy(
-            std::env::current_exe().unwrap(),
-            root.join("runtime/fake").join(name),
-        )
-        .unwrap();
-        let digest = fetcher::digest_of(&root.join("runtime/fake").join(name)).unwrap();
-        fs::write(root.join("runtime/fake/.homerun-build"), &digest[..12]).unwrap();
+        let runtime = match &fixed {
+            Some(fixed) => fixed.runtime.clone(),
+            None => {
+                let runtime = root.join("runtime");
+                fs::create_dir_all(runtime.join("fake")).unwrap();
+                fs::copy(
+                    std::env::current_exe().unwrap(),
+                    runtime.join("fake").join(name),
+                )
+                .unwrap();
+                runtime
+            }
+        };
+        let digest = fetcher::digest_of(&runtime.join("fake").join(name)).unwrap();
+        fs::write(runtime.join("fake/.homerun-build"), &digest[..12]).unwrap();
         let d = json!({
             "id":"fake", "name":"Test server", "hosts":[platform::HOST],
             "platforms":{(platform::HOST):{
@@ -207,11 +303,17 @@ impl Fixture {
             "config":[{"file":"settings.json","format":"json","keys":{"hostname":"{setting:hostname}"}}],
             "settings":[{"key":"hostname","type":"string","default":"{serverName}"}]
         });
-        Self { root, d, port }
+        Self {
+            root,
+            runtime,
+            d,
+            port,
+            _fixed: fixed,
+        }
     }
     fn start(&self) -> Value {
         json!({"cmd":"start","serverId":"s1","descriptor":self.d,
-        "runtimeRoot":self.root.join("runtime"), "serverDir":self.root.join("server"),
+        "runtimeRoot":self.runtime, "serverDir":self.root.join("server"),
         "serverName":"{secret:rcon}","settings":{},"secrets":{"rcon":"do-not-print-this"},"licenceAccepted":true})
     }
 }
@@ -744,7 +846,7 @@ fn stderr_readiness_console_and_eof_save_the_world() {
 /// rather than leave an administrative console reachable from outside.
 #[test]
 fn a_private_port_bound_to_every_interface_stops_the_server() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_BIND"] =
@@ -938,6 +1040,62 @@ fn a_cleared_setting_leaves_its_managed_key_out_of_the_config_file() {
     h.eof();
 }
 
+/// A JSON config keeps each setting's type and can reach nested members.
+/// Hytale's server refused `"MaxPlayers": "10"` at config load and never
+/// became ready; its default game mode lives one object down.
+#[test]
+fn json_config_values_keep_their_type_and_dotted_keys_nest() {
+    let mut f = Fixture::new();
+    f.d["settings"] = json!([
+        {"key":"hostname","type":"string","default":"{serverName}"},
+        {"key":"maxPlayers","type":"int","default":10},
+        {"key":"pvp","type":"bool","default":false},
+        {"key":"mode","type":"string","default":"Adventure"}
+    ]);
+    f.d["config"] = json!([{"file":"settings.json","format":"json","keys":{
+        "hostname":"{setting:hostname}", "MaxPlayers":"{setting:maxPlayers}",
+        "Pvp":"{setting:pvp}", "Defaults.GameMode":"{setting:mode}",
+        "Motd":"{setting:maxPlayers} slots"
+    }}]);
+    fs::create_dir_all(f.root.join("server")).unwrap();
+    fs::write(
+        f.root.join("server/settings.json"),
+        r#"{"Defaults":{"World":"default","GameMode":"Creative"},"keep":"mine"}"#,
+    )
+    .unwrap();
+
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["settings"] = json!({ "maxPlayers": 12, "pvp": true });
+    h.send(start);
+    h.until("server-started");
+
+    let config: Value =
+        serde_json::from_slice(&fs::read(f.root.join("server/settings.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["MaxPlayers"],
+        json!(12),
+        "an int setting must be a JSON number: {config}"
+    );
+    assert_eq!(
+        config["Pvp"],
+        json!(true),
+        "a bool setting must be a JSON boolean: {config}"
+    );
+    assert_eq!(
+        config["Motd"],
+        json!("12 slots"),
+        "text around a placeholder stays text: {config}"
+    );
+    assert_eq!(config["Defaults"]["GameMode"], "Adventure", "{config}");
+    assert_eq!(
+        config["Defaults"]["World"], "default",
+        "a nested sibling must survive: {config}"
+    );
+    assert_eq!(config["keep"], "mine", "{config}");
+    h.eof();
+}
+
 #[test]
 fn malformed_known_commands_reply_without_starting_and_keep_stdin_usable() {
     let f = Fixture::new();
@@ -1079,6 +1237,242 @@ fn start_fetches_a_missing_runtime_from_a_local_fixture_server() {
     assert!(h.seen.iter().any(|v| v["event"] == "fetch-complete"));
     h.eof();
     http.join().unwrap();
+}
+
+/// A vendor archive shaped like Terraria's: everything under one top folder
+/// named for the version's digits.
+fn vendor_zip(exe: &str, body: &[u8]) -> Vec<u8> {
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut buffer);
+        let options: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        writer.add_directory("1458/", options).unwrap();
+        writer.start_file(format!("1458/{exe}"), options).unwrap();
+        writer.write_all(body).unwrap();
+        writer
+            .start_file("1458/Linux/TerrariaServer", options)
+            .unwrap();
+        writer.write_all(b"not this platform").unwrap();
+        writer.finish().unwrap();
+    }
+    buffer.into_inner()
+}
+
+/// Serves each body in turn, one connection each, and records the paths
+/// asked for.
+fn serve_in_turn(bodies: Vec<Vec<u8>>) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = asked.clone();
+    thread::spawn(move || {
+        for body in bodies {
+            let Ok((mut client, _)) = listener.accept() else {
+                return;
+            };
+            client
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(client.try_clone().unwrap());
+            let mut first = String::new();
+            let _ = reader.read_line(&mut first);
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            log.lock()
+                .unwrap()
+                .push(first.split(' ').nth(1).unwrap_or("").to_string());
+            write!(
+                client,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            client.write_all(&body).unwrap();
+        }
+    });
+    (port, asked)
+}
+
+/// The vendor source end to end: the host names a version, the runner
+/// fetches it from the descriptor's address into its own directory with the
+/// archive's top folder stripped, a second fetch of that version reuses it
+/// without a request, and a vendor that later serves different bytes for
+/// the same version is refused -- with the first download's digest, recorded
+/// on this machine, as the reason.
+#[test]
+fn a_vendor_runtime_is_fetched_per_version_and_a_changed_file_is_refused() {
+    let mut f = Fixture::new();
+    let exe = f.d["platforms"][platform::HOST]["launch"]["exe"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first = vendor_zip(&exe, b"version one");
+    let changed = vendor_zip(&exe, b"version one, but not the same bytes");
+    let (port, asked) = serve_in_turn(vec![first.clone(), changed]);
+    f.d["platforms"][platform::HOST]["runtime"] = json!({
+        "source": "vendor",
+        "url": format!("http://127.0.0.1:{port}/api/download/terraria-server-{{versionDigits}}.zip"),
+        "extract": "zip",
+        "stripComponents": 1,
+        "versionSetting": "version"
+    });
+    f.d["settings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"version","type":"string","label":"Version","default":"latest"}));
+    let fetch = |version: Option<&str>| {
+        let mut command = json!({"cmd":"fetch","serverId":"s1","runtimeRoot":f.root.join("runtime"),
+            "descriptor":f.d,"licenceAccepted":true});
+        if let Some(version) = version {
+            command["runtimeVersion"] = json!(version);
+        }
+        command
+    };
+    let version_dir = f.root.join("runtime/fake/1.4.5.8");
+    let record = f.root.join("runtime/fake/.vendor-hashes.json");
+
+    // The host has to say which version; the runner never picks one.
+    for missing_or_bad in [None, Some("latest"), Some("1.4/../../x")] {
+        let mut h = Host::new();
+        h.send(fetch(missing_or_bad));
+        let error = h.until("error");
+        assert_eq!(error["code"], "descriptor_invalid", "{error}");
+        h.eof();
+    }
+    assert!(asked.lock().unwrap().is_empty(), "nothing was requested");
+
+    let mut h = Host::new();
+    h.send(fetch(Some("1.4.5.8")));
+    let complete = h.until("fetch-complete");
+    h.eof();
+    assert_eq!(complete["buildId"], "v1.4.5.8");
+    assert_eq!(
+        fs::canonicalize(complete["runtimeDir"].as_str().unwrap()).unwrap(),
+        fs::canonicalize(&version_dir).unwrap()
+    );
+    assert_eq!(
+        asked.lock().unwrap().as_slice(),
+        ["/api/download/terraria-server-1458.zip"]
+    );
+    assert_eq!(
+        fs::read(version_dir.join(&exe)).unwrap(),
+        b"version one",
+        "the archive's top folder is stripped"
+    );
+    assert!(!version_dir.join("1458").exists());
+    let recorded: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    let served = f.root.join("served.zip");
+    fs::write(&served, &first).unwrap();
+    assert_eq!(
+        recorded["1.4.5.8"],
+        fetcher::digest_of(&served).unwrap(),
+        "the first download of a version is what later ones are held to"
+    );
+
+    // Already on disk: no second request. Asked through the standalone CLI,
+    // whose --runtime-version is the same field.
+    let descriptor = f.root.join("game.json");
+    fs::write(&descriptor, f.d.to_string()).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
+        .args([
+            "fetch",
+            &descriptor.to_string_lossy(),
+            "--accept-licence",
+            "--json",
+        ])
+        .args(["--runtime-version", "1.4.5.8"])
+        .arg("--runtime-root")
+        .arg(f.root.join("runtime"))
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(result.status.success(), "{stdout}");
+    let complete: Value = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|e| e["event"] == "fetch-complete")
+        .unwrap_or_else(|| panic!("{stdout}"));
+    assert_eq!(complete["buildId"], "v1.4.5.8");
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "a present version is reused"
+    );
+
+    // The version's directory is gone and the vendor now serves other bytes
+    // under the same version.
+    fs::remove_dir_all(&version_dir).unwrap();
+    let mut h = Host::new();
+    h.send(fetch(Some("1.4.5.8")));
+    let error = h.until("error");
+    h.eof();
+    assert_eq!(error["code"], "fetch_failed", "{error}");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("changed") && message.contains("1.4.5.8"),
+        "{message}"
+    );
+    assert_eq!(asked.lock().unwrap().len(), 2);
+    assert!(
+        !version_dir.join(&exe).exists(),
+        "a refused download is never unpacked"
+    );
+    assert!(!version_dir.join(".homerun-build").exists());
+    let still: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    assert_eq!(still, recorded, "a refusal does not rewrite the record");
+}
+
+/// Launching uses the version's directory for everything that names the
+/// runtime: the executable, a `runtime` working directory, `{runtimeDir}`
+/// and save mounts. The fake game asserts its cwd is `{runtimeDir}` and
+/// finds its asset there.
+#[cfg(windows)]
+#[test]
+fn a_vendor_runtime_is_launched_from_its_versions_directory() {
+    let mut f = Fixture::with_runtime_saves();
+    let game = f.root.join("runtime/fake");
+    let version_dir = game.join("1.4.5.8");
+    fs::create_dir_all(&version_dir).unwrap();
+    for entry in fs::read_dir(&game).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path() != version_dir {
+            fs::rename(entry.path(), version_dir.join(entry.file_name())).unwrap();
+        }
+    }
+    fs::write(version_dir.join(".homerun-build"), "v1.4.5.8").unwrap();
+    f.d["platforms"][platform::HOST]["runtime"] = json!({
+        "source": "vendor",
+        // Never reached: the version is already on disk.
+        "url": "http://127.0.0.1:1/terraria-server-{versionDigits}.zip",
+        "extract": "zip",
+        "versionSetting": "version"
+    });
+    f.d["settings"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"key":"version","type":"string","label":"Version","default":"latest"}));
+    let mut start = f.start();
+    start["runtimeVersion"] = json!("1.4.5.8");
+    let mut h = Host::new();
+    h.send(start);
+    let complete = h.until("fetch-complete");
+    assert_eq!(complete["buildId"], "v1.4.5.8");
+    h.until("server-started");
+    assert!(platform::is_mount(&version_dir.join("server")));
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/world/world.save")).unwrap(),
+        "boot\n"
+    );
+    h.eof();
+    assert!(
+        !version_dir.join("server").exists(),
+        "the save mount is removed"
+    );
+    assert!(!f.root.join("runtime/.homerun-mounts-fake.json").exists());
 }
 
 /// `doctor` reported every refusal as `requires_unmet`, including "nobody has
@@ -1277,7 +1671,7 @@ fn incompatible_handshake_shuts_down_and_unknown_commands_do_not() {
 
 #[test]
 fn network_private_exposure_without_marker_skips_save_grace() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["stop"]["graceMs"] = json!(180000);
@@ -1305,7 +1699,7 @@ fn network_private_exposure_without_marker_skips_save_grace() {
 
 #[test]
 fn network_private_port_widening_after_ready_is_refused() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     let mut h = Host::new();
@@ -1327,7 +1721,7 @@ fn network_private_port_widening_after_ready_is_refused() {
 
 #[test]
 fn network_private_port_widening_during_stop_is_refused() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["stop"]["graceMs"] = json!(180000);
@@ -1354,7 +1748,7 @@ fn network_private_port_widening_during_stop_is_refused() {
 #[cfg(windows)]
 #[test]
 fn network_private_descendant_is_inspected_and_terminated() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let extra = free_port();
     let mut start = f.start();
     start["descriptor"]["ports"]
@@ -1378,7 +1772,7 @@ fn network_private_descendant_is_inspected_and_terminated() {
 #[test]
 fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
     for (bind, success) in [("127.0.0.1", true), ("0.0.0.0", false)] {
-        let mut f = Fixture::new();
+        let mut f = Fixture::binding_wide();
         let extra = free_port();
         let env = &mut f.d["platforms"][platform::HOST]["launch"]["env"];
         env["HOMERUN_TEST_EXTRA_PORT"] = json!(extra.to_string());
@@ -1390,7 +1784,7 @@ fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
             .arg(path)
             .args(["--accept-licence", "--observe-seconds", "2", "--json"])
             .arg("--runtime-root")
-            .arg(f.root.join("runtime"))
+            .arg(&f.runtime)
             .arg("--server-dir")
             .arg(f.root.join("server"))
             .arg("--evidence")
@@ -1424,7 +1818,7 @@ fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
 #[cfg(windows)]
 #[test]
 fn network_refusal_kills_even_when_runner_output_is_not_drained() {
-    let f = Fixture::new();
+    let f = Fixture::binding_wide();
     let mut start = f.start();
     start["descriptor"]["ports"][0]["expose"] = json!(false);
     start["descriptor"]["stop"]["graceMs"] = json!(180000);

@@ -26,6 +26,8 @@ homerun-game stop --server-dir <folder> [--json]
 Options:
   --accept-licence          Record your own acceptance of the game's terms
   --runtime-root <folder>   Default: runtime/games
+  --runtime-version <v>     The version to fetch and run, for a game downloaded
+                            from its vendor's site in a chosen version (e.g. 1.4.5.8)
   --server-dir <folder>     Default: servers/<game>
   --server-id <id>          Default: descriptor game id
   --server-name <name>      Default: descriptor name
@@ -86,8 +88,9 @@ pub fn run() -> std::result::Result<(), String> {
                 println!("{HELP}");
                 return Ok(());
             }
-            "--runtime-root" | "--server-dir" | "--server-id" | "--server-name"
-            | "--settings-file" | "--secrets-file" | "--observe-seconds" | "--evidence" => {
+            "--runtime-root" | "--runtime-version" | "--server-dir" | "--server-id"
+            | "--server-name" | "--settings-file" | "--secrets-file" | "--observe-seconds"
+            | "--evidence" => {
                 let value = args.next().ok_or_else(|| format!("{arg} needs a value."))?;
                 if options.insert(arg.clone(), value).is_some() {
                     return Err(format!("{arg} was supplied twice."));
@@ -151,14 +154,16 @@ pub fn run() -> std::result::Result<(), String> {
         .get("--server-dir")
         .cloned()
         .unwrap_or_else(|| format!("servers/{}", d.id));
+    let version = options.get("--runtime-version").cloned();
     if verb == "doctor" {
         let machine = platform::machine_capacity(Path::new(&root));
-        let verdict = engine::doctor::doctor(
-            &d,
-            &machine,
-            &fetcher::present(&Path::new(&root).join(&d.id)),
-            accepted,
-        );
+        // A version that is not one is reported by the verdict itself; the
+        // directory it would name is then simply not looked in.
+        let present = engine::fetch::install_dir(&d, platform::HOST, &root, version.as_deref())
+            .map(|dir| fetcher::present(Path::new(&dir)))
+            .unwrap_or_default();
+        let verdict =
+            engine::doctor::doctor_version(&d, &machine, &present, accepted, version.as_deref());
         // No success event exists for doctor in v1: report via stderr in JSON
         // mode and use protocol errors for refusals, rather than inventing events.
         if as_json {
@@ -278,6 +283,7 @@ pub fn run() -> std::result::Result<(), String> {
             descriptor: value,
             runtime_root: root,
             licence_accepted: accepted,
+            runtime_version: version,
         }
     } else {
         Command::Start {
@@ -307,6 +313,7 @@ pub fn run() -> std::result::Result<(), String> {
             )
             .map_err(|_| "Secrets must be an object of strings.".to_string())?,
             bind_address: Some("127.0.0.1".into()),
+            runtime_version: version,
         }
     };
     runner.command(command);

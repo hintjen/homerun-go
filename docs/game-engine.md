@@ -453,6 +453,35 @@ gigabytes, and a ceiling tuned for a UI bundle would refuse every real game.
 `HOMERUN_STEAMCMD` names an existing `steamcmd` — which is how a Linux or
 macOS session uses one, since only Windows can bootstrap it.
 
+**A vendor download is checked and remembered, because it cannot be
+pinned.** `runtime.source: "vendor"` fetches from the vendor's own HTTPS site,
+named in the signed descriptor, in the version the player chose. The host
+resolves that choice (including "latest") to one concrete version and passes
+it in; the engine never lists or resolves versions. `url` is a pattern with
+`{version}` or `{versionDigits}` (the version without its dots) in its path
+and no other placeholder; `extract` must be `zip`; `stripComponents` drops the
+archive's top folder(s) (it works for any zip extract); `versionSetting` names
+the `string` setting that holds the choice. `sha256` is not used. The version
+must be dotted digits, `^[0-9]+(\.[0-9]+){0,5}$`, because it becomes part of a
+URL and a directory name. What stands in for a pinned digest:
+
+- the address is the descriptor's, over HTTPS, and a redirect to any other
+  origin is refused rather than followed (debug builds also accept plain
+  HTTP to `127.0.0.1`, for the test suites; nothing a player runs does);
+- the body must be as long as `Content-Length` said, and as `size` when the
+  descriptor gives one; a vendor download is never resumed;
+- every archive member is read to its end so its CRC is checked, including
+  members that stripping leaves with no name, and traversal is refused;
+- **trust on first use, per machine**: `<runtimeRoot>/<id>/.vendor-hashes.json`
+  maps each version to the sha256 of its first download, written only after
+  that download unpacked cleanly. A later download of a recorded version must
+  match it; if it does not, the vendor's file for that version changed and
+  the fetch is refused before anything is unpacked or run.
+
+Each version lives in `<runtimeRoot>/<id>/<version>`, stamped `v<version>`, so
+a version already on disk is `alreadyPresent` and switching back is free.
+`engine::fetch::install_dir` is the one place that directory is computed.
+
 ### The console — `rcon.rs`
 
 Two dialects: **Source RCON** (Valve's binary protocol over TCP) and
@@ -595,8 +624,8 @@ reason at the top of this page. Each arm is a thin call into the module above.
 | `engine.schema` | the JSON Schema, from the types |
 | `engine.secrets` | which secrets the host must generate |
 | `engine.licence` | may we, and what does the game want written? |
-| `engine.doctor` | can this machine, and what will be wrong? |
-| `engine.fetchPlan` | where the server comes from |
+| `engine.doctor` | can this machine, and what will be wrong? (optional `runtimeVersion` for a vendor runtime) |
+| `engine.fetchPlan` | where the server comes from (optional `runtimeVersion`; required for a vendor runtime) |
 | `engine.settings` | the API's strings, typed |
 | `engine.invocation` | the command line |
 | `engine.classify` | ready / joined / left, for one console line |
