@@ -70,6 +70,11 @@ pub const FEATURES: &[&str] = &[
     // because a runner that reads the source but not the field -- or the
     // reverse -- cannot run such a game.
     "vendor-runtime",
+    // `requires.java` and `launch.program: "java"`, with `javaPath` on `fetch`
+    // and `start`: the server runs on a Java the host supplies and the runner
+    // checks. An older runner ignores both fields and has no program to run,
+    // so a host must require this name for such a descriptor.
+    "host-java",
 ];
 
 /// What Electron sends.
@@ -97,6 +102,12 @@ pub enum Command {
         /// version may look like. Feature `vendor-runtime`.
         #[serde(default)]
         runtime_version: Option<String>,
+        /// The Java runtime the host supplies to a game whose descriptor asks
+        /// for one (`requires.java`, `launch.program: "java"`): an absolute
+        /// path to its `java` program, which the runner checks before use.
+        /// Ignored for every other game. Feature `host-java`.
+        #[serde(default)]
+        java_path: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Start {
@@ -122,6 +133,9 @@ pub enum Command {
         /// server is launched from.
         #[serde(default)]
         runtime_version: Option<String>,
+        /// As on `Fetch`: the host's Java, which the server is launched with.
+        #[serde(default)]
+        java_path: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     StartTunnel {
@@ -380,8 +394,19 @@ mod tests {
                 runtime_root: "C:\\rt".into(),
                 licence_accepted: true,
                 runtime_version: None,
+                java_path: None,
             }
         );
+
+        match parse(
+            r#"{"cmd":"fetch","serverId":"s1","descriptor":{"id":"hytale"},
+                "runtimeRoot":"/rt","licenceAccepted":true,"javaPath":"/rt/java/bin/java"}"#,
+        ) {
+            Command::Fetch { java_path, .. } => {
+                assert_eq!(java_path.as_deref(), Some("/rt/java/bin/java"))
+            }
+            other => panic!("{other:?}"),
+        }
 
         match parse(
             r#"{"cmd":"fetch","serverId":"s1","descriptor":{"id":"terraria"},
@@ -398,7 +423,7 @@ mod tests {
                 "serverDir":"C:\\servers\\s1","runtimeRoot":"C:\\rt",
                 "serverName":"Keep","settings":{"maxPlayers":"10"},
                 "secrets":{"rcon":"x"},"bindAddress":"127.0.0.1",
-                "licenceAccepted":true,"runtimeVersion":"1.4.5.8"}"#,
+                "licenceAccepted":true,"runtimeVersion":"1.4.5.8","javaPath":"C:/java/bin/java.exe"}"#,
         );
         match start {
             Command::Start {
@@ -410,9 +435,11 @@ mod tests {
                 bind_address,
                 licence_accepted,
                 runtime_version,
+                java_path,
                 ..
             } => {
                 assert_eq!(runtime_version.as_deref(), Some("1.4.5.8"));
+                assert_eq!(java_path.as_deref(), Some("C:/java/bin/java.exe"));
                 assert_eq!(server_id, "s1");
                 assert_eq!(server_dir, "C:\\servers\\s1");
                 assert_eq!(server_name, "Keep");

@@ -919,6 +919,105 @@ fn a_server_name_that_is_a_switch_is_refused_before_anything_is_spawned() {
     h.eof();
 }
 
+/// A stand-in for the host's `java` (`examples/fake_java.rs`, which `cargo
+/// test` builds): answers `-version` with a banner for `major`, the way
+/// Temurin prints it, and otherwise runs the fake game with the arguments it
+/// was given -- which is what the real `java -jar` does.
+fn fake_java(f: &Fixture, major: u32) -> PathBuf {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let built = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .and_then(|deps| deps.parent())
+        .unwrap()
+        .join("examples")
+        .join(format!("fake_java{suffix}"));
+    assert!(
+        built.is_file(),
+        "{} is missing: run the whole suite (`cargo test`), which builds examples",
+        built.display()
+    );
+    let home = f.root.join("java");
+    fs::create_dir_all(home.join("bin")).unwrap();
+    let java = home.join("bin").join(format!("java{suffix}"));
+    fs::copy(&built, &java).unwrap();
+    fs::write(home.join("major"), major.to_string()).unwrap();
+    let game = f.runtime.join("fake").join(format!("fake{suffix}"));
+    fs::write(home.join("game"), game.to_string_lossy().as_bytes()).unwrap();
+    java
+}
+
+/// The fixture's game, run on a Java the host supplies instead of its own
+/// executable.
+fn on_host_java(f: &mut Fixture) {
+    f.d["requires"] = json!({ "java": { "major": 25 } });
+    let launch = &mut f.d["platforms"][platform::HOST]["launch"];
+    launch.as_object_mut().unwrap().remove("exe");
+    launch["program"] = json!("java");
+}
+
+/// A JVM game runs on the Java the host passed, once that Java answers with
+/// the major the descriptor names -- no JRE of its own downloaded or needed.
+#[test]
+fn a_game_runs_on_the_java_its_host_supplies() {
+    let mut f = Fixture::new();
+    on_host_java(&mut f);
+    let java = fake_java(&f, 25);
+    let mut start = f.start();
+    start["javaPath"] = json!(java);
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    assert!(
+        f.root.join("server/pid").is_file(),
+        "the game ran, through the host's java"
+    );
+    h.eof();
+}
+
+/// The wrong major is refused before anything is spawned or downloaded, in a
+/// sentence a player can read. Break the major check and this fails.
+#[test]
+fn a_java_of_the_wrong_major_is_refused_before_the_game_starts() {
+    let mut f = Fixture::new();
+    on_host_java(&mut f);
+    let java = fake_java(&f, 21);
+    let mut start = f.start();
+    start["javaPath"] = json!(java);
+    let mut h = Host::new();
+    h.send(start);
+    let error = h.until("error");
+    assert_eq!(error["code"], "requires_unmet", "{error}");
+    assert!(
+        error["message"].as_str().unwrap().contains("needs Java 25")
+            && error["message"].as_str().unwrap().contains("is 21"),
+        "{error}"
+    );
+    assert!(!f.root.join("server/pid").exists(), "nothing was spawned");
+    assert!(!h.seen.iter().any(|v| v["event"] == "server-started"));
+    h.eof();
+}
+
+/// A host that sends no Java for a game that needs one is refused, never
+/// left to fall through to some other program.
+#[test]
+fn a_game_that_needs_java_is_refused_when_the_host_sends_none() {
+    let mut f = Fixture::new();
+    on_host_java(&mut f);
+    let mut h = Host::new();
+    h.send(f.start());
+    let error = h.until("error");
+    assert_eq!(error["code"], "requires_unmet", "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("did not provide one"),
+        "{error}"
+    );
+    h.eof();
+}
+
 /// A setting a player cleared has to leave the managed file. Skipping the key
 /// kept the value from the launch before, so a cleared seed went on
 /// generating the old world with nothing on screen naming the number doing

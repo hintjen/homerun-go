@@ -291,6 +291,28 @@ pub struct Requires {
     pub disk_mb: u64,
     #[serde(default)]
     pub cpu_cores: Option<u32>,
+    /// The Java a JVM server needs, which the host supplies rather than the
+    /// descriptor downloading its own. Goes with `launch.program: "java"`.
+    ///
+    /// Homerun Desktop already keeps Java runtimes - one bundled, others
+    /// fetched once per major version and shared with Minecraft - so a game
+    /// that pinned its own JRE would put a second copy of the same Java
+    /// beside them. See [`JavaRequirement`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java: Option<JavaRequirement>,
+}
+
+/// Which Java a server needs. See [`Requires::java`].
+///
+/// An exact major, not "this or newer": a JVM upgrade changes how a server
+/// behaves (garbage collection, removed flags, a vendor's AOT cache that only
+/// loads on the build it was trained on), and the host's store already keys
+/// its runtimes by exact major. A vendor that moves to a new Java bumps the
+/// descriptor, and the host fetches that major once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaRequirement {
+    pub major: u32,
 }
 
 /// The per-platform half: where the server comes from and how it is started.
@@ -433,6 +455,27 @@ pub struct Launch {
     /// `docs/game-runner.md`.
     #[serde(default)]
     pub cwd_base: CwdBase,
+    /// A program the host supplies, instead of `exe` from the runtime.
+    ///
+    /// A closed set, never a path and never templated, for the same reason
+    /// `exe` is never templated: nothing a player chooses may decide what is
+    /// executed. With it set, `exe` is absent; the host resolves the program
+    /// (for `java`, the runtime [`Requires::java`] names) and the runner checks
+    /// it before launching with `args` unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<LaunchProgram>,
+}
+
+/// Programs a host can supply for a launch. See [`Launch::program`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchProgram {
+    /// The Java runtime [`Requires::java`] names.
+    Java,
+    /// A program added after this build shipped: refused by validation in a
+    /// sentence rather than by serde in a diagnostic.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Which directory a launch's working directory is relative to.
@@ -840,6 +883,7 @@ mod tests {
                 ram_mb: 8192,
                 disk_mb: 16000,
                 cpu_cores: None,
+                java: None,
             },
             ready: Ready {
                 marker: "Server startup complete".into(),

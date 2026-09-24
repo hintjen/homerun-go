@@ -347,22 +347,27 @@ fn run(
     out: &Output,
     audit: &crate::network::Audit,
 ) -> Result<()> {
-    let (id, root, version) = match &command {
+    let (id, root, version, java) = match &command {
         Command::Fetch {
             server_id,
             runtime_root,
             runtime_version,
+            java_path,
             ..
         }
         | Command::Start {
             server_id,
             runtime_root,
             runtime_version,
+            java_path,
             ..
         } => (
             server_id.clone(),
             prepare::absolute(runtime_root)?,
             prepare::runtime_version(d, runtime_version.as_deref())?,
+            // Checked before anything is downloaded: a game that cannot run
+            // on the Java it was given should not fetch gigabytes first.
+            prepare::host_java(d, java_path.as_deref())?,
         ),
         _ => unreachable!(),
     };
@@ -397,6 +402,7 @@ fn run(
         &settings,
         &secrets,
         bind_address.as_deref(),
+        java.as_deref(),
     )?;
     runtime_owner.install(d, &server)?;
     if let Some(job) = runtime_owner.process_job() {

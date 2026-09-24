@@ -38,8 +38,8 @@
 use std::collections::{BTreeSet, HashSet};
 
 use super::descriptor::{
-    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, PlayersVia, Setting, SettingKind,
-    StopVia, SCHEMA_VERSION,
+    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, LaunchProgram, PlayersVia, Setting,
+    SettingKind, StopVia, SCHEMA_VERSION,
 };
 use super::settings::SERVER_NAME_PLACEHOLDER;
 use super::template::{self, Placeholder};
@@ -524,9 +524,48 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
     let setting_keys: HashSet<&str> = d.settings.iter().map(|s| s.key.as_str()).collect();
     let port_names: HashSet<&str> = d.ports.iter().map(|p| p.name.as_str()).collect();
 
+    if let Some(java) = d.requires.java {
+        if !super::java::MAJORS.contains(&java.major) {
+            r.problems.push(format!(
+                "Java {} is not a version Homerun can supply; this game has to ask for \
+                 Java 8 to 99.",
+                java.major
+            ));
+        }
+        if !d
+            .platforms
+            .values()
+            .any(|p| p.launch.program == Some(LaunchProgram::Java))
+        {
+            r.problems.push(
+                "this game asks the host for Java but never runs it (launch.program).".into(),
+            );
+        }
+    }
+
     for (host, platform) in &d.platforms {
         let launch = &platform.launch;
-        if launch.exe.is_empty() {
+        if let Some(program) = launch.program {
+            // A program the host supplies stands in for `exe`; both at once
+            // would leave it unclear which one runs.
+            if !launch.exe.is_empty() {
+                r.problems.push(format!(
+                    "this game's {host} launch names both a program in its download and \
+                     one the host supplies; it has to be one or the other."
+                ));
+            }
+            match program {
+                LaunchProgram::Java if d.requires.java.is_none() => r.problems.push(format!(
+                    "this game runs Java on {host} but does not say which Java it needs \
+                     (requires.java)."
+                )),
+                LaunchProgram::Java => {}
+                LaunchProgram::Unknown => r.problems.push(format!(
+                    "this game's {host} launch asks for a program this version of Homerun \
+                     cannot supply. Updating Homerun should fix it."
+                )),
+            }
+        } else if launch.exe.is_empty() {
             r.problems
                 .push(format!("this game does not say what to run on {host}."));
         } else if launch.exe.contains('{') {
@@ -1169,6 +1208,65 @@ mod tests {
 
     fn says(problems: &[String], needle: &str) -> bool {
         problems.iter().any(|p| p.contains(needle))
+    }
+
+    // ─── host-supplied Java ─────────────────────────────────────────────────
+
+    fn host_java(patch: serde_json::Value) -> Vec<String> {
+        let mut base = json!({
+            "requires": { "java": { "major": 25 } },
+            "platforms": { "win32-x64": { "launch": { "exe": "", "program": "java" } } }
+        });
+        deep_merge(&mut base, &patch);
+        problems_of(base)
+    }
+
+    #[test]
+    fn a_game_that_runs_the_hosts_java_is_accepted() {
+        let problems = host_java(json!({}));
+        assert!(
+            !says(&problems, "Java") && !says(&problems, "what to run"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_program_and_an_exe_cannot_both_be_named() {
+        let problems =
+            host_java(json!({ "platforms": { "win32-x64": { "launch": { "exe": "S.exe" } } } }));
+        assert!(says(&problems, "one or the other"), "{problems:?}");
+    }
+
+    #[test]
+    fn running_java_needs_to_say_which_java() {
+        let problems = host_java(json!({ "requires": { "java": null } }));
+        assert!(says(&problems, "does not say which Java"), "{problems:?}");
+    }
+
+    #[test]
+    fn asking_for_java_needs_a_launch_that_runs_it() {
+        let problems = host_java(json!({ "platforms": { "win32-x64": { "launch": {
+            "exe": "S.exe", "program": null } } } }));
+        assert!(says(&problems, "never runs it"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_java_major_outside_the_range_is_refused() {
+        for major in [7, 100, 250] {
+            let problems = host_java(json!({ "requires": { "java": { "major": major } } }));
+            assert!(
+                says(&problems, "not a version Homerun can supply"),
+                "{major}: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_this_build_does_not_know_is_refused_in_a_sentence() {
+        let problems = host_java(
+            json!({ "platforms": { "win32-x64": { "launch": { "program": "python" } } } }),
+        );
+        assert!(says(&problems, "cannot supply"), "{problems:?}");
     }
 
     // ─── the three safety checks ───────────────────────────────────────────
