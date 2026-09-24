@@ -1,5 +1,5 @@
-//! `{setting:…}`, `{port:…}`, `{secret:…}`, `{bindAddress}`, `{runtimeDir}` —
-//! and the one rule that makes them safe.
+//! `{setting:…}`, `{port:…}`, `{secret:…}`, `{extension:…}`, `{bindAddress}`,
+//! `{runtimeDir}` — and the one rule that makes them safe.
 //!
 //! # Substitution happens once, and never looks at what it produced
 //!
@@ -85,6 +85,12 @@ pub struct Bindings<'a> {
     /// why it is a different binding from `{serverDir}` rather than a path
     /// built out of it.
     pub runtime_dir: &'a str,
+    /// What the game's extension supplied for this launch, for
+    /// `{extension:<key>}`. Empty for a game with no extension.
+    ///
+    /// Kept apart from `secrets` on purpose: the host generates every
+    /// secret, and never these. See [`super::extensions`].
+    pub extension: &'a BTreeMap<String, String>,
 }
 
 /// What a string resolved to.
@@ -116,6 +122,8 @@ pub enum Placeholder {
     Setting(String),
     Port(String),
     Secret(String),
+    /// A value the game's extension supplies. See [`super::extensions`].
+    Extension(String),
     ServerName,
     ServerDir,
     /// This game's installed files, shared by every server of it.
@@ -137,6 +145,7 @@ impl Placeholder {
             Placeholder::Setting(k) => format!("{{setting:{k}}}"),
             Placeholder::Port(n) => format!("{{port:{n}}}"),
             Placeholder::Secret(n) => format!("{{secret:{n}}}"),
+            Placeholder::Extension(k) => format!("{{extension:{k}}}"),
             Placeholder::ServerName => "{serverName}".into(),
             Placeholder::ServerDir => "{serverDir}".into(),
             Placeholder::RuntimeDir => "{runtimeDir}".into(),
@@ -209,6 +218,7 @@ fn parse(body: &str, whole: &str) -> Result<Placeholder> {
         Some(("setting", key)) if !key.is_empty() => Ok(Placeholder::Setting(key.to_string())),
         Some(("port", name)) if !name.is_empty() => Ok(Placeholder::Port(name.to_string())),
         Some(("secret", name)) if !name.is_empty() => Ok(Placeholder::Secret(name.to_string())),
+        Some(("extension", key)) if !key.is_empty() => Ok(Placeholder::Extension(key.to_string())),
         Some(_) => Err(unknown()),
         None => match body {
             "serverName" => Ok(Placeholder::ServerName),
@@ -295,6 +305,16 @@ pub fn fill(input: &str, bindings: &Bindings) -> Result<Filled> {
                     })?;
                     out.push_str(secret);
                 }
+                Placeholder::Extension(key) => {
+                    let value = bindings.extension.get(key).ok_or_else(|| {
+                        Error::Malformed(format!(
+                            "this game's extension did not provide \"{key}\" for the \
+                             launch. This is a bug in Homerun rather than something you \
+                             can fix."
+                        ))
+                    })?;
+                    out.push_str(value);
+                }
                 Placeholder::ServerName => out.push_str(bindings.server_name),
                 Placeholder::ServerDir => out.push_str(bindings.server_dir),
                 Placeholder::RuntimeDir => {
@@ -373,6 +393,7 @@ mod tests {
         server_dir: String,
         bind_address: String,
         runtime_dir: String,
+        extension: BTreeMap<String, String>,
     }
 
     impl Fixture {
@@ -396,6 +417,9 @@ mod tests {
                 server_dir: "C:\\servers\\abc".into(),
                 bind_address: "127.0.0.1".into(),
                 runtime_dir: r"C:\runtime\rust".into(),
+                extension: [("token".to_string(), "t0ken".to_string())]
+                    .into_iter()
+                    .collect(),
             }
         }
 
@@ -408,6 +432,7 @@ mod tests {
                 server_dir: &self.server_dir,
                 bind_address: &self.bind_address,
                 runtime_dir: &self.runtime_dir,
+                extension: &self.extension,
             }
         }
     }
@@ -520,6 +545,35 @@ mod tests {
         assert_eq!(text("{secret:rcon}"), "hunter2");
         assert_eq!(text("{serverName}"), "Justin's server");
         assert_eq!(text("{serverDir}"), "C:\\servers\\abc");
+        assert_eq!(text("{extension:token}"), "t0ken");
+    }
+
+    #[test]
+    fn an_extension_value_is_opaque_and_never_a_secret() {
+        let mut f = Fixture::new();
+        // A value that looks like a placeholder stays text, like a setting.
+        f.extension.insert("token".into(), "{secret:rcon}".into());
+        assert_eq!(
+            fill("{extension:token}", &f.bindings()).unwrap(),
+            Filled::Text("{secret:rcon}".into())
+        );
+        // An extension key never reaches into the host's secrets, or back.
+        assert!(fill("{extension:rcon}", &f.bindings()).is_err());
+        assert!(fill("{secret:token}", &f.bindings()).is_err());
+    }
+
+    #[test]
+    fn a_missing_extension_value_is_an_error_not_an_empty_string() {
+        let mut f = Fixture::new();
+        f.extension.clear();
+        let err = fill("K={extension:token}", &f.bindings())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"token\""), "{err}");
+        assert!(
+            fill("{extension:}", &f.bindings()).is_err(),
+            "an empty key is not a placeholder"
+        );
     }
 
     #[test]

@@ -269,6 +269,8 @@ pub fn launch(
         server_dir: &server.to_string_lossy(),
         bind_address: bind,
         runtime_dir: &runtime.to_string_lossy(),
+        // Filled by the game's extension once the runner runs extensions.
+        extension: &BTreeMap::new(),
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;

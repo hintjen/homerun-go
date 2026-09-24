@@ -106,6 +106,27 @@
       },
       "type": "object"
     },
+    "extension": {
+      "description": "Code only this game needs, compiled into the runner and chosen by name. Its values reach the launch through {extension:<key>}; a secret one only through launch.env.",
+      "properties": {
+        "config": {
+          "description": "Data for the named extension, which validates it.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "An extension compiled into the runner. A runner without it refuses the descriptor.",
+          "pattern": "^[a-z0-9-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "hosts": {
       "description": "Declared, never inferred. Every entry needs a matching `platforms` key.",
       "items": {

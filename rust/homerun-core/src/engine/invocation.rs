@@ -140,6 +140,7 @@ mod tests {
         settings: Resolved,
         ports: BTreeMap<String, u16>,
         secrets: BTreeMap<String, String>,
+        extension: BTreeMap<String, String>,
     }
 
     impl Fixture {
@@ -156,6 +157,9 @@ mod tests {
                 secrets: [("rcon".to_string(), "hunter2".to_string())]
                     .into_iter()
                     .collect(),
+                extension: [("profile".to_string(), "p-123".to_string())]
+                    .into_iter()
+                    .collect(),
             }
         }
         fn bindings(&self) -> Bindings<'_> {
@@ -167,6 +171,7 @@ mod tests {
                 server_dir: "C:\\servers\\abc",
                 bind_address: "127.0.0.1",
                 runtime_dir: RUNTIME_DIR,
+                extension: &self.extension,
             }
         }
     }
@@ -195,6 +200,14 @@ mod tests {
                 "+server.hostname",
                 "Ruined Keep"
             ]
+        );
+    }
+
+    #[test]
+    fn an_extension_value_resolves_where_the_launch_line_asks_for_it() {
+        assert_eq!(
+            args_of(&["--owner-uuid", "{extension:profile}"]),
+            vec!["--owner-uuid", "p-123"]
         );
     }
 
