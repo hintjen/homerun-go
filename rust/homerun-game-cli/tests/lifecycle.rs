@@ -1791,3 +1791,330 @@ fn network_descendants_are_gone_before_clean_stop_is_reported() {
     );
     h.eof();
 }
+
+// ─── game extensions ────────────────────────────────────────────────────────
+//
+// The reference extension, `fixture`, driven through the real runner and the
+// fake game. Its config picks the behaviour; see `src/extensions/fixture.rs`.
+// Only built with `--features test-extensions`, which `npm run test:game`
+// passes.
+
+#[cfg(feature = "test-extensions")]
+mod extensions {
+    use super::*;
+
+    /// Must match `src/extensions/fixture.rs`. Spelled out here rather than
+    /// imported: this binary is the runner's host, not its library.
+    const TOKEN: &str = "fixture-secret-token-7c1d";
+
+    /// A fake game whose descriptor names the fixture, and which echoes the
+    /// supplied token on a line of its own the way a vendor echoes its
+    /// launch arguments.
+    fn with_extension(config: Value) -> Fixture {
+        let mut f = Fixture::new();
+        let mut merged = json!({ "host": "vendor.example" });
+        for (k, v) in config.as_object().unwrap() {
+            merged[k] = v.clone();
+        }
+        f.d["extension"] = json!({ "name": "fixture", "config": merged });
+        f.d["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_ECHO"] =
+            json!("{extension:token}");
+        f
+    }
+
+    /// The next `server-log` line satisfying `wanted`.
+    fn until_line(h: &mut Host, wanted: impl Fn(&str) -> bool) -> Value {
+        loop {
+            let event = h.until("server-log");
+            if wanted(event["line"].as_str().unwrap_or_default()) {
+                return event;
+            }
+        }
+    }
+
+    fn position(h: &Host, wanted: impl Fn(&Value) -> bool) -> Option<usize> {
+        h.seen.iter().position(wanted)
+    }
+
+    fn never_spawned(f: &Fixture) -> bool {
+        !f.root.join("server/pid").exists()
+    }
+
+    #[test]
+    fn the_runner_advertises_the_mechanism_and_the_fixture() {
+        let mut h = Host::new();
+        let ready = h.seen.last().unwrap().clone();
+        let features: Vec<&str> = ready["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(features.contains(&"extensions"), "{features:?}");
+        assert!(features.contains(&"extension:fixture"), "{features:?}");
+        h.eof();
+    }
+
+    /// The whole happy path: a supplied secret reaches the game and never
+    /// the log, the observer hears `Started`, and `on_stop` runs before the
+    /// host is told the server stopped.
+    #[test]
+    fn a_supplied_secret_reaches_the_game_and_never_the_log() {
+        let f = with_extension(json!({}));
+        let mut h = Host::new();
+        h.send(f.start());
+        h.until("server-started");
+        until_line(&mut h, |l| l == "fixture saw Started");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+
+        assert!(
+            h.seen
+                .iter()
+                // Contains: the test harness prefixes the fake game's first line.
+                .any(|v| v["line"].as_str().is_some_and(
+                    |l| l.ends_with("Command line: -batchmode +rcon.password [redacted]")
+                )),
+            "the game was given the token and echoed it: {:?}",
+            h.seen
+        );
+        for event in &h.seen {
+            assert!(
+                !event.to_string().contains(TOKEN),
+                "the supplied secret leaked: {event}"
+            );
+        }
+        let stopped_note = position(&h, |v| v["line"] == "fixture stopped: Stopped")
+            .expect("on_stop ran with the outcome");
+        let stopped = position(&h, |v| v["event"] == "server-stopped").unwrap();
+        assert!(stopped_note < stopped, "on_stop runs before server-stopped");
+        h.eof();
+    }
+
+    #[test]
+    fn a_sign_in_is_shown_and_completed_before_the_server_starts() {
+        let f = with_extension(json!({ "signIn": true }));
+        let mut h = Host::new();
+        h.send(f.start());
+        let sign_in = h.until("sign-in");
+        assert_eq!(sign_in["serverId"], "s1");
+        assert_eq!(sign_in["purpose"], "server");
+        assert_eq!(sign_in["url"], "https://vendor.example/device?code=FIX-1");
+        assert_eq!(sign_in["code"], "FIX-1");
+        assert_eq!(sign_in["expiresInSecs"], 900);
+        assert_eq!(h.until("signed-in")["purpose"], "server");
+        h.until("server-started");
+        h.eof();
+    }
+
+    /// Whatever printed it, a sign-in link to a host the spec does not name
+    /// is never shown, and the start does not go ahead without the sign-in.
+    #[test]
+    fn a_sign_in_to_an_untrusted_host_is_refused_and_nothing_starts() {
+        let f = with_extension(json!({ "signInUrl": "https://vendor.example.evil.net/device" }));
+        let mut h = Host::new();
+        h.send(f.start());
+        let error = h.until("error");
+        assert_eq!(error["code"], "extension_failed");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not trust"),
+            "{error}"
+        );
+        assert!(position(&h, |v| v["event"] == "sign-in").is_none());
+        h.send(json!({"cmd":"status"}));
+        let status = h.until("status");
+        assert_eq!(status["servers"][0]["state"], "crashed", "{status}");
+        assert!(position(&h, |v| v["event"] == "server-started").is_none());
+        assert!(never_spawned(&f));
+        h.eof();
+    }
+
+    /// What an extension supplies is checked against its spec, so a value
+    /// the spec never declared -- and so never said whether it is secret --
+    /// cannot reach a launch.
+    #[test]
+    fn a_value_the_spec_does_not_declare_fails_the_start() {
+        let f = with_extension(json!({ "supplyUndeclared": true }));
+        let mut h = Host::new();
+        h.send(f.start());
+        assert_eq!(h.until("error")["code"], "extension_failed");
+        assert!(never_spawned(&f));
+        h.eof();
+    }
+
+    /// A `begin` waiting on a person still ends when the player clicks Stop,
+    /// and the game is never started.
+    #[test]
+    fn a_stop_while_the_extension_waits_ends_the_start_without_spawning() {
+        let f = with_extension(json!({ "awaitStop": true }));
+        let mut h = Host::new();
+        h.send(f.start());
+        loop {
+            let progress = h.until("fetch-progress");
+            if progress["phase"] == "extension" {
+                assert_eq!(progress["message"], "waiting for you to sign in");
+                break;
+            }
+        }
+        let asked = Instant::now();
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        assert!(
+            asked.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            asked.elapsed()
+        );
+        assert!(
+            position(&h, |v| v["event"] == "error").is_none(),
+            "{:?}",
+            h.seen
+        );
+        assert!(never_spawned(&f));
+        h.eof();
+    }
+
+    #[test]
+    fn a_panic_in_begin_fails_the_start_and_the_runner_carries_on() {
+        let f = with_extension(json!({ "panicIn": "begin" }));
+        let mut h = Host::new();
+        h.send(f.start());
+        let error = h.until("error");
+        assert_eq!(error["code"], "extension_failed");
+        assert!(
+            !error["message"].as_str().unwrap().contains("panic"),
+            "{error}"
+        );
+        assert!(never_spawned(&f));
+        // Still answering: the panic stayed inside the extension.
+        h.send(json!({"cmd":"extension-status","extension":"fixture"}));
+        h.until("extension-status");
+        h.eof();
+    }
+
+    /// An observer asks for a console command and gets it, once per line it
+    /// asked on; when it later fails the run, the server is stopped and the
+    /// player told why in the extension's words.
+    #[test]
+    fn an_observer_drives_the_console_and_can_fail_the_run() {
+        let f = with_extension(json!({
+            "consoleOn": "FAKE READY",
+            "command": "from-the-extension",
+            "failOn": "reply: from-the-extension"
+        }));
+        let mut h = Host::new();
+        h.send(f.start());
+        until_line(&mut h, |l| l == "reply: from-the-extension");
+        let error = h.until("error");
+        assert_eq!(error["code"], "account_not_allowed");
+        assert_eq!(
+            error["message"],
+            "The fixture account is not allowed to host this server."
+        );
+        h.until("server-crashed");
+        assert!(position(&h, |v| v["event"] == "server-stopped").is_none());
+        assert!(
+            position(&h, |v| v["line"] == "fixture stopped: Crashed").is_some(),
+            "{:?}",
+            h.seen
+        );
+        let replies = h
+            .seen
+            .iter()
+            .filter(|v| v["line"] == "reply: from-the-extension")
+            .count();
+        assert_eq!(replies, 1, "the command was sent once");
+        h.eof();
+    }
+
+    /// A server that repeats itself -- "not signed in" on every tick -- must
+    /// not make the extension start something new on every tick.
+    #[test]
+    fn a_console_command_asked_for_twice_is_sent_once() {
+        let f =
+            with_extension(json!({ "consoleOn": "reply: nudge", "command": "from-the-extension" }));
+        let mut h = Host::new();
+        h.send(f.start());
+        h.until("server-started");
+        for id in ["n1", "n2"] {
+            h.send(json!({"cmd":"console","serverId":"s1","command":"nudge","reqId":id}));
+            h.until("console-response");
+            until_line(&mut h, |l| l == "reply: nudge");
+        }
+        if position(&h, |v| v["line"] == "reply: from-the-extension").is_none() {
+            until_line(&mut h, |l| l == "reply: from-the-extension");
+        }
+        // Long enough for a second send past the one-second interval.
+        thread::sleep(Duration::from_millis(2500));
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        let sent = h
+            .seen
+            .iter()
+            .filter(|v| v["line"] == "reply: from-the-extension")
+            .count();
+        assert_eq!(sent, 1, "{:?}", h.seen);
+        h.eof();
+    }
+
+    /// A panicking observer switches itself off; the server it was watching
+    /// runs and stops normally.
+    #[test]
+    fn a_panic_in_an_observer_is_contained() {
+        let f = with_extension(json!({ "panicIn": "line" }));
+        let mut h = Host::new();
+        h.send(f.start());
+        h.until("server-started");
+        h.send(json!({"cmd":"console","serverId":"s1","command":"still-here","reqId":"c1"}));
+        h.until("console-response");
+        until_line(&mut h, |l| l == "reply: still-here");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        assert!(
+            position(&h, |v| v["line"]
+                .as_str()
+                .is_some_and(|l| l.starts_with("fixture stopped")))
+            .is_none(),
+            "a poisoned run's on_stop is skipped"
+        );
+        h.eof();
+    }
+
+    #[test]
+    fn extension_status_and_sign_out_need_no_server() {
+        let mut h = Host::new();
+        h.send(json!({"cmd":"extension-status","extension":"fixture"}));
+        let status = h.until("extension-status");
+        assert_eq!(
+            status,
+            json!({"event":"extension-status","extension":"fixture",
+                "signedIn":false,"account":"fixture account"})
+        );
+        h.send(json!({"cmd":"extension-forget","extension":"fixture"}));
+        assert_eq!(h.until("extension-status")["extension"], "fixture");
+
+        h.send(json!({"cmd":"extension-status","extension":"not-built"}));
+        let error = h.until("error");
+        assert_eq!(error["code"], "requires_unmet");
+        assert!(error.get("serverId").is_none());
+
+        h.send(json!({"cmd":"extension-status"}));
+        assert_eq!(h.until("error")["code"], "descriptor_invalid");
+        h.eof();
+    }
+
+    #[test]
+    fn signing_out_waits_for_the_server_to_stop() {
+        let f = with_extension(json!({}));
+        let mut h = Host::new();
+        h.send(f.start());
+        h.until("server-started");
+        h.send(json!({"cmd":"extension-forget","extension":"fixture"}));
+        assert_eq!(h.until("error")["code"], "busy");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        h.eof();
+    }
+}

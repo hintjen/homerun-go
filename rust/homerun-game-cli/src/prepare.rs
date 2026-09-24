@@ -214,6 +214,10 @@ pub struct Prepared {
     pub console: Option<rcon::Target>,
 }
 
+// Each argument is a different half of one launch -- the descriptor, three
+// places on disk, the player's choices, the host's secrets, the address and
+// the extension's values -- and a struct would only rename them.
+#[allow(clippy::too_many_arguments)]
 pub fn launch(
     d: &GameDescriptor,
     runtime: &Path,
@@ -222,6 +226,7 @@ pub fn launch(
     settings: &serde_json::Map<String, serde_json::Value>,
     secrets: &BTreeMap<String, String>,
     bind: Option<&str>,
+    extension: &BTreeMap<String, String>,
 ) -> Result<Prepared> {
     // v1 binds descriptor games on loopback and nowhere else: the tunnel
     // connects to loopback, and a port the descriptor marks `expose: false`
@@ -269,8 +274,7 @@ pub fn launch(
         server_dir: &server.to_string_lossy(),
         bind_address: bind,
         runtime_dir: &runtime.to_string_lossy(),
-        // Filled by the game's extension once the runner runs extensions.
-        extension: &BTreeMap::new(),
+        extension,
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;

@@ -370,10 +370,10 @@ here, one module per extension, and is an `ExtensionSpec`:
 | `hosts` | where the extension may reach over HTTPS, and send a person to sign in |
 | `config_schema` | its config's JSON Schema, spliced into `game.v0.json` |
 
-The effects half (the hooks: HTTP, waiting on a person, console commands)
-lives in the runner. This change is the pure half only; the runner does not
-run extensions yet, so every descriptor naming one is refused as needing a
-newer Homerun.
+The effects half (the hooks: waiting on a person, console commands, and
+later HTTP) lives in the runner; `docs/game-runner.md` § *Game extensions*
+is its page. A descriptor naming an extension this build does not have is
+refused as needing a newer Homerun.
 
 **`{extension:<key>}` is how an extension's output reaches the launch.** It is
 deliberately not `{secret:…}`. The host generates every secret
@@ -772,9 +772,8 @@ fix it.
 
 **"This game needs a part of Homerun called … that this version does not
 have."** The descriptor names an extension this build was not compiled with.
-Every extension is refused that way until the runner runs extensions, and
-after that, a newer runner is the fix. A test-only name (`fixture`) is
-refused in any build that is not a test build, which is the point.
+A newer runner is the fix. A test-only name (`fixture`) is refused in any
+build that is not a test build, which is the point.
 
 **A download keeps failing at the same point.** Check for a `.download.part`
 that is larger than the file should be, or a server that answers `200` to a
