@@ -41,9 +41,11 @@ and `{credentials}` (the downloader's own sign-in file) are substituted, and
 command line.
 
 The first time, the downloader asks the person to sign in. Lines matching
-`runtime.signIn` become a **`fetch-sign-in`** event (`url`, and `code` when the
-downloader prints one separately); the host shows them, the person approves
-in their own browser, and the download continues. Nothing is typed into the
+`runtime.signIn` become the generic **`sign-in`** event with `purpose:
+"download"` (`url`, and `code` when the downloader prints one separately) --
+the same event a game's extension sends, so a host has one sign-in card. The
+person approves in their own browser and the download continues; once the
+downloader finishes signed in, **`signed-in`** closes the card. Nothing is typed into the
 downloader, and an agreement prompt ends the run exactly as it does for
 steamcmd. The sign-in file lives at `<tools dir>/credentials/<game>.json` --
 beside steamcmd, never in a server folder, so never in a backup -- and the

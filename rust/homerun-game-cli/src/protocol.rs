@@ -80,8 +80,8 @@ pub const FEATURES: &[&str] = &[
     // reverse -- cannot run such a game.
     "vendor-runtime",
     // `runtime.source: "tool"`: a pinned vendor downloader run with the
-    // person's own sign-in, and the `fetch-sign-in` event that carries its
-    // verification address. An older runner refuses the source by name.
+    // person's own sign-in, shown through the generic `sign-in` event with
+    // `purpose: "download"`. An older runner refuses the source by name.
     "runtime-vendor-tool",
     // `requires.java` and `launch.program: "java"`, with `javaPath` on `fetch`
     // and `start`: the server runs on a Java the host supplies and the runner
@@ -232,17 +232,6 @@ pub enum Event {
         total: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-    },
-    /// A vendor's downloader is waiting for the person to sign in. The host
-    /// shows `url` (and `code`, when the downloader printed one separately);
-    /// the person opens it in their own browser. Sent again when either
-    /// changes, and the fetch simply continues once they have signed in.
-    #[serde(rename_all = "camelCase")]
-    FetchSignIn {
-        server_id: String,
-        url: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        code: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     FetchComplete {
@@ -708,25 +697,6 @@ mod tests {
         assert_eq!(progress["received"], 123);
         assert!(progress.get("message").is_none(), "absent, not null");
 
-        let sign_in = rendered(Event::FetchSignIn {
-            server_id: "s1".into(),
-            url: "https://example.invalid/device?user_code=ABCD".into(),
-            code: Some("ABCD".into()),
-        });
-        assert_eq!(sign_in["event"], "fetch-sign-in");
-        assert_eq!(sign_in["serverId"], "s1");
-        assert_eq!(
-            sign_in["url"],
-            "https://example.invalid/device?user_code=ABCD"
-        );
-        assert_eq!(sign_in["code"], "ABCD");
-        let no_code = rendered(Event::FetchSignIn {
-            server_id: "s1".into(),
-            url: "https://example.invalid/device".into(),
-            code: None,
-        });
-        assert!(no_code.get("code").is_none(), "absent, not null");
-
         let complete = rendered(Event::FetchComplete {
             server_id: "s1".into(),
             runtime_dir: "C:\\rt\\rust".into(),
@@ -852,10 +822,12 @@ mod tests {
                 total: None,
                 message: None,
             },
-            Event::FetchSignIn {
+            Event::SignIn {
                 server_id: "s1".into(),
+                purpose: crate::extensions::Purpose::Download,
                 url: "https://example.invalid/device".into(),
                 code: None,
+                expires_in_secs: None,
             },
             Event::ServerLog {
                 server_id: "s1".into(),

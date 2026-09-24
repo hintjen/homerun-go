@@ -65,6 +65,9 @@ pub enum Progress {
     /// and, if there is one, enter `code`. Sent again whenever either
     /// changes. Nothing here answers it; the person does, in their browser.
     SignIn { url: String, code: Option<String> },
+    /// The downloader finished after asking the person to sign in, so the
+    /// sign-in worked: a host takes its card down.
+    SignedIn,
 }
 
 /// What a completed fetch left on disk.
@@ -428,6 +431,11 @@ fn run_tool(
                 .map(|l| format!(": {}", l.trim()))
                 .unwrap_or_else(|| ".".to_string())
         ));
+    }
+    // A downloader that asked for a sign-in and then finished cleanly was
+    // signed in; the card that asked can go.
+    if url.is_some() {
+        (ctx.on_progress)(Progress::SignedIn);
     }
     Ok(lines)
 }
@@ -1457,6 +1465,7 @@ mod tests {
                 .map(|p| match p {
                     Progress::Note { phase, .. } | Progress::Bytes { phase, .. } => *phase,
                     Progress::SignIn { .. } => "sign-in",
+                    Progress::SignedIn => "signed-in",
                 })
                 .collect()
         }

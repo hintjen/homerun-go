@@ -1169,17 +1169,23 @@ fn a_vendor_downloader_signs_in_downloads_and_is_skipped_once_current() {
     let mut h = Host::new();
     h.send(f.start());
     h.until("server-started");
-    let sign_in: Vec<&Value> = h
-        .seen
-        .iter()
-        .filter(|v| v["event"] == "fetch-sign-in")
-        .collect();
+    let sign_in: Vec<&Value> = h.seen.iter().filter(|v| v["event"] == "sign-in").collect();
     assert!(
         sign_in.iter().any(|v| v["url"]
             == "https://example.invalid/oauth2/device/verify?user_code=TEST1234"
-            && v["code"] == "TEST1234"),
+            && v["code"] == "TEST1234"
+            && v["purpose"] == "download"),
         "the host must be shown where to sign in: {sign_in:?}"
     );
+    // The same generic card an extension uses, closed once the downloader
+    // finished signed in.
+    let shown = h.seen.iter().position(|v| v["event"] == "sign-in").unwrap();
+    let closed = h
+        .seen
+        .iter()
+        .position(|v| v["event"] == "signed-in" && v["purpose"] == "download")
+        .expect("the sign-in card is closed");
+    assert!(shown < closed);
     assert_eq!(
         fs::read_to_string(f.root.join("runtime/fake/server-files/marker.txt")).unwrap(),
         "from the vendor"
@@ -1208,7 +1214,7 @@ fn a_vendor_downloader_signs_in_downloads_and_is_skipped_once_current() {
     h.send(f.start());
     h.until("server-started");
     assert!(
-        !h.seen.iter().any(|v| v["event"] == "fetch-sign-in"),
+        !h.seen.iter().any(|v| v["event"] == "sign-in"),
         "a saved sign-in is reused"
     );
     assert_eq!(
