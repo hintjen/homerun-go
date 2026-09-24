@@ -952,6 +952,62 @@ fn a_cleared_setting_leaves_its_managed_key_out_of_the_config_file() {
     h.eof();
 }
 
+/// A JSON config keeps each setting's type and can reach nested members.
+/// Hytale's server refused `"MaxPlayers": "10"` at config load and never
+/// became ready; its default game mode lives one object down.
+#[test]
+fn json_config_values_keep_their_type_and_dotted_keys_nest() {
+    let mut f = Fixture::new();
+    f.d["settings"] = json!([
+        {"key":"hostname","type":"string","default":"{serverName}"},
+        {"key":"maxPlayers","type":"int","default":10},
+        {"key":"pvp","type":"bool","default":false},
+        {"key":"mode","type":"string","default":"Adventure"}
+    ]);
+    f.d["config"] = json!([{"file":"settings.json","format":"json","keys":{
+        "hostname":"{setting:hostname}", "MaxPlayers":"{setting:maxPlayers}",
+        "Pvp":"{setting:pvp}", "Defaults.GameMode":"{setting:mode}",
+        "Motd":"{setting:maxPlayers} slots"
+    }}]);
+    fs::create_dir_all(f.root.join("server")).unwrap();
+    fs::write(
+        f.root.join("server/settings.json"),
+        r#"{"Defaults":{"World":"default","GameMode":"Creative"},"keep":"mine"}"#,
+    )
+    .unwrap();
+
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["settings"] = json!({ "maxPlayers": 12, "pvp": true });
+    h.send(start);
+    h.until("server-started");
+
+    let config: Value =
+        serde_json::from_slice(&fs::read(f.root.join("server/settings.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["MaxPlayers"],
+        json!(12),
+        "an int setting must be a JSON number: {config}"
+    );
+    assert_eq!(
+        config["Pvp"],
+        json!(true),
+        "a bool setting must be a JSON boolean: {config}"
+    );
+    assert_eq!(
+        config["Motd"],
+        json!("12 slots"),
+        "text around a placeholder stays text: {config}"
+    );
+    assert_eq!(config["Defaults"]["GameMode"], "Adventure", "{config}");
+    assert_eq!(
+        config["Defaults"]["World"], "default",
+        "a nested sibling must survive: {config}"
+    );
+    assert_eq!(config["keep"], "mine", "{config}");
+    h.eof();
+}
+
 #[test]
 fn malformed_known_commands_reply_without_starting_and_keep_stdin_usable() {
     let f = Fixture::new();

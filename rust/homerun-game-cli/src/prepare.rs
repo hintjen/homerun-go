@@ -291,11 +291,19 @@ pub fn launch(
         // nothing on screen naming the number responsible. Same rule core
         // applies to an argument, and the same reason.
         let mut keys = Vec::new();
+        let mut typed = Vec::new();
         let mut cleared = Vec::new();
         for (key, template) in &config.keys {
-            match engine::template::fill(template, &bindings)
-                .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?
-            {
+            let invalid = |e: homerun_core::Error| fail(codes::DESCRIPTOR_INVALID, e.to_string());
+            if matches!(config.format, ConfigFormat::Json) {
+                // JSON keeps a setting's type: a number stays a number.
+                match engine::template::fill_value(template, &bindings).map_err(invalid)? {
+                    Some(value) => typed.push((key.clone(), value)),
+                    None => cleared.push(key.clone()),
+                }
+                continue;
+            }
+            match engine::template::fill(template, &bindings).map_err(invalid)? {
                 Filled::Text(value) => keys.push((key.clone(), value)),
                 Filled::Dropped => cleared.push(key.clone()),
             }
@@ -318,13 +326,8 @@ pub fn launch(
                 let kept = homerun_core::properties::remove(&existing, &cleared);
                 homerun_core::properties::merge(&kept, &keys)
             }
-            ConfigFormat::Json => {
-                let mut object: serde_json::Map<String, serde_json::Value> = if existing.is_empty() { Default::default() }
-                    else { serde_json::from_str(&existing).map_err(|_| fail(codes::SPAWN_FAILED, "The existing game configuration is not a JSON object."))? };
-                for key in &cleared { object.remove(key); }
-                for (key, value) in keys { object.insert(key, value.into()); }
-                serde_json::to_string_pretty(&object).unwrap()
-            }
+            ConfigFormat::Json => homerun_core::json_config::merge(&existing, &typed, &cleared)
+                .map_err(|e| fail(codes::SPAWN_FAILED, format!("This server's configuration cannot be updated: {e}.")))?,
             _ => return Err(fail(codes::DESCRIPTOR_INVALID, "This runner supports JSON and properties configuration files. This game's format needs an engine extension.")),
         };
         write(&path, &contents)?;
