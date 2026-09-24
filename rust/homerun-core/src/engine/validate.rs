@@ -38,9 +38,10 @@
 use std::collections::{BTreeSet, HashSet};
 
 use super::descriptor::{
-    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, PlayersVia, Setting, SettingKind,
-    StopVia, SCHEMA_VERSION,
+    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, LaunchProgram, PlayersVia, Setting,
+    SettingKind, StopVia, SCHEMA_VERSION,
 };
+use super::extensions::{self, ExtensionSpec};
 use super::settings::SERVER_NAME_PLACEHOLDER;
 use super::template::{self, Placeholder};
 use crate::tunnel::Protocol;
@@ -82,6 +83,7 @@ pub fn report(descriptor: &GameDescriptor) -> Report {
     check_mounts(descriptor, &mut r);
     check_servable(descriptor, &mut r);
     check_observe(descriptor, &mut r);
+    check_extension(descriptor, &mut r);
 
     r
 }
@@ -524,9 +526,48 @@ fn check_platforms(d: &GameDescriptor, r: &mut Report) {
     let setting_keys: HashSet<&str> = d.settings.iter().map(|s| s.key.as_str()).collect();
     let port_names: HashSet<&str> = d.ports.iter().map(|p| p.name.as_str()).collect();
 
+    if let Some(java) = d.requires.java {
+        if !super::java::MAJORS.contains(&java.major) {
+            r.problems.push(format!(
+                "Java {} is not a version Homerun can supply; this game has to ask for \
+                 Java 8 to 99.",
+                java.major
+            ));
+        }
+        if !d
+            .platforms
+            .values()
+            .any(|p| p.launch.program == Some(LaunchProgram::Java))
+        {
+            r.problems.push(
+                "this game asks the host for Java but never runs it (launch.program).".into(),
+            );
+        }
+    }
+
     for (host, platform) in &d.platforms {
         let launch = &platform.launch;
-        if launch.exe.is_empty() {
+        if let Some(program) = launch.program {
+            // A program the host supplies stands in for `exe`; both at once
+            // would leave it unclear which one runs.
+            if !launch.exe.is_empty() {
+                r.problems.push(format!(
+                    "this game's {host} launch names both a program in its download and \
+                     one the host supplies; it has to be one or the other."
+                ));
+            }
+            match program {
+                LaunchProgram::Java if d.requires.java.is_none() => r.problems.push(format!(
+                    "this game runs Java on {host} but does not say which Java it needs \
+                     (requires.java)."
+                )),
+                LaunchProgram::Java => {}
+                LaunchProgram::Unknown => r.problems.push(format!(
+                    "this game's {host} launch asks for a program this version of Homerun \
+                     cannot supply. Updating Homerun should fix it."
+                )),
+            }
+        } else if launch.exe.is_empty() {
             r.problems
                 .push(format!("this game does not say what to run on {host}."));
         } else if launch.exe.contains('{') {
@@ -992,6 +1033,14 @@ fn check_placeholders(
                      the server binds on this computer."
                 ));
             }
+            // Whatever an extension supplies is for this machine's launch,
+            // and some of it is a token: never something to show a player.
+            (Placeholder::Extension(key), Site::Servable) => {
+                r.problems.push(format!(
+                    "\"{text}\" is shown to players and cannot contain \"{key}\" from \
+                     this game's extension."
+                ));
+            }
             (Placeholder::Host, Site::Host) => {
                 r.problems.push(format!(
                     "\"{text}\" uses the address players connect to, which is known \
@@ -1001,6 +1050,115 @@ fn check_placeholders(
             _ => {}
         }
     }
+}
+
+/// Where on the host side a templated string sits, for the one rule that
+/// cares: a secret an extension supplies may only be passed through env.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    Arg,
+    Env,
+    Config,
+}
+
+/// The game's extension: one this build has, a config its own spec accepts,
+/// and every `{extension:…}` a key it supplies -- a secret one only in
+/// `launch.env`. See [`super::extensions`].
+fn check_extension(d: &GameDescriptor, r: &mut Report) {
+    let spec: Option<&ExtensionSpec> = match &d.extension {
+        None => None,
+        Some(ext) if !extensions::name_is_valid(&ext.name) => {
+            r.problems.push(format!(
+                "this game names its extension \"{}\", which is not an extension name: \
+                 use lowercase letters, digits and dashes.",
+                ext.name
+            ));
+            None
+        }
+        Some(ext) => match extensions::spec(&ext.name) {
+            None => {
+                r.problems.push(format!(
+                    "this game needs a part of Homerun called \"{}\" that this version \
+                     does not have. Updating Homerun should fix it.",
+                    ext.name
+                ));
+                None
+            }
+            Some(spec) => {
+                match &ext.config {
+                    Value::Null => (spec.validate)(&Value::Object(Default::default()), d, r),
+                    config @ Value::Object(_) => (spec.validate)(config, d, r),
+                    _ => r.problems.push(format!(
+                        "this game's settings for its \"{}\" extension are not an object.",
+                        ext.name
+                    )),
+                }
+                Some(spec)
+            }
+        },
+    };
+
+    for (text, place) in host_strings(d) {
+        // A malformed placeholder is reported by `check_placeholders`.
+        let Ok(found) = template::placeholders(&text) else {
+            continue;
+        };
+        for placeholder in found {
+            let Placeholder::Extension(key) = placeholder else {
+                continue;
+            };
+            let Some(ext) = &d.extension else {
+                r.problems.push(format!(
+                    "\"{text}\" uses {{extension:{key}}}, but this game names no \
+                     extension to supply it."
+                ));
+                continue;
+            };
+            // An extension this build lacks has been reported once above.
+            let Some(spec) = spec else { continue };
+            match spec.supply(&key) {
+                None => r.problems.push(format!(
+                    "\"{text}\" uses \"{key}\" from the \"{}\" extension, which does not \
+                     supply it.",
+                    ext.name
+                )),
+                Some(supply) if supply.secret && place != Place::Env => {
+                    let site = match place {
+                        Place::Arg => {
+                            "on the command line, where any program on this \
+                                       computer can read it"
+                        }
+                        _ => "in a configuration file, which is backed up",
+                    };
+                    r.problems.push(format!(
+                        "\"{text}\" puts the \"{}\" extension's secret \"{key}\" {site}. \
+                         Pass it through the launch environment instead.",
+                        ext.name
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+/// Every host-side templated string, with where it sits.
+fn host_strings(d: &GameDescriptor) -> Vec<(String, Place)> {
+    let mut out = Vec::new();
+    for platform in d.platforms.values() {
+        out.extend(platform.launch.args.iter().map(|a| (a.clone(), Place::Arg)));
+        out.extend(
+            platform
+                .launch
+                .env
+                .values()
+                .map(|v| (v.clone(), Place::Env)),
+        );
+    }
+    for file in &d.config {
+        out.extend(file.keys.values().map(|v| (v.clone(), Place::Config)));
+    }
+    out
 }
 
 /// Relative, and staying inside where it is relative to.
@@ -1231,6 +1389,175 @@ mod tests {
 
     fn says(problems: &[String], needle: &str) -> bool {
         problems.iter().any(|p| p.contains(needle))
+    }
+
+    // ─── a game's extension ────────────────────────────────────────────────
+
+    /// The reference extension, with its host, and a launch that places
+    /// both of its values where they are allowed.
+    fn with_fixture(patch: serde_json::Value) -> serde_json::Value {
+        let mut base = json!({
+            "extension": { "name": "fixture", "config": { "host": "vendor.example" } },
+            "platforms": { "win32-x64": { "launch": {
+                "env": { "VENDOR_TOKEN": "{extension:token}" }
+            } } }
+        });
+        deep_merge(&mut base, &patch);
+        base
+    }
+
+    #[test]
+    fn a_registered_extension_with_a_valid_config_is_accepted() {
+        let p = problems_of(with_fixture(json!({})));
+        assert!(!says(&p, "extension"), "{p:#?}");
+    }
+
+    #[test]
+    fn an_extension_this_build_lacks_asks_for_an_update() {
+        let p = problems_of(json!({ "extension": { "name": "not-built" } }));
+        assert!(
+            says(&p, "\"not-built\" that this version does not have"),
+            "{p:#?}"
+        );
+        assert_eq!(
+            p.iter().filter(|m| m.contains("not-built")).count(),
+            1,
+            "{p:#?}"
+        );
+    }
+
+    #[test]
+    fn an_extension_name_is_a_slug() {
+        for bad in ["", "Fixture", "fix ture", "../x", "fixture:1"] {
+            let p = problems_of(json!({ "extension": { "name": bad } }));
+            assert!(says(&p, "not an extension name"), "{bad:?}: {p:#?}");
+        }
+    }
+
+    #[test]
+    fn the_extension_judges_its_own_config() {
+        let p = problems_of(with_fixture(
+            json!({ "extension": { "config": { "host": "a/b" } } }),
+        ));
+        assert!(says(&p, "is not a bare host name"), "{p:#?}");
+        let p = problems_of(with_fixture(json!({ "extension": { "config": null } })));
+        assert!(
+            says(&p, "needs the vendor's \"host\""),
+            "null is an empty config: {p:#?}"
+        );
+        let p = problems_of(with_fixture(json!({ "extension": { "config": [1] } })));
+        assert!(says(&p, "are not an object"), "{p:#?}");
+    }
+
+    #[test]
+    fn an_extension_value_needs_an_extension_that_supplies_it() {
+        let p = problems_of(json!({
+            "platforms": { "win32-x64": { "launch": { "env": { "T": "{extension:token}" } } } }
+        }));
+        assert!(says(&p, "names no extension to supply it"), "{p:#?}");
+
+        let p = problems_of(with_fixture(json!({
+            "platforms": { "win32-x64": { "launch": { "env": { "X": "{extension:nope}" } } } }
+        })));
+        assert!(says(&p, "which does not supply it"), "{p:#?}");
+    }
+
+    /// Argv is readable by every process on the machine, and a config file
+    /// is backed up: a supplied secret goes through env or nowhere.
+    #[test]
+    fn a_supplied_secret_only_travels_in_the_environment() {
+        let p = problems_of(with_fixture(json!({
+            "platforms": { "win32-x64": { "launch": { "args": ["--token", "{extension:token}"] } } }
+        })));
+        assert!(says(&p, "on the command line"), "{p:#?}");
+
+        let p = problems_of(with_fixture(json!({
+            "config": [{ "file": "server.json", "format": "json",
+                         "keys": { "Token": "{extension:token}" } }]
+        })));
+        assert!(says(&p, "in a configuration file"), "{p:#?}");
+
+        // A value that is not secret may go anywhere on the host side.
+        let p = problems_of(with_fixture(json!({
+            "platforms": { "win32-x64": { "launch": { "args": ["--owner", "{extension:profile}"] } } }
+        })));
+        assert!(!says(&p, "extension"), "{p:#?}");
+    }
+
+    #[test]
+    fn a_player_never_sees_an_extension_value() {
+        let p = problems_of(with_fixture(json!({
+            "client": { "joinUrl": "game://{host}:{port:game}?p={extension:profile}" }
+        })));
+        assert!(says(&p, "shown to players"), "{p:#?}");
+    }
+
+    #[test]
+    fn the_host_never_generates_what_an_extension_supplies() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+        deep_merge(&mut value, &with_fixture(json!({})));
+        let d: GameDescriptor = serde_json::from_value(value).unwrap();
+        assert_eq!(required_secrets(&d), vec!["rcon".to_string()]);
+    }
+
+    // ─── host-supplied Java ─────────────────────────────────────────────────
+
+    fn host_java(patch: serde_json::Value) -> Vec<String> {
+        let mut base = json!({
+            "requires": { "java": { "major": 25 } },
+            "platforms": { "win32-x64": { "launch": { "exe": "", "program": "java" } } }
+        });
+        deep_merge(&mut base, &patch);
+        problems_of(base)
+    }
+
+    #[test]
+    fn a_game_that_runs_the_hosts_java_is_accepted() {
+        let problems = host_java(json!({}));
+        assert!(
+            !says(&problems, "Java") && !says(&problems, "what to run"),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_host_program_and_an_exe_cannot_both_be_named() {
+        let problems =
+            host_java(json!({ "platforms": { "win32-x64": { "launch": { "exe": "S.exe" } } } }));
+        assert!(says(&problems, "one or the other"), "{problems:?}");
+    }
+
+    #[test]
+    fn running_java_needs_to_say_which_java() {
+        let problems = host_java(json!({ "requires": { "java": null } }));
+        assert!(says(&problems, "does not say which Java"), "{problems:?}");
+    }
+
+    #[test]
+    fn asking_for_java_needs_a_launch_that_runs_it() {
+        let problems = host_java(json!({ "platforms": { "win32-x64": { "launch": {
+            "exe": "S.exe", "program": null } } } }));
+        assert!(says(&problems, "never runs it"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_java_major_outside_the_range_is_refused() {
+        for major in [7, 100, 250] {
+            let problems = host_java(json!({ "requires": { "java": { "major": major } } }));
+            assert!(
+                says(&problems, "not a version Homerun can supply"),
+                "{major}: {problems:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_program_this_build_does_not_know_is_refused_in_a_sentence() {
+        let problems = host_java(
+            json!({ "platforms": { "win32-x64": { "launch": { "program": "python" } } } }),
+        );
+        assert!(says(&problems, "cannot supply"), "{problems:?}");
     }
 
     const GOOD_SHA: &str = "4c95451cea98556def2c54f7782933f52a26d4a36bd85e1d59f0364464828b07";

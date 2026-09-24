@@ -63,8 +63,8 @@ replaces it the pinned digest stops matching and the fetch fails with a
 checksum error until the descriptor is re-pinned. That is deliberate: an
 executable Homerun runs is one somebody vetted.
 
-The commands are hello, fetch, start, start-tunnel, console, stop, status and
-shutdown. A new process announces ready, and hello repeats the announcement.
+The commands are hello, fetch, start, start-tunnel, console, stop, status,
+shutdown, extension-status and extension-forget (see *Game extensions*). A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad
 JSON is diagnosed without echoing it (it could contain secrets). A recognized
 command with missing or incorrectly typed fields emits `descriptor_invalid`
@@ -141,6 +141,25 @@ quit is unaffected.
 
 See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
 
+## Game extensions: `src/extensions/`
+
+The runner runs a descriptor's extension: `begin` after the fetch and before
+the launch is composed (it may wait on a person, and ends on a Stop), then
+observers on every line and state change, and `on_stop` within 10 s before the
+terminal event. It enforces, for every extension, the rules an extension must
+not get wrong: sign-in URLs only on the spec's hosts, supplied secrets
+redacted, panics contained, console commands rate limited, a vendor reached
+only over `vendor_http`, and what is kept sealed to this user.
+
+The commands `extension-status`, `extension-forget` and `prompt-answer`, and
+the events `sign-in`, `signed-in`, `prompt`, `prompt-closed` and
+`extension-status`, belong to it, as do the codes `sign_in_required`,
+`sign_in_expired`, `account_not_allowed`, `vendor_unavailable` and
+`extension_failed`.
+
+**`docs/game-extensions.md` is the page for all of it.** It is not repeated
+here so the two cannot drift.
+
 ## Vendor runtimes: `runtimeVersion` and `--runtime-version`
 
 A descriptor whose `platforms[host].runtime.source` is `vendor` downloads the
@@ -171,6 +190,35 @@ later download of that version must match it. When it does not, the fetch
 fails with `fetch_failed` saying the vendor's file for that version changed,
 and nothing is unpacked or run. Deleting the record is how a person who has
 checked the new file tells this machine to trust it.
+
+## Host-supplied Java: `javaPath` and `--java`
+
+A JVM server's descriptor names the Java it needs, `requires.java.major`, and
+`launch.program: "java"` in place of `launch.exe`. It downloads no JRE of its
+own: Homerun Desktop already keeps Java runtimes (one bundled, others fetched
+once per major and shared with Minecraft), so the host resolves one and sends
+its `java` as `javaPath` on `fetch` and `start` (`--java <path>` standalone,
+including `doctor`). Feature `host-java`; an older runner would ignore both
+fields and have no program to run.
+
+The runner checks what it was given before it downloads or spawns anything
+(`prepare::host_java`): the path must be absolute and exist, and the program's
+own `java -version` must report exactly the major the descriptor names. A
+missing, wrong or unrunnable Java is `requires_unmet` with a sentence a player
+can read ("Hytale needs Java 25, and the Java this app provided is 21"), never
+a fall-through to some other program. The host chose the path; the check is
+there because a store can hold a damaged or half-extracted JRE.
+
+The launch spawns `javaPath` with `launch.args` unchanged, so `{runtimeDir}`
+still names the game's own files. `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and
+`JDK_JAVA_OPTIONS` are removed from the server's environment unless the descriptor sets
+them, so a value left on the player's machine by some other tool cannot
+change how it runs. The match is on an exact major, like the desktop's own
+`resolveJava`: a vendor that moves to a new Java bumps the descriptor.
+
+The lifecycle tests use `examples/fake_java.rs` as the host's `java` (a real
+executable, because the runner spawns into a job object, which a batch file
+cannot be); `cargo test` builds it.
 
 ## `prepare.rs`: directories, settings and resources
 
@@ -246,6 +294,7 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 | `src/runner.rs` | Worker ownership, events, tunnels, stdin and EOF cleanup |
 | `src/prepare.rs` | Validation, fetch, invocation and confined configuration writes |
 | `src/cli.rs` | Arguments, local ownership, stop requests and probe evidence |
+| `src/extensions/` | Game extensions; files listed in `docs/game-extensions.md` |
 | `tests/lifecycle.rs` | A self-reinvoking fake game, local HTTP and real subprocess tests |
 | `rust/homerun-supervisor/src/process_engine.rs` | Process lifecycle and independent pipe draining |
 | `rust/homerun-supervisor/src/fetcher.rs` | Cancellable effects, including a silent download peer |

@@ -31,6 +31,12 @@ serde_json = "1"
 # pulls in no `getrandom` and nothing platform-specific.
 ed25519-dalek = "2"
 
+[features]
+# The reference game extension (`engine::extensions::fixture`), for the
+# runner's tests. Never enabled in a release build: it is always on for this
+# crate's own tests, and nothing a player runs should know its name.
+test-extensions = []
+
 [profile.release]
 opt-level = "z"
 lto = true

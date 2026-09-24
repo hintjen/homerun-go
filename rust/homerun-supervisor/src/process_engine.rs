@@ -68,6 +68,10 @@ pub struct Invocation {
     /// so there is no setting it afterwards.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Removed from the inherited environment before `env` is added, so a
+    /// variable can be taken away rather than only set to "".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unset: Vec<String>,
 }
 
 /// How to tell this particular server is up, talk to it, and stop it.
@@ -422,6 +426,9 @@ impl ProcessEngine {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for key in &self.invocation.unset {
+            command.env_remove(key);
+        }
         for (key, value) in &self.invocation.env {
             command.env(key, value);
         }
@@ -818,6 +825,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("HOMERUN_FAKE_SERVER".to_string(), script.to_string());
         Invocation {
+            unset: Vec::new(),
             program: std::env::current_exe()
                 .expect("the test binary must be locatable")
                 .to_string_lossy()

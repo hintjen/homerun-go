@@ -298,6 +298,9 @@ windows-sys = { version = "0.61", default-features = false, features = [
     # `CreateJobObjectW` takes a SECURITY_ATTRIBUTES pointer, so its binding
     # is gated on this even though the pointer passed is null.
     "Win32_Security",
+    # DPAPI (`CryptProtectData`), which seals what a game's extension keeps --
+    # a refresh token -- to this computer's user. `local_secret.rs`.
+    "Win32_Security_Cryptography",
     # A directory junction, which is DeviceIoControl and nothing higher-level:
     # `std` has no API for one, and the alternative -- a symbolic link -- needs
     # a privilege a player's account does not have.

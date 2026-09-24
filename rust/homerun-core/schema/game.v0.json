@@ -106,6 +106,27 @@
       },
       "type": "object"
     },
+    "extension": {
+      "description": "Code only this game needs, compiled into the runner and chosen by name. Its values reach the launch through {extension:<key>}; a secret one only through launch.env.",
+      "properties": {
+        "config": {
+          "description": "Data for the named extension, which validates it.",
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "An extension compiled into the runner. A runner without it refuses the descriptor.",
+          "pattern": "^[a-z0-9-]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
     "hosts": {
       "description": "Declared, never inferred. Every entry needs a matching `platforms` key.",
       "items": {
@@ -258,13 +279,16 @@
                 "type": "object"
               },
               "exe": {
-                "description": "Relative to the runtime directory, without a platform suffix. Never templated.",
+                "description": "Relative to the runtime directory, without a platform suffix. Never templated. Absent when program is set.",
                 "type": "string"
+              },
+              "program": {
+                "description": "A program the host supplies instead of exe: java is the runtime requires.java names. Never a path.",
+                "enum": [
+                  "java"
+                ]
               }
             },
-            "required": [
-              "exe"
-            ],
             "type": "object"
           },
           "runtime": {
@@ -547,6 +571,23 @@
         "diskMb": {
           "minimum": 0,
           "type": "integer"
+        },
+        "java": {
+          "description": "The Java major a JVM server needs, supplied by the host. Goes with launch.program java.",
+          "properties": {
+            "major": {
+              "maximum": 99,
+              "minimum": 8,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "major"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "ramMb": {
           "minimum": 0,

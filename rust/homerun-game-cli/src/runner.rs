@@ -1,7 +1,8 @@
 //! A single owned server; stdin remains responsive while fetching or running.
 use crate::{
+    extensions::{self, Outcome},
     prepare::{self, fail, Result},
-    protocol::{codes, Command, Event, Player, ServerStatus, FEATURES, PROTOCOL},
+    protocol::{codes, features, Command, Event, Player, ServerStatus, PROTOCOL},
 };
 use homerun_core::engine::{self, descriptor::PlayersVia};
 use homerun_supervisor::{
@@ -64,6 +65,9 @@ pub struct Runner {
     console_tasks: Vec<JoinHandle<()>>,
     build: String,
     pub(crate) network: crate::network::Audit,
+    /// The open extension prompt, if any: answered from here, waited on by
+    /// the lifecycle thread.
+    prompts: extensions::Prompts,
 }
 
 impl Runner {
@@ -78,6 +82,7 @@ impl Runner {
             console_tasks: vec![],
             build: digest[..12].into(),
             network: crate::network::Audit::default(),
+            prompts: extensions::Prompts::default(),
         })
     }
     pub fn ready(&self) {
@@ -85,7 +90,7 @@ impl Runner {
             protocol: PROTOCOL,
             version: env!("CARGO_PKG_VERSION").into(),
             build: self.build.clone(),
-            features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            features: features(),
         });
     }
     pub fn idle(&self) -> bool {
@@ -142,6 +147,47 @@ impl Runner {
                 }
             }
             Command::Unknown => eprintln!("Ignoring a command this runner does not recognize."),
+            Command::ExtensionStatus {
+                extension,
+                runtime_root,
+            } => match machine_root(&runtime_root)
+                .and_then(|root| extensions::status(&extension, &root))
+            {
+                Ok(event) => self.out.send(event),
+                Err(e) => self.out.error(None, e),
+            },
+            Command::PromptAnswer {
+                server_id,
+                prompt_id,
+                value,
+            } => {
+                if let Err(e) = self.prompts.answer(&server_id, &prompt_id, value) {
+                    self.out.error(Some(&server_id), e);
+                }
+            }
+            // Refused while that game is fetching or running: its extension
+            // may be mid-way through using what this would delete.
+            Command::ExtensionForget {
+                extension,
+                runtime_root,
+            } => {
+                if !self.idle() {
+                    self.out.error(
+                        None,
+                        fail(
+                            codes::BUSY,
+                            "Stop the server before signing out of its game's account.",
+                        ),
+                    );
+                } else {
+                    match machine_root(&runtime_root)
+                        .and_then(|root| extensions::forget(&extension, &root))
+                    {
+                        Ok(event) => self.out.send(event),
+                        Err(e) => self.out.error(None, e),
+                    }
+                }
+            }
             Command::Shutdown => return false,
             Command::Status => self.out.send(Event::Status {
                 servers: self
@@ -300,11 +346,12 @@ impl Runner {
         let (s, l, out, server_id) = (stop.clone(), live.clone(), self.out.clone(), id.clone());
         let audit = self.network.clone();
         audit.clear();
+        let prompts = self.prompts.clone();
         let task = thread::Builder::new()
             .name("game-lifecycle".into())
             .stack_size(16 * 1024 * 1024)
             .spawn(move || {
-                let result = run(command, &d, &s, &l, &out, &audit);
+                let result = run(command, &d, &s, &l, &out, &audit, &prompts);
                 if let Err(e) = result {
                     if s.should_stop() {
                         l.lock().unwrap().state = "stopped".into();
@@ -346,23 +393,29 @@ fn run(
     live: &Arc<Mutex<Live>>,
     out: &Output,
     audit: &crate::network::Audit,
+    prompts: &extensions::Prompts,
 ) -> Result<()> {
-    let (id, root, version) = match &command {
+    let (id, root, version, java) = match &command {
         Command::Fetch {
             server_id,
             runtime_root,
             runtime_version,
+            java_path,
             ..
         }
         | Command::Start {
             server_id,
             runtime_root,
             runtime_version,
+            java_path,
             ..
         } => (
             server_id.clone(),
             prepare::absolute(runtime_root)?,
             prepare::runtime_version(d, runtime_version.as_deref())?,
+            // Checked before anything is downloaded: a game that cannot run
+            // on the Java it was given should not fetch gigabytes first.
+            prepare::host_java(d, java_path.as_deref())?,
         ),
         _ => unreachable!(),
     };
@@ -389,25 +442,64 @@ fn run(
         return Ok(());
     }
     let server = prepare::absolute(&server_dir)?;
-    let mut p = prepare::launch(
-        d,
-        &runtime,
-        &server,
-        &server_name,
-        &settings,
-        &secrets,
-        bind_address.as_deref(),
-    )?;
-    runtime_owner.install(d, &server)?;
-    if let Some(job) = runtime_owner.process_job() {
-        p.engine.require_job(job);
-    } else {
-        #[cfg(windows)]
-        p.engine.require_job(Arc::new(
-            ProcessJob::required_process().map_err(|e| fail(codes::SPAWN_FAILED, e))?,
-        ));
+    // The game's extension, if it has one, goes first: it may need a person
+    // to sign in, and what it supplies is part of the launch line below.
+    let mut extension = extensions::begin(d, &id, &root, &server, stop, out, prompts)?;
+    let supplied = extension
+        .as_ref()
+        .map(|e| e.supplied().clone())
+        .unwrap_or_default();
+    let prepared = (|| -> Result<prepare::Prepared> {
+        if stop.should_stop() {
+            return Err(fail(codes::SPAWN_FAILED, "The start was cancelled."));
+        }
+        let mut p = prepare::launch(
+            d,
+            &runtime,
+            &server,
+            &server_name,
+            &settings,
+            &secrets,
+            bind_address.as_deref(),
+            java.as_deref(),
+            &supplied,
+        )?;
+        runtime_owner.install(d, &server)?;
+        if let Some(job) = runtime_owner.process_job() {
+            p.engine.require_job(job);
+        } else {
+            #[cfg(windows)]
+            p.engine.require_job(Arc::new(
+                ProcessJob::required_process().map_err(|e| fail(codes::SPAWN_FAILED, e))?,
+            ));
+        }
+        Ok(p)
+    })();
+    let p = match prepared {
+        Ok(p) => p,
+        Err(e) => {
+            // Nothing was spawned, but `begin` may have made something the
+            // extension has to undo.
+            if let Some(extension) = extension.take() {
+                extension.finish(Outcome::Crashed, out);
+            }
+            return Err(e);
+        }
+    };
+    // Every secret, the host's and the extension's, is kept out of the log.
+    let mut redact: Vec<String> = secrets
+        .values()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect();
+    if let Some(extension) = &extension {
+        redact.extend(extension.secret_values());
     }
     let engine = Arc::new(p.engine);
+    if let Some(extension) = &mut extension {
+        extension.attach(engine.clone(), p.console.clone(), stop.clone(), out.clone());
+    }
+    let extension = extension.map(Arc::new);
     {
         let mut l = live.lock().unwrap();
         l.engine = Some(engine.clone());
@@ -488,6 +580,7 @@ fn run(
         })
     };
     let sampler = {
+        let extension = extension.clone();
         let (engine, stop, out, id, done, started, d, console, ready, live, exposed) = (
             engine.clone(),
             stop.clone(),
@@ -506,6 +599,11 @@ fn run(
         thread::spawn(move || {
             let mut sampled = Instant::now();
             while !done.load(Ordering::SeqCst) {
+                if stop.should_stop() {
+                    if let Some(extension) = &extension {
+                        extension.stopping();
+                    }
+                }
                 if ready.load(Ordering::SeqCst) && !started.load(Ordering::SeqCst) {
                     let all_bound = d.ports.iter().all(|p| {
                         observed_ports
@@ -529,6 +627,9 @@ fn run(
                             out.send(Event::ServerStarted {
                                 server_id: id.clone(),
                             });
+                            if let Some(extension) = &extension {
+                                extension.started();
+                            }
                         }
                     }
                 }
@@ -590,8 +691,11 @@ fn run(
             let mut lines = tail.lock().unwrap();
             // Do not publish secrets a vendor echoes with its launch arguments.
             let mut line = line;
-            for secret in secrets.values().filter(|s| !s.is_empty()) {
-                line = line.replace(secret, "[redacted]");
+            for secret in &redact {
+                line = line.replace(secret.as_str(), "[redacted]");
+            }
+            if let Some(extension) = &extension {
+                extension.on_line(&line, stream);
             }
             if lines.len() == 100 {
                 lines.pop_front();
@@ -619,7 +723,10 @@ fn run(
     done.store(true, Ordering::SeqCst);
     let _ = monitor.join();
     let _ = sampler.join();
+    let extension_failure = extension.as_ref().and_then(|e| e.failure());
     if let Some(failure) = network_failure.lock().unwrap().take() {
+        out.error(Some(&id), failure);
+    } else if let Some(failure) = extension_failure.clone() {
         out.error(Some(&id), failure);
     } else if timed_out.load(Ordering::SeqCst) {
         out.error(
@@ -634,11 +741,29 @@ fn run(
     // server that failed to start, so it takes the same road as a ready
     // timeout: the error has already been sent, and what follows must not
     // report a clean stop over the top of it.
-    let refused = timed_out.load(Ordering::SeqCst) || exposed.load(Ordering::SeqCst);
+    let refused = timed_out.load(Ordering::SeqCst)
+        || exposed.load(Ordering::SeqCst)
+        || extension_failure.is_some();
     let requested = stop.should_stop() && !refused;
-    if !refused
-        && (requested || (started.load(Ordering::SeqCst) && matches!(outcome, RunOutcome::Stopped)))
-    {
+    let clean = !refused
+        && (requested
+            || (started.load(Ordering::SeqCst) && matches!(outcome, RunOutcome::Stopped)));
+    // Before the terminal event, so a host that sees `server-stopped` knows
+    // the extension has finished with the server too.
+    if let Some(extension) = extension {
+        match Arc::try_unwrap(extension) {
+            Ok(extension) => extension.finish(
+                if clean {
+                    Outcome::Stopped
+                } else {
+                    Outcome::Crashed
+                },
+                out,
+            ),
+            Err(_) => eprintln!("A game extension was still in use after its server exited."),
+        }
+    }
+    if clean {
         live.lock().unwrap().state = "stopped".into();
         out.send(Event::ServerStopped {
             server_id: id,
@@ -662,6 +787,18 @@ fn run(
         });
     }
     Ok(())
+}
+
+/// The runtime root an extension command names, which is where its machine
+/// store is found.
+fn machine_root(runtime_root: &str) -> Result<std::path::PathBuf> {
+    if runtime_root.is_empty() {
+        return Err(fail(
+            codes::DESCRIPTOR_INVALID,
+            "This request needs the runtimeRoot that fetch and start are given.",
+        ));
+    }
+    prepare::absolute(runtime_root)
 }
 
 /// Only report a roster when the reply has an explicit supported shape.
@@ -704,7 +841,17 @@ fn report_malformed(out: &Output, line: &[u8]) {
     };
     if !matches!(
         cmd,
-        "hello" | "fetch" | "start" | "start-tunnel" | "console" | "stop" | "status" | "shutdown"
+        "hello"
+            | "fetch"
+            | "start"
+            | "start-tunnel"
+            | "console"
+            | "stop"
+            | "status"
+            | "shutdown"
+            | "extension-status"
+            | "extension-forget"
+            | "prompt-answer"
     ) {
         return;
     }

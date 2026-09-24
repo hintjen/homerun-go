@@ -408,6 +408,7 @@ mod tests {
     }
     fn invocation(output: &std::path::Path) -> Invocation {
         Invocation {
+            unset: Vec::new(),
             program: std::env::current_exe()
                 .unwrap()
                 .to_string_lossy()
