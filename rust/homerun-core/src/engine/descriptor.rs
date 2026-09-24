@@ -112,6 +112,12 @@ pub struct GameDescriptor {
     pub observe: Observe,
     #[serde(default)]
     pub mods: Mods,
+    /// The game's extension, for what only this game needs: code compiled
+    /// into the runner, chosen here by name. See [`super::extensions`].
+    ///
+    /// `None` for every game that is data alone, which should be most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension: Option<Extension>,
     /// Reserved: per-game ceilings (storage, monthly transfer, server count).
     ///
     /// Deliberately untyped and deliberately present. The key exists so that
@@ -746,6 +752,21 @@ pub enum PingVia {
 pub struct Mods {
     #[serde(default)]
     pub supported: bool,
+}
+
+/// Which extension this game uses, and the data it is given.
+///
+/// The name chooses code the runner was built with; the config is data that
+/// extension alone reads and validates. A runner without the named extension
+/// refuses the descriptor rather than running the game without it.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Extension {
+    #[serde(default)]
+    pub name: String,
+    /// Validated by the extension's own spec. Null means an empty object.
+    #[serde(default)]
+    pub config: Value,
 }
 
 impl GameDescriptor {

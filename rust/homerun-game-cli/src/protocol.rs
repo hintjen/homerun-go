@@ -57,6 +57,15 @@ pub const PROTOCOL: u32 = 1;
 /// Names are lowercase and hyphenated, and one name covers one shipped
 /// capability. Adding to this list is how a descriptor field becomes something
 /// a host may rely on; removing from it is a break.
+/// Every feature this build has: [`FEATURES`], then the extension mechanism
+/// and one `extension:<name>` per extension it can run. What `ready` and
+/// `homerun-game --features` report.
+pub fn features() -> Vec<String> {
+    let mut out: Vec<String> = FEATURES.iter().map(|f| f.to_string()).collect();
+    out.extend(crate::extensions::features());
+    out
+}
+
 pub const FEATURES: &[&str] = &[
     // Runtime working directories and server-owned save mounts, merged in PR 35
     // (`docs/runtime-save-mounts.md`): `platforms[host].launch.cwdBase`,
@@ -156,6 +165,33 @@ pub enum Command {
     },
     Status,
     Shutdown,
+    /// What a game's extension keeps on this machine, e.g. whether it is
+    /// signed in. Answered by `extension-status`.
+    ///
+    /// `runtimeRoot` is the one `fetch` and `start` are given: an
+    /// extension's machine store lives beside the runtimes.
+    #[serde(rename_all = "camelCase")]
+    ExtensionStatus {
+        extension: String,
+        #[serde(default)]
+        runtime_root: String,
+    },
+    /// Delete what a game's extension keeps on this machine: "Sign out".
+    /// Answered by `extension-status`, or an `error`.
+    #[serde(rename_all = "camelCase")]
+    ExtensionForget {
+        extension: String,
+        #[serde(default)]
+        runtime_root: String,
+    },
+    /// The person's choice for an open `prompt`. `value` must be one of the
+    /// prompt's options.
+    #[serde(rename_all = "camelCase")]
+    PromptAnswer {
+        server_id: String,
+        prompt_id: String,
+        value: String,
+    },
     /// A command added after this runner shipped.
     ///
     /// Not an error: the desktop and the runner are versioned separately and
@@ -280,6 +316,57 @@ pub enum Event {
         /// no `unwrap`, no `panicked at`. The `homerun-go` rule.
         message: String,
     },
+    /// Someone has to sign in, in their own browser, for this server to go
+    /// on: open `url`, and type `code` if the URL does not already carry it.
+    /// Sent by a game's extension; `url` is always on a host its spec names.
+    #[serde(rename_all = "camelCase")]
+    SignIn {
+        server_id: String,
+        /// `download` | `server`. What the sign-in is for.
+        purpose: crate::extensions::Purpose,
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires_in_secs: Option<u64>,
+    },
+    /// The sign-in for `purpose` is done; a host closes its card.
+    #[serde(rename_all = "camelCase")]
+    SignedIn {
+        server_id: String,
+        purpose: crate::extensions::Purpose,
+    },
+    /// A game's extension asks the person to choose. The host shows its one
+    /// choice dialog and answers with `prompt-answer`. Always followed by
+    /// `prompt-closed`.
+    #[serde(rename_all = "camelCase")]
+    Prompt {
+        server_id: String,
+        prompt_id: String,
+        /// `choice`, the only kind so far.
+        kind: String,
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+        options: Vec<crate::extensions::Choice>,
+    },
+    /// The prompt is over -- answered, or abandoned by a stop. A host takes
+    /// its dialog down.
+    #[serde(rename_all = "camelCase")]
+    PromptClosed {
+        server_id: String,
+        prompt_id: String,
+    },
+    /// The answer to `extension-status` and `extension-forget`.
+    #[serde(rename_all = "camelCase")]
+    ExtensionStatus {
+        extension: String,
+        /// Absent when the extension keeps no sign-in, or cannot tell.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        signed_in: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+    },
     ShutdownComplete,
 }
 
@@ -331,10 +418,29 @@ pub mod codes {
     pub const PORT_EXPOSED: &str = "port_exposed";
     pub const PORT_INSPECTION_FAILED: &str = "port_inspection_failed";
 
+    // A game's extension. Each arrives with a message written for a player;
+    // the code is what a host branches on. Not every one has a user yet: they
+    // are the contract every extension is written against.
+
+    /// Someone has to sign in before this server can start.
+    #[allow(dead_code)]
+    pub const SIGN_IN_REQUIRED: &str = "sign_in_required";
+    /// A sign-in code ran out before anyone used it.
+    #[allow(dead_code)]
+    pub const SIGN_IN_EXPIRED: &str = "sign_in_expired";
+    /// The account signed in may not host this game, e.g. it does not own it.
+    #[allow(dead_code)]
+    pub const ACCOUNT_NOT_ALLOWED: &str = "account_not_allowed";
+    /// The game's vendor could not be reached, or answered with an error.
+    #[allow(dead_code)]
+    pub const VENDOR_UNAVAILABLE: &str = "vendor_unavailable";
+    /// The extension itself failed: a bug in Homerun, not the player's doing.
+    pub const EXTENSION_FAILED: &str = "extension_failed";
+
     /// Every one of them, for the test that keeps this list and the
     /// document's in step.
     #[cfg(test)]
-    pub const ALL: [&str; 10] = [
+    pub const ALL: [&str; 15] = [
         LICENCE_NOT_ACCEPTED,
         DESCRIPTOR_INVALID,
         REQUIRES_UNMET,
@@ -345,6 +451,11 @@ pub mod codes {
         BUSY,
         PORT_EXPOSED,
         PORT_INSPECTION_FAILED,
+        SIGN_IN_REQUIRED,
+        SIGN_IN_EXPIRED,
+        ACCOUNT_NOT_ALLOWED,
+        VENDOR_UNAVAILABLE,
+        EXTENSION_FAILED,
     ];
 }
 
@@ -746,7 +857,106 @@ mod tests {
                 "busy",
                 "port_exposed",
                 "port_inspection_failed",
+                "sign_in_required",
+                "sign_in_expired",
+                "account_not_allowed",
+                "vendor_unavailable",
+                "extension_failed",
             ]
+        );
+    }
+
+    #[test]
+    fn the_extension_commands_parse() {
+        assert_eq!(
+            parse(r#"{"cmd":"extension-status","extension":"hytale","runtimeRoot":"C:\\rt"}"#),
+            Command::ExtensionStatus {
+                extension: "hytale".into(),
+                runtime_root: "C:\\rt".into(),
+            }
+        );
+        assert_eq!(
+            parse(r#"{"cmd":"extension-forget","extension":"hytale"}"#),
+            Command::ExtensionForget {
+                extension: "hytale".into(),
+                runtime_root: String::new(),
+            }
+        );
+        assert_eq!(
+            parse(r#"{"cmd":"prompt-answer","serverId":"s1","promptId":"prompt-1","value":"a"}"#),
+            Command::PromptAnswer {
+                server_id: "s1".into(),
+                prompt_id: "prompt-1".into(),
+                value: "a".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_extension_events_render_as_documented() {
+        use crate::extensions::Purpose;
+        let line = |e: Event| serde_json::from_str::<serde_json::Value>(&e.line()).unwrap();
+
+        let sign_in = line(Event::SignIn {
+            server_id: "s1".into(),
+            purpose: Purpose::Server,
+            url: "https://accounts.example/device?code=AB".into(),
+            code: Some("AB".into()),
+            expires_in_secs: Some(900),
+        });
+        assert_eq!(
+            sign_in,
+            serde_json::json!({"event":"sign-in","serverId":"s1","purpose":"server",
+                "url":"https://accounts.example/device?code=AB","code":"AB","expiresInSecs":900})
+        );
+        let bare = line(Event::SignIn {
+            server_id: "s1".into(),
+            purpose: Purpose::Download,
+            url: "https://accounts.example/device".into(),
+            code: None,
+            expires_in_secs: None,
+        });
+        assert_eq!(bare["purpose"], "download");
+        assert!(bare.get("code").is_none() && bare.get("expiresInSecs").is_none());
+
+        assert_eq!(
+            line(Event::SignedIn {
+                server_id: "s1".into(),
+                purpose: Purpose::Server
+            }),
+            serde_json::json!({"event":"signed-in","serverId":"s1","purpose":"server"})
+        );
+        assert_eq!(
+            line(Event::Prompt {
+                server_id: "s1".into(),
+                prompt_id: "prompt-1".into(),
+                kind: "choice".into(),
+                title: "Which profile?".into(),
+                message: None,
+                options: vec![crate::extensions::Choice {
+                    value: "a".into(),
+                    label: "Alpha".into()
+                }],
+            }),
+            serde_json::json!({"event":"prompt","serverId":"s1","promptId":"prompt-1",
+                "kind":"choice","title":"Which profile?",
+                "options":[{"value":"a","label":"Alpha"}]})
+        );
+        assert_eq!(
+            line(Event::PromptClosed {
+                server_id: "s1".into(),
+                prompt_id: "prompt-1".into()
+            }),
+            serde_json::json!({"event":"prompt-closed","serverId":"s1","promptId":"prompt-1"})
+        );
+        assert_eq!(
+            line(Event::ExtensionStatus {
+                extension: "hytale".into(),
+                signed_in: Some(true),
+                account: Some("Operator".into())
+            }),
+            serde_json::json!({"event":"extension-status","extension":"hytale",
+                "signedIn":true,"account":"Operator"})
         );
     }
 

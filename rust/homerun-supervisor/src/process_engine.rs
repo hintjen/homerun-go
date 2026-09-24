@@ -825,6 +825,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert("HOMERUN_FAKE_SERVER".to_string(), script.to_string());
         Invocation {
+            unset: Vec::new(),
             program: std::env::current_exe()
                 .expect("the test binary must be locatable")
                 .to_string_lossy()

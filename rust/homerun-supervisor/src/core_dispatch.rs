@@ -1926,6 +1926,9 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
             };
             let ports = port_map(&args, "ports");
             let secrets = string_map(&args, "secrets");
+            // Additive: values a game's extension supplied, for
+            // `{extension:<key>}`. Absent for every game without one.
+            let extension = string_map(&args, "extension");
             let server_name = optional_text("serverName").unwrap_or_default();
             let server_dir = optional_text("serverDir").unwrap_or_default();
             // Additive: a caller built against the arm before `{bindAddress}`
@@ -1945,6 +1948,7 @@ fn dispatch(method: &str, args: &str) -> Result<Value, String> {
                     server_dir: &server_dir,
                     bind_address: &bind_address,
                     runtime_dir: &optional_text("runtimeDir").unwrap_or_default(),
+                    extension: &extension,
                 },
             )
             .map_err(|e| e.to_string())?;

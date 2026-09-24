@@ -61,7 +61,7 @@ pub fn schema() -> Value {
             "major": { "type": "integer", "minimum": 8, "maximum": 99 }
         }
     });
-    json!({
+    let mut document = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": SCHEMA_ID,
         "title": "Homerun game descriptor",
@@ -437,7 +437,57 @@ pub fn schema() -> Value {
                 "description": "Reserved for per-game ceilings. Nothing reads it yet."
             }
         }
-    })
+    });
+    // Built apart: the document above is already close to `json!`'s
+    // recursion limit, and this part is generated from the registry.
+    document["properties"]["extension"] = extension(super::extensions::PUBLISHED);
+    document
+}
+
+/// `extension`, from the extensions a release build carries.
+///
+/// Generated rather than written, so a new extension cannot leave the schema
+/// behind: its name joins the enum, and its own config schema applies when
+/// the descriptor names it. The test-only reference extension is never here.
+fn extension(published: &[super::extensions::ExtensionSpec]) -> Value {
+    let mut name = json!({
+        "type": "string",
+        "pattern": "^[a-z0-9-]+$",
+        "description":
+            "An extension compiled into the runner. A runner without it refuses \
+             the descriptor."
+    });
+    if !published.is_empty() {
+        name["enum"] = published.iter().map(|s| json!(s.name)).collect();
+    }
+    let configs: Vec<Value> = published
+        .iter()
+        .map(|spec| {
+            json!({
+                "if": { "properties": { "name": { "const": spec.name } }, "required": ["name"] },
+                "then": { "properties": { "config": (spec.config_schema)() } }
+            })
+        })
+        .collect();
+    let mut extension = json!({
+        "type": "object",
+        "required": ["name"],
+        "description":
+            "Code only this game needs, compiled into the runner and chosen by name. \
+             Its values reach the launch through {extension:<key>}; a secret one only \
+             through launch.env.",
+        "properties": {
+            "name": name,
+            "config": {
+                "type": ["object", "null"],
+                "description": "Data for the named extension, which validates it."
+            }
+        }
+    });
+    if !configs.is_empty() {
+        extension["allOf"] = Value::Array(configs);
+    }
+    extension
 }
 
 /// The schema as the file the monorepo pins, newline-terminated.
@@ -585,8 +635,35 @@ mod tests {
                 ping: PingVia::A2s,
             },
             mods: Mods { supported: true },
+            extension: Some(Extension {
+                name: "fixture".into(),
+                // Empty: its keys are the extension's, and not the schema's.
+                config: serde_json::json!({}),
+            }),
             limits: serde_json::json!({}),
         }
+    }
+
+    /// A published extension joins the name enum, and its own config schema
+    /// applies when a descriptor names it -- checked on the reference
+    /// extension, since no release extension exists yet.
+    #[test]
+    fn a_published_extension_brings_its_name_and_config_schema() {
+        let generated = extension(&[crate::engine::extensions::fixture::SPEC]);
+        assert_eq!(
+            generated["properties"]["name"]["enum"],
+            serde_json::json!(["fixture"])
+        );
+        let rule = &generated["allOf"][0];
+        assert_eq!(rule["if"]["properties"]["name"]["const"], "fixture");
+        assert_eq!(
+            rule["then"]["properties"]["config"],
+            (crate::engine::extensions::fixture::SPEC.config_schema)()
+        );
+
+        let none = extension(&[]);
+        assert!(none["properties"]["name"].get("enum").is_none());
+        assert!(none.get("allOf").is_none());
     }
 
     /// Every property name the types can serialise has to appear somewhere in

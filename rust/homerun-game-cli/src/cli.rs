@@ -68,7 +68,10 @@ pub fn run() -> std::result::Result<(), String> {
     // on one line, for the same reason Pumpkin's `--minecraft-version` is
     // parseable: the reader is a script, not a person.
     if verb == "--features" {
-        println!("{}", serde_json::to_string(crate::protocol::FEATURES).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string(&crate::protocol::features()).map_err(|e| e.to_string())?
+        );
         return Ok(());
     }
     if verb == "supervise" {

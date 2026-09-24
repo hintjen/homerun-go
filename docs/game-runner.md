@@ -29,8 +29,8 @@ binary so a manifest cannot claim a capability the artifact beside it lacks.
 Adding a name is how a descriptor field becomes something a host may rely on;
 removing one is a break.
 
-The commands are hello, fetch, start, start-tunnel, console, stop, status and
-shutdown. A new process announces ready, and hello repeats the announcement.
+The commands are hello, fetch, start, start-tunnel, console, stop, status,
+shutdown, extension-status and extension-forget (see *Game extensions*). A new process announces ready, and hello repeats the announcement.
 An incompatible hello ends the session. Unknown commands are ignored. Bad
 JSON is diagnosed without echoing it (it could contain secrets). A recognized
 command with missing or incorrectly typed fields emits `descriptor_invalid`
@@ -106,6 +106,25 @@ and cannot be used for mounted saves. Detaching from the runner on desktop
 quit is unaffected.
 
 See `docs/shared-core.md` and `rust/homerun-supervisor/src/job.rs`.
+
+## Game extensions: `src/extensions/`
+
+The runner runs a descriptor's extension: `begin` after the fetch and before
+the launch is composed (it may wait on a person, and ends on a Stop), then
+observers on every line and state change, and `on_stop` within 10 s before the
+terminal event. It enforces, for every extension, the rules an extension must
+not get wrong: sign-in URLs only on the spec's hosts, supplied secrets
+redacted, panics contained, console commands rate limited, a vendor reached
+only over `vendor_http`, and what is kept sealed to this user.
+
+The commands `extension-status`, `extension-forget` and `prompt-answer`, and
+the events `sign-in`, `signed-in`, `prompt`, `prompt-closed` and
+`extension-status`, belong to it, as do the codes `sign_in_required`,
+`sign_in_expired`, `account_not_allowed`, `vendor_unavailable` and
+`extension_failed`.
+
+**`docs/game-extensions.md` is the page for all of it.** It is not repeated
+here so the two cannot drift.
 
 ## Vendor runtimes: `runtimeVersion` and `--runtime-version`
 
@@ -241,6 +260,7 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 | `src/runner.rs` | Worker ownership, events, tunnels, stdin and EOF cleanup |
 | `src/prepare.rs` | Validation, fetch, invocation and confined configuration writes |
 | `src/cli.rs` | Arguments, local ownership, stop requests and probe evidence |
+| `src/extensions/` | Game extensions; files listed in `docs/game-extensions.md` |
 | `tests/lifecycle.rs` | A self-reinvoking fake game, local HTTP and real subprocess tests |
 | `rust/homerun-supervisor/src/process_engine.rs` | Process lifecycle and independent pipe draining |
 | `rust/homerun-supervisor/src/fetcher.rs` | Cancellable effects, including a silent download peer |

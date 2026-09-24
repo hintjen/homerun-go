@@ -86,6 +86,14 @@ pub mod pumpkin_settings;
 #[cfg(feature = "game-engine")]
 pub mod rcon;
 
+/// Sealing what a game's extension keeps to this computer's user (DPAPI).
+#[cfg(feature = "game-engine")]
+pub mod local_secret;
+
+/// HTTPS to a game vendor's own hosts, for a game's extension.
+#[cfg(feature = "game-engine")]
+pub mod vendor_http;
+
 /// How the linked engine is handed work from a thread that may already be
 /// inside a runtime.
 ///

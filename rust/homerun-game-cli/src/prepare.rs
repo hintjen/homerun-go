@@ -225,6 +225,13 @@ const JAVA_OPTION_VARIABLES: [&str; 3] = ["JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", 
 /// This game's runtime directory: `<root>/<id>`, or `<root>/<id>/<version>`
 /// for a vendor runtime. The one place the runner asks, so the fetch, the
 /// executable check, a runtime working directory and save mounts agree.
+/// Where per-machine tools and state live for runtimes under `root`: its
+/// parent, beside the runtimes rather than inside any of them. steamcmd, a
+/// vendor's downloader and every extension's machine store go here.
+pub fn tools_dir(root: &Path) -> PathBuf {
+    root.parent().unwrap_or(root).to_path_buf()
+}
+
 pub fn install_dir(d: &GameDescriptor, root: &Path, version: Option<&str>) -> Result<PathBuf> {
     engine::fetch::install_dir(d, platform::HOST, &root.to_string_lossy(), version)
         .map(PathBuf::from)
@@ -267,7 +274,7 @@ pub fn fetch(
         return Err(fail(codes::REQUIRES_UNMET, "This computer's available resources could not be checked. Check disk access and try again."));
     }
     let ctx = fetcher::Context {
-        tools_dir: root.parent().unwrap_or(root).to_path_buf(),
+        tools_dir: tools_dir(root),
         cancelled: &|| stop.should_stop(),
         on_progress: &|progress| {
             let (phase, received, total, message) = match progress {
@@ -306,8 +313,10 @@ pub struct Prepared {
     pub console: Option<rcon::Target>,
 }
 
-// Each argument is one fact a `start` carries; bundling them into a struct
-// would only rename the list.
+// Each argument is a different half of one launch -- the descriptor, three
+// places on disk, the player's choices, the host's secrets, the address, the
+// host's Java and the extension's values -- and a struct would only rename
+// them.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
     d: &GameDescriptor,
@@ -318,6 +327,7 @@ pub fn launch(
     secrets: &BTreeMap<String, String>,
     bind: Option<&str>,
     java: Option<&Path>,
+    extension: &BTreeMap<String, String>,
 ) -> Result<Prepared> {
     // v1 binds descriptor games on loopback and nowhere else: the tunnel
     // connects to loopback, and a port the descriptor marks `expose: false`
@@ -365,6 +375,7 @@ pub fn launch(
         server_dir: &server.to_string_lossy(),
         bind_address: bind,
         runtime_dir: &runtime.to_string_lossy(),
+        extension,
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;

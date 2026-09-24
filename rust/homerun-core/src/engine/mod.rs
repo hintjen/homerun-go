@@ -3,9 +3,10 @@
 //! # What this is
 //!
 //! One implementation of "fetch, prepare, launch, observe, stop a game
-//! server", driven entirely by a `game.json`. Adding a game is a descriptor
-//! and a docs page; it is not code. A game the schema cannot express grows
-//! the schema, once, and every later game gets the growth.
+//! server", driven by a `game.json`. Adding a game is a descriptor and a
+//! docs page, and for most games it is not code. What only one game needs
+//! lives in that game's [`extensions`] module; the schema grows when a
+//! second game needs the same thing, and every later game gets the growth.
 //!
 //! Everything here is pure, as the rest of this crate is: it opens no
 //! sockets, spawns nothing, reads no files and has no clock. The effects live
@@ -59,6 +60,7 @@
 pub mod control;
 pub mod descriptor;
 pub mod doctor;
+pub mod extensions;
 pub mod fetch;
 pub mod invocation;
 pub mod java;
@@ -146,6 +148,7 @@ mod tests {
                 server_dir: "C:\\servers\\abc",
                 bind_address: "127.0.0.1",
                 runtime_dir: RUNTIME_DIR,
+                extension: &BTreeMap::new(),
             },
         )
         .unwrap();
@@ -219,6 +222,7 @@ mod tests {
                 server_dir: "C:\\s",
                 bind_address: "127.0.0.1",
                 runtime_dir: RUNTIME_DIR,
+                extension: &BTreeMap::new(),
             },
         )
         .unwrap();
