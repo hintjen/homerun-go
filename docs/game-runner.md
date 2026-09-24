@@ -45,7 +45,11 @@ The first time, the downloader asks the person to sign in. Lines matching
 "download"` (`url`, and `code` when the downloader prints one separately) --
 the same event a game's extension sends, so a host has one sign-in card. The
 person approves in their own browser and the download continues; once the
-downloader finishes signed in, **`signed-in`** closes the card. Nothing is typed into the
+downloader finishes signed in, **`signed-in`** closes the card. A link is
+offered only if it is `https://` on the host the `signIn.url` marker starts
+with (or a subdomain of it) -- not merely if it mentions the marker, which a
+query string can -- so `validate` refuses a marker that does not start with a
+host name. Nothing is typed into the
 downloader, and an agreement prompt ends the run exactly as it does for
 steamcmd. The sign-in file lives at `<tools dir>/credentials/<game>.json` --
 beside steamcmd, never in a server folder, so never in a backup -- and the

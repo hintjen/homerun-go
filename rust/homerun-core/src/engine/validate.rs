@@ -688,6 +688,18 @@ fn check_vendor_tool(host: &str, runtime: &super::descriptor::Runtime, r: &mut R
             "this game's {host} downloader's result has to be unpacked (\"extract\": \"zip\")."
         ));
     }
+    // The marker names the site a sign-in link may point at; see
+    // `fetch::sign_in_host`.
+    if let Some(sign_in) = &runtime.sign_in {
+        if !sign_in.url.is_empty() && super::fetch::sign_in_host(&sign_in.url).is_none() {
+            r.problems.push(format!(
+                "this game's {host} downloader's sign-in marker \"{}\" has to start with the \
+                 sign-in site's host name, such as accounts.example.com/device, so Homerun \
+                 knows where a sign-in link may point.",
+                sign_in.url
+            ));
+        }
+    }
 }
 
 /// A download from the vendor's own site, in the version a player chose.
@@ -1605,6 +1617,24 @@ mod tests {
         let mut runtime = good_vendor();
         runtime["versionArgs"] = json!(["{secret:rcon}"]);
         assert!(says(&vendor_problems(runtime), "uses something other than"));
+    }
+
+    #[test]
+    fn a_vendor_downloader_sign_in_marker_starts_with_its_host() {
+        let mut runtime = good_vendor();
+        runtime["signIn"] = json!({ "url": "oauth.accounts.example.com/device", "code": "" });
+        assert!(!says(&vendor_problems(runtime.clone()), "sign-in marker"));
+        for bad in [
+            "oauth2/device/verify",
+            "https://accounts.example.com/device",
+            "/device",
+        ] {
+            runtime["signIn"] = json!({ "url": bad, "code": "" });
+            assert!(
+                says(&vendor_problems(runtime.clone()), "sign-in marker"),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -1162,7 +1162,7 @@ fn a_vendor_downloader_signs_in_downloads_and_is_skipped_once_current() {
                   "extract": "none", "exe": "fake" },
         "args": args,
         "versionArgs": version_args,
-        "signIn": { "url": "oauth2/device/verify", "code": "Authorization code: " },
+        "signIn": { "url": "example.invalid/oauth2/device/verify", "code": "Authorization code: " },
         "extract": "zip"
     });
 

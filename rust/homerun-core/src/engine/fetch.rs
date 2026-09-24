@@ -230,6 +230,27 @@ pub fn vendor_scheme_allowed(url: &str) -> bool {
     url.starts_with("https://") || (cfg!(debug_assertions) && url.starts_with("http://127.0.0.1:"))
 }
 
+/// The host a downloader's sign-in link has to be on: the start of its
+/// `signIn.url` marker, up to the first `/`.
+///
+/// The marker already decides which line of the downloader's output is the
+/// sign-in; reading the host from it means a link is shown only if it points
+/// at that site (or a subdomain of it), checked by
+/// [`super::extensions::url_allowed`] -- not merely if it mentions the marker
+/// somewhere, as `https://evil.example/?next=<marker>` does. `None` for a
+/// marker that does not start with a host name, which `validate` refuses.
+pub fn sign_in_host(marker: &str) -> Option<String> {
+    let host = marker.split('/').next()?.trim().to_ascii_lowercase();
+    let well_formed = host.contains('.')
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && !host.contains("..")
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    well_formed.then_some(host)
+}
+
 /// Why a vendor URL pattern is not one, or `None` when it is.
 ///
 /// It needs a version placeholder, may carry no other, and must keep them
@@ -504,6 +525,31 @@ fn missing(descriptor: &GameDescriptor, what: &str) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sign_in_marker_names_its_host() {
+        assert_eq!(
+            sign_in_host("oauth.accounts.hytale.com/oauth2/device/verify").as_deref(),
+            Some("oauth.accounts.hytale.com")
+        );
+        assert_eq!(
+            sign_in_host("Accounts.Example.COM").as_deref(),
+            Some("accounts.example.com")
+        );
+        for bad in [
+            "oauth2/device/verify",
+            "https://accounts.example.com/device",
+            "/device",
+            "",
+            "localhost/device",
+            ".example.com/x",
+            "a..b/x",
+            "user@example.com/x",
+            "example.com:443/x",
+        ] {
+            assert_eq!(sign_in_host(bad), None, "{bad}");
+        }
+    }
     use serde_json::json;
 
     fn rust() -> GameDescriptor {

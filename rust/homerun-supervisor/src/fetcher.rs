@@ -489,10 +489,18 @@ pub fn sign_in_parts(
 ) -> (Option<String>, Option<String>) {
     let line = without_escapes(line);
     let line = line.as_str();
+    // On the marker's own host, not merely mentioning the marker: see
+    // `engine::fetch::sign_in_host`.
+    let hosts: Vec<String> = homerun_core::engine::fetch::sign_in_host(&markers.url)
+        .into_iter()
+        .collect();
     let url = (!markers.url.is_empty() && line.contains(&markers.url))
         .then(|| {
             line.split_whitespace()
-                .find(|word| word.starts_with("https://") && word.contains(&markers.url))
+                .find(|word| {
+                    word.contains(&markers.url)
+                        && homerun_core::engine::extensions::url_allowed(word, &hosts)
+                })
                 .map(str::to_string)
         })
         .flatten();
@@ -1380,6 +1388,34 @@ mod tests {
         );
         assert_eq!(
             sign_in_parts("file://oauth.accounts.hytale.com/oauth2/device/verify", &m).0,
+            None
+        );
+    }
+
+    /// A line can mention the marker without pointing at the marker's site:
+    /// in a query string, or on a lookalike host. Neither is offered.
+    #[test]
+    fn a_link_that_only_mentions_the_marker_is_not_offered() {
+        let m = hytale_markers();
+        for line in [
+            "Visit https://evil.example/?next=oauth.accounts.hytale.com/oauth2/device/verify",
+            "https://evil.example/oauth.accounts.hytale.com/oauth2/device/verify",
+            "https://oauth.accounts.hytale.com.evil.example/oauth.accounts.hytale.com/oauth2/device/verify",
+            "https://x@oauth.accounts.hytale.com/oauth2/device/verify",
+        ] {
+            assert_eq!(sign_in_parts(line, &m).0, None, "{line}");
+        }
+        // A marker with no host in it offers nothing at all.
+        let hostless = homerun_core::engine::descriptor::SignIn {
+            url: "oauth2/device/verify".into(),
+            code: String::new(),
+        };
+        assert_eq!(
+            sign_in_parts(
+                "https://oauth.accounts.hytale.com/oauth2/device/verify?user_code=A",
+                &hostless
+            )
+            .0,
             None
         );
     }
