@@ -107,6 +107,90 @@
       "type": "object"
     },
     "extension": {
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "name": {
+                "const": "hytale"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "then": {
+            "properties": {
+              "config": {
+                "properties": {
+                  "clientId": {
+                    "description": "The OAuth client, hytale-server.",
+                    "type": "string"
+                  },
+                  "consoleSignIn": {
+                    "description": "The server's own console sign-in, used only if it reports it is not signed in. Substrings of its console lines.",
+                    "properties": {
+                      "code": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "done": {
+                        "type": "string"
+                      },
+                      "needed": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "type": "string"
+                      }
+                    },
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "deviceUrl": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  },
+                  "profilesUrl": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  },
+                  "scope": {
+                    "description": "openid offline auth:server",
+                    "type": "string"
+                  },
+                  "sessionUrl": {
+                    "description": "The game-session resource: /new is appended to create one; DELETE ends it.",
+                    "pattern": "^https://",
+                    "type": "string"
+                  },
+                  "signInHost": {
+                    "description": "A host whose subdomains may be shown as sign-in links, e.g. hytale.com.",
+                    "type": "string"
+                  },
+                  "tokenUrl": {
+                    "pattern": "^https://",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "clientId",
+                  "scope",
+                  "deviceUrl",
+                  "tokenUrl",
+                  "profilesUrl",
+                  "sessionUrl"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        }
+      ],
       "description": "Code only this game needs, compiled into the runner and chosen by name. Its values reach the launch through {extension:<key>}; a secret one only through launch.env.",
       "properties": {
         "config": {
@@ -118,6 +202,9 @@
         },
         "name": {
           "description": "An extension compiled into the runner. A runner without it refuses the descriptor.",
+          "enum": [
+            "hytale"
+          ],
           "pattern": "^[a-z0-9-]+$",
           "type": "string"
         }

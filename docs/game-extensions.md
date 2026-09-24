@@ -33,8 +33,8 @@ HTTPS limited to the spec's hosts, generic sign-in and prompt events, and the
 server's console. That is what keeps an extension small enough to review and
 unable to get the safety rules wrong.
 
-**No release extension exists yet.** `PUBLISHED` is empty; the only extension
-is the test-only `fixture`. Hytale's server sign-in is the first planned one.
+**One release extension exists: `hytale`**, Hytale's server sign-in
+(below). The test-only `fixture` is the other, and the example to copy.
 
 ### When something belongs in an extension
 
@@ -202,9 +202,12 @@ One prompt is open at a time, because one server runs at a time. There is no
 overall time limit — a person may take as long as they like — and a Stop is
 how they decline. Every prompt ends with `prompt-closed`, answered or not.
 
-An answer that is not one of the options is refused (`descriptor_invalid`,
-with the server id). An answer for a prompt that is already closed is not an
-error: a person who clicks as the server stops has done nothing wrong.
+An answer that is not one of the options is refused with its own code,
+`prompt_invalid`, and the prompt stays open. It is not `descriptor_invalid`:
+that code with a server id is what a failed start looks like, and a host
+reading it that way would give up on a start still waiting for a good answer.
+An answer for a prompt that is already closed is not an error: a person who
+clicks as the server stops has done nothing wrong.
 
 ### `fixture.rs`
 
@@ -283,18 +286,27 @@ Every addition is generic; nothing names a game.
 | Event | `signed-in` | `serverId`, `purpose` |
 | Event | `prompt` | `serverId`, `promptId`, `kind: "choice"`, `title`, `message?`, `options: [{value, label}]` |
 | Event | `prompt-closed` | `serverId`, `promptId` |
-| Event | `extension-status` | `extension`, `signedIn?`, `account?` |
-| Command | `prompt-answer` | `serverId`, `promptId`, `value` |
-| Command | `extension-status` | `extension`, `runtimeRoot` |
-| Command | `extension-forget` | `extension`, `runtimeRoot` — refused with `busy` while a server is fetching or running |
+| Event | `extension-status` | `extension`, `signedIn?`, `account?`, `reqId?` |
+| Event | `error` | gains an optional `reqId`: the request it refuses, when that request carried one |
+| Command | `prompt-answer` | `serverId`, `promptId`, `value` — a value not among the options is refused with `prompt_invalid` |
+| Command | `extension-status` | `extension`, `runtimeRoot`, `reqId?` |
+| Command | `extension-forget` | `extension`, `runtimeRoot`, `reqId?` — refused with `busy` while a server is fetching or running |
 
 `runtimeRoot` on the two extension commands is the one `fetch` and `start`
 are given: the machine store is found beside the runtimes. Without it the
 command is refused (`descriptor_invalid`) rather than guessed at.
 
+**`reqId` pairs an extension request with its answer.** A host may send one on
+`extension-status` or `extension-forget`; it comes back on the
+`extension-status` answer and on any `error` refusing the request -- including
+one too malformed to parse, whose `reqId` is still read off it. Without it a
+host has to pair answers by the order the runner handles commands, and a
+serverless `busy` from "stop before signing out" would be indistinguishable
+from any other. A request with no `reqId` gets none back.
+
 Error codes: `sign_in_required`, `sign_in_expired`, `account_not_allowed`,
-`vendor_unavailable`, `extension_failed`. Each arrives with a message written
-for a player; the code is what a host branches on.
+`vendor_unavailable`, `extension_failed`, `prompt_invalid`. Each arrives with a
+message written for a player; the code is what a host branches on.
 
 Features: `ready.features` and `homerun-game --features` carry `extensions`
 (the mechanism, these events and commands) and one `extension:<name>` per
@@ -304,17 +316,79 @@ descriptor fields are ignored by design, so a runner built before extensions
 existed would silently ignore the block and launch the game without it; the
 feature gate is the only thing that prevents that.
 
+## `hytale` — Hytale's server sign-in
+
+A Hytale server admits nobody until it is signed in to the hosting person's
+Hytale account. This extension does that the way Hytale's Server Provider
+Authentication Guide describes for automated hosts, so nobody types into a
+server console:
+
+| When | What happens |
+|---|---|
+| First start on a machine | The OAuth device flow (RFC 8628, client `hytale-server`): a `sign-in` card with `purpose: "server"`, polling until the person approves, then `signed-in`. The refresh token that comes back is kept in the sealed machine store. |
+| Every start | Spend the kept refresh token for a new pair **inside the store's lock**, keeping the rotated one before anything else happens. Pick the profile (remembered for this server, the only one, or asked with a `prompt`). Open a game session. |
+| Launch | The session's tokens reach the server through `{extension:sessionToken}` and `{extension:identityToken}` in `launch.env` (secret: redacted, never argv), and `{extension:ownerUuid}`. |
+| While it runs | The server refreshes its own session. If it nonetheless prints that it is not signed in, the **console fallback** sends `auth login device` once per round and passes the sign-in it prints on as `sign-in` / `signed-in` — the flow closed PR #60 built, now inside the extension. |
+| Stop | End the game session (`DELETE`), so sessions do not pile up towards the account's limit of 500. A hard kill skips this; the session ends on its own within the hour. |
+| Sign out | `extension-forget` deletes the kept refresh token. |
+
+**The descriptor** names the extension and carries Hytale's endpoints as data,
+so a changed endpoint is a descriptor update, not a runner release:
+
+```json
+"extension": { "name": "hytale", "config": {
+  "clientId": "hytale-server",
+  "scope": "openid offline auth:server",
+  "deviceUrl": "https://oauth.accounts.hytale.com/oauth2/device/auth",
+  "tokenUrl": "https://oauth.accounts.hytale.com/oauth2/token",
+  "profilesUrl": "https://account-data.hytale.com/my-account/get-profiles",
+  "sessionUrl": "https://sessions.hytale.com/game-session",
+  "signInHost": "hytale.com",
+  "consoleSignIn": { "needed": "No server tokens configured", "command": "auth login device",
+                     "url": "oauth.accounts.hytale.com/oauth2/device/verify",
+                     "code": "Enter code: ", "done": "Authentication successful!" } } },
+"platforms": { "win32-x64": { "launch": {
+  "args": ["...", "--owner-uuid", "{extension:ownerUuid}"],
+  "env": { "HYTALE_SERVER_SESSION_TOKEN": "{extension:sessionToken}",
+           "HYTALE_SERVER_IDENTITY_TOKEN": "{extension:identityToken}" } } } }
+```
+
+`signInHost` is there because the guide's device-flow answer points a person
+at `accounts.hytale.com/device` — a parent of the endpoints' hosts, which the
+host check would otherwise refuse. The console markers are the ones the real
+server printed (2026-09-23), not the guide's sample, which differs.
+
+**Where the decisions are.** Everything read off Hytale's answers is a pure
+function in `homerun-core/src/engine/extensions/hytale.rs` — what a token
+reply means (`token_reply`, by RFC 8628's error codes), which profile
+(`choose_profile`), how a refused session is explained (`session_refusal`),
+and what the machine store holds (`stored` / `stored_refresh`, versioned). The
+runner's `extensions/hytale.rs` only makes the requests.
+
+**Not verified against the real service yet.** The flow is tested end to end
+against a fake of Hytale's services built from the guide, and the console
+fallback against lines the real server printed. The device flow, token
+rotation and session calls have not met a real Hytale account: the first run
+against one is what proves them. Whether a passthrough server survives a failed
+hourly session refresh — the case the console fallback exists for — is also
+open.
+
 ## Testing an extension
 
 - **Contract tests** (`extensions::tests`) iterate the registry, so a new
   extension cannot skip them: the two registries agree; `status` answers on a
   fresh machine; after `forget`, not signed in and no store file left.
-- **The harness** (`extensions::tests::harness`) drives an extension's
-  `begin` and `Run` directly, with a recording `Output`, a real `Prompts` a
-  helper thread answers, and stores under a temporary runtime root. Most of an
-  extension's tests need no process and no network.
+- **The harness** (`extensions/harness.rs`, test builds only) drives any
+  registered extension's `begin`, `Run` and `on_stop` directly, with a
+  recording `Output`, a real `Prompts` a helper thread answers, and stores
+  under a temporary runtime root. Most of an extension's tests need no process
+  and no network.
+- **A fake vendor.** `tests/support/fake_hytale.rs` fakes Hytale's services on
+  loopback and records every request; the harness and the lifecycle tests
+  share it through `#[path]`, so there is one fake to keep honest. A new
+  extension's vendor fake goes beside it.
 - **Lifecycle tests** (`tests/lifecycle.rs`, module `extensions`) run the real
-  runner against the fake game, with `serve_in_turn` as a fake vendor on
+  runner against the fake game, with `serve_in_turn` or a vendor fake on
   loopback.
 - **Break each guard on purpose** (the `tests-that-bite` skill). One lesson
   from doing it here: a guard whose absence makes the code *wait* — a prompt
@@ -355,6 +429,10 @@ Run them with `npm run test:game`, which passes `--features test-extensions`.
 | `homerun-game-cli/src/extensions/store.rs` | `MachineStore`, `ServerStore` |
 | `homerun-game-cli/src/extensions/prompt.rs` | `Prompts`: the open question between two threads |
 | `homerun-game-cli/src/extensions/fixture.rs` | the reference extension's effects half (test only) |
+| `homerun-core/src/engine/extensions/hytale.rs` | Hytale: config, hosts, and every decision about Hytale's answers |
+| `homerun-game-cli/src/extensions/hytale.rs` | Hytale: the requests, the console fallback, ending the session |
+| `homerun-game-cli/src/extensions/harness.rs` | driving an extension without a runner (test only) |
+| `homerun-game-cli/tests/support/fake_hytale.rs` | a fake of Hytale's services on loopback (test only) |
 | `homerun-game-cli/src/runner.rs` | where the hooks are called in a run |
 | `homerun-supervisor/src/vendor_http.rs` | HTTPS to allowed hosts only |
 | `homerun-supervisor/src/local_secret.rs` | DPAPI sealing |
@@ -388,8 +466,23 @@ the rotation demands it.
 
 **A `prompt` never gets an answer.** The host has to reply with
 `prompt-answer` carrying the same `serverId` and `promptId`, and a `value`
-from the options. A wrong value is an `error`; a stale `promptId` is silently
-ignored.
+from the options. A wrong value is an `error` with code `prompt_invalid`, and
+the prompt stays open; a stale `promptId` is silently ignored.
+
+**Hytale: every start asks the person to sign in.** The refresh token was not
+kept or no longer works. `extension-status` for `hytale` says whether one is
+kept; a token unused for 30 days expires, and one spent by another copy of the
+same store (a restored backup of the tools folder) is refused as
+`invalid_grant` and forgotten.
+
+**Hytale: the start fails with `account_not_allowed`.** Hytale refused a game
+session: the account does not own Hytale, has no game profile, or already has
+500 sessions open. The message says which when Hytale's answer does.
+
+**Hytale: the server says "No server tokens configured" while running.** Its
+session could not be refreshed. The console fallback sends `auth login
+device` and shows the sign-in it prints; if nothing appears, check the
+`consoleSignIn` markers against the server's actual lines.
 
 **`extension-status` or `extension-forget` answers `descriptor_invalid`.**
 They need `runtimeRoot`, the same one `fetch` and `start` get.

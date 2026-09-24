@@ -2142,6 +2142,12 @@ fn network_descendants_are_gone_before_clean_stop_is_reported() {
 // Only built with `--features test-extensions`, which `npm run test:game`
 // passes.
 
+/// A fake of Hytale's services on loopback, shared with the runner's unit
+/// tests.
+#[cfg(feature = "test-extensions")]
+#[path = "support/fake_hytale.rs"]
+mod fake_hytale;
+
 #[cfg(feature = "test-extensions")]
 mod extensions {
     use super::*;
@@ -2183,6 +2189,74 @@ mod extensions {
         !f.root.join("server/pid").exists()
     }
 
+    /// Hytale's own extension, end to end against a fake of Hytale's
+    /// services: signed in before the server starts, the session's tokens in
+    /// the game's environment and never in the log, the session ended before
+    /// the host hears the server stopped -- and the second start refreshes
+    /// without asking anyone anything.
+    #[test]
+    fn hytale_signs_in_passes_its_session_on_and_ends_it_at_stop() {
+        let fake = super::fake_hytale::FakeHytale::start();
+        let mut f = Fixture::new();
+        f.d["extension"] = json!({ "name": "hytale", "config": fake.config() });
+        let env = &mut f.d["platforms"][platform::HOST]["launch"]["env"];
+        env["HYTALE_SERVER_SESSION_TOKEN"] = json!("{extension:sessionToken}");
+        env["HYTALE_SERVER_IDENTITY_TOKEN"] = json!("{extension:identityToken}");
+        env["HOMERUN_TEST_OWNER"] = json!("{extension:ownerUuid}");
+        // The fake game echoes this as a vendor echoes its launch line.
+        env["HOMERUN_TEST_ECHO"] = json!("{extension:sessionToken}");
+
+        let mut h = Host::new();
+        h.send(f.start());
+        let sign_in = h.until("sign-in");
+        assert_eq!(sign_in["purpose"], "server");
+        assert_eq!(
+            sign_in["url"],
+            "https://accounts.example.com/device?user_code=ABCD-1234"
+        );
+        assert_eq!(sign_in["code"], "ABCD-1234");
+        assert_eq!(h.until("signed-in")["purpose"], "server");
+        h.until("server-started");
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+
+        for event in &h.seen {
+            let text = event.to_string();
+            assert!(
+                !text.contains("session-token-1") && !text.contains("identity-token-1"),
+                "a session token leaked: {event}"
+            );
+        }
+        assert!(
+            h.seen.iter().any(|v| v["line"]
+                .as_str()
+                .is_some_and(|l| l.ends_with("+rcon.password [redacted]"))),
+            "the game was given the session token and echoed it"
+        );
+        let calls = fake.calls();
+        assert_eq!(
+            calls.last().map(String::as_str),
+            Some("DELETE /game-session")
+        );
+        assert!(
+            f.root.join("extensions/hytale/store.bin").is_file(),
+            "the refresh token is kept beside the runtimes"
+        );
+
+        let before = h.seen.len();
+        h.send(f.start());
+        h.until("server-started");
+        assert!(
+            !h.seen[before..].iter().any(|v| v["event"] == "sign-in"),
+            "a kept sign-in is refreshed, not asked for again"
+        );
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        h.send(json!({"cmd":"extension-status","extension":"hytale","runtimeRoot":f.runtime}));
+        assert_eq!(h.until("extension-status")["signedIn"], true);
+        h.eof();
+    }
+
     #[test]
     fn the_runner_advertises_the_mechanism_and_the_fixture() {
         let mut h = Host::new();
@@ -2195,6 +2269,7 @@ mod extensions {
             .collect();
         assert!(features.contains(&"extensions"), "{features:?}");
         assert!(features.contains(&"extension:fixture"), "{features:?}");
+        assert!(features.contains(&"extension:hytale"), "{features:?}");
         h.eof();
     }
 
@@ -2452,6 +2527,38 @@ mod extensions {
         h.eof();
     }
 
+    /// A `reqId` comes back on the answer and on every refusal -- including a
+    /// request too malformed to parse -- so a host pairs them by id, not by
+    /// the order the runner happens to handle commands in.
+    #[test]
+    fn extension_requests_are_answered_with_their_req_id() {
+        let f = Fixture::new();
+        let mut h = Host::new();
+        h.send(json!({"cmd":"extension-status","extension":"fixture",
+            "runtimeRoot":f.runtime,"reqId":"r1"}));
+        assert_eq!(h.until("extension-status")["reqId"], "r1");
+        h.send(json!({"cmd":"extension-forget","extension":"fixture",
+            "runtimeRoot":f.runtime,"reqId":"r2"}));
+        assert_eq!(h.until("extension-status")["reqId"], "r2");
+
+        h.send(json!({"cmd":"extension-status","extension":"not-built",
+            "runtimeRoot":f.runtime,"reqId":"r3"}));
+        let refused = h.until("error");
+        assert_eq!(
+            (refused["code"].as_str(), refused["reqId"].as_str()),
+            (Some("requires_unmet"), Some("r3"))
+        );
+        h.send(json!({"cmd":"extension-status","extension":"fixture","reqId":"r4"}));
+        assert_eq!(h.until("error")["reqId"], "r4", "no runtimeRoot");
+        h.send(json!({"cmd":"extension-status","reqId":"r5"}));
+        assert_eq!(h.until("error")["reqId"], "r5", "too malformed to parse");
+
+        // Without a reqId, nothing is invented.
+        h.send(json!({"cmd":"extension-status","extension":"fixture","runtimeRoot":f.runtime}));
+        assert!(h.until("extension-status").get("reqId").is_none());
+        h.eof();
+    }
+
     /// A remembered sign-in is sealed on disk, reported by status without a
     /// server running, and gone after sign-out.
     #[test]
@@ -2502,7 +2609,9 @@ mod extensions {
         let id = prompt["promptId"].clone();
         h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"gamma"}));
         let refused = h.until("error");
-        assert_eq!(refused["code"], "descriptor_invalid");
+        // Its own code: `descriptor_invalid` with a server id is what a failed
+        // start looks like, and this start is still waiting for an answer.
+        assert_eq!(refused["code"], "prompt_invalid");
         assert_eq!(refused["serverId"], "s1");
         h.send(json!({"cmd":"prompt-answer","serverId":"s1","promptId":id,"value":"beta"}));
         assert_eq!(h.until("prompt-closed")["promptId"], id);
@@ -2599,8 +2708,14 @@ mod extensions {
         let mut h = Host::new();
         h.send(f.start());
         h.until("server-started");
-        h.send(json!({"cmd":"extension-forget","extension":"fixture","runtimeRoot":f.runtime}));
-        assert_eq!(h.until("error")["code"], "busy");
+        h.send(json!({"cmd":"extension-forget","extension":"fixture",
+            "runtimeRoot":f.runtime,"reqId":"f1"}));
+        let busy = h.until("error");
+        assert_eq!(busy["code"], "busy");
+        assert_eq!(
+            busy["reqId"], "f1",
+            "told apart from a busy start by its reqId"
+        );
         h.send(json!({"cmd":"stop","serverId":"s1"}));
         h.until("server-stopped");
         h.eof();

@@ -74,7 +74,7 @@ impl Prompts {
         };
         if !open.values.contains(&value) {
             return Err(fail(
-                codes::DESCRIPTOR_INVALID,
+                codes::PROMPT_INVALID,
                 "That is not one of the choices offered.",
             ));
         }

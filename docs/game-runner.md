@@ -160,8 +160,9 @@ only over `vendor_http`, and what is kept sealed to this user.
 The commands `extension-status`, `extension-forget` and `prompt-answer`, and
 the events `sign-in`, `signed-in`, `prompt`, `prompt-closed` and
 `extension-status`, belong to it, as do the codes `sign_in_required`,
-`sign_in_expired`, `account_not_allowed`, `vendor_unavailable` and
-`extension_failed`.
+`sign_in_expired`, `account_not_allowed`, `vendor_unavailable`,
+`extension_failed` and `prompt_invalid`, and the optional `reqId` the extension
+commands echo on their answer and on `error`.
 
 **`docs/game-extensions.md` is the page for all of it.** It is not repeated
 here so the two cannot drift.
