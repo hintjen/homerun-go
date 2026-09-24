@@ -67,6 +67,9 @@ use crate::{
 
 #[cfg(feature = "test-extensions")]
 mod fixture;
+#[cfg(all(test, windows, feature = "test-extensions"))]
+mod harness;
+mod hytale;
 mod prompt;
 mod store;
 
@@ -382,6 +385,7 @@ impl MachineContext {
 pub fn registry() -> Vec<&'static dyn GameExtension> {
     #[allow(unused_mut)]
     let mut all: Vec<&'static dyn GameExtension> = vec![];
+    all.push(&hytale::Hytale);
     #[cfg(feature = "test-extensions")]
     all.push(&fixture::Fixture);
     all
@@ -884,142 +888,6 @@ mod tests {
         for extension in registry() {
             let spec = specs::spec(extension.name()).unwrap();
             let _ = extension.status(&machine_context(spec, &runtime_root()));
-        }
-    }
-
-    // ─── the harness: an extension driven without a runner ────────────────
-
-    #[cfg(all(windows, feature = "test-extensions"))]
-    mod harness {
-        use super::*;
-        use serde_json::json;
-        use std::sync::Mutex as StdMutex;
-
-        struct Harness {
-            spec: &'static ExtensionSpec,
-            config: Value,
-            descriptor: GameDescriptor,
-            stop: StopSignal,
-            out: Output,
-            seen: Arc<StdMutex<Vec<Event>>>,
-            prompts: Prompts,
-            root: std::path::PathBuf,
-        }
-
-        impl Harness {
-            fn new(config: Value) -> Self {
-                let seen = Arc::new(StdMutex::new(Vec::new()));
-                let s = seen.clone();
-                Self {
-                    spec: specs::spec("fixture").unwrap(),
-                    config,
-                    descriptor: GameDescriptor::default(),
-                    stop: StopSignal::default(),
-                    out: Output::new(move |e| s.lock().unwrap().push(e)),
-                    seen,
-                    prompts: Prompts::default(),
-                    root: runtime_root(),
-                }
-            }
-
-            fn begin(&self) -> std::result::Result<Begun, ExtError> {
-                let mut ctx = StartContext {
-                    spec: self.spec,
-                    config: &self.config,
-                    descriptor: &self.descriptor,
-                    server_id: "s1",
-                    stop: &self.stop,
-                    out: &self.out,
-                    machine: MachineStore::new(&crate::prepare::tools_dir(&self.root), "fixture"),
-                    server: ServerStore::new(&self.root.join("server"), "fixture"),
-                    policy: policy(self.spec, &self.config),
-                    prompts: &self.prompts,
-                };
-                registry()
-                    .into_iter()
-                    .find(|e| e.name() == "fixture")
-                    .unwrap()
-                    .begin(&mut ctx)
-            }
-
-            /// Answer the next prompt with `value`, from another thread.
-            fn answer_with(&self, value: &'static str) -> JoinHandle<()> {
-                let (prompts, seen) = (self.prompts.clone(), self.seen.clone());
-                thread::spawn(move || loop {
-                    let open = seen.lock().unwrap().iter().rev().find_map(|e| match e {
-                        Event::Prompt { prompt_id, .. } => Some(prompt_id.clone()),
-                        _ => None,
-                    });
-                    if let Some(id) = open {
-                        prompts.answer("s1", &id, value.into()).unwrap();
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                })
-            }
-        }
-
-        #[test]
-        fn a_prompt_is_asked_once_per_server_and_its_answer_supplied() {
-            let h = Harness::new(json!({ "host": "vendor.example", "askProfile": ["a", "b"] }));
-            let answering = h.answer_with("b");
-            let begun = h.begin().unwrap();
-            answering.join().unwrap();
-            assert_eq!(begun.supplied["profile"], "b");
-            // Asked once: the second run remembers the answer, and asks nothing.
-            let prompts_before = h.seen.lock().unwrap().len();
-            assert_eq!(h.begin().unwrap().supplied["profile"], "b");
-            assert_eq!(h.seen.lock().unwrap().len(), prompts_before);
-        }
-
-        #[test]
-        fn a_remembered_sign_in_survives_between_runs_and_is_forgotten_on_sign_out() {
-            let h = Harness::new(json!({ "host": "vendor.example", "remember": true }));
-            h.begin().unwrap();
-            h.begin().unwrap();
-            let store = MachineStore::new(&crate::prepare::tools_dir(&h.root), "fixture");
-            assert_eq!(store.read().unwrap().unwrap()["starts"], 2);
-            let ctx = machine_context(h.spec, &h.root);
-            let fixture = registry()
-                .into_iter()
-                .find(|e| e.name() == "fixture")
-                .unwrap();
-            assert_eq!(fixture.status(&ctx).signed_in, Some(true));
-            fixture.forget(&ctx).unwrap();
-            assert_eq!(fixture.status(&ctx).signed_in, Some(false));
-        }
-
-        /// The output pump's budget: an observer that returned slowly would
-        /// stall `server-log`. Ten thousand lines in well under a second.
-        #[test]
-        fn an_observer_keeps_up_with_a_line_storm() {
-            let h = Harness::new(json!({
-                "host": "vendor.example", "consoleOn": "never", "command": "x"
-            }));
-            let mut run = h.begin().unwrap().run;
-            let begun = Instant::now();
-            for i in 0..10_000 {
-                run.on_line(&format!("[world] generating chunk {i}"), "stdout");
-            }
-            assert!(
-                begun.elapsed() < Duration::from_secs(1),
-                "{:?}",
-                begun.elapsed()
-            );
-        }
-
-        #[test]
-        fn http_to_a_host_the_spec_does_not_name_is_refused_in_words() {
-            let h = Harness::new(json!({
-                "host": "vendor.example", "vendorUrl": "https://evil.example/hello"
-            }));
-            let error = h.begin().err().unwrap();
-            assert_eq!(error.code, codes::EXTENSION_FAILED);
-            assert!(
-                error.message.contains("does not trust"),
-                "{}",
-                error.message
-            );
         }
     }
 
