@@ -259,7 +259,11 @@ function runnerFeatures(file) {
   } catch {
     parsed = null;
   }
-  const NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
+  // A token, or a namespaced one: `extension:<name>` is how a runner says
+  // which game extensions are compiled in (homerun-core's extension_feature).
+  // The colon is the only punctuation it adds, so the rule still admits
+  // nothing that is unsafe in a log line or a comparison.
+  const NAME = /^[a-z0-9][a-z0-9-]{0,63}(:[a-z0-9][a-z0-9-]{0,63})?$/;
   if (!Array.isArray(parsed) || parsed.some((f) => typeof f !== "string" || !NAME.test(f))) {
     console.error(`\nThe runner answered --features with something else:\n  ${out.trim()}\n`);
     process.exit(1);

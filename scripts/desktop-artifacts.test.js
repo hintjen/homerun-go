@@ -165,11 +165,24 @@ test("a runner manifest names the features the built binary reports", (t) => {
 });
 
 test("a runner answering --features with something else is not published", (t) => {
-  for (const answer of [{ runtimeMounts: true }, ["Runtime-Mounts"], ["ok", 7], "runtime-mounts"]) {
+  for (const answer of [
+    { runtimeMounts: true }, ["Runtime-Mounts"], ["ok", 7], "runtime-mounts",
+    ["extension:"], [":hytale"], ["extension:hytale:more"], ["extension:Hytale"],
+  ]) {
     const { dir, exitCode } = runPublisher(t, ["--only", "game-runner"], true, {}, null, answer);
     assert.equal(exitCode, 1, `${JSON.stringify(answer)} must not become a manifest`);
     assert.equal(fs.existsSync(path.join(dir, LAYOUT["game-runner"].manifest)), false);
   }
+});
+
+test("a runner's extension features are published as it names them", (t) => {
+  // The first build with a compiled-in extension was refused here, because
+  // this rule predated the `extension:<name>` token and had no colon in it.
+  const answer = ["runtime-mounts", "extensions", "extension:hytale"];
+  const { dir, exitCode } = runPublisher(t, ["--only", "game-runner"], true, {}, null, answer);
+  assert.equal(exitCode, 0);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, LAYOUT["game-runner"].manifest)));
+  assert.deepEqual(manifest.features, answer);
 });
 
 test("a runner with no features publishes an empty list, not a missing one", (t) => {
