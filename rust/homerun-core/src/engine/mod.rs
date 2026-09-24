@@ -63,6 +63,7 @@ pub mod doctor;
 pub mod extensions;
 pub mod fetch;
 pub mod invocation;
+pub mod java;
 pub mod licence;
 pub mod ports;
 pub mod schema;

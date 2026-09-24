@@ -134,6 +134,94 @@ pub fn runtime_version(d: &GameDescriptor, requested: Option<&str>) -> Result<Op
     Ok(Some(version.to_string()))
 }
 
+/// The Java the host supplied, checked, for a game that runs one.
+///
+/// `None` for a game that does not ask for Java, whatever the host sent. For
+/// one that does, a missing, relative or absent path is refused, and so is a
+/// runtime whose own `java -version` does not report the major the descriptor
+/// names. The host picked the path, but a store can hold a damaged or
+/// half-extracted JRE, and a server on the wrong Java fails in ways a player
+/// cannot read -- so the program is asked, before anything is spawned.
+pub fn host_java(d: &GameDescriptor, supplied: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(major) = engine::java::required_major(d) else {
+        return Ok(None);
+    };
+    let name = if d.name.is_empty() {
+        "This game"
+    } else {
+        d.name.as_str()
+    };
+    let refuse = |why: String| fail(codes::REQUIRES_UNMET, why);
+    let Some(supplied) = supplied.filter(|s| !s.is_empty()) else {
+        return Err(refuse(format!(
+            "{name} needs Java {major}, and this app did not provide one. Update Homerun \
+             Desktop and try again."
+        )));
+    };
+    let path = PathBuf::from(supplied);
+    if !path.is_absolute() || !path.is_file() {
+        return Err(refuse(format!(
+            "{name} needs Java {major}, and the Java this app provided is not there."
+        )));
+    }
+    match java_major(&path) {
+        Some(found) if found == major => Ok(Some(path)),
+        Some(found) => Err(refuse(format!(
+            "{name} needs Java {major}, and the Java this app provided is {found}."
+        ))),
+        None => Err(refuse(format!(
+            "{name} needs Java {major}, and the Java this app provided could not be run."
+        ))),
+    }
+}
+
+/// What `java -version` says about itself, within ten seconds.
+fn java_major(program: &Path) -> Option<u32> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(program);
+    command
+        .arg("-version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The same variables the launch removes, so the banner is not preceded by
+    // "Picked up ..." lines or bent by options meant for something else.
+    for key in JAVA_OPTION_VARIABLES {
+        command.env_remove(key);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    let output = child.wait_with_output().ok()?;
+    let banner = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    engine::java::major_from_version(&banner)
+}
+
+/// Variables a JVM reads options from. A launch of the host's Java removes
+/// them, so a value on the player's machine -- left by some other tool --
+/// cannot quietly change how a game server runs. A descriptor that needs one
+/// sets it in `launch.env`, which wins.
+const JAVA_OPTION_VARIABLES: [&str; 3] = ["JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"];
+
 /// This game's runtime directory: `<root>/<id>`, or `<root>/<id>/<version>`
 /// for a vendor runtime. The one place the runner asks, so the fetch, the
 /// executable check, a runtime working directory and save mounts agree.
@@ -160,7 +248,11 @@ pub fn fetch(
 ) -> Result<PathBuf> {
     let dir = install_dir(d, root, version)?;
     let mut present = fetcher::present(&dir);
-    if !platform::executable(&dir, &d.platform(platform::HOST).unwrap().launch.exe).is_file() {
+    // The program has to be on disk too, not only the stamp -- unless the
+    // host supplies it, when the download holds no program to look for.
+    if !engine::java::launches_host_java(d, platform::HOST)
+        && !platform::executable(&dir, &d.platform(platform::HOST).unwrap().launch.exe).is_file()
+    {
         present.build_id = None;
     }
     let plan = engine::fetch::plan_version(
@@ -222,8 +314,9 @@ pub struct Prepared {
 }
 
 // Each argument is a different half of one launch -- the descriptor, three
-// places on disk, the player's choices, the host's secrets, the address and
-// the extension's values -- and a struct would only rename them.
+// places on disk, the player's choices, the host's secrets, the address, the
+// host's Java and the extension's values -- and a struct would only rename
+// them.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
     d: &GameDescriptor,
@@ -233,6 +326,7 @@ pub fn launch(
     settings: &serde_json::Map<String, serde_json::Value>,
     secrets: &BTreeMap<String, String>,
     bind: Option<&str>,
+    java: Option<&Path>,
     extension: &BTreeMap<String, String>,
 ) -> Result<Prepared> {
     // v1 binds descriptor games on loopback and nowhere else: the tunnel
@@ -380,13 +474,31 @@ pub fn launch(
     } else {
         ConsoleRoute::None
     };
-    let executable = platform::executable(runtime, &inv.exe);
-    if !executable.is_file() {
-        return Err(fail(
-            codes::SPAWN_FAILED,
-            "The downloaded runtime does not contain this game's server executable.",
-        ));
-    }
+    let env = inv.env;
+    let mut unset = Vec::new();
+    let executable = if engine::java::launches_host_java(d, platform::HOST) {
+        // Checked by `host_java` before the fetch; a caller that skipped it
+        // gets the same refusal rather than a spawn of nothing.
+        let java = match java {
+            Some(java) => java.to_path_buf(),
+            None => host_java(d, None)?.unwrap_or_default(),
+        };
+        unset = JAVA_OPTION_VARIABLES
+            .iter()
+            .filter(|key| !env.contains_key(**key))
+            .map(|key| key.to_string())
+            .collect();
+        java
+    } else {
+        let executable = platform::executable(runtime, &inv.exe);
+        if !executable.is_file() {
+            return Err(fail(
+                codes::SPAWN_FAILED,
+                "The downloaded runtime does not contain this game's server executable.",
+            ));
+        }
+        executable
+    };
     let supervision = Supervision {
         readiness: Readiness::Marker(d.ready.marker.clone()),
         presence: d
@@ -409,7 +521,8 @@ pub fn launch(
             Invocation {
                 program: executable.to_string_lossy().into(),
                 args: inv.args,
-                env: inv.env,
+                env,
+                unset,
             },
             supervision,
         ),

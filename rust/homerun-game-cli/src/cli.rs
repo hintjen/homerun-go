@@ -28,6 +28,8 @@ Options:
   --runtime-root <folder>   Default: runtime/games
   --runtime-version <v>     The version to fetch and run, for a game downloaded
                             from its vendor's site in a chosen version (e.g. 1.4.5.8)
+  --java <path>             The java program to run, for a game that asks its host
+                            for Java (requires.java); checked with java -version
   --server-dir <folder>     Default: servers/<game>
   --server-id <id>          Default: descriptor game id
   --server-name <name>      Default: descriptor name
@@ -91,7 +93,7 @@ pub fn run() -> std::result::Result<(), String> {
                 println!("{HELP}");
                 return Ok(());
             }
-            "--runtime-root" | "--runtime-version" | "--server-dir" | "--server-id"
+            "--runtime-root" | "--runtime-version" | "--java" | "--server-dir" | "--server-id"
             | "--server-name" | "--settings-file" | "--secrets-file" | "--observe-seconds"
             | "--evidence" => {
                 let value = args.next().ok_or_else(|| format!("{arg} needs a value."))?;
@@ -158,6 +160,7 @@ pub fn run() -> std::result::Result<(), String> {
         .cloned()
         .unwrap_or_else(|| format!("servers/{}", d.id));
     let version = options.get("--runtime-version").cloned();
+    let java = options.get("--java").cloned();
     if verb == "doctor" {
         let machine = platform::machine_capacity(Path::new(&root));
         // A version that is not one is reported by the verdict itself; the
@@ -165,8 +168,15 @@ pub fn run() -> std::result::Result<(), String> {
         let present = engine::fetch::install_dir(&d, platform::HOST, &root, version.as_deref())
             .map(|dir| fetcher::present(Path::new(&dir)))
             .unwrap_or_default();
-        let verdict =
+        let mut verdict =
             engine::doctor::doctor_version(&d, &machine, &present, accepted, version.as_deref());
+        // A game that runs the host's Java is not ready until a Java is
+        // named and answers with the right major -- the same check a launch
+        // makes, so doctor cannot pass a machine that start would refuse.
+        if let Err((_, message)) = prepare::host_java(&d, java.as_deref()) {
+            verdict.problems.push(message);
+            verdict.ok = false;
+        }
         // No success event exists for doctor in v1: report via stderr in JSON
         // mode and use protocol errors for refusals, rather than inventing events.
         if as_json {
@@ -287,6 +297,7 @@ pub fn run() -> std::result::Result<(), String> {
             runtime_root: root,
             licence_accepted: accepted,
             runtime_version: version,
+            java_path: java.clone(),
         }
     } else {
         Command::Start {
@@ -317,6 +328,7 @@ pub fn run() -> std::result::Result<(), String> {
             .map_err(|_| "Secrets must be an object of strings.".to_string())?,
             bind_address: Some("127.0.0.1".into()),
             runtime_version: version,
+            java_path: java,
         }
     };
     runner.command(command);

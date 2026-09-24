@@ -51,6 +51,16 @@ pub const SCHEMA_ID: &str = "https://gethomerun.app/schemas/game.v0.json";
 
 /// The descriptor schema, as a JSON Schema 2020-12 document.
 pub fn schema() -> Value {
+    // Built apart from the document below to keep `json!` inside its
+    // recursion limit.
+    let java = json!({
+        "type": ["object", "null"],
+        "description": "The Java major a JVM server needs, supplied by the host. Goes with launch.program java.",
+        "required": ["major"],
+        "properties": {
+            "major": { "type": "integer", "minimum": 8, "maximum": 99 }
+        }
+    });
     let mut document = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": SCHEMA_ID,
@@ -224,7 +234,8 @@ pub fn schema() -> Value {
                 "properties": {
                     "ramMb": { "type": "integer", "minimum": 0 },
                     "diskMb": { "type": "integer", "minimum": 0 },
-                    "cpuCores": { "type": ["integer", "null"], "minimum": 0 }
+                    "cpuCores": { "type": ["integer", "null"], "minimum": 0 },
+                    "java": java
                 }
             },
             "platforms": {
@@ -293,13 +304,19 @@ pub fn schema() -> Value {
                         },
                         "launch": {
                             "type": "object",
-                            "required": ["exe"],
                             "properties": {
                                 "exe": {
                                     "type": "string",
                                     "description":
                                         "Relative to the runtime directory, without a \
-                                         platform suffix. Never templated."
+                                         platform suffix. Never templated. Absent when \
+                                         program is set."
+                                },
+                                "program": {
+                                    "enum": ["java"],
+                                    "description":
+                                        "A program the host supplies instead of exe: java \
+                                         is the runtime requires.java names. Never a path."
                                 },
                                 "args": { "type": "array", "items": { "type": "string" } },
                                 "env": {
@@ -544,6 +561,7 @@ mod tests {
                 ram_mb: 8192,
                 disk_mb: 16000,
                 cpu_cores: Some(4),
+                java: Some(JavaRequirement { major: 25 }),
             },
             platforms: BTreeMap::from([(
                 "win32-x64".to_string(),
@@ -566,6 +584,7 @@ mod tests {
                         env: BTreeMap::from([("K".to_string(), "v".to_string())]),
                         cwd: Some(".".into()),
                         cwd_base: CwdBase::Runtime,
+                        program: Some(LaunchProgram::Java),
                     },
                 },
             )]),

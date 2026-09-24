@@ -638,6 +638,7 @@ mod tests {
         let mut env = std::collections::BTreeMap::new();
         env.insert("HOMERUN_FAKE_SERVER".to_string(), "ready".to_string());
         let engine: Arc<dyn Engine> = Arc::new(ProcessEngine::new(Invocation {
+            unset: Vec::new(),
             program: std::env::current_exe()
                 .unwrap()
                 .to_string_lossy()

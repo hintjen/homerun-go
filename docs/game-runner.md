@@ -157,6 +157,35 @@ fails with `fetch_failed` saying the vendor's file for that version changed,
 and nothing is unpacked or run. Deleting the record is how a person who has
 checked the new file tells this machine to trust it.
 
+## Host-supplied Java: `javaPath` and `--java`
+
+A JVM server's descriptor names the Java it needs, `requires.java.major`, and
+`launch.program: "java"` in place of `launch.exe`. It downloads no JRE of its
+own: Homerun Desktop already keeps Java runtimes (one bundled, others fetched
+once per major and shared with Minecraft), so the host resolves one and sends
+its `java` as `javaPath` on `fetch` and `start` (`--java <path>` standalone,
+including `doctor`). Feature `host-java`; an older runner would ignore both
+fields and have no program to run.
+
+The runner checks what it was given before it downloads or spawns anything
+(`prepare::host_java`): the path must be absolute and exist, and the program's
+own `java -version` must report exactly the major the descriptor names. A
+missing, wrong or unrunnable Java is `requires_unmet` with a sentence a player
+can read ("Hytale needs Java 25, and the Java this app provided is 21"), never
+a fall-through to some other program. The host chose the path; the check is
+there because a store can hold a damaged or half-extracted JRE.
+
+The launch spawns `javaPath` with `launch.args` unchanged, so `{runtimeDir}`
+still names the game's own files. `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and
+`JDK_JAVA_OPTIONS` are removed from the server's environment unless the descriptor sets
+them, so a value left on the player's machine by some other tool cannot
+change how it runs. The match is on an exact major, like the desktop's own
+`resolveJava`: a vendor that moves to a new Java bumps the descriptor.
+
+The lifecycle tests use `examples/fake_java.rs` as the host's `java` (a real
+executable, because the runner spawns into a job object, which a batch file
+cannot be); `cargo test` builds it.
+
 ## `prepare.rs`: directories, settings and resources
 
 For cwd-relative assets, `launch.cwdBase: "runtime"` selects the shared runtime
