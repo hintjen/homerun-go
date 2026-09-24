@@ -7,7 +7,8 @@
 //! - `game`: the program to run in its place, with the same arguments.
 //!
 //! `-version` prints a banner the way Temurin does, on stderr. Anything else
-//! runs `game` with the arguments, stdin, stdout and stderr it was given and
+//! writes `options` -- each JVM option variable it was given, one
+//! `NAME=value` per line -- then runs `game` with the arguments, stdin, stdout and stderr it was given and
 //! exits with its code -- what `java -jar server.jar ...` looks like from the
 //! outside. It exists because the runner spawns a real executable (a batch
 //! file cannot be put in a job object directly), and a libtest binary refuses
@@ -32,6 +33,18 @@ fn main() {
         eprintln!("OpenJDK Runtime Environment (fake)");
         return;
     }
+    let options: String = ["JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"]
+        .iter()
+        .filter_map(|key| {
+            std::env::var(key).ok().map(|value| {
+                format!(
+                    "{key}={value}
+"
+                )
+            })
+        })
+        .collect();
+    let _ = std::fs::write(home.join("options"), options);
     let status = Command::new(read("game"))
         .args(&args)
         .status()

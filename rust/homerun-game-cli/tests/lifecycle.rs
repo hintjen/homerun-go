@@ -635,8 +635,14 @@ struct Host {
 }
 impl Host {
     fn new() -> Self {
+        Self::with_env(&[])
+    }
+    /// A runner started with `vars` in its environment, as a player's machine
+    /// might have them.
+    fn with_env(vars: &[(&str, &str)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
             .arg("supervise")
+            .envs(vars.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -971,6 +977,32 @@ fn a_game_runs_on_the_java_its_host_supplies() {
     assert!(
         f.root.join("server/pid").is_file(),
         "the game ran, through the host's java"
+    );
+    h.eof();
+}
+
+/// JVM option variables on the player's machine do not reach the server:
+/// they are removed, not set to "" (which the JVM announces on every start
+/// as "Picked up JAVA_TOOL_OPTIONS: "). One the descriptor sets is kept.
+#[test]
+fn jvm_option_variables_on_the_machine_do_not_reach_the_server() {
+    let mut f = Fixture::new();
+    on_host_java(&mut f);
+    f.d["platforms"][platform::HOST]["launch"]["env"]["JDK_JAVA_OPTIONS"] = json!("-Dgame=1");
+    let java = fake_java(&f, 25);
+    let mut start = f.start();
+    start["javaPath"] = json!(java);
+    let mut h = Host::with_env(&[
+        ("JAVA_TOOL_OPTIONS", "-Xmx1m"),
+        ("_JAVA_OPTIONS", "-Xmx1m"),
+        ("JDK_JAVA_OPTIONS", "-Xmx1m"),
+    ]);
+    h.send(start);
+    h.until("server-started");
+    assert_eq!(
+        fs::read_to_string(f.root.join("java/options")).unwrap(),
+        "JDK_JAVA_OPTIONS=-Dgame=1
+"
     );
     h.eof();
 }

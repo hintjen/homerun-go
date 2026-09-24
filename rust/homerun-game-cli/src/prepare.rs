@@ -184,7 +184,7 @@ fn java_major(program: &Path) -> Option<u32> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // The same variables the launch empties, so the banner is not preceded by
+    // The same variables the launch removes, so the banner is not preceded by
     // "Picked up ..." lines or bent by options meant for something else.
     for key in JAVA_OPTION_VARIABLES {
         command.env_remove(key);
@@ -216,8 +216,8 @@ fn java_major(program: &Path) -> Option<u32> {
     engine::java::major_from_version(&banner)
 }
 
-/// Variables a JVM reads options from. A launch of the host's Java sets them
-/// empty, so a value on the player's machine -- left by some other tool --
+/// Variables a JVM reads options from. A launch of the host's Java removes
+/// them, so a value on the player's machine -- left by some other tool --
 /// cannot quietly change how a game server runs. A descriptor that needs one
 /// sets it in `launch.env`, which wins.
 const JAVA_OPTION_VARIABLES: [&str; 3] = ["JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS"];
@@ -463,7 +463,8 @@ pub fn launch(
     } else {
         ConsoleRoute::None
     };
-    let mut env = inv.env;
+    let env = inv.env;
+    let mut unset = Vec::new();
     let executable = if engine::java::launches_host_java(d, platform::HOST) {
         // Checked by `host_java` before the fetch; a caller that skipped it
         // gets the same refusal rather than a spawn of nothing.
@@ -471,9 +472,11 @@ pub fn launch(
             Some(java) => java.to_path_buf(),
             None => host_java(d, None)?.unwrap_or_default(),
         };
-        for key in JAVA_OPTION_VARIABLES {
-            env.entry(key.to_string()).or_default();
-        }
+        unset = JAVA_OPTION_VARIABLES
+            .iter()
+            .filter(|key| !env.contains_key(**key))
+            .map(|key| key.to_string())
+            .collect();
         java
     } else {
         let executable = platform::executable(runtime, &inv.exe);
@@ -508,6 +511,7 @@ pub fn launch(
                 program: executable.to_string_lossy().into(),
                 args: inv.args,
                 env,
+                unset,
             },
             supervision,
         ),

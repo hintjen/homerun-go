@@ -158,7 +158,7 @@ there because a store can hold a damaged or half-extracted JRE.
 
 The launch spawns `javaPath` with `launch.args` unchanged, so `{runtimeDir}`
 still names the game's own files. `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS` and
-`JDK_JAVA_OPTIONS` are set empty for the server unless the descriptor sets
+`JDK_JAVA_OPTIONS` are removed from the server's environment unless the descriptor sets
 them, so a value left on the player's machine by some other tool cannot
 change how it runs. The match is on an exact major, like the desktop's own
 `resolveJava`: a vendor that moves to a new Java bumps the descriptor.
