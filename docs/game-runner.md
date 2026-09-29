@@ -244,15 +244,46 @@ a refusal rather than an optimistic launch.
 
 Relative cwd paths are confined to the selected server or runtime base; config
 paths stay confined to the server directory. Managed files
-cannot traverse symbolic links. JSON object and properties files merge managed
-keys without erasing unrelated settings. A managed key whose setting is unset
-is **removed** rather than left at the previous launch's value; unmanaged keys,
-comments and layout survive that too. Other descriptor config formats
-(INI, TOML, XML) currently fail with an explicit capability message; implement
-their merge rules before onboarding a game that requires them. The descriptor
+cannot traverse symbolic links. JSON object, INI and properties files merge
+managed keys without erasing unrelated settings, and create the file and its
+folders when the game has not written them yet. A managed key whose setting is
+unset is **removed** rather than left at the previous launch's value; unmanaged
+keys, comments and layout survive that too. The other descriptor config formats
+(TOML, XML) fail with an explicit capability message; implement their merge
+rules before onboarding a game that requires them. The descriptor
 and vendor executable remain trusted bundled inputs, not a sandbox for hostile
 programs. Port checks do not establish where a vendor writes its saves or which
 network interfaces it chooses: the onboarding probe must verify those facts.
+
+## INI configuration: `config-ini`
+
+`format: "ini"` is written by `homerun_core::ini_config`, which reads INI the
+way Unreal Engine writes it. A key names its section in brackets, because
+Unreal's section names are paths full of `/` and `.`:
+
+- `"[HTTPServer.Listeners]DefaultBindAddress": "{bindAddress}"` is a plain
+  `DefaultBindAddress=127.0.0.1` line in that section. A missing section is
+  appended; a missing key goes at the end of its section.
+- `"[/Script/Pal.PalGameWorldSettings]OptionSettings(ServerName)": "{setting:name}"`
+  is one member of the Unreal struct on the `OptionSettings=` line,
+  `OptionSettings=(ServerName="...",...)`. Other members, including nested
+  lists like `CrossplayPlatforms=(Steam,Xbox)`, are kept as written; a missing
+  struct is created holding only the managed members, which Unreal fills out
+  from its defaults.
+
+A member sits in parentheses, not after a dot, because Unreal keys have dots of
+their own (`[SystemSettings]r.Shadow.MaxResolution`). Names match ignoring
+ASCII case, as Unreal's do. Values keep their type: a bool setting is
+`True`/`False`, a number is bare, and a value that is exactly one `{port:...}`
+is a number too. Text is raw on a plain line and double-quoted in a struct,
+where a `"` or `\` in it is refused (a quote ends the string and the rest
+becomes members of the struct; no game has been seen to honour Unreal's
+backslash escape). A control character is refused everywhere. The error names
+the key, never the value. A file whose managed key appears twice, or whose
+struct does not balance, is refused rather than guessed at, and a UTF-16 file
+(Unreal saves one once it holds anything outside ASCII) is written back as
+UTF-16. Hosts must require feature `config-ini` for a descriptor with an INI
+entry: an older runner refuses the format at launch.
 
 ## `cli.rs`: standalone use
 
