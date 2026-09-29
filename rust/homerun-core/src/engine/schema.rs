@@ -401,7 +401,7 @@ pub fn schema() -> Value {
             "stop": {
                 "type": "object",
                 "properties": {
-                    "via": { "enum": ["console", "interrupt"] },
+                    "via": { "enum": ["console", "interrupt", "http"] },
                     "command": { "type": ["string", "null"] },
                     "graceMs": { "type": "integer", "minimum": 0 }
                 }
@@ -478,7 +478,59 @@ pub fn schema() -> Value {
     // Built apart: the document above is already close to `json!`'s
     // recursion limit, and this part is generated from the registry.
     document["properties"]["extension"] = extension(super::extensions::PUBLISHED);
+    document["properties"]["stop"]["properties"]["http"] = http_stop();
     document
+}
+
+/// `stop.http`. Built apart for the same recursion limit.
+fn http_stop() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "description":
+            "For stop.via http: requests sent in order to 127.0.0.1 on a private \
+             port, each only after the one before answered 2xx. Nothing in them is \
+             templated. Feature stop-http.",
+        "required": ["port", "requests"],
+        "properties": {
+            "port": {
+                "type": "string",
+                "description": "The name of a declared TCP port with expose false. Never a host."
+            },
+            "auth": {
+                "type": ["object", "null"],
+                "properties": {
+                    "basic": {
+                        "type": "object",
+                        "required": ["user", "secret"],
+                        "properties": {
+                            "user": { "type": "string" },
+                            "secret": {
+                                "type": "string",
+                                "description": "The name of a generated secret, never a literal."
+                            }
+                        }
+                    }
+                }
+            },
+            "requests": {
+                "type": "array", "minItems": 1, "maxItems": 8,
+                "items": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": {
+                        "method": { "enum": ["POST", "PUT"], "default": "POST" },
+                        "path": {
+                            "type": "string", "pattern": "^/", "maxLength": 256,
+                            "description": "An absolute path, query included. No host, no \"..\"."
+                        },
+                        "body": {
+                            "description": "Sent as application/json exactly as written; at most 4096 bytes. Absent sends no body."
+                        }
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// `extension`, from the extensions a release build carries.
@@ -653,6 +705,20 @@ mod tests {
                 via: StopVia::Console,
                 command: Some("quit".into()),
                 grace_ms: 1,
+                http: Some(HttpStop {
+                    port: "rest".into(),
+                    auth: Some(HttpAuth {
+                        basic: Some(BasicAuth {
+                            user: "admin".into(),
+                            secret: "admin".into(),
+                        }),
+                    }),
+                    requests: vec![HttpRequest {
+                        method: HttpMethod::Post,
+                        path: "/v1/api/save".into(),
+                        body: Some(serde_json::json!({})),
+                    }],
+                }),
             },
             ports: vec![Port {
                 name: "game".into(),

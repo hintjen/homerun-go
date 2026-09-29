@@ -637,6 +637,9 @@ pub struct Stop {
     /// a while and a hard kill during one is how a world is lost.
     #[serde(default)]
     pub grace_ms: u64,
+    /// Where and what to send, for [`StopVia::Http`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http: Option<HttpStop>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -649,6 +652,87 @@ pub enum StopVia {
     /// not start in its own console group — which is why a game whose only
     /// stop is an interrupt is a platform gap, not a descriptor detail.
     Interrupt,
+    /// A fixed sequence of HTTP requests to the server's own admin API on
+    /// loopback -- [`Stop::http`]. For a game with no console on stdin whose
+    /// supported way to be asked to save and exit is a REST endpoint.
+    Http,
+}
+
+/// A stop sent as HTTP requests to a port this server bound on loopback.
+///
+/// Under `stop` rather than `console` because it is not a console: nothing a
+/// person types reaches it, there is no reply to show, and every request it
+/// can make is written here, in the signed descriptor. The runner connects to
+/// `127.0.0.1` and nowhere else -- there is deliberately no host to name.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStop {
+    /// The **name of a declared port**, which must be `expose: false`. Its
+    /// number is whatever the server was told to bind, as for [`Rcon::port`].
+    #[serde(default)]
+    pub port: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<HttpAuth>,
+    /// Sent in order, each only once the one before answered 2xx.
+    #[serde(default)]
+    pub requests: Vec<HttpRequest>,
+}
+
+/// How the requests identify themselves. Basic is the only scheme today.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basic: Option<BasicAuth>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BasicAuth {
+    /// A literal user name: `admin` for Palworld. Not secret.
+    #[serde(default)]
+    pub user: String,
+    /// The name of a generated secret (`{secret:<name>}`), never a literal --
+    /// the same rule as [`Rcon::secret`], for the same reason.
+    #[serde(default)]
+    pub secret: String,
+}
+
+/// One request of an HTTP stop. Nothing in it is templated.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpRequest {
+    #[serde(default)]
+    pub method: HttpMethod,
+    /// An absolute path on the server, query included: `/v1/api/save`.
+    #[serde(default)]
+    pub path: String,
+    /// Sent as `application/json` exactly as written. `None` sends no body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<Value>,
+}
+
+/// The methods a stop may use. A closed set: a stop asks a server to do
+/// something, so there is no reading and nothing to delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    #[default]
+    Post,
+    Put,
+    /// Anything else, kept so validation can refuse it in a sentence.
+    #[serde(other)]
+    Unknown,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HttpMethod::Post => "POST",
+            HttpMethod::Put => "PUT",
+            HttpMethod::Unknown => "?",
+        }
+    }
 }
 
 /// One port the server binds.
@@ -976,6 +1060,7 @@ mod tests {
                 via: StopVia::Console,
                 command: Some("quit".into()),
                 grace_ms: 60_000,
+                http: None,
             },
             client: Client {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
