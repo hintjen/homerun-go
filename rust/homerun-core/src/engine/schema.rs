@@ -433,7 +433,11 @@ pub fn schema() -> Value {
                     "properties": {
                         "file": { "type": "string" },
                         "format": { "enum": ["properties", "ini", "json", "toml", "xml"] },
-                        "keys": { "type": "object", "additionalProperties": { "type": "string" } }
+                        "keys": {
+                            "type": "object",
+                            "description": "Key in the file -> a templated value. properties: the key. json: a dotted path. ini: \"[Section]Key\", or \"[Section]Key(Member)\" for one member of an Unreal struct value.",
+                            "additionalProperties": { "type": "string" }
+                        }
                     }
                 }
             },

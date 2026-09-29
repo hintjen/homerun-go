@@ -833,6 +833,9 @@ fn check_config_and_saves(d: &GameDescriptor, r: &mut Report) {
         if matches!(file.format, ConfigFormat::Json) {
             check_json_keys(file, r);
         }
+        if matches!(file.format, ConfigFormat::Ini) {
+            check_ini_keys(file, r);
+        }
     }
 
     for path in &d.saves.paths {
@@ -868,6 +871,43 @@ fn check_json_keys(file: &ConfigFile, r: &mut Report) {
                 ));
             }
         }
+    }
+}
+
+/// Managed INI keys are `[Section]Key` or `[Section]Key(Member)`
+/// (`crate::ini_config`). Unreal matches names ignoring case, so two keys that
+/// differ only in case are the same line, and a key managed both whole and by
+/// member asks for one value to be text and a struct at once.
+fn check_ini_keys(file: &ConfigFile, r: &mut Report) {
+    let mut whole = HashSet::new();
+    let mut structs = HashSet::new();
+    let mut seen = HashSet::new();
+    for key in file.keys.keys() {
+        let Some(parsed) = crate::ini_config::parse_key(key) else {
+            r.problems.push(format!(
+                "\"{key}\" in {} is not an INI setting: write \"[Section]Key\", or \"[Section]Key(Member)\" for one member of a struct.",
+                file.file
+            ));
+            continue;
+        };
+        if !seen.insert(key.to_ascii_lowercase()) {
+            r.problems.push(format!(
+                "{} sets \"{key}\" more than once, spelled differently.",
+                file.file
+            ));
+        }
+        let line = format!("[{}]{}", parsed.section, parsed.name).to_ascii_lowercase();
+        if parsed.member.is_some() {
+            structs.insert(line);
+        } else {
+            whole.insert(line);
+        }
+    }
+    for line in whole.intersection(&structs) {
+        r.problems.push(format!(
+            "{} sets \"{line}\" both whole and member by member, so it would have to be a value and a group of values at once.",
+            file.file
+        ));
     }
 }
 
@@ -1731,6 +1771,38 @@ mod tests {
                 .any(|p| p.contains("setting path") || p.contains("a group")),
             "{ok:?}"
         );
+    }
+
+    #[test]
+    fn ini_config_keys_name_a_section_and_optionally_a_member() {
+        let ok = problems_of(
+            json!({ "config": [{ "file": "Game.ini", "format": "ini", "keys": {
+            "[/Script/Pal.PalGameWorldSettings]OptionSettings(ServerName)": "x",
+            "[HTTPServer.Listeners]DefaultBindAddress": "{bindAddress}"
+        } }] }),
+        );
+        assert!(!ok.iter().any(|p| p.contains("INI")), "{ok:?}");
+
+        let bad = problems_of(json!({ "config": [{ "file": "Game.ini", "format": "ini",
+            "keys": { "NoSection": "x", "[S]Key(A.B)": "y" } }] }));
+        assert_eq!(
+            bad.iter()
+                .filter(|p| p.contains("not an INI setting"))
+                .count(),
+            2,
+            "{bad:?}"
+        );
+    }
+
+    #[test]
+    fn an_ini_key_cannot_be_both_whole_and_a_struct_or_set_twice() {
+        let p = problems_of(
+            json!({ "config": [{ "file": "Game.ini", "format": "ini", "keys": {
+            "[S]Opts": "x", "[s]opts(A)": "y", "[S]K": "1", "[s]k": "2"
+        } }] }),
+        );
+        assert!(says(&p, "a value and a group"), "{p:?}");
+        assert!(says(&p, "more than once"), "{p:?}");
     }
 
     #[test]

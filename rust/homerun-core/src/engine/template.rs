@@ -369,6 +369,23 @@ pub fn fill_value(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
     })
 }
 
+/// [`fill_value`], and a value that is exactly one `{port:…}` is a number.
+///
+/// For the INI writer, where the type is spelled in the file: inside an
+/// Unreal struct text is quoted and a number is not, so a port written as
+/// text would be `RESTAPIPort="8212"` for a setting the game reads as an
+/// integer. JSON keeps [`fill_value`]'s rule, under which a port is text,
+/// because changing it would change files every JSON descriptor already
+/// writes.
+pub fn fill_value_with_ports(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
+    if let Ok([Piece::Placeholder(Placeholder::Port(name))]) = scan(input).as_deref() {
+        if let Some(port) = bindings.ports.get(name) {
+            return Ok(Some(Value::from(*port)));
+        }
+    }
+    fill_value(input, bindings)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -471,6 +488,17 @@ mod tests {
             Some(json!("25 players"))
         );
         assert_eq!(value("{port:game}"), Some(json!("28015")));
+    }
+
+    #[test]
+    fn a_sole_port_is_a_number_only_where_the_writer_asks_for_one() {
+        let f = Fixture::new();
+        let ported = |input| fill_value_with_ports(input, &f.bindings()).unwrap();
+        assert_eq!(ported("{port:game}"), Some(json!(28015)));
+        assert_eq!(ported("{port:game}/tcp"), Some(json!("28015/tcp")));
+        assert_eq!(ported("{setting:maxPlayers}"), Some(json!(25)));
+        assert_eq!(ported("{setting:seed}"), None);
+        assert!(fill_value_with_ports("{port:nope}", &f.bindings()).is_err());
     }
 
     #[test]
