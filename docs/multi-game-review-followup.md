@@ -33,13 +33,15 @@ the argument-value policy, Job Object ownership with process-tree killing,
 lossy UTF-8 log decoding and the null-drop fix below are implemented and
 verified. Merging the engine PR does not waive this gate.
 
-All six are addressed in PR 28 (`fix/game-engine-gate`), which is a draft and
-has not been merged. **The gate is not lifted by this record**: what it
-records is that each item has an implementation and a regression that fails
-without it, every one of them run on Windows 11. What none of them establishes
-is behaviour against a real vendor's server — see *What only a real machine
-can prove* at the end of that PR, which is part of the gate and not a
-footnote.
+**Status: lifted.** All six are addressed in PR 28 (`fix/game-engine-gate`),
+merged 2026-09-21. Each item has an implementation and a regression that fails
+without it, every one of them run on Windows 11. The part those regressions
+could not establish, behaviour against a real vendor's server (*What only a
+real machine can prove* at the end of that PR), has since been exercised by
+real servers probed on Windows 11: Rust, Terraria, Hytale and Palworld, from
+2026-09-21 on. Josh recorded the gate as lifted on 2026-09-29, after this
+record had gone on saying "not merged" for a week. The history below is kept as
+it was written.
 
 - H3: bindAddress is restricted to loopback but not passed into invocation;
   observed ports omit the local address. Private/admin sockets can therefore
