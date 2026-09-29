@@ -155,8 +155,18 @@ fn fake_game() {
         println!("Command line: -batchmode +rcon.password {echo}");
         std::io::stdout().flush().unwrap();
     }
+    // A game whose only stop is its REST API, as Palworld's is. Bound before
+    // it says it is ready, on loopback, the way the descriptor's bind
+    // address tells a well-behaved one to.
+    let rest = std::env::var("HOMERUN_TEST_REST_PORT")
+        .ok()
+        .map(|rest| TcpListener::bind(("127.0.0.1", rest.parse::<u16>().unwrap())).unwrap());
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
+    }
+    if let Some(rest) = rest {
+        serve_rest(rest, &save);
+        return;
     }
     if std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("flood-then-widen") {
         thread::spawn(move || {
@@ -214,6 +224,96 @@ fn fake_game() {
         println!("reply: {line}");
         std::io::stdout().flush().unwrap();
     }
+}
+
+/// Palworld's REST API, as much of it as a stop uses: `POST /v1/api/save`
+/// writes the save and `POST /v1/api/shutdown` exits, each only for the
+/// admin password the launch handed the game (`HOMERUN_TEST_ADMIN_PASSWORD`).
+/// Stdin is never read -- this game has no console.
+///
+/// It is strict where a sloppy stop would get away with something: a wrong
+/// or missing `Authorization` is 401, and a shutdown before a save is 409
+/// and does not exit, so only save-then-shutdown with the right password
+/// ends with "world flushed". Every request is appended to `rest-log` for
+/// the test to read the order back. `HOMERUN_TEST_REST_REFUSE` makes the
+/// save answer 500.
+fn serve_rest(listener: TcpListener, save: &str) {
+    let password = std::env::var("HOMERUN_TEST_ADMIN_PASSWORD").unwrap_or_default();
+    let expected = format!("Basic {}", base64(format!("admin:{password}").as_bytes()));
+    let refuse = std::env::var("HOMERUN_TEST_REST_REFUSE").is_ok();
+    let mut saved = false;
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else { continue };
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() {
+            continue;
+        }
+        let (mut authorized, mut length, mut json) = (false, 0usize, false);
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                break;
+            }
+            let (name, value) = header.trim_end().split_once(": ").unwrap_or_default();
+            match name.to_ascii_lowercase().as_str() {
+                "authorization" => authorized = value == expected,
+                "content-length" => length = value.parse().unwrap_or(0),
+                "content-type" => json = value == "application/json",
+                _ => {}
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        let body = String::from_utf8(body).unwrap();
+        let route = request_line.trim_end().to_string();
+        let mut log = fs::read_to_string("rest-log").unwrap_or_default();
+        log.push_str(&format!("{route} auth={authorized} json={json} {body}\n"));
+        fs::write("rest-log", log).unwrap();
+
+        let (status, exit) = match route.as_str() {
+            _ if !authorized => ("401 Unauthorized", false),
+            "POST /v1/api/save HTTP/1.1" if refuse => ("500 Internal Server Error", false),
+            "POST /v1/api/save HTTP/1.1" => {
+                fs::write(save, "world flushed").unwrap();
+                saved = true;
+                ("200 OK", false)
+            }
+            "POST /v1/api/shutdown HTTP/1.1" if !saved => ("409 Conflict", false),
+            "POST /v1/api/shutdown HTTP/1.1" => ("200 OK", true),
+            _ => ("404 Not Found", false),
+        };
+        let mut stream = reader.into_inner();
+        let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+        let _ = stream.flush();
+        if exit {
+            // Palworld's `waittime`: it answers, then goes a moment later.
+            thread::sleep(Duration::from_millis(300));
+            return;
+        }
+    }
+}
+
+/// Standard base64, for the fake's expected `Authorization`.
+fn base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 /// One runtime, at one path per machine, for fixtures whose game listens on
@@ -954,6 +1054,165 @@ fn a_private_port_on_loopback_is_not_refused() {
         "{:?}",
         h.seen
     );
+    h.eof();
+}
+
+/// A start for a game stopped the way Palworld is: no console, and a save
+/// then a shutdown sent to its REST API on a private port, signed in as
+/// `admin` with the host's secret -- which the launch hands the game too.
+fn http_stop_start(f: &Fixture) -> Value {
+    let mut start = f.start();
+    let d = &mut start["descriptor"];
+    d["ports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"rest","proto":"tcp","port":free_port(),"expose":false}));
+    let env = &mut d["platforms"][platform::HOST]["launch"]["env"];
+    env["HOMERUN_TEST_REST_PORT"] = json!("{port:rest}");
+    env["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("{secret:rcon}");
+    d["console"] = json!({"via":"none"});
+    d["stop"] = json!({"via":"http","graceMs":5000,"http":{
+    "port":"rest",
+    "auth":{"basic":{"user":"admin","secret":"rcon"}},
+    "requests":[
+        {"method":"POST","path":"/v1/api/save","body":{}},
+        {"method":"POST","path":"/v1/api/shutdown","body":{"waittime":1,"message":"Server stopping"}}
+    ]}});
+    start
+}
+
+/// What the stop said about itself, on the runner's own stream.
+fn stop_notes(h: &Host) -> Vec<String> {
+    h.seen
+        .iter()
+        .filter(|v| v["event"] == "server-log" && v["stream"] == "host")
+        .filter_map(|v| v["line"].as_str().map(String::from))
+        .collect()
+}
+
+/// The whole stop, against a game that insists on the password and on the
+/// order: the save is written, the game exits on its own inside the grace,
+/// and the stop's account of itself names each request and the rung.
+#[test]
+fn an_http_stop_saves_then_shuts_the_game_down() {
+    let f = Fixture::new();
+    let mut h = Host::new();
+    assert!(
+        h.seen[0]["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("stop-http")),
+        "a host has to be able to require this: {}",
+        h.seen[0]
+    );
+    h.send(http_stop_start(&f));
+    h.until("server-started");
+    let asked = Instant::now();
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "the game should have exited on its own, not at the terminate: {:?}",
+        asked.elapsed()
+    );
+
+    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
+    let requests: Vec<&str> = log.lines().collect();
+    assert_eq!(requests.len(), 2, "{log}");
+    assert_eq!(
+        requests[0],
+        "POST /v1/api/save HTTP/1.1 auth=true json=true {}"
+    );
+    assert_eq!(
+        requests[1],
+        r#"POST /v1/api/shutdown HTTP/1.1 auth=true json=true {"message":"Server stopping","waittime":1}"#
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/saved")).unwrap(),
+        "world flushed"
+    );
+
+    let notes = stop_notes(&h);
+    for expected in [
+        "POST /v1/api/save answered 200",
+        "POST /v1/api/shutdown answered 200",
+        "exited during the http step",
+    ] {
+        assert!(
+            notes.iter().any(|n| n.contains(expected)),
+            "{expected}: {notes:#?}"
+        );
+    }
+    assert!(!notes.iter().any(|n| n.contains("terminate")), "{notes:#?}");
+    assert!(
+        !h.seen
+            .iter()
+            .any(|v| v.to_string().contains("do-not-print-this")),
+        "the password reached the host"
+    );
+    h.eof();
+}
+
+/// A save the game refuses ends the sequence there: the shutdown is never
+/// sent, and the ladder waits out the grace and falls to the terminate.
+#[test]
+fn an_http_stop_the_game_refuses_falls_through_to_terminate() {
+    let f = Fixture::new();
+    let mut start = http_stop_start(&f);
+    start["descriptor"]["stop"]["graceMs"] = json!(1000);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_REST_REFUSE"] =
+        json!("1");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+
+    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
+    assert_eq!(
+        log.lines().count(),
+        1,
+        "the shutdown must not follow a failed save: {log}"
+    );
+    assert!(!f.root.join("server/saved").exists());
+    let notes = stop_notes(&h);
+    for expected in [
+        "POST /v1/api/save answered 500, so the rest was not sent",
+        "moving on to the terminate step",
+        "exited during the terminate step",
+    ] {
+        assert!(
+            notes.iter().any(|n| n.contains(expected)),
+            "{expected}: {notes:#?}"
+        );
+    }
+    h.eof();
+}
+
+/// A password the game was not given is refused by it, and the stop says
+/// so without saying the password.
+#[test]
+fn an_http_stop_with_the_wrong_password_is_refused_by_the_game() {
+    let f = Fixture::new();
+    let mut start = http_stop_start(&f);
+    start["descriptor"]["stop"]["graceMs"] = json!(1000);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]
+        ["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("something-else");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
+    assert!(
+        log.starts_with("POST /v1/api/save HTTP/1.1 auth=false"),
+        "{log}"
+    );
+    assert!(stop_notes(&h).iter().any(|n| n.contains("answered 401")));
+    assert!(!h
+        .seen
+        .iter()
+        .any(|v| v.to_string().contains("do-not-print-this")));
     h.eof();
 }
 

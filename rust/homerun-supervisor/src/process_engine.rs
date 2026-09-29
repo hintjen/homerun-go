@@ -41,6 +41,15 @@
 //! is not allowed to depend on its own Minecraft module, so there is no shared
 //! type up there to use, and a supervisor that walked two different ladder
 //! types would be two stop paths pretending to be one.
+//!
+//! # A stop says what it did
+//!
+//! [`ProcessEngine::run_streamed`] reports each rung it climbs past the first
+//! and each request of an HTTP stop as a line on the [`HOST`] stream, with
+//! the time since the stop was asked for, and ends with which rung the
+//! server went on. That is what makes "the stop was clean" something a
+//! probe's evidence can show rather than assume. [`Engine::run`] drops those
+//! lines: its callers are Minecraft's, whose console never had them.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -138,6 +147,10 @@ pub enum Action {
     /// Send this verb over whatever [`ConsoleRoute`] says. The rung that
     /// flushes a world.
     Console(String),
+    /// Send these requests to the server's admin API on loopback, in order,
+    /// each only if the one before answered 2xx. The other polite rung, for
+    /// a game whose vendor's way to save and exit is HTTP.
+    Http(Arc<crate::stop_http::Stop>),
     /// A console control event. Unsupported on Windows, and
     /// [`platform::graceful_interrupt`] says so rather than pretending.
     Interrupt,
@@ -162,20 +175,39 @@ impl From<&jvm::Rung> for Rung {
     }
 }
 
-impl From<&homerun_core::engine::control::Rung> for Rung {
-    fn from(rung: &homerun_core::engine::control::Rung) -> Self {
-        use homerun_core::engine::control::Action as Core;
-        Rung {
-            action: match &rung.action {
+/// A descriptor's ladder, in this file's terms.
+///
+/// Not a `From`, because one rung cannot be converted on its own: the core's
+/// HTTP rung carries a port *name* and a secret *name*, and `http` is what the
+/// host resolved them to once it knew what was bound. With none, the HTTP
+/// rung is left out and the ladder starts at the rung below -- the core's
+/// rule for a console stop with nowhere to send it.
+pub fn descriptor_ladder(
+    ladder: &[homerun_core::engine::control::Rung],
+    http: Option<&crate::stop_http::Stop>,
+) -> Vec<Rung> {
+    use homerun_core::engine::control::Action as Core;
+    ladder
+        .iter()
+        .filter_map(|rung| {
+            let action = match &rung.action {
                 Core::Console { command } => Action::Console(command.clone()),
                 Core::Interrupt => Action::Interrupt,
+                Core::Http { .. } => Action::Http(Arc::new(http?.clone())),
                 Core::Terminate => Action::Terminate,
                 Core::Kill => Action::Kill,
-            },
-            wait_ms: rung.wait_ms,
-        }
-    }
+            };
+            Some(Rung {
+                action,
+                wait_ms: rung.wait_ms,
+            })
+        })
+        .collect()
 }
+
+/// The stream a stop's own account of itself arrives on, beside `stdout` and
+/// `stderr`. The runner's name for the runner talking.
+pub const HOST: &str = "host";
 
 impl Supervision {
     /// A Minecraft server, which is what this engine meant before descriptors
@@ -376,7 +408,18 @@ impl Engine for ProcessEngine {
         on_line: &dyn Fn(String),
         on_ready: &dyn Fn(),
     ) -> RunOutcome {
-        self.run_streamed(request, stop, &|line, _| on_line(line), on_ready)
+        // The stop's notes are for the runner; a Minecraft console never
+        // carried them. See the module header.
+        self.run_streamed(
+            request,
+            stop,
+            &|line, stream| {
+                if stream != HOST {
+                    on_line(line)
+                }
+            },
+            on_ready,
+        )
     }
 
     fn command(&self, command: &str) -> Result<(), String> {
@@ -499,16 +542,21 @@ impl ProcessEngine {
         // the server, so climbing the ladder has to happen from somewhere
         // else. It takes the child's pid rather than the child itself, because
         // waiting on the child belongs to this thread alone.
+        let (notes, noted) = std::sync::mpsc::channel::<String>();
         let watcher = spawn_stop_watcher(
             child.id(),
             stop.clone(),
             self.supervision.ladder.clone(),
             self.console_sender(),
             job.clone(),
+            notes,
         );
 
         let mut ready = false;
         loop {
+            for note in noted.try_iter() {
+                on_line(note, HOST);
+            }
             match rx.recv_timeout(Duration::from_millis(100)) {
                 Ok((line, stream)) => {
                     observe(&line, &roster, &self.supervision.presence);
@@ -535,9 +583,14 @@ impl ProcessEngine {
         watcher.finish();
         *self.live() = None;
 
-        // Whatever stderr had left to say, now that stdout is done.
+        // Whatever stderr had left to say, now that stdout is done, and then
+        // how the stop ended -- the watcher has been joined, so its last word
+        // is in.
         for (line, stream) in rx.try_iter() {
             on_line(line, stream);
+        }
+        for note in noted.try_iter() {
+            on_line(note, HOST);
         }
 
         match status {
@@ -620,6 +673,7 @@ fn spawn_stop_watcher(
     ladder: Vec<Rung>,
     say: ConsoleSender,
     job: Option<Arc<crate::job::Job>>,
+    notes: std::sync::mpsc::Sender<String>,
 ) -> StopWatcher {
     let done = Arc::new(StopSignal::default());
     let finished = Arc::clone(&done);
@@ -635,10 +689,34 @@ fn spawn_stop_watcher(
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        for rung in ladder {
+        // Every note carries the time since the stop was asked for. A closed
+        // receiver means nobody is listening, which is no reason to stop.
+        let asked = Instant::now();
+        let note = |text: String| {
+            let _ = notes.send(format!(
+                "Stop: {text} ({:.1} s after the stop was asked for).",
+                asked.elapsed().as_secs_f64()
+            ));
+        };
+        // Said once the server has gone, naming the rung it went on.
+        let gone = |rung: &Action| {
+            note(format!("the server exited during the {} step", step(rung)));
+        };
+
+        for (i, rung) in ladder.iter().enumerate() {
             if finished.should_stop() {
+                if let Some(before) = i.checked_sub(1) {
+                    gone(&ladder[before].action);
+                }
                 return;
             }
+            if i > 0 {
+                note(format!(
+                    "the server had not exited, so moving on to the {} step",
+                    step(&rung.action)
+                ));
+            }
+            let begun = Instant::now();
             match &rung.action {
                 // **This rung has to be carried out here.** It was briefly a
                 // no-op, on the theory that the host would write `stop`
@@ -649,6 +727,37 @@ fn spawn_stop_watcher(
                 // silence and then took a SIGTERM. The rung that exists to
                 // save the world was the one being skipped.
                 Action::Console(verb) => say(verb),
+                // Sent in order, and the first that is not answered 2xx ends
+                // the sequence -- a shutdown after a save that failed would
+                // be a stop that loses the world it was meant to keep. Either
+                // way the rung's grace is waited out below, from when the
+                // rung began: a server may be on its way out regardless, and
+                // the terminate after it is what a refusal falls to.
+                Action::Http(http) => {
+                    let grace = Duration::from_millis(rung.wait_ms);
+                    for request in &http.requests {
+                        if finished.should_stop() {
+                            break;
+                        }
+                        let timeout = crate::stop_http::REQUEST_TIMEOUT
+                            .min(grace.saturating_sub(begun.elapsed()))
+                            .max(Duration::from_millis(100));
+                        let what = format!("{} {}", request.method, request.path);
+                        match crate::stop_http::send(&http.target, request, timeout) {
+                            Ok(code) if (200..300).contains(&code) => {
+                                note(format!("{what} answered {code}"))
+                            }
+                            Ok(code) => {
+                                note(format!("{what} answered {code}, so the rest was not sent"));
+                                break;
+                            }
+                            Err(why) => {
+                                note(format!("{what} failed: {why}, so the rest was not sent"));
+                                break;
+                            }
+                        }
+                    }
+                }
                 // A failure here is not fatal to the stop: the next rung
                 // handles it, and on Windows this rung always fails because
                 // the platform cannot do it. Saying so on the diagnostics
@@ -670,19 +779,40 @@ fn spawn_stop_watcher(
                 },
             }
 
-            let deadline = Instant::now() + Duration::from_millis(rung.wait_ms);
+            // An HTTP rung's grace includes its requests; see above.
+            let from = match rung.action {
+                Action::Http(_) => begun,
+                _ => Instant::now(),
+            };
+            let deadline = from + Duration::from_millis(rung.wait_ms);
             while Instant::now() < deadline {
                 if finished.should_stop() {
+                    gone(&rung.action);
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
+        }
+        // Nothing waits after a kill, and nothing survives one.
+        if let Some(last) = ladder.last() {
+            gone(&last.action);
         }
     });
 
     StopWatcher {
         done,
         handle: Some(handle),
+    }
+}
+
+/// A rung, as a stop's notes name it.
+fn step(action: &Action) -> &'static str {
+    match action {
+        Action::Console(_) => "console",
+        Action::Http(_) => "http",
+        Action::Interrupt => "interrupt",
+        Action::Terminate => "terminate",
+        Action::Kill => "kill",
     }
 }
 
@@ -1378,15 +1508,43 @@ mod tests {
                  "stop": { "via": "console", "command": "quit", "graceMs": 1000 } }"#,
         )
         .unwrap();
-        let converted: Vec<Rung> = homerun_core::engine::control::stop_ladder(&descriptor)
-            .iter()
-            .map(Rung::from)
-            .collect();
+        let converted = descriptor_ladder(
+            &homerun_core::engine::control::stop_ladder(&descriptor),
+            None,
+        );
         assert_eq!(
             converted.first().unwrap().action,
             Action::Console("quit".to_string())
         );
         assert_eq!(converted.last().unwrap().action, Action::Kill);
+    }
+
+    /// The core's HTTP rung only names its port and secret. Resolved, it is
+    /// the polite rung with its grace; unresolved, it is left out rather
+    /// than kept as a rung that could only time out.
+    #[test]
+    fn an_http_rung_is_kept_only_once_it_has_somewhere_to_go() {
+        let descriptor: GameDescriptor = serde_json::from_str(
+            r#"{ "id": "g", "console": { "via": "none" },
+                 "stop": { "via": "http", "graceMs": 30000, "http": { "port": "rest",
+                   "requests": [{ "method": "POST", "path": "/v1/api/save" }] } } }"#,
+        )
+        .unwrap();
+        let core = homerun_core::engine::control::stop_ladder(&descriptor);
+        let resolved = crate::stop_http::Stop::new(
+            crate::stop_http::Target::new(8212, Some(("admin", "pw"))),
+            &descriptor.stop.http.as_ref().unwrap().requests,
+        )
+        .unwrap();
+
+        let ladder = descriptor_ladder(&core, Some(&resolved));
+        assert_eq!(ladder[0].action, Action::Http(Arc::new(resolved)));
+        assert_eq!(ladder[0].wait_ms, 30_000);
+        assert_eq!(ladder.last().unwrap().action, Action::Kill);
+
+        let unresolved = descriptor_ladder(&core, None);
+        assert_eq!(unresolved[0].action, Action::Terminate);
+        assert_eq!(unresolved.len(), ladder.len() - 1);
     }
 
     fn drive(script: &str, on_running: impl FnOnce(&ProcessEngine, &StopSignal)) -> RunOutcome {

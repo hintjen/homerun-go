@@ -13,9 +13,10 @@ use homerun_core::{
 use homerun_supervisor::{
     fetcher, platform,
     process_engine::{
-        ConsoleRoute, Invocation, Presence, ProcessEngine, Readiness, Rung, Supervision,
+        descriptor_ladder, ConsoleRoute, Invocation, Presence, ProcessEngine, Readiness,
+        Supervision,
     },
-    rcon,
+    rcon, stop_http,
 };
 use std::{
     collections::BTreeMap,
@@ -486,6 +487,40 @@ pub fn launch(
         }),
         _ => None,
     };
+    // An HTTP stop's names, resolved the way the console's are: the port to
+    // what the server was told to bind, the secret to its value. There is no
+    // address to resolve -- the target is always 127.0.0.1.
+    let http_stop = match &d.stop.http {
+        Some(http) if d.stop.via == engine::descriptor::StopVia::Http => {
+            let basic = match http.auth.as_ref().and_then(|a| a.basic.as_ref()) {
+                Some(basic) => Some((
+                    basic.user.as_str(),
+                    secrets
+                        .get(&basic.secret)
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            fail(
+                                codes::DESCRIPTOR_INVALID,
+                                "The host has not provided the password for the server's admin API.",
+                            )
+                        })?
+                        .as_str(),
+                )),
+                None => None,
+            };
+            let port = *ports.get(&http.port).ok_or_else(|| {
+                fail(
+                    codes::DESCRIPTOR_INVALID,
+                    "This game's stop names a port it does not declare.",
+                )
+            })?;
+            Some(
+                stop_http::Stop::new(stop_http::Target::new(port, basic), &http.requests)
+                    .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e))?,
+            )
+        }
+        _ => None,
+    };
     let route = if let Some(target) = &console {
         ConsoleRoute::Rcon(target.clone())
     } else if matches!(d.console.via, engine::descriptor::ConsoleVia::Stdin) {
@@ -530,10 +565,7 @@ pub fn launch(
             })
             .unwrap_or(Presence::None),
         console: route,
-        ladder: engine::control::stop_ladder(d)
-            .iter()
-            .map(Rung::from)
-            .collect(),
+        ladder: descriptor_ladder(&engine::control::stop_ladder(d), http_stop.as_ref()),
     };
     Ok(Prepared {
         engine: ProcessEngine::supervised(

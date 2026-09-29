@@ -86,6 +86,12 @@ pub mod pumpkin_settings;
 #[cfg(feature = "game-engine")]
 pub mod rcon;
 
+/// A stop sent to a server's own HTTP admin API on loopback. With the process
+/// engine rather than `game-engine`: it is std and nothing else, and the stop
+/// ladder that walks it lives there.
+#[cfg(feature = "process-engine")]
+pub mod stop_http;
+
 /// Sealing what a game's extension keeps to this computer's user (DPAPI).
 #[cfg(feature = "game-engine")]
 pub mod local_secret;
