@@ -377,11 +377,30 @@ pub fn fill_value(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
 /// integer. JSON keeps [`fill_value`]'s rule, under which a port is text,
 /// because changing it would change files every JSON descriptor already
 /// writes.
+///
+/// The same holds for a constant: a descriptor that switches a game's own
+/// admin API on writes `"true"`, and as text that would be
+/// `RESTAPIEnabled="true"`. So a value with no placeholder at all that reads
+/// as `true`, `false` or a number is written as one. Only the signed
+/// descriptor can spell a constant; a player's text always arrives through
+/// `{setting:…}` and keeps its type.
 pub fn fill_value_with_ports(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
-    if let Ok([Piece::Placeholder(Placeholder::Port(name))]) = scan(input).as_deref() {
-        if let Some(port) = bindings.ports.get(name) {
-            return Ok(Some(Value::from(*port)));
+    match scan(input).as_deref() {
+        Ok([Piece::Placeholder(Placeholder::Port(name))]) => {
+            if let Some(port) = bindings.ports.get(name) {
+                return Ok(Some(Value::from(*port)));
+            }
         }
+        Ok([Piece::Literal(text)]) => match text.as_str() {
+            "true" => return Ok(Some(Value::Bool(true))),
+            "false" => return Ok(Some(Value::Bool(false))),
+            number => {
+                if let Ok(n @ Value::Number(_)) = serde_json::from_str::<Value>(number) {
+                    return Ok(Some(n));
+                }
+            }
+        },
+        _ => {}
     }
     fill_value(input, bindings)
 }
@@ -499,6 +518,13 @@ mod tests {
         assert_eq!(ported("{setting:maxPlayers}"), Some(json!(25)));
         assert_eq!(ported("{setting:seed}"), None);
         assert!(fill_value_with_ports("{port:nope}", &f.bindings()).is_err());
+        // A constant the descriptor spells is typed; a player's text is not.
+        assert_eq!(ported("true"), Some(json!(true)));
+        assert_eq!(ported("false"), Some(json!(false)));
+        assert_eq!(ported("30.5"), Some(json!(30.5)));
+        assert_eq!(ported("True"), Some(json!("True")));
+        assert_eq!(ported("127.0.0.1"), Some(json!("127.0.0.1")));
+        assert_eq!(ported("{setting:hostname}"), Some(json!("Ruined Keep")));
     }
 
     #[test]
