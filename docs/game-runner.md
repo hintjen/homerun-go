@@ -345,12 +345,17 @@ Windows Job Object descendant coverage. Other unsupported inspection adapters re
 `probe`/`verify` also refuse undeclared non-loopback endpoints. Undeclared loopback
 endpoints are recorded without failing. UDP tables include all bound endpoints; they
 do not distinguish an auxiliary outbound socket from a service. Such endpoints need
-review rather than being silently omitted. Ordinary `launch`/`supervise` enforce
+review rather than being silently omitted. One exception: an undeclared UDP endpoint
+whose port is in the OS's dynamic (ephemeral) range was chosen by the OS, cannot be
+declared, and is recorded with `ephemeral: true` instead of refused (Terraria's LAN
+announce, a Palworld boot socket). Undeclared TCP, and undeclared UDP on a fixed port,
+are still refused. Ordinary `launch`/`supervise` enforce
 private ports but do not apply the probe's undeclared-port refusal.
 
 Probe JSON gains `network`: scope, nominal polling interval, timing origin, sample
 count and a bounded inventory of PID/protocol/address/port, declared/confined flags,
-first/last observation and sample counts. Observations are aggregated, not a packet
+first/last observation and sample counts, plus `ephemeralUdp`: the dynamic UDP
+ranges used and their `source` (`netsh`, `ip_local_port_range` or `iana-default`). Observations are aggregated, not a packet
 trace. Exceeding the distinct-endpoint bound fails verification instead of truncating
 an apparently complete audit. No Windows Firewall rules are created or altered.
 
