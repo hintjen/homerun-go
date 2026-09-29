@@ -181,12 +181,18 @@ fn fake_game() {
     }
     if let Ok(extra_port) = std::env::var("HOMERUN_TEST_EXTRA_PORT") {
         let extra_bind = std::env::var("HOMERUN_TEST_EXTRA_BIND").unwrap_or("0.0.0.0".into());
+        let udp = std::env::var("HOMERUN_TEST_EXTRA_PROTO").as_deref() == Ok("udp");
         thread::spawn(move || {
             // It must appear after readiness so verify cannot pass with a one-shot audit.
             thread::sleep(Duration::from_millis(750));
-            let _extra =
-                TcpListener::bind((extra_bind.as_str(), extra_port.parse::<u16>().unwrap()))
-                    .unwrap();
+            let address = (extra_bind.as_str(), extra_port.parse::<u16>().unwrap());
+            // UDP is an unconnected socket, like a LAN announce: port 0 lets
+            // the OS choose, as Terraria's and Palworld's servers do.
+            let _extra: Box<dyn std::any::Any> = if udp {
+                Box::new(std::net::UdpSocket::bind(address).unwrap())
+            } else {
+                Box::new(TcpListener::bind(address).unwrap())
+            };
             thread::sleep(Duration::from_secs(30));
         });
     }
@@ -2067,6 +2073,77 @@ fn network_verify_records_loopback_and_refuses_undeclared_wildcard() {
                 .any(|e| e["code"] == "port_exposed"));
         }
         assert!(port_freed(extra));
+    }
+}
+
+/// An undeclared UDP socket is tolerated by verify only when the OS chose its
+/// port: one on port 0 lands in the dynamic range and is recorded as
+/// `ephemeral`; one on a fixed port is a service and is refused. The fixed
+/// port's expected outcome is read from the range the runner reports, so a
+/// machine with a reconfigured range does not turn this into a flake.
+#[test]
+fn network_verify_records_an_os_assigned_udp_socket_and_refuses_a_fixed_one() {
+    // A UDP port below the default dynamic range that nothing holds now.
+    let fixed = (40000..49152)
+        .find(|p| std::net::UdpSocket::bind(("0.0.0.0", *p)).is_ok())
+        .unwrap();
+    for port in [0, fixed] {
+        let mut f = Fixture::binding_wide();
+        let env = &mut f.d["platforms"][platform::HOST]["launch"]["env"];
+        env["HOMERUN_TEST_EXTRA_PORT"] = json!(port.to_string());
+        env["HOMERUN_TEST_EXTRA_BIND"] = json!("0.0.0.0");
+        env["HOMERUN_TEST_EXTRA_PROTO"] = json!("udp");
+        let path = f.root.join("game.json");
+        fs::write(&path, f.d.to_string()).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_homerun-game"))
+            .arg("verify")
+            .arg(path)
+            .args(["--accept-licence", "--observe-seconds", "2", "--json"])
+            .arg("--runtime-root")
+            .arg(&f.runtime)
+            .arg("--server-dir")
+            .arg(f.root.join("server"))
+            .arg("--evidence")
+            .arg(f.root.join("evidence"))
+            .output()
+            .unwrap();
+        let report: Value =
+            serde_json::from_slice(&fs::read(f.root.join("evidence/probe.json")).unwrap()).unwrap();
+        let range = &report["network"]["ephemeralUdp"]["ipv4"];
+        assert!(
+            range["first"].is_u64() && report["network"]["ephemeralUdp"]["source"].is_string(),
+            "the range used is part of the evidence: {report}"
+        );
+        let row = report["network"]["inventory"]["listeners"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["protocol"] == "udp" && (port == 0 || e["port"] == port))
+            .expect("undeclared UDP socket absent from evidence")
+            .clone();
+        let bound = row["port"].as_u64().unwrap();
+        let ephemeral =
+            range["first"].as_u64().unwrap() <= bound && bound <= range["last"].as_u64().unwrap();
+        if port == 0 {
+            assert!(
+                ephemeral,
+                "the OS chose {bound} outside its own reported range: {report}"
+            );
+        }
+        assert_eq!(row["declared"], false);
+        assert_eq!(row["confined"], false);
+        assert_eq!(row["ephemeral"], ephemeral, "{row}");
+        assert_eq!(result.status.success(), ephemeral, "{report}");
+        assert_eq!(report["ok"], ephemeral);
+        assert_eq!(
+            report["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["code"] == "port_exposed"),
+            !ephemeral,
+            "{report}"
+        );
     }
 }
 
