@@ -340,6 +340,53 @@ not a stop, and the rung before it exists so a normal shutdown never reaches
 the kill. A console stop with no verb, or no console to send it to, starts at
 the rung below rather than inventing a polite rung that would only time out.
 
+The polite rung is one of three: a console verb (`stop.via: console`), an
+interrupt, or **HTTP requests to the server's own admin API**
+(`stop.via: http`) — for a game with no console on stdin whose vendor's way
+to save and exit is a REST endpoint. Palworld is the first:
+
+```json
+"stop": { "via": "http", "graceMs": 30000, "http": {
+  "port": "rest",
+  "auth": { "basic": { "user": "admin", "secret": "admin" } },
+  "requests": [
+    { "method": "POST", "path": "/v1/api/save", "body": {} },
+    { "method": "POST", "path": "/v1/api/shutdown",
+      "body": { "waittime": 1, "message": "Server stopping" } }
+  ] } }
+```
+
+It lives under `stop` rather than `console` because it is not a console:
+nothing a person types reaches it, there is no reply to show, and every
+request it can make is in the signed descriptor. `console.via` is whatever
+else the game has — `none` for Palworld. The rung carries names only (port,
+secret), like an RCON console; the host resolves them.
+
+What makes it safe is what it cannot say, and `validate` refuses the rest:
+
+- **No host.** It names a declared port, and the runner connects to
+  `127.0.0.1` on whatever that port was bound to. Plain `http://`, never
+  TLS, no redirect followed.
+- **The port is private and TCP.** `expose: false` is required, so the
+  runner's bind check stops a server that puts it anywhere but loopback with
+  `port_exposed`. As for an RCON console, a launch with no `{bindAddress}`
+  anywhere earns a warning.
+- **The password is a generated secret**, named in `auth.basic.secret` and
+  never a literal or a placeholder; `required_secrets` lists it. A warning
+  says so if nothing in the launch or configuration hands it to the game,
+  because that stop will always be refused.
+- **Fixed requests.** At most eight; `POST` or `PUT`; an absolute path of
+  at most 256 printable ASCII characters, with no host, no `.`/`..` segment
+  (spelled out or percent-encoded), no encoded slash, and no whitespace,
+  backslash, backtick or `# " < > { } | ^`; a JSON body of at most 4096 bytes, sent as
+  written — a placeholder in it is refused, since nothing is templated.
+
+Requests are sent in order and each only if the one before answered 2xx,
+because a shutdown after a failed save is a stop that loses the world it was
+meant to keep. Whatever happens, the rung's `graceMs` — counted from when the
+rung began, requests included — is waited out for the process to exit, and
+then the ladder goes on to terminate.
+
 ## Extensions — `extensions/`
 
 What only one game needs — a vendor's sign-in API, a rotating token — lives in
@@ -537,6 +584,26 @@ short test would never catch:
 No TLS, and none wanted: `wss://` would mean the console had left the
 machine, which is what the device websocket is for.
 
+### The HTTP stop — `stop_http.rs`
+
+One HTTP/1.1 request per connection on `std::net::TcpStream`, to
+`127.0.0.1:<bound port>`: request line, `Host`, `Connection: close`,
+`Content-Length`, `Content-Type: application/json` when there is a body, and
+`Authorization: Basic …` when the descriptor asks for it. Only the status line
+is read. Not `reqwest`, which is in the tree behind `game-engine`: it follows
+redirects and resolves names, and a stop has no use for either — here a `3xx`
+is simply an answer that is not `2xx`. Each request is bounded by 15 seconds
+and by what is left of the rung's grace.
+
+`Stop::new` re-checks each request with `validate::http_path_is_safe` and the
+same bounds before anything is sent, so a descriptor that reached the
+supervisor some other way still cannot put a second line in a request. The
+password lives only in the `Authorization` value, whose `Debug` is
+`[redacted]`; no failure quotes a request or a reply.
+
+With the process engine rather than `game-engine`, because it is std and
+nothing else, and the ladder that walks it is in `process_engine.rs`.
+
 ### The platform adapter — `platform.rs`
 
 Windows is the only host for descriptor-driven games, and not just for now:
@@ -615,7 +682,7 @@ failed every time on that machine.
 | Ready | `console::is_ready` | a substring the descriptor names |
 | Roster | join/leave lines, with names | join/leave substrings, **counts only** |
 | Console | a line on stdin | stdin, or RCON on a loopback port |
-| Stop | `stop`, then terminate, then kill | the descriptor's verb, then the same |
+| Stop | `stop`, then terminate, then kill | the descriptor's verb or HTTP requests, then the same |
 
 The roster difference is deliberate. A descriptor's presence markers say
 *that* somebody joined, not who; parsing a name out of a line whose shape we
@@ -628,7 +695,17 @@ file has its own `Rung` that both convert into, rather than one of the two
 winning. That is not indirection for its own sake: the core is not allowed to
 depend on its own Minecraft module, so there is no shared type up there to
 use, and a supervisor walking two different ladder types would be two stop
-paths pretending to be one.
+paths pretending to be one. A descriptor's ladder converts through
+`descriptor_ladder` rather than a `From`, because its HTTP rung names a port
+and a secret the host has to resolve first; unresolved, the rung is left out.
+
+**A stop says what it did.** `run_streamed` reports each request of an HTTP
+stop, each rung climbed past the first, and the rung the server exited on, as
+lines on the `host` stream with the time since the stop was asked for
+(`Stop: POST /v1/api/save answered 200 (0.4 s after the stop was asked
+for).`). That is what lets a probe's evidence show a stop was clean rather
+than only that it finished. `Engine::run` drops these lines, since its callers
+are Minecraft's.
 
 ## The bridge — `engine.*`
 
@@ -647,7 +724,7 @@ reason at the top of this page. Each arm is a thin call into the module above.
 | `engine.invocation` | the command line |
 | `engine.classify` | ready / joined / left, for one console line |
 | `engine.console` | stdin, or which RCON where |
-| `engine.stopLadder` | the rungs |
+| `engine.stopLadder` | the rungs (an `http` rung carries the port and secret by name) |
 | `engine.readyTimeoutMs` | how long to wait |
 | `engine.forwards` | the wireproxy forwards |
 
@@ -684,6 +761,7 @@ And in `homerun-supervisor`, behind `game-engine`:
 |---|---|
 | `fetcher.rs` | download, resume, verify, unpack; steamcmd, anonymous only |
 | `rcon.rs` | Valve's binary RCON and Facepunch's WebSocket dialect |
+| `stop_http.rs` | a stop sent to the server's admin API on loopback |
 | `platform.rs` | every OS assumption in the crate, in one place |
 | `process_engine.rs` | `Supervision` — readiness, roster, console and stop, per game |
 | `vendor_http.rs` | HTTPS to a game extension's allowed hosts only (`docs/game-extensions.md`) |
@@ -743,7 +821,15 @@ front of it: `engine.classify` with that exact line answers in one call, and
 `stop.via: interrupt`, that is unsupported on the only platform that ships —
 `platform::graceful_interrupt` refuses, the ladder climbs past it, and the
 save is whatever the game managed before the terminate. `engine::validate`
-warns about it at authoring time.
+warns about it at authoring time. If the game has an admin API on a port it
+can be told to keep on loopback, `stop.via: http` is the way out.
+
+**An HTTP stop falls to the terminate.** Read the `host` lines the stop
+wrote: they name each request and what it answered. `401` is a password the
+game was not given — check the launch or config file carries the same
+`{secret:<name>}`. Nothing answering is a port the game is not listening on,
+or not on loopback. A `2xx` for every request followed by a terminate is a
+game that took longer than `graceMs` to exit.
 
 **The console works for Minecraft and not for a new game.** The route is in
 `Supervision::console`, not in the engine. A game whose descriptor says

@@ -227,6 +227,37 @@ The lifecycle tests use `examples/fake_java.rs` as the host's `java` (a real
 executable, because the runner spawns into a job object, which a batch file
 cannot be); `cargo test` builds it.
 
+## A stop over HTTP: `stop-http`
+
+A game with no console on stdin may be stopped through its own admin API:
+`stop.via: "http"` with `stop.http` naming a private port, basic credentials
+by secret name, and a fixed list of requests (Palworld: `POST /v1/api/save`,
+then `POST /v1/api/shutdown`). `docs/game-engine.md` has the shape and what
+`validate` refuses. Feature `stop-http`; an older runner cannot parse the
+route and refuses the descriptor, so a host must require the name — without
+it the game could only ever be terminated.
+
+`prepare` resolves the names the way it resolves an RCON console's: the port
+to what the server was told to bind, the secret to the host's value (a
+missing one is `descriptor_invalid` before anything is spawned). The target
+is always `127.0.0.1`; the descriptor has nowhere to put a host. The requests
+are sent in order, each only if the one before answered 2xx; a refusal, a
+redirect or no answer ends the sequence, the rung's `graceMs` is waited out,
+and the ladder goes on to terminate. The password is redacted from the log
+like every secret, and the stop's own lines never contain it.
+
+**Every stop now says what it did,** on the `host` stream: each HTTP request
+and its status, each rung climbed past the first, and the rung the server
+exited on, each with the seconds since the stop was asked for. `probe` and
+`verify` keep those lines in their events, so evidence records which rung
+stopped the process — "exited during the http step" is a clean stop,
+"exited during the terminate step" is not — though `verify` does not yet fail
+on the second.
+
+The lifecycle tests' fake game serves this API on loopback: it answers 401 to
+a wrong `Authorization`, 409 to a shutdown before a save, and exits only on
+save-then-shutdown, so the order and the password are both checked end to end.
+
 ## `prepare.rs`: directories, settings and resources
 
 For cwd-relative assets, `launch.cwdBase: "runtime"` selects the shared runtime
@@ -285,7 +316,8 @@ probe and verify use the real fetch/start/stop path, observe after readiness,
 then save `evidence/<host>/probe.json` (or --evidence). verify exits nonzero on
 a lifecycle error. The report retains at most 10,000 events and explicitly
 names unverified claims. It is evidence of readiness, bound ports, sampled
-resources and stop completion, **not** proof of save persistence, stray writes,
+resources, stop completion and the stop's own account of which rung ended the
+process, **not** proof of save persistence, stray writes,
 all player-query formats, or gateway reachability. Real-game onboarding still
 needs those checks. No real Rust server has been tested by this implementation.
 
