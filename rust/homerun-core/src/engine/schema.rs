@@ -406,7 +406,7 @@ pub fn schema() -> Value {
             "stop": {
                 "type": "object",
                 "properties": {
-                    "via": { "enum": ["console", "interrupt"] },
+                    "via": { "enum": ["console", "interrupt", "extension"] },
                     "command": { "type": ["string", "null"] },
                     "graceMs": { "type": "integer", "minimum": 0 }
                 }

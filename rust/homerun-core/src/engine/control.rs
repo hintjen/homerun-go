@@ -27,6 +27,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::descriptor::{ConsoleVia, GameDescriptor, RconProtocol, StopVia};
+use super::extensions;
 use crate::{Error, Result};
 
 /// Whether this line means the server is up.
@@ -139,6 +140,10 @@ pub enum Action {
     Console { command: String },
     /// A console control event — `SIGINT`, or its Windows equivalent.
     Interrupt,
+    /// Ask the game's extension to ask the server to stop. Carries nothing:
+    /// what it sends, and where, is the extension's, and the runner hands
+    /// the supervisor the extension's hook for this rung.
+    Extension,
     /// Ask the process to exit. A JVM runs its shutdown hook here; many
     /// games flush a save.
     Terminate,
@@ -181,6 +186,21 @@ pub fn stop_ladder(descriptor: &GameDescriptor) -> Vec<Rung> {
             action: Action::Interrupt,
             wait_ms: grace,
         }),
+        // The console stop's rule again: no extension that can stop the
+        // server, and the ladder starts lower. `validate` refuses it.
+        StopVia::Extension => {
+            let stops = descriptor
+                .extension
+                .as_ref()
+                .and_then(|e| extensions::spec(&e.name))
+                .is_some_and(|spec| spec.stops);
+            if stops {
+                ladder.push(Rung {
+                    action: Action::Extension,
+                    wait_ms: grace,
+                });
+            }
+        }
     }
 
     ladder.push(Rung {
@@ -328,6 +348,7 @@ mod tests {
             rust(),
             GameDescriptor::default(),
             serde_json::from_value(json!({ "id": "g", "stop": { "via": "interrupt" } })).unwrap(),
+            extension_stop("fixture"),
         ] {
             let ladder = stop_ladder(&descriptor);
             assert_eq!(ladder.last().unwrap().action, Action::Kill);
@@ -380,6 +401,49 @@ mod tests {
 
         let stdin = serde_json::to_value(ConsoleKind::Stdin).unwrap();
         assert_eq!(stdin["kind"], "stdin");
+    }
+
+    /// A game stopped by its extension, named `extension`.
+    fn extension_stop(extension: &str) -> GameDescriptor {
+        serde_json::from_value(json!({
+            "id": "g", "console": { "via": "none" },
+            "stop": { "via": "extension", "graceMs": 30000 },
+            "extension": { "name": extension, "config": { "host": "vendor.example" } }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_extension_stop_is_the_polite_rung_and_carries_nothing() {
+        let ladder = stop_ladder(&extension_stop("fixture"));
+        assert_eq!(ladder[0].action, Action::Extension);
+        assert_eq!(ladder[0].wait_ms, 30_000);
+        assert_eq!(
+            ladder[1..]
+                .iter()
+                .map(|r| r.action.clone())
+                .collect::<Vec<_>>(),
+            vec![Action::Terminate, Action::Kill]
+        );
+
+        let wire = serde_json::to_value(&ladder).unwrap();
+        assert_eq!(wire[0], json!({ "action": "extension", "waitMs": 30_000 }));
+    }
+
+    /// No extension, one this build lacks, or one that cannot stop a server:
+    /// nothing polite to do, so the ladder starts lower.
+    #[test]
+    fn an_extension_stop_with_no_extension_that_stops_starts_lower() {
+        for d in [
+            extension_stop("nope"),
+            extension_stop("hytale"),
+            GameDescriptor {
+                extension: None,
+                ..extension_stop("fixture")
+            },
+        ] {
+            assert_eq!(stop_ladder(&d)[0].action, Action::Terminate);
+        }
     }
 
     #[test]

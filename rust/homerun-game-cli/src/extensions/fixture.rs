@@ -20,16 +20,28 @@
 //! | `remember` | count starts in the sealed machine store, as a sign-in would |
 //! | `vendorUrl` | `GET` it in `begin` and note what came back |
 //! | `vendorOnStop` | `DELETE` it in `on_stop` and note the status |
+//! | `stop` | how it stops a server, below |
 //!
 //! It always supplies `token` (secret, [`TOKEN`]) and `profile` (plain).
+//!
+//! Its stop, for `stop.via: "extension"`, is `stop.how`:
+//!
+//! | `how` | Does |
+//! |---|---|
+//! | `http` (the default) | `POST stop.path` (default `/exit`) on the private port `stop.port`, as `stop.user` (default `admin`) with the host secret `stop.secret`; any 2xx is a stop asked for |
+//! | `exit-then-wait` | the same, then wait for the stop to be over, and say so |
+//! | `refuse` | fail without asking |
+//! | `hang` | never return, ignoring the cancellation |
+//! | `panic` | panic |
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, thread, time::Duration};
 
 use serde_json::{json, Value};
 
 use super::{
-    Action, Begun, Choice, ExtError, ExtensionStatus, GameExtension, MachineContext, Outcome,
-    Prompt, Purpose, Request, Run, RunState, SignIn, StartContext, StopContext,
+    Action, Begun, Choice, ExtError, ExtensionStatus, GameExtension, LocalRequest, MachineContext,
+    Outcome, Prompt, Purpose, Request, Run, RunState, SignIn, StartContext, StopContext,
+    StopRungContext,
 };
 use crate::protocol::codes;
 
@@ -147,6 +159,45 @@ impl GameExtension for Fixture {
             },
             Err(_) => ExtensionStatus::default(),
         }
+    }
+
+    fn stop(&self, ctx: &StopRungContext) -> Result<(), ExtError> {
+        let stop = &ctx.config()["stop"];
+        let text = |key: &str, default: &str| stop[key].as_str().unwrap_or(default).to_string();
+        let how = text("how", "http");
+        match how.as_str() {
+            "refuse" => {
+                return Err(ExtError::new(
+                    codes::EXTENSION_FAILED,
+                    "The fixture was told not to ask.",
+                ))
+            }
+            // Deliberately deaf to the cancellation: the runner has to
+            // abandon it.
+            "hang" => {
+                thread::sleep(Duration::from_secs(120));
+                return Ok(());
+            }
+            "panic" => panic!("the fixture was told to panic in stop"),
+            _ => {}
+        }
+        let request = LocalRequest::post(text("path", "/exit"))
+            .basic(text("user", "admin"), text("secret", ""));
+        let answer = ctx.local_http(&text("port", ""), &request)?;
+        if !answer.ok() {
+            return Err(ExtError::new(
+                codes::EXTENSION_FAILED,
+                format!("The fixture's admin API answered {}.", answer.status),
+            ));
+        }
+        ctx.note("the fixture asked");
+        if how == "exit-then-wait" {
+            while !ctx.cancelled() {
+                thread::sleep(Duration::from_millis(25));
+            }
+            ctx.note("the fixture saw its stop was over");
+        }
+        Ok(())
     }
 }
 

@@ -86,6 +86,11 @@ pub mod pumpkin_settings;
 #[cfg(feature = "game-engine")]
 pub mod rcon;
 
+/// Plain HTTP to a game server's own admin API on loopback, for a game's
+/// extension.
+#[cfg(feature = "game-engine")]
+pub mod local_http;
+
 /// Sealing what a game's extension keeps to this computer's user (DPAPI).
 #[cfg(feature = "game-engine")]
 pub mod local_secret;

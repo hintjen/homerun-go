@@ -453,10 +453,6 @@ fn run(
     // The game's extension, if it has one, goes first: it may need a person
     // to sign in, and what it supplies is part of the launch line below.
     let mut extension = extensions::begin(d, &id, &root, &server, stop, out, prompts)?;
-    let supplied = extension
-        .as_ref()
-        .map(|e| e.supplied().clone())
-        .unwrap_or_default();
     let prepared = (|| -> Result<prepare::Prepared> {
         if stop.should_stop() {
             return Err(fail(codes::SPAWN_FAILED, "The start was cancelled."));
@@ -470,7 +466,7 @@ fn run(
             &secrets,
             bind_address.as_deref(),
             java.as_deref(),
-            &supplied,
+            extension.as_ref(),
         )?;
         runtime_owner.install(d, &server)?;
         if let Some(job) = runtime_owner.process_job() {

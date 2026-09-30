@@ -13,7 +13,8 @@ use homerun_core::{
 use homerun_supervisor::{
     fetcher, platform,
     process_engine::{
-        ConsoleRoute, Invocation, Presence, ProcessEngine, Readiness, Rung, Supervision,
+        descriptor_ladder, ConsoleRoute, Invocation, Presence, ProcessEngine, Readiness,
+        Supervision,
     },
     rcon,
 };
@@ -334,7 +335,7 @@ pub struct Prepared {
 
 // Each argument is a different half of one launch -- the descriptor, three
 // places on disk, the player's choices, the host's secrets, the address, the
-// host's Java and the extension's values -- and a struct would only rename
+// host's Java and the game's extension -- and a struct would only rename
 // them.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
@@ -346,7 +347,7 @@ pub fn launch(
     secrets: &BTreeMap<String, String>,
     bind: Option<&str>,
     java: Option<&Path>,
-    extension: &BTreeMap<String, String>,
+    extension: Option<&crate::extensions::Active>,
 ) -> Result<Prepared> {
     // v1 binds descriptor games on loopback and nowhere else: the tunnel
     // connects to loopback, and a port the descriptor marks `expose: false`
@@ -386,6 +387,7 @@ pub fn launch(
         }
         ports.insert(p.name.clone(), p.port);
     }
+    let supplied = extension.map(|e| e.supplied().clone()).unwrap_or_default();
     let bindings = Bindings {
         settings: &resolved,
         ports: &ports,
@@ -394,7 +396,7 @@ pub fn launch(
         server_dir: &server.to_string_lossy(),
         bind_address: bind,
         runtime_dir: &runtime.to_string_lossy(),
-        extension,
+        extension: &supplied,
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;
@@ -503,6 +505,13 @@ pub fn launch(
         }),
         _ => None,
     };
+    // The extension's stop, when it has one, with what it may reach on
+    // loopback resolved the way the console's names are: the port to what
+    // the server was told to bind, the secret to the host's value.
+    let hook = match extension {
+        Some(extension) => extension.stop_hook(d, &ports, secrets)?,
+        None => None,
+    };
     let route = if let Some(target) = &console {
         ConsoleRoute::Rcon(target.clone())
     } else if matches!(d.console.via, engine::descriptor::ConsoleVia::Stdin) {
@@ -547,10 +556,7 @@ pub fn launch(
             })
             .unwrap_or(Presence::None),
         console: route,
-        ladder: engine::control::stop_ladder(d)
-            .iter()
-            .map(Rung::from)
-            .collect(),
+        ladder: descriptor_ladder(&engine::control::stop_ladder(d), hook.as_ref()),
     };
     Ok(Prepared {
         engine: ProcessEngine::supervised(

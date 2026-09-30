@@ -10,6 +10,10 @@ use std::sync::Mutex as StdMutex;
 #[path = "../../tests/support/fake_hytale.rs"]
 pub mod fake_hytale;
 
+/// A fake of Palworld's REST API, shared with the lifecycle tests' fake game.
+#[path = "../../tests/support/fake_palworld.rs"]
+pub mod fake_palworld;
+
 /// A runtime root of its own, under a fresh temporary directory, so each
 /// harness's machine store is its own.
 pub fn runtime_root() -> std::path::PathBuf {
@@ -106,6 +110,41 @@ impl Harness {
         run.on_stop(&ctx, outcome);
     }
 
+    /// Run the extension's `stop`, as the ladder's polite rung does, with
+    /// what it may reach on loopback resolved against `d`, the bound `ports`
+    /// and the host's `secrets`. What it returned, and what it noted.
+    pub fn stop_rung(
+        &self,
+        d: &GameDescriptor,
+        ports: &[(&str, u16)],
+        secrets: &[(&str, &str)],
+    ) -> (std::result::Result<(), ExtError>, Vec<String>) {
+        let ports = ports.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let secrets = secrets
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let local = resolve_local(self.spec, &self.config, d, &ports, &secrets).unwrap();
+        let notes = StdMutex::new(Vec::new());
+        let note = |text: String| notes.lock().unwrap().push(text);
+        let begun = Instant::now();
+        let cancelled = || begun.elapsed() > Duration::from_secs(10);
+        let asking = Asking::new(&cancelled, &note);
+        let ctx = StopRungContext {
+            name: self.spec.name,
+            config: &self.config,
+            server_id: "s1",
+            local: &local,
+            asking: &asking,
+        };
+        let result = registry()
+            .into_iter()
+            .find(|e| e.name() == self.spec.name)
+            .unwrap()
+            .stop(&ctx);
+        (result, notes.into_inner().unwrap())
+    }
+
     /// Every event sent so far.
     pub fn events(&self) -> Vec<Event> {
         self.seen.lock().unwrap().clone()
@@ -194,4 +233,127 @@ fn http_to_a_host_the_spec_does_not_name_is_refused_in_words() {
         "{}",
         error.message
     );
+}
+
+// ─── Palworld's stop, against a fake of its REST API ─────────────────────────
+
+mod palworld {
+    use super::fake_palworld::{serve, Behaviour};
+    use super::*;
+    use std::net::TcpListener;
+
+    /// The descriptor the stop is resolved against: a private REST port.
+    fn descriptor() -> GameDescriptor {
+        serde_json::from_value(json!({
+            "id": "palworld",
+            "ports": [{ "name": "rest", "proto": "tcp", "port": 8212, "expose": false }],
+            "stop": { "via": "extension" },
+            "extension": { "name": "palworld" }
+        }))
+        .unwrap()
+    }
+
+    /// What the fake saw, and whether it saved.
+    type Seen = Arc<StdMutex<(Vec<String>, bool)>>;
+
+    /// Serve the fake on a thread of its own. A stop that failed leaves it
+    /// waiting on its port, which ends with the test process.
+    fn fake(behaviour: Behaviour) -> (u16, Seen) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen: Seen = Arc::default();
+        let (lines, saved) = (seen.clone(), seen.clone());
+        thread::spawn(move || {
+            serve(
+                listener,
+                &behaviour,
+                &mut |line| lines.lock().unwrap().0.push(line),
+                &mut || saved.lock().unwrap().1 = true,
+            )
+        });
+        (port, seen)
+    }
+
+    #[test]
+    fn it_saves_then_shuts_down_as_admin_with_the_hosts_password() {
+        let (port, served) = fake(Behaviour {
+            password: "hunter2".into(),
+            ..Behaviour::default()
+        });
+        let h = Harness::for_extension(
+            "palworld",
+            json!({ "shutdownWait": 3, "shutdownMessage": "Back soon" }),
+        );
+        let (result, notes) =
+            h.stop_rung(&descriptor(), &[("rest", port)], &[("admin", "hunter2")]);
+        assert_eq!(result, Ok(()));
+        assert_eq!(notes, ["Palworld saved the world"]);
+        let (seen, saved) = served.lock().unwrap().clone();
+        assert!(saved);
+        assert_eq!(
+            seen,
+            [
+                "POST /v1/api/save HTTP/1.1 auth=true json=true {}",
+                r#"POST /v1/api/shutdown HTTP/1.1 auth=true json=true {"message":"Back soon","waittime":3}"#
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refused_password_asks_nothing_more_and_says_why() {
+        let (port, served) = fake(Behaviour {
+            password: "hunter2".into(),
+            ..Behaviour::default()
+        });
+        let h = Harness::for_extension("palworld", json!({}));
+        let (result, _) = h.stop_rung(&descriptor(), &[("rest", port)], &[("admin", "wrong")]);
+        let error = result.unwrap_err();
+        assert!(
+            error.message.contains("admin password"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("wrong"), "{}", error.message);
+        let (seen, _) = served.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            seen[0].starts_with("POST /v1/api/save HTTP/1.1 auth=false"),
+            "{seen:?}"
+        );
+    }
+
+    /// A shutdown after a failed save would be a stop that loses the world.
+    #[test]
+    fn a_failed_save_is_never_followed_by_a_shutdown() {
+        let (port, served) = fake(Behaviour {
+            password: "hunter2".into(),
+            refuse_save: Some(500),
+        });
+        let h = Harness::for_extension("palworld", json!({}));
+        let (result, notes) =
+            h.stop_rung(&descriptor(), &[("rest", port)], &[("admin", "hunter2")]);
+        assert_eq!(
+            result.unwrap_err().message,
+            "Palworld answered 500 when asked to save the world."
+        );
+        assert!(notes.is_empty(), "{notes:?}");
+        let (seen, saved) = served.lock().unwrap().clone();
+        assert!(!saved);
+        assert_eq!(seen.len(), 1, "the stop sent only the save: {seen:?}");
+    }
+
+    #[test]
+    fn nothing_listening_is_a_stop_that_did_not_happen() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let h = Harness::for_extension("palworld", json!({}));
+        let (result, _) = h.stop_rung(&descriptor(), &[("rest", port)], &[("admin", "x")]);
+        assert!(
+            result.unwrap_err().message.contains("Nothing answered"),
+            "a closed port answered"
+        );
+    }
 }

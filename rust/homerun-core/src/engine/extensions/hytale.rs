@@ -53,6 +53,8 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     validate,
     hosts,
     config_schema,
+    stops: false,
+    loopback: super::no_loopback,
 };
 
 /// The config keys that are addresses of Hytale's services.

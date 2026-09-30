@@ -47,6 +47,7 @@ use super::validate::Report;
 #[cfg(any(test, feature = "test-extensions"))]
 pub mod fixture;
 pub mod hytale;
+pub mod palworld;
 
 /// The pure half of one extension. See the module header.
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +69,31 @@ pub struct ExtensionSpec {
     /// JSON Schema for `extension.config`, spliced into the descriptor
     /// schema under this extension's name.
     pub config_schema: fn() -> Value,
+    /// Whether it can ask a server to stop: the polite rung of a descriptor
+    /// that says `stop.via: "extension"`. `validate` refuses that stop for an
+    /// extension that cannot.
+    pub stops: bool,
+    /// The server's own private ports the extension may reach on loopback,
+    /// and the host secrets it may sign in to them with -- both by name, read
+    /// from a config that has passed [`Self::validate`].
+    ///
+    /// The runner enforces this list, as it does [`Self::hosts`]; `validate`
+    /// holds every port on it to `expose: false` and TCP.
+    pub loopback: fn(config: &Value) -> Loopback,
+}
+
+/// What an extension may reach on the server's own machine. Names only: the
+/// runner resolves a port to what the server was told to bind and a secret
+/// to the host's value, and the extension never sees either secret.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Loopback {
+    pub ports: Vec<String>,
+    pub secrets: Vec<String>,
+}
+
+/// [`ExtensionSpec::loopback`] for an extension that reaches nothing local.
+pub fn no_loopback(_config: &Value) -> Loopback {
+    Loopback::default()
 }
 
 /// One value an extension supplies to the launch.
@@ -101,7 +127,7 @@ pub const FEATURE: &str = "extensions";
 
 /// Extensions a release build carries, and the only ones the published
 /// schema describes.
-pub const PUBLISHED: &[ExtensionSpec] = &[hytale::SPEC];
+pub const PUBLISHED: &[ExtensionSpec] = &[hytale::SPEC, palworld::SPEC];
 
 /// Every extension this build can run: [`PUBLISHED`], plus the test-only
 /// reference extension when built for tests.

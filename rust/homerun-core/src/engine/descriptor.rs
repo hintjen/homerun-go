@@ -654,6 +654,12 @@ pub enum StopVia {
     /// not start in its own console group — which is why a game whose only
     /// stop is an interrupt is a platform gap, not a descriptor detail.
     Interrupt,
+    /// The game's extension asks the server to stop, through whatever the
+    /// server offers for it -- Palworld's REST API. For a game with no
+    /// console on stdin whose way to be asked to save and exit is not a
+    /// console verb. The named extension's spec has to say it can
+    /// (`ExtensionSpec::stops`).
+    Extension,
 }
 
 /// One port the server binds.
@@ -1015,6 +1021,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(StopVia::Interrupt).unwrap(),
             "interrupt"
+        );
+        assert_eq!(
+            serde_json::to_value(StopVia::Extension).unwrap(),
+            "extension"
         );
         assert_eq!(
             serde_json::to_value(RuntimeSource::Vendor).unwrap(),

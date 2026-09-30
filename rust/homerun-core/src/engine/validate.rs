@@ -27,6 +27,8 @@
 //!    server's admin password.
 //!  - **An RCON port may not be exposed.** Exposing it puts an
 //!    administrative console on the public internet behind one password.
+//!    A port an extension reaches on loopback -- a game's own admin API --
+//!    is held to the same rule; see [`check_extension`].
 //!
 //! # Paths
 //!
@@ -41,7 +43,7 @@ use super::descriptor::{
     ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, LaunchProgram, PlayersVia, Setting,
     SettingKind, StopVia, SCHEMA_VERSION,
 };
-use super::extensions::{self, ExtensionSpec};
+use super::extensions::{self, ExtensionSpec, Loopback};
 use super::settings::SERVER_NAME_PLACEHOLDER;
 use super::template::{self, Placeholder};
 use crate::tunnel::Protocol;
@@ -113,7 +115,40 @@ pub fn required_secrets(descriptor: &GameDescriptor) -> Vec<String> {
             }
         }
     }
+    // So is one an extension signs in to the server's own API with: the
+    // runner resolves it for the extension.
+    names.extend(
+        extension_loopback(descriptor)
+            .secrets
+            .into_iter()
+            .filter(|s| !s.is_empty()),
+    );
     names.into_iter().collect()
+}
+
+/// What the descriptor's extension may reach on loopback. Nothing for no
+/// extension, one this build lacks, or a config that is not an object.
+fn extension_loopback(d: &GameDescriptor) -> Loopback {
+    let Some(ext) = &d.extension else {
+        return Loopback::default();
+    };
+    let Some(spec) = extensions::spec(&ext.name) else {
+        return Loopback::default();
+    };
+    match &ext.config {
+        Value::Null => (spec.loopback)(&Value::Object(Default::default())),
+        config @ Value::Object(_) => (spec.loopback)(config),
+        _ => Loopback::default(),
+    }
+}
+
+/// Whether anything the host templates hands the game `{secret:<name>}`.
+fn gives_secret(d: &GameDescriptor, name: &str) -> bool {
+    templated_strings(d).iter().any(|s| {
+        template::placeholders(s)
+            .map(|found| found.contains(&Placeholder::Secret(name.to_string())))
+            .unwrap_or(false)
+    })
 }
 
 /// Every host-side templated string, for the scans above.
@@ -408,7 +443,7 @@ fn check_ports(d: &GameDescriptor, r: &mut Report) {
 /// and in the second case the descriptor is still the best available and the
 /// runner's check is what stands behind it.
 fn check_bind_address(d: &GameDescriptor, r: &mut Report) {
-    if d.console.via != ConsoleVia::Rcon {
+    if d.console.via != ConsoleVia::Rcon && extension_loopback(d).ports.is_empty() {
         return;
     }
     let used = templated_strings(d).iter().any(|s| {
@@ -418,8 +453,8 @@ fn check_bind_address(d: &GameDescriptor, r: &mut Report) {
     });
     if !used {
         r.warnings.push(
-            "this game has an administrative console and nothing in its launch line \
-             says which address to bind it to, so the game will choose — and most \
+            "this game has an administrative console or API and nothing in its launch \
+             line says which address to bind it to, so the game will choose — and most \
              choose every network interface. Pass {bindAddress} where this game \
              takes a bind address."
                 .into(),
@@ -511,6 +546,21 @@ fn check_lifecycle(d: &GameDescriptor, r: &mut Report) {
                     .into(),
             );
         }
+        // An extension this build lacks is `check_extension`'s to report.
+        StopVia::Extension => match &d.extension {
+            None => r
+                .problems
+                .push("this game is stopped by its extension, but names no extension.".into()),
+            Some(ext) => {
+                if extensions::spec(&ext.name).is_some_and(|spec| !spec.stops) {
+                    r.problems.push(format!(
+                        "this game is stopped by its \"{}\" extension, which cannot stop \
+                         a server.",
+                        ext.name
+                    ));
+                }
+            }
+        },
     }
 
     if d.stop.grace_ms == 0 {
@@ -1156,6 +1206,7 @@ fn check_extension(d: &GameDescriptor, r: &mut Report) {
                         ext.name
                     )),
                 }
+                check_extension_loopback(d, &ext.name, r);
                 Some(spec)
             }
         },
@@ -1201,6 +1252,47 @@ fn check_extension(d: &GameDescriptor, r: &mut Report) {
                 }
                 Some(_) => {}
             }
+        }
+    }
+}
+
+/// What an extension reaches on loopback is held to the RCON console's rules.
+///
+/// Every port a declared TCP one with `expose: false`, so the runner's bind
+/// check stops a server that puts it anywhere but loopback; every secret one
+/// the host generates, which the game had better be given too.
+fn check_extension_loopback(d: &GameDescriptor, name: &str, r: &mut Report) {
+    let loopback = extension_loopback(d);
+    for port_name in &loopback.ports {
+        match d.port(port_name) {
+            None => r.problems.push(format!(
+                "the \"{name}\" extension reaches a port called \"{port_name}\", which this \
+                 game does not declare."
+            )),
+            Some(port) => {
+                if port.expose {
+                    r.problems.push(format!(
+                        "the port \"{port_name}\" carries this game's admin API, which its \
+                         \"{name}\" extension reaches, and must not be published to the \
+                         internet."
+                    ));
+                }
+                if port.proto != Protocol::Tcp {
+                    r.problems.push(format!(
+                        "the port \"{port_name}\", which the \"{name}\" extension reaches over \
+                         HTTP, has to be TCP."
+                    ));
+                }
+            }
+        }
+    }
+    for secret in &loopback.secrets {
+        if !secret.is_empty() && !gives_secret(d, secret) {
+            r.warnings.push(format!(
+                "the \"{name}\" extension signs in to the server with the secret \
+                 \"{secret}\", and nothing in this game's launch line or configuration \
+                 gives that password to the game, so the server will refuse it."
+            ));
         }
     }
 }
@@ -1574,6 +1666,113 @@ mod tests {
         deep_merge(&mut value, &with_fixture(json!({})));
         let d: GameDescriptor = serde_json::from_value(value).unwrap();
         assert_eq!(required_secrets(&d), vec!["rcon".to_string()]);
+    }
+
+    // ─── a stop an extension asks for ──────────────────────────────────────
+
+    /// The pilot, stopped by the fixture through the RCON port and password
+    /// it already has, which the launch line hands the game.
+    fn extension_stop(patch: serde_json::Value) -> serde_json::Value {
+        let mut base = with_fixture(json!({
+            "console": { "via": "none", "rcon": null },
+            "observe": { "players": "none", "playersCommand": null },
+            "stop": { "via": "extension", "command": null },
+            "extension": { "config": { "stop": { "port": "rcon", "secret": "rcon" } } }
+        }));
+        deep_merge(&mut base, &patch);
+        base
+    }
+
+    #[test]
+    fn an_extension_that_stops_a_server_may_be_the_stop() {
+        let p = problems_of(extension_stop(json!({})));
+        assert!(p.is_empty(), "{p:#?}");
+        let w = warnings_of(extension_stop(json!({})));
+        assert!(!says(&w, "extension"), "{w:#?}");
+    }
+
+    #[test]
+    fn an_extension_stop_needs_an_extension_that_can_stop() {
+        let mut value = extension_stop(json!({}));
+        value["extension"] = serde_json::Value::Null;
+        let p = problems_of(value);
+        assert!(says(&p, "names no extension"), "{p:#?}");
+
+        let p = problems_of(extension_stop(json!({ "extension": { "name": "hytale" } })));
+        assert!(
+            says(&p, "\"hytale\" extension, which cannot stop a server"),
+            "{p:#?}"
+        );
+    }
+
+    /// Exposing it would put the admin API, and the password in front of
+    /// it, on the internet; and an HTTP API is TCP.
+    #[test]
+    fn a_port_an_extension_reaches_is_declared_private_and_tcp() {
+        let at = |port: &str| {
+            problems_of(extension_stop(
+                json!({ "extension": { "config": { "stop": { "port": port } } } }),
+            ))
+        };
+        assert!(says(&at("nope"), "which this game does not declare"));
+        let exposed = at("game");
+        assert!(says(&exposed, "must not be published"), "{exposed:#?}");
+        assert!(says(&exposed, "has to be TCP"), "{exposed:#?}");
+    }
+
+    /// A password the game was never given is a stop that is always refused.
+    #[test]
+    fn a_secret_an_extension_signs_in_with_is_generated_and_given_to_the_game() {
+        let value = extension_stop(json!({
+            "extension": { "config": { "stop": { "secret": "admin" } } }
+        }));
+        let w = warnings_of(value.clone());
+        assert!(says(&w, "the server will refuse it"), "{w:#?}");
+        let d: GameDescriptor = {
+            let mut base: serde_json::Value =
+                serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+            deep_merge(&mut base, &value);
+            serde_json::from_value(base).unwrap()
+        };
+        assert_eq!(
+            required_secrets(&d),
+            vec!["admin".to_string(), "rcon".to_string()]
+        );
+    }
+
+    /// Palworld's shape: a REST port kept private, and the admin password
+    /// written into the game's settings file.
+    #[test]
+    fn a_palworld_stop_is_accepted() {
+        let mut value = json!({
+            "console": { "via": "none", "rcon": null },
+            "observe": { "players": "none", "playersCommand": null },
+            "stop": { "via": "extension", "command": null, "graceMs": 30000 },
+            "extension": { "name": "palworld" },
+            "config": [{ "file": "admin.json", "format": "json",
+                         "keys": { "AdminPassword": "{secret:admin}" } }]
+        });
+        value["ports"] = json!([
+            { "name": "game", "proto": "udp", "port": 8211, "expose": true, "service": "game" },
+            { "name": "rest", "proto": "tcp", "port": 8212, "expose": false }
+        ]);
+        let mut base: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+        base["platforms"]["win32-x64"]["launch"]["args"] = json!([
+            "-port={port:game}",
+            "-bind={bindAddress}",
+            "-rest={port:rest}"
+        ]);
+        deep_merge(&mut base, &value);
+        let d: GameDescriptor = serde_json::from_value(base).unwrap();
+        let r = report(&d);
+        assert!(r.ok(), "{:#?}", r.problems);
+        assert!(!says(&r.warnings, "extension"), "{:#?}", r.warnings);
+        assert_eq!(required_secrets(&d), vec!["admin".to_string()]);
+        assert_eq!(
+            super::super::control::stop_ladder(&d)[0].action,
+            super::super::control::Action::Extension
+        );
     }
 
     // ─── host-supplied Java ─────────────────────────────────────────────────

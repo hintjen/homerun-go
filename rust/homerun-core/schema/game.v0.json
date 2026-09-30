@@ -198,6 +198,51 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "name": {
+                "const": "palworld"
+              }
+            },
+            "required": [
+              "name"
+            ]
+          },
+          "then": {
+            "properties": {
+              "config": {
+                "additionalProperties": false,
+                "properties": {
+                  "adminSecret": {
+                    "default": "admin",
+                    "description": "The generated secret that is the admin password, by name. The descriptor also gives it to the game (AdminPassword).",
+                    "type": "string"
+                  },
+                  "restPort": {
+                    "default": "rest",
+                    "description": "The declared TCP port, expose false, that carries Palworld's REST API.",
+                    "type": "string"
+                  },
+                  "shutdownMessage": {
+                    "default": "The server is shutting down.",
+                    "description": "What players are shown as the server goes.",
+                    "maxLength": 200,
+                    "type": "string"
+                  },
+                  "shutdownWait": {
+                    "default": 1,
+                    "description": "waittime: seconds between the shutdown answer and the exit.",
+                    "maximum": 300,
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "type": "object"
+              }
+            }
+          }
         }
       ],
       "description": "Code only this game needs, compiled into the runner and chosen by name. Its values reach the launch through {extension:<key>}; a secret one only through launch.env.",
@@ -212,7 +257,8 @@
         "name": {
           "description": "An extension compiled into the runner. A runner without it refuses the descriptor.",
           "enum": [
-            "hytale"
+            "hytale",
+            "palworld"
           ],
           "pattern": "^[a-z0-9-]+$",
           "type": "string"
@@ -839,7 +885,8 @@
         "via": {
           "enum": [
             "console",
-            "interrupt"
+            "interrupt",
+            "extension"
           ]
         }
       },
