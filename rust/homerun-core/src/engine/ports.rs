@@ -226,6 +226,9 @@ pub enum Binding {
     Declared,
     PrivateExposed(String),
     Undeclared,
+    /// Undeclared UDP on a port from the OS's dynamic range: see
+    /// [`classify_audited`]. [`classify_binding`] never returns it.
+    Ephemeral,
 }
 
 pub fn classify_binding(
@@ -242,6 +245,34 @@ pub fn classify_binding(
         Some(p) if !p.expose && !is_loopback(address) => Binding::PrivateExposed(p.name.clone()),
         Some(_) => Binding::Declared,
         None => Binding::Undeclared,
+    }
+}
+
+/// The strict audit's view (`probe`/`verify`): as [`classify_binding`], except
+/// that an undeclared UDP socket whose port is in `dynamic` -- the OS's
+/// ephemeral range for the socket's address family -- is `Ephemeral`.
+///
+/// A game that sends from an unconnected socket bound to port 0 (Terraria's
+/// LAN announce, Unreal's boot-time socket in Palworld) gets a port the OS
+/// chose that run. Nothing can declare, forward or advertise it, and no
+/// player can be told to reach it, so it is recorded rather than refused.
+/// TCP is never tolerated: a wildcard TCP listener is a service whatever its
+/// port. A declared port is classified first, so a private port on a wide
+/// interface stays `PrivateExposed` even inside the dynamic range.
+pub fn classify_audited(
+    d: &super::GameDescriptor,
+    protocol: crate::tunnel::Protocol,
+    port: u16,
+    address: std::net::IpAddr,
+    dynamic: &std::ops::RangeInclusive<u16>,
+) -> Binding {
+    match classify_binding(d, protocol, port, address) {
+        Binding::Undeclared
+            if protocol == crate::tunnel::Protocol::Udp && dynamic.contains(&port) =>
+        {
+            Binding::Ephemeral
+        }
+        binding => binding,
     }
 }
 
@@ -293,6 +324,57 @@ mod binding_tests {
         assert_eq!(
             classify_binding(&d, Protocol::Tcp, 4321, "127.0.0.1".parse().unwrap()),
             Binding::Undeclared
+        );
+    }
+
+    #[test]
+    fn only_undeclared_udp_in_the_dynamic_range_is_ephemeral() {
+        let d: GameDescriptor = serde_json::from_value(serde_json::json!({"id":"g","ports":[
+            {"name":"admin","proto":"tcp","port":50000,"expose":false},
+            {"name":"query","proto":"udp","port":50001,"expose":false},
+            {"name":"game","proto":"udp","port":50002,"expose":true}
+        ]}))
+        .unwrap();
+        let dynamic = 49152..=65535;
+        let audit = |protocol, port, address: &str| {
+            classify_audited(&d, protocol, port, address.parse().unwrap(), &dynamic)
+        };
+        for address in ["0.0.0.0", "::", "192.168.1.2"] {
+            // Terraria's announce socket and Palworld's boot socket.
+            assert_eq!(audit(Protocol::Udp, 55476, address), Binding::Ephemeral);
+            assert_eq!(audit(Protocol::Udp, 49152, address), Binding::Ephemeral);
+            assert_eq!(audit(Protocol::Udp, 65535, address), Binding::Ephemeral);
+            // A fixed port below the range is a service someone chose.
+            assert_eq!(audit(Protocol::Udp, 49151, address), Binding::Undeclared);
+            assert_eq!(audit(Protocol::Udp, 7777, address), Binding::Undeclared);
+            // TCP is a service whatever its port.
+            assert_eq!(audit(Protocol::Tcp, 55476, address), Binding::Undeclared);
+            // Declared ports are unaffected, private ones included.
+            assert_eq!(
+                audit(Protocol::Tcp, 50000, address),
+                Binding::PrivateExposed("admin".into())
+            );
+            assert_eq!(
+                audit(Protocol::Udp, 50001, address),
+                Binding::PrivateExposed("query".into())
+            );
+            assert_eq!(audit(Protocol::Udp, 50002, address), Binding::Declared);
+        }
+        // A configured, narrower range is honoured.
+        assert_eq!(
+            classify_audited(
+                &d,
+                Protocol::Udp,
+                55476,
+                "0.0.0.0".parse().unwrap(),
+                &(60000..=60999)
+            ),
+            Binding::Undeclared
+        );
+        assert_eq!(
+            classify_binding(&d, Protocol::Udp, 55476, "0.0.0.0".parse().unwrap()),
+            Binding::Undeclared,
+            "the launch path's classification is unchanged"
         );
     }
 }

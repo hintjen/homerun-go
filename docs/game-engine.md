@@ -301,6 +301,43 @@ reachable. What is worth stopping a server over is the private one.
 Today `{bindAddress}` is always `127.0.0.1`; the runner refuses any other
 value. Widening that is a contract change rather than a flag.
 
+### `probe` and `verify` refuse what was not declared — except a port the OS chose
+
+The strict audit behind `probe`/`verify` goes further than `launch`: any
+undeclared socket off loopback is `port_exposed`, because an onboarding run
+is where a missing `ports[]` entry has to be found. One kind of socket cannot
+be declared at all. Terraria's LAN announce and the socket an Unreal Engine
+server (Palworld) opens during boot are unconnected UDP sockets bound to port
+0 on `0.0.0.0`: the OS picks the port, a different one each run (55476, then
+52660, for Terraria), and the game has no switch to stop it. There is no
+number to write in the descriptor, nothing to forward or advertise, and no
+player can be told to reach it — so it is not a service.
+
+`ports::classify_audited` therefore treats **undeclared UDP whose port lies in
+the OS's dynamic range** for that address family as `Ephemeral`: it stays in
+the probe inventory with `ephemeral: true` and does not fail the run. That
+settles engine issue #43 as an engine tolerance rather than a new descriptor
+field, since a field would have nothing to hold. The edges are deliberate:
+
+- **TCP is never tolerated.** A listening TCP socket on a wide address is a
+  service whatever its port.
+- **A fixed UDP port outside the range stays refused** — someone chose it, so
+  it can be declared.
+- **Declared ports are classified first.** A private port on `0.0.0.0` is
+  `PrivateExposed` even inside the dynamic range, and a UDP socket on a
+  declared port is `Declared`.
+- **`launch`/`supervise` are unchanged:** they never applied the undeclared
+  refusal and do not read the range.
+
+The range is the OS's own, read once per runner and only by the strict audit
+(`platform::udp_dynamic_ports`): `netsh int ipv4|ipv6 show dynamicport udp` on
+Windows, where it is configurable, bounded to a few seconds per call; and
+`/proc/sys/net/ipv4/ip_local_port_range` on Linux. Anything unreadable or
+implausible falls back to IANA's 49152–65535 (the Windows default). Probe
+evidence carries `network.ephemeralUdp` with both ranges and a `source` of
+`netsh`, `ip_local_port_range` or `iana-default`, so a reviewer can see which
+range decided each `ephemeral` row.
+
 ## Ports and the gateway — `ports.rs`
 
 Three numbers, and two of them are never the same:

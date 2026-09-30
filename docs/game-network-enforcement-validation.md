@@ -53,5 +53,10 @@ Alternating the standalone supervisor and CLI manifests in one shared target cac
 caused an E0463 artifact-resolution failure; the isolated check resolved it without
 source workarounds. No test executable was launched for these final checks.
 
+Later change (2026-09-29): the undeclared-wide refusal no longer applies to
+undeclared UDP on a port in the OS's dynamic range; such an endpoint is recorded
+with `ephemeral: true` (issue #43; see the bind-enforcement section of
+`game-engine.md`). TCP and fixed-port UDP refusals above are unchanged.
+
 Source is based on merged main 883033cd (including PR 36), proposed in
 [engine draft PR 40](https://github.com/hintjen/homerun-go/pull/40).

@@ -154,6 +154,74 @@ pub fn checked_listening_ports(pids: &[u32]) -> Result<Vec<(u32, Listening)>, St
     }
 }
 
+/// An inclusive range of port numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortRange {
+    pub first: u16,
+    pub last: u16,
+}
+
+impl PortRange {
+    /// IANA's dynamic range (RFC 6335), and the Windows default since Vista.
+    pub const IANA_DYNAMIC: PortRange = PortRange {
+        first: 49152,
+        last: 65535,
+    };
+
+    pub fn contains(&self, port: u16) -> bool {
+        (self.first..=self.last).contains(&port)
+    }
+}
+
+/// The ports this OS hands out for UDP when a program binds port 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicPorts {
+    pub ipv4: PortRange,
+    pub ipv6: PortRange,
+    /// Where the ranges came from: the OS's own answer, or `iana-default`
+    /// when that answer could not be read. Evidence says which.
+    pub source: &'static str,
+}
+
+impl DynamicPorts {
+    pub const IANA: DynamicPorts = DynamicPorts {
+        ipv4: PortRange::IANA_DYNAMIC,
+        ipv6: PortRange::IANA_DYNAMIC,
+        source: "iana-default",
+    };
+
+    /// Whether the OS could have chosen this port for a socket on `address`.
+    /// A socket on `::` (dual-stack or not) is in the IPv6 table and draws
+    /// from the IPv6 range.
+    pub fn contains(&self, address: IpAddr, port: u16) -> bool {
+        match address {
+            IpAddr::V4(_) => self.ipv4.contains(port),
+            IpAddr::V6(_) => self.ipv6.contains(port),
+        }
+    }
+}
+
+/// The OS's dynamic (ephemeral) UDP port ranges, read once per process.
+///
+/// The range is configurable on Windows (`netsh int ipv4 set dynamicport`),
+/// so the default is not assumed. Reading is bounded; anything that fails or
+/// looks implausible falls back to [`DynamicPorts::IANA`], which says so in
+/// its `source`.
+pub fn udp_dynamic_ports() -> DynamicPorts {
+    static ONCE: std::sync::OnceLock<DynamicPorts> = std::sync::OnceLock::new();
+    *ONCE.get_or_init(|| imp::udp_dynamic_ports().unwrap_or(DynamicPorts::IANA))
+}
+
+/// A range the OS reported, or none if it is not one an OS would use:
+/// empty, starting in the well-known ports, or running past 65535.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn plausible_range(first: u32, last: u32) -> Option<PortRange> {
+    (first >= 1024 && first <= last && last <= 65535).then(|| PortRange {
+        first: first as u16,
+        last: last as u16,
+    })
+}
+
 /// Resident memory and cumulative CPU for a process.
 pub fn process_stats(pid: u32) -> Option<Stats> {
     imp::process_stats(pid)
@@ -397,6 +465,96 @@ mod imp {
             return Vec::new();
         };
         parse(&String::from_utf8_lossy(&output.stdout), pid)
+    }
+
+    /// `netsh int ipv4|ipv6 show dynamicport udp`, the documented reader for
+    /// a setting that lives in no plain registry value. Each call is given a
+    /// few seconds and killed after that; either family failing means neither
+    /// is trusted.
+    pub fn udp_dynamic_ports() -> Option<DynamicPorts> {
+        let read = |family: &str| -> Option<PortRange> {
+            let mut child = Command::new("netsh")
+                .args(["int", family, "show", "dynamicport", "udp"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) if status.success() => break,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(25))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                }
+            }
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut child.stdout.take()?, &mut text).ok()?;
+            parse_dynamic_port(&text)
+        };
+        Some(DynamicPorts {
+            ipv4: read("ipv4")?,
+            ipv6: read("ipv6")?,
+            source: "netsh",
+        })
+    }
+
+    /// `Start Port : 49152` then `Number of Ports : 16384`. The labels are
+    /// localized, so only the numbers after the colons are read, in order,
+    /// and anything other than exactly two is no answer.
+    fn parse_dynamic_port(text: &str) -> Option<PortRange> {
+        let numbers: Vec<u32> = text
+            .lines()
+            .filter_map(|line| line.rsplit_once(':'))
+            .filter_map(|(_, value)| value.trim().parse().ok())
+            .collect();
+        match numbers[..] {
+            [start, count] if count > 0 => plausible_range(start, start.checked_add(count - 1)?),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn this_machine_answers_and_its_answer_holds_port_zero() {
+        let dynamic = udp_dynamic_ports().expect("netsh gave no dynamic range");
+        assert_eq!(dynamic.source, "netsh");
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+        assert!(dynamic.ipv4.contains(port), "{port} outside {dynamic:?}");
+    }
+
+    #[test]
+    fn dynamic_port_ranges_are_read_by_number_not_label() {
+        let english =
+            "\r\nProtocol udp Dynamic Port Range\r\n---------------------------------\r\n\
+                       Start Port      : 49152\r\nNumber of Ports : 16384\r\n\r\n";
+        assert_eq!(parse_dynamic_port(english), Some(PortRange::IANA_DYNAMIC));
+        // Synthetic labels, not a claim about any Windows translation.
+        let custom = "Protokoll udp\n-----\nAnfangsport : 10000\nAnzahl : 1000\n";
+        assert_eq!(
+            parse_dynamic_port(custom),
+            Some(PortRange {
+                first: 10000,
+                last: 10999
+            })
+        );
+        for broken in [
+            "",
+            "Start Port : 49152\n",
+            "Start Port : 49152\nNumber of Ports : 0\n",
+            "Start Port : 60000\nNumber of Ports : 16384\n",
+            "Start Port : 80\nNumber of Ports : 100\n",
+            "Error: 1\nStart Port : 49152\nNumber of Ports : 16384\n",
+            "Start Port : 4294967295\nNumber of Ports : 2\n",
+        ] {
+            assert_eq!(parse_dynamic_port(broken), None, "{broken:?}");
+        }
     }
 
     fn parse(text: &str, pid: u32) -> Vec<Listening> {
@@ -684,6 +842,49 @@ mod imp {
 #[cfg(unix)]
 mod imp {
     use super::*;
+
+    /// `/proc/sys/net/ipv4/ip_local_port_range`, two numbers. Linux uses the
+    /// one range for IPv4 and IPv6 alike. Elsewhere (macOS, development
+    /// only) there is no answer and the caller falls back to IANA's range.
+    pub fn udp_dynamic_ports() -> Option<DynamicPorts> {
+        #[cfg(target_os = "linux")]
+        {
+            let text = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range").ok()?;
+            let range = parse_local_port_range(&text)?;
+            Some(DynamicPorts {
+                ipv4: range,
+                ipv6: range,
+                source: "ip_local_port_range",
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn parse_local_port_range(text: &str) -> Option<PortRange> {
+        match text.split_whitespace().collect::<Vec<_>>()[..] {
+            [first, last] => plausible_range(first.parse().ok()?, last.parse().ok()?),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_port_range_is_two_numbers() {
+        assert_eq!(
+            parse_local_port_range("32768\t60999\n"),
+            Some(PortRange {
+                first: 32768,
+                last: 60999
+            })
+        );
+        for broken in ["", "32768", "60999 32768", "1 2 3", "x 60999"] {
+            assert_eq!(parse_local_port_range(broken), None, "{broken:?}");
+        }
+    }
 
     /// `/proc/net/{tcp,tcp6,udp,udp6}`, matched to the process's own sockets
     /// through `/proc/<pid>/fd`.
