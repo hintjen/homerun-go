@@ -357,10 +357,10 @@ rung (`GameExtension::stop`, in `docs/game-extensions.md`). `validate`
 requires an `extension` whose spec says it `stops`; without one the ladder
 starts at the rung below, as a console stop with no verb does.
 
-It is not descriptor data on purpose. A first cut described the requests in
-the descriptor (`stop.via: http`, with paths, bodies and a user), and that is
-a schema field with one user — exactly what the extension rule below exists
-to prevent. When a second game needs the same save-then-shutdown shape, it
+It is not descriptor data on purpose: requests described in the descriptor
+(paths, bodies, a user) would be a schema field with one user, which is
+exactly what the extension rule below exists to prevent. When a second game
+needs the same save-then-shutdown shape, it
 moves into a descriptor field and a primitive, and Palworld's extension
 switches over in the same change.
 
