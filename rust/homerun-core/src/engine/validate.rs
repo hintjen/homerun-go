@@ -974,6 +974,17 @@ fn check_servable(d: &GameDescriptor, r: &mut Report) {
     if let Some(url) = &d.client.join_url {
         check_placeholders(url, Site::Servable, &setting_keys, &port_names, r);
     }
+    // Shown as-is by every UI, so a placeholder would reach a player as the
+    // literal text `{host}` rather than an address.
+    if let Some(hint) = &d.client.join_hint {
+        if hint.chars().count() > 200 || hint.chars().any(char::is_control) || hint.contains('{') {
+            r.problems.push(
+                "client.joinHint is one plain sentence of at most 200 characters: no \
+                 line breaks and no placeholders, since nothing fills them."
+                    .into(),
+            );
+        }
+    }
 }
 
 fn check_observe(d: &GameDescriptor, r: &mut Report) {
@@ -1410,6 +1421,18 @@ mod tests {
             !report(&d).ok(),
             "runtime paths must not reach public join URLs"
         );
+    }
+
+    #[test]
+    fn a_join_hint_is_one_plain_sentence() {
+        let hint = |h: &str| problems_of(json!({ "client": { "joinHint": h } }));
+        assert!(!says(
+            &hint("In the game, choose Join and paste the address into the box."),
+            "joinHint"
+        ));
+        assert!(says(&hint("Paste {host} into the box."), "joinHint"));
+        assert!(says(&hint("Two\nlines."), "joinHint"));
+        assert!(says(&hint(&"a".repeat(201)), "joinHint"));
     }
 
     fn problems_of(patch: serde_json::Value) -> Vec<String> {

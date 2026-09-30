@@ -212,6 +212,11 @@ pub struct Client {
     /// means `host:port`, which is an accepted UX.
     #[serde(default)]
     pub srv: Option<String>,
+    /// One sentence on where a player puts the address in the game's own UI,
+    /// for a game joined by typing it in. Display only and servable, so it is
+    /// never templated: a placeholder in it would be shown, not filled.
+    #[serde(default)]
+    pub join_hint: Option<String>,
 }
 
 /// What a setting is.
@@ -980,6 +985,7 @@ mod tests {
             client: Client {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
                 srv: None,
+                join_hint: None,
             },
             ..Default::default()
         })

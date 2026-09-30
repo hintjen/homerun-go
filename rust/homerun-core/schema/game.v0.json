@@ -27,6 +27,14 @@
     },
     "client": {
       "properties": {
+        "joinHint": {
+          "description": "One sentence on where the address goes in the game's own UI. Display only; never templated.",
+          "maxLength": 200,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "joinUrl": {
           "type": [
             "string",

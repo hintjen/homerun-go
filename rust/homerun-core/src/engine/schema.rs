@@ -233,6 +233,11 @@ pub fn schema() -> Value {
                     "srv": {
                         "type": ["string", "null"],
                         "description": "Set only when the game's client resolves SRV records."
+                    },
+                    "joinHint": {
+                        "type": ["string", "null"],
+                        "maxLength": 200,
+                        "description": "One sentence on where the address goes in the game's own UI. Display only; never templated."
                     }
                 }
             },
@@ -582,6 +587,7 @@ mod tests {
             client: Client {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
                 srv: Some("_example".into()),
+                join_hint: None,
             },
             settings: vec![Setting {
                 key: "maxPlayers".into(),
