@@ -24,17 +24,19 @@ Each extension has two halves, the same split as the rest of the engine:
 
 | Half | Lives in | Holds |
 |---|---|---|
-| Pure | `rust/homerun-core/src/engine/extensions/<name>.rs` | its `ExtensionSpec`: config validation, the values it supplies, the hosts it may reach, and any decision two hosts could answer differently |
-| Effects | `rust/homerun-game-cli/src/extensions/<name>.rs` | a `GameExtension`: the hooks, which may wait on a person, talk to the vendor, and send console commands |
+| Pure | `rust/homerun-core/src/engine/extensions/<name>.rs` | its `ExtensionSpec`: config validation, the values it supplies, the hosts it may reach, what it may reach on loopback, whether it stops a server, and any decision two hosts could answer differently |
+| Effects | `rust/homerun-game-cli/src/extensions/<name>.rs` | a `GameExtension`: the hooks, which may wait on a person, talk to the vendor, send console commands, and ask the server to stop |
 
 Both halves stand on primitives the runner and supervisor provide, and reach
 the world only through them: a sealed per-machine store, a per-server store,
-HTTPS limited to the spec's hosts, generic sign-in and prompt events, and the
-server's console. That is what keeps an extension small enough to review and
+HTTPS limited to the spec's hosts, plain HTTP to the server's own private
+ports on loopback, generic sign-in and prompt events, and the server's
+console. That is what keeps an extension small enough to review and
 unable to get the safety rules wrong.
 
-**One release extension exists: `hytale`**, Hytale's server sign-in
-(below). The test-only `fixture` is the other, and the example to copy.
+**Two release extensions exist: `hytale`**, Hytale's server sign-in, and
+**`palworld`**, Palworld's stop through its REST API (both below). The
+test-only `fixture` is the third, and the example to copy.
 
 ### When something belongs in an extension
 
@@ -66,6 +68,8 @@ half may not add one:
 | `validate` | problems with this descriptor's `extension.config` (always given an object; `null` means `{}`) |
 | `hosts` | where the extension may reach over HTTPS, and send a person to sign in |
 | `config_schema` | its config's JSON Schema, spliced into `game.v0.json` |
+| `stops` | whether it can ask a server to stop, so a descriptor may say `stop.via: "extension"` |
+| `loopback` | the server's own private ports it may reach, and the host secrets it may sign in to them with, both by name (`no_loopback` for none) |
 
 **The registry is two lists.** `PUBLISHED` is what a release build carries and
 the only thing the schema describes. `registry()` adds the test-only `fixture`
@@ -90,6 +94,14 @@ phishing link looks like.
   process on the machine, and a config file sits in a folder that is backed
   up.
 - Nothing an extension supplies appears in `client.joinUrl`.
+- `stop.via: "extension"` names an extension whose spec `stops`.
+- Every port the spec's `loopback` names is a declared TCP port with
+  `expose: false`, held to the RCON console's rule: an admin API on the
+  internet is a password away from anyone. With one, a launch that never
+  passes `{bindAddress}` earns the same warning an RCON console does.
+- Every secret `loopback` names is one the host generates (`required_secrets`
+  lists it), and a warning says so if nothing hands it to the game, because
+  the server would refuse every request signed with it.
 
 ### `{extension:<key>}`, in `engine/template.rs`
 
@@ -104,7 +116,8 @@ text.
 
 The pure half of the reference extension: it requires a bare `host`,
 supplies `token` (secret) and `profile` (plain), and allows exactly its
-`host`.
+`host`. It `stops`, and reaches on loopback the port and secret its config's
+`stop.port` and `stop.secret` name.
 
 ## The effects half — `homerun-game-cli/src/extensions/mod.rs`
 
@@ -118,6 +131,7 @@ does nothing.
 | `begin` | after fetch, before config is written or the launch composed | lifecycle | yes, watching `ctx.stopping()` |
 | `Run::on_line` | every output line, already redacted | output pump | **no**: returns `Action`s |
 | `Run::on_state` | `Started` (with `server-started`); `Stopping` (the first stop seen) | sampler | **no**: returns `Action`s |
+| `stop` | the polite rung of a stop, for `stop.via: "extension"` | its own | up to the stop's `graceMs`, then abandoned |
 | `Run::on_stop` | after the process tree has exited, before the terminal event | its own | up to `STOP_BUDGET` (10 s), then abandoned |
 | `forget` | `extension-forget`: delete what it keeps on this machine | main | briefly |
 | `status` | `extension-status`: signed in or not, and as whom | main | briefly |
@@ -125,6 +139,17 @@ does nothing.
 An `Action` is `Console(command)`, `SignIn`, `SignedIn`, `Note` or
 `Fail(error)`. A worker thread carries them out, so the output pump never
 waits on a console or a vendor.
+
+**`stop` is the one hook that asks the server to go.** It is on
+`GameExtension` rather than `Run`: observers take the run's lock without
+waiting, and a stop that held it for seconds would silence them, the
+`Stopping` state included. `Ok` means the server was asked, and the ladder
+gives it the rest of the grace to exit; an error, a panic or no return in
+time means it was not, and the ladder goes straight on to terminate, then
+kill. Either way the `host` lines name what happened (`Stop: the palworld
+extension could not ask the server to stop: … (0.1 s after the stop was
+asked for).`). An extension that cannot stop a server keeps the default,
+which refuses.
 
 ### The rules the runner enforces, so no extension can get them wrong
 
@@ -163,9 +188,17 @@ waits on a console or a vendor.
 | `machine_store()` | yes | yes | yes |
 | `server_store()` | yes | yes | — |
 
+`stop`'s context is its own, because the server is still running and the
+stop is the only thing that may talk to it: `config()`, `server_id()`,
+`cancelled()` (the server has exited, or the grace is spent), `note(text)`
+(a line in the stop's own account, on the `host` stream), and
+`local_http(port, request)` — nothing else. The stores, prompts and
+vendor HTTPS are withheld: a stop has a grace to keep, not a sign-in to do.
+
 **Withheld on purpose:** processes, files and sockets outside the list above;
 the host's secrets (an extension never sees `rcon` or any other generated
-secret); other extensions' stores; the server and runtime folders. An
+secret — `local_http` takes a secret's *name* and the runner fills in the
+value); other extensions' stores; the server and runtime folders. An
 extension that could spawn or write anywhere would be a second engine, with
 none of the process-tree ownership, path confinement or network audit the
 runner does now.
@@ -226,6 +259,7 @@ and every capability, which makes it the example a new extension starts from:
 | `askProfile` | ask once per server which profile, and supply it |
 | `remember` | count starts in the sealed machine store |
 | `vendorUrl` / `vendorOnStop` | `GET` in `begin`, `DELETE` in `on_stop` |
+| `stop` | its stop: `port`, `secret`, `user`, `path`, and `how` — `http` (`POST` the path, the default), `exit-then-wait`, `refuse`, `hang`, `panic` |
 
 ## The primitives — `homerun-supervisor`, behind `game-engine`
 
@@ -249,6 +283,34 @@ does not trust…"), `Cancelled`, or `Unreachable(message)` (→
 `Policy::loopback_http` also allows `http://127.0.0.1:<port>`, for the
 lifecycle tests' fake vendor. The runner sets it only when built with
 `test-extensions`.
+
+### `local_http.rs`
+
+Plain HTTP to the server's own admin API, and nothing else. The one way an
+extension reaches a game's REST endpoint, from `stop`'s context as
+`ctx.local_http(port, request)`:
+
+- **Loopback only, by name.** `port` is a port *name*; it must be one the
+  spec's `loopback` lists, declared TCP with `expose: false`, and the runner
+  connects to `127.0.0.1` on what the server was told to bind. There is no
+  address for an extension to give.
+- **A secret by name.** `LocalRequest::post(path).basic(user, secret)` names
+  a host secret, which must be one `loopback` lists; the runner resolves it,
+  and a start whose host did not provide it fails with `descriptor_invalid`
+  before anything is spawned, as an RCON console's does.
+- **A plain request.** `GET`, `POST` or `PUT`; a path `path_is_safe` accepts
+  (absolute, bounded, no host, no `.`/`..`, nothing that ends the request
+  line); a JSON body of at most 16 KiB. No redirect is followed.
+- **Bounded and cancellable:** 15 s per request, an answer of at most 1 MiB,
+  read in short steps that check `cancelled()`.
+- **Quiet:** method, port and route go to stderr as `extension local http:
+  POST 127.0.0.1:8212/v1/api/save -> 200`; the query string, bodies and the
+  `Authorization` header never do.
+
+Failures are the extension's to explain: a port or secret the spec does not
+name, or a request the rules refuse, is `extension_failed` ("…a part of its
+server Homerun does not allow…"); no answer is `extension_failed` with what
+happened ("Nothing answered on the server's admin port.").
 
 ### `local_secret.rs`
 
@@ -311,7 +373,10 @@ message written for a player; the code is what a host branches on.
 Features: `ready.features` and `homerun-game --features` carry `extensions`
 (the mechanism, these events and commands) and one `extension:<name>` per
 registered extension, generated from the registry. **A host must require
-`extension:<name>` for any descriptor naming that extension.** Unknown
+`extension:<name>` for any descriptor naming that extension.** A stop through
+an extension needs nothing more: the hook shipped with the first extension
+that stops, and a runner too old to have it cannot parse
+`stop.via: "extension"` and refuses the descriptor. Unknown
 descriptor fields are ignored by design, so a runner built before extensions
 existed would silently ignore the block and launch the game without it; the
 feature gate is the only thing that prevents that.
@@ -373,6 +438,59 @@ against one is what proves them. Whether a passthrough server survives a failed
 hourly session refresh — the case the console fallback exists for — is also
 open.
 
+## `palworld` — Palworld's stop
+
+A Palworld dedicated server reads nothing on stdin, so a console stop has
+nowhere to go, and on Windows a piped child has no console for a control
+event either: without this extension the only stop it gets is a terminate,
+and whatever it had not saved is lost. This extension is its polite rung.
+
+| When | What happens |
+|---|---|
+| Start | Nothing. The server needs nothing from Homerun but its settings; the admin password is a host secret the descriptor writes into `PalWorldSettings.ini`. |
+| Stop | `POST /v1/api/save` with `{}`, then — only if that answered 2xx — `POST /v1/api/shutdown` with `{"waittime": <s>, "message": <m>}`, both as `admin` with the host's admin password, on the REST port on loopback. Any other answer, or none, is a stop that did not happen, and the ladder goes on to terminate. |
+
+**The descriptor** keeps the REST port private and stops through the
+extension:
+
+```json
+"console": { "via": "none" },
+"stop": { "via": "extension", "graceMs": 30000 },
+"extension": { "name": "palworld", "config": {} },
+"ports": [ { "name": "rest", "proto": "tcp", "port": 8212, "expose": false } ]
+```
+
+| Config | Default | Is |
+|---|---|---|
+| `restPort` | `rest` | the declared private TCP port that carries the REST API |
+| `adminSecret` | `admin` | the host secret that is the admin password, by name |
+| `shutdownWait` | `1` | `waittime`: seconds between the shutdown answer and the exit (0 to 300) |
+| `shutdownMessage` | `The server is shutting down.` | what players are shown as it goes (one line, at most 200 characters) |
+
+`validate` warns when the wait is no shorter than the stop's grace — that
+stop always reaches the terminate — and when a descriptor names the extension
+but does not stop through it.
+
+**Why REST and not RCON.** Palworld's RCON binds every interface with no
+setting to keep it on loopback, which the runner's bind check would refuse;
+the vendor has deprecated it; and its `Shutdown` alone did not save. The REST
+API can be bound to loopback, and has a save of its own.
+
+**Why the save first.** A shutdown after a save that failed would be a stop
+that loses the world it was meant to keep, so a refused save ends the
+extension's asking and the terminate follows.
+
+**Seen on the real server.** Windows Palworld v1.0.5 (2026-09-29): both
+requests answered 200 with an empty body, the process exited about 2.4 s
+after the shutdown was asked for, and the world files were written after the
+request. The extension is tested against `tests/support/fake_palworld.rs`,
+which insists on the password and on the order.
+
+**Where the decisions are.** The config and its defaults, the two requests,
+and how a refusal reads (`refusal`, which names a refused password as such)
+are in `homerun-core/src/engine/extensions/palworld.rs`; the runner's
+`extensions/palworld.rs` only sends them.
+
 ## Testing an extension
 
 - **Contract tests** (`extensions::tests`) iterate the registry, so a new
@@ -386,7 +504,12 @@ open.
 - **A fake vendor.** `tests/support/fake_hytale.rs` fakes Hytale's services on
   loopback and records every request; the harness and the lifecycle tests
   share it through `#[path]`, so there is one fake to keep honest. A new
-  extension's vendor fake goes beside it.
+  extension's vendor fake goes beside it, as `fake_palworld.rs` does — served
+  by a thread in the harness, and by the fake game's own process in the
+  lifecycle tests.
+- **A stop.** `Harness::stop_rung` runs an extension's `stop` against a
+  descriptor, bound ports and host secrets, and returns what it said and
+  noted.
 - **Lifecycle tests** (`tests/lifecycle.rs`, module `extensions`) run the real
   runner against the fake game, with `serve_in_turn` or a vendor fake on
   loopback.
@@ -431,10 +554,15 @@ Run them with `npm run test:game`, which passes `--features test-extensions`.
 | `homerun-game-cli/src/extensions/fixture.rs` | the reference extension's effects half (test only) |
 | `homerun-core/src/engine/extensions/hytale.rs` | Hytale: config, hosts, and every decision about Hytale's answers |
 | `homerun-game-cli/src/extensions/hytale.rs` | Hytale: the requests, the console fallback, ending the session |
+| `homerun-core/src/engine/extensions/palworld.rs` | Palworld: config, what it reaches on loopback, the two requests, how a refusal reads |
+| `homerun-game-cli/src/extensions/palworld.rs` | Palworld: the save and the shutdown |
 | `homerun-game-cli/src/extensions/harness.rs` | driving an extension without a runner (test only) |
 | `homerun-game-cli/tests/support/fake_hytale.rs` | a fake of Hytale's services on loopback (test only) |
+| `homerun-game-cli/tests/support/fake_palworld.rs` | a fake of Palworld's REST API on loopback (test only) |
 | `homerun-game-cli/src/runner.rs` | where the hooks are called in a run |
 | `homerun-supervisor/src/vendor_http.rs` | HTTPS to allowed hosts only |
+| `homerun-supervisor/src/local_http.rs` | plain HTTP to the server's own private ports on loopback |
+| `homerun-supervisor/src/process_engine.rs` | `StopHook`: the ladder's rung for an extension's `stop` |
 | `homerun-supervisor/src/local_secret.rs` | DPAPI sealing |
 
 ## Triage
@@ -483,6 +611,19 @@ session: the account does not own Hytale, has no game profile, or already has
 session could not be refreshed. The console fallback sends `auth login
 device` and shows the sign-in it prints; if nothing appears, check the
 `consoleSignIn` markers against the server's actual lines.
+
+**A stop through an extension ends at the terminate.** The `host` lines say
+why: "could not ask the server to stop" and the extension's reason, or "had
+not finished after N s" for one that did not return within `graceMs`. The
+runner's stderr has `extension local http: … -> <status>` for each request.
+
+**Palworld: the stop says the admin password was not accepted.** The
+password in `PalWorldSettings.ini` is not the host's `{secret:admin}` (or
+whatever `adminSecret` names): the game was given another, or none.
+
+**Palworld: "Nothing answered on the server's admin port".** The REST API
+is off (`RESTAPIEnabled`), or on another port than `rest`, or not bound to
+loopback.
 
 **`extension-status` or `extension-forget` answers `descriptor_invalid`.**
 They need `runtimeRoot`, the same one `fetch` and `start` get.

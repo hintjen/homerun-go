@@ -227,36 +227,43 @@ The lifecycle tests use `examples/fake_java.rs` as the host's `java` (a real
 executable, because the runner spawns into a job object, which a batch file
 cannot be); `cargo test` builds it.
 
-## A stop over HTTP: `stop-http`
+## A stop through the game's extension
 
-A game with no console on stdin may be stopped through its own admin API:
-`stop.via: "http"` with `stop.http` naming a private port, basic credentials
-by secret name, and a fixed list of requests (Palworld: `POST /v1/api/save`,
-then `POST /v1/api/shutdown`). `docs/game-engine.md` has the shape and what
-`validate` refuses. Feature `stop-http`; an older runner cannot parse the
-route and refuses the descriptor, so a host must require the name — without
-it the game could only ever be terminated.
+A game with no console on stdin may be stopped by its extension:
+`stop.via: "extension"`, with an `extension` whose spec says it `stops`.
+Palworld's sends `POST /v1/api/save` and then `POST /v1/api/shutdown` to its
+REST API on a private port. `docs/game-extensions.md` has the hook and the
+`palworld` section; `docs/game-engine.md` has the rung. There is no feature
+name of its own: a host already requires `extensions` and `extension:<name>`
+for a descriptor naming an extension, every runner that has an extension
+whose spec stops has the hook, and an older runner cannot parse
+`stop.via: "extension"` and refuses the descriptor rather than launch a game
+it could only terminate.
 
-`prepare` resolves the names the way it resolves an RCON console's: the port
-to what the server was told to bind, the secret to the host's value (a
-missing one is `descriptor_invalid` before anything is spawned). The target
-is always `127.0.0.1`; the descriptor has nowhere to put a host. The requests
-are sent in order, each only if the one before answered 2xx; a refusal, a
-redirect or no answer ends the sequence, the rung's `graceMs` is waited out,
-and the ladder goes on to terminate. The password is redacted from the log
+`prepare` resolves what the extension may reach the way it resolves an RCON
+console's names: each port its spec's `loopback` names to what the server was
+told to bind — only a declared TCP port with `expose: false` — and each
+secret to the host's value (a missing one is `descriptor_invalid` before
+anything is spawned). The target is always `127.0.0.1`. The hook runs on its
+own thread within the rung's grace; asked, the server gets the rest of the
+grace to exit; not asked — a refusal, a panic, no answer in time — and the
+ladder goes on to terminate at once. The password is redacted from the log
 like every secret, and the stop's own lines never contain it.
 
-**Every stop now says what it did,** on the `host` stream: each HTTP request
-and its status, each rung climbed past the first, and the rung the server
-exited on, each with the seconds since the stop was asked for. `probe` and
-`verify` keep those lines in their events, so evidence records which rung
-stopped the process — "exited during the http step" is a clean stop,
-"exited during the terminate step" is not — though `verify` does not yet fail
-on the second.
+**Every stop now says what it did,** on the `host` stream: each rung climbed
+past the first, what the extension noted as it asked and whether it asked,
+and the rung the server exited on, each with the seconds since the stop was
+asked for. `probe` and `verify` keep those lines in their events, so evidence
+records which rung stopped the process — "exited during the extension step"
+is a clean stop, "exited during the terminate step" is not — though `verify`
+does not yet fail on the second.
 
-The lifecycle tests' fake game serves this API on loopback: it answers 401 to
-a wrong `Authorization`, 409 to a shutdown before a save, and exits only on
-save-then-shutdown, so the order and the password are both checked end to end.
+The lifecycle tests' fake game serves an admin API on loopback in two
+shapes: a fake of Palworld's REST API (`tests/support/fake_palworld.rs`),
+which answers 401 to a wrong `Authorization`, 409 to a shutdown before a
+save, and exits only on save-then-shutdown; and a one-route API the test
+`fixture` extension stops, for the rung's own behaviour — asked, refused,
+hung, panicked, and cancelled by the server's exit.
 
 ## `prepare.rs`: directories, settings and resources
 

@@ -341,63 +341,49 @@ the kill. A console stop with no verb, or no console to send it to, starts at
 the rung below rather than inventing a polite rung that would only time out.
 
 The polite rung is one of three: a console verb (`stop.via: console`), an
-interrupt, or **HTTP requests to the server's own admin API**
-(`stop.via: http`) — for a game with no console on stdin whose vendor's way
-to save and exit is a REST endpoint. Palworld is the first:
+interrupt, or **the game's extension** (`stop.via: extension`) — for a game
+with no console on stdin whose way to be asked to save and exit is not a
+console verb. Palworld is the first: its extension sends a save and then a
+shutdown to the server's own REST API.
 
 ```json
-"stop": { "via": "http", "graceMs": 30000, "http": {
-  "port": "rest",
-  "auth": { "basic": { "user": "admin", "secret": "admin" } },
-  "requests": [
-    { "method": "POST", "path": "/v1/api/save", "body": {} },
-    { "method": "POST", "path": "/v1/api/shutdown",
-      "body": { "waittime": 1, "message": "Server stopping" } }
-  ] } }
+"stop": { "via": "extension", "graceMs": 30000 },
+"extension": { "name": "palworld" }
 ```
 
-It lives under `stop` rather than `console` because it is not a console:
-nothing a person types reaches it, there is no reply to show, and every
-request it can make is in the signed descriptor. `console.via` is whatever
-else the game has — `none` for Palworld. The rung carries names only (port,
-secret), like an RCON console; the host resolves them.
+The rung carries nothing. What is sent, and in what order, is the
+extension's; the runner hands the supervisor the extension's hook for the
+rung (`GameExtension::stop`, in `docs/game-extensions.md`). `validate`
+requires an `extension` whose spec says it `stops`; without one the ladder
+starts at the rung below, as a console stop with no verb does.
 
-What makes it safe is what it cannot say, and `validate` refuses the rest:
+It is not descriptor data on purpose. A first cut described the requests in
+the descriptor (`stop.via: http`, with paths, bodies and a user), and that is
+a schema field with one user — exactly what the extension rule below exists
+to prevent. When a second game needs the same save-then-shutdown shape, it
+moves into a descriptor field and a primitive, and Palworld's extension
+switches over in the same change.
 
-- **No host.** It names a declared port, and the runner connects to
-  `127.0.0.1` on whatever that port was bound to. Plain `http://`, never
-  TLS, no redirect followed.
-- **The port is private and TCP.** `expose: false` is required, so the
-  runner's bind check stops a server that puts it anywhere but loopback with
-  `port_exposed`. As for an RCON console, a launch with no `{bindAddress}`
-  anywhere earns a warning.
-- **The password is a generated secret**, named in `auth.basic.secret` and
-  never a literal or a placeholder; `required_secrets` lists it. A warning
-  says so if nothing in the launch or configuration hands it to the game,
-  because that stop will always be refused.
-- **Fixed requests.** At most eight; `POST` or `PUT`; an absolute path of
-  at most 256 printable ASCII characters, with no host, no `.`/`..` segment
-  (spelled out or percent-encoded), no encoded slash, and no whitespace,
-  backslash, backtick or `# " < > { } | ^`; a JSON body of at most 4096 bytes, sent as
-  written — a placeholder in it is refused, since nothing is templated.
-
-Requests are sent in order and each only if the one before answered 2xx,
-because a shutdown after a failed save is a stop that loses the world it was
-meant to keep. Whatever happens, the rung's `graceMs` — counted from when the
-rung began, requests included — is waited out for the process to exit, and
-then the ladder goes on to terminate.
+What any extension may reach this way is held to the RCON console's rules,
+by `validate` and again by the runner: only ports its spec's `loopback` names,
+each a declared TCP port with `expose: false`, and only host secrets it names,
+which `required_secrets` lists and a warning asks the game be given too. See
+`local_http.rs` below.
 
 ## Extensions — `extensions/`
 
-What only one game needs — a vendor's sign-in API, a rotating token — lives in
-that game's extension, compiled into the runner and chosen by name from the
-descriptor (`"extension": { "name", "config" }`). Its pure half is here: an
-`ExtensionSpec` per extension (config validation, the values it supplies
-through `{extension:<key>}`, the hosts it may reach), the registry, and
-`url_allowed`, the one check every URL a person is shown goes through.
-`validate` refuses an extension this build lacks, an `{extension:<key>}` the
-extension does not supply, a secret one anywhere but `launch.env`, and any in
-`client.joinUrl`.
+What only one game needs — a vendor's sign-in API, a rotating token, a stop
+through its own REST API — lives in that game's extension, compiled into the
+runner and chosen by name from the descriptor (`"extension": { "name",
+"config" }`). Its pure half is here: an `ExtensionSpec` per extension (config
+validation, the values it supplies through `{extension:<key>}`, the hosts it
+may reach, whether it stops a server, and the private ports and secrets it may
+reach on loopback), the registry, and `url_allowed`, the one check every URL a
+person is shown goes through. `validate` refuses an extension this build
+lacks, an `{extension:<key>}` the extension does not supply, a secret one
+anywhere but `launch.env`, any in `client.joinUrl`, a stop through an
+extension that cannot stop, and a loopback port that is undeclared, exposed
+or UDP.
 
 **`docs/game-extensions.md` is the page for all of it** — both halves, the
 primitives, the protocol, testing, and how to write one. It is not repeated
@@ -584,25 +570,27 @@ short test would never catch:
 No TLS, and none wanted: `wss://` would mean the console had left the
 machine, which is what the device websocket is for.
 
-### The HTTP stop — `stop_http.rs`
+### A game's admin API — `local_http.rs`
 
-One HTTP/1.1 request per connection on `std::net::TcpStream`, to
-`127.0.0.1:<bound port>`: request line, `Host`, `Connection: close`,
-`Content-Length`, `Content-Type: application/json` when there is a body, and
-`Authorization: Basic …` when the descriptor asks for it. Only the status line
-is read. Not `reqwest`, which is in the tree behind `game-engine`: it follows
-redirects and resolves names, and a stop has no use for either — here a `3xx`
-is simply an answer that is not `2xx`. Each request is bounded by 15 seconds
-and by what is left of the rung's grace.
+How a game's extension reaches the server's own admin API: one HTTP/1.1
+request per connection on `std::net::TcpStream`, to `127.0.0.1:<bound port>`
+and nowhere else. The request names a port and a secret; the runner resolves
+the port to what the server was told to bind (only a declared, private TCP
+port the extension's spec names) and the secret to the host's value, and the
+extension never sees it. Request line, `Host`, `Connection: close`,
+`Content-Length`, `Content-Type: application/json` with a body, and
+`Authorization: Basic …` when the request asks for it.
 
-`Stop::new` re-checks each request with `validate::http_path_is_safe` and the
-same bounds before anything is sent, so a descriptor that reached the
-supervisor some other way still cannot put a second line in a request. The
-password lives only in the `Authorization` value, whose `Debug` is
-`[redacted]`; no failure quotes a request or a reply.
-
-With the process engine rather than `game-engine`, because it is std and
-nothing else, and the ladder that walks it is in `process_engine.rs`.
+Not `reqwest`, which is in the tree for `vendor_http.rs`: it follows
+redirects and resolves names, and this has no use for either — a `3xx` is
+simply an answer. `GET`, `POST` or `PUT`; a path checked by `path_is_safe`
+(absolute, at most 256 printable ASCII characters, no host, no `.`/`..`
+segment spelled out or percent-encoded, no encoded slash, nothing that ends
+the request line); a body of at most 16 KiB and an answer of at most 1 MiB,
+Content-Length, chunked or close-delimited. Each request is bounded by 15
+seconds and read in 50 ms steps that check the caller's cancellation. Method,
+port and route go to stderr; the query string, bodies and the password never
+do, and `Target`'s `Debug` is `[redacted]`.
 
 ### The platform adapter — `platform.rs`
 
@@ -682,7 +670,7 @@ failed every time on that machine.
 | Ready | `console::is_ready` | a substring the descriptor names |
 | Roster | join/leave lines, with names | join/leave substrings, **counts only** |
 | Console | a line on stdin | stdin, or RCON on a loopback port |
-| Stop | `stop`, then terminate, then kill | the descriptor's verb or HTTP requests, then the same |
+| Stop | `stop`, then terminate, then kill | the descriptor's verb or its extension's stop, then the same |
 
 The roster difference is deliberate. A descriptor's presence markers say
 *that* somebody joined, not who; parsing a name out of a line whose shape we
@@ -696,16 +684,26 @@ winning. That is not indirection for its own sake: the core is not allowed to
 depend on its own Minecraft module, so there is no shared type up there to
 use, and a supervisor walking two different ladder types would be two stop
 paths pretending to be one. A descriptor's ladder converts through
-`descriptor_ladder` rather than a `From`, because its HTTP rung names a port
-and a secret the host has to resolve first; unresolved, the rung is left out.
+`descriptor_ladder` rather than a `From`, because its extension rung is only
+a name for a hook the runner builds once it knows what was bound; with no
+hook, the rung is left out.
 
-**A stop says what it did.** `run_streamed` reports each request of an HTTP
-stop, each rung climbed past the first, and the rung the server exited on, as
-lines on the `host` stream with the time since the stop was asked for
-(`Stop: POST /v1/api/save answered 200 (0.4 s after the stop was asked
-for).`). That is what lets a probe's evidence show a stop was clean rather
-than only that it finished. `Engine::run` drops these lines, since its callers
-are Minecraft's.
+**A hook is someone else's code talking to a server that may not answer.**
+The `Hook` rung (`StopHook`) runs on a thread of its own, told through
+`Asking::cancelled` when to give up: once the process exits or the rung's
+grace is spent. `Ok` means the server was asked, and the rest of the grace —
+counted from when the rung began — is its time to go. An error, a panic, or
+no return by the end of the grace means it was not asked, and the ladder
+moves on to terminate at once rather than wait out a grace for a stop that
+never happened; a hook that ignored its cancellation is abandoned.
+
+**A stop says what it did.** `run_streamed` reports each rung climbed past
+the first, what a hook noted as it asked, whether it asked, and the rung the
+server exited on, as lines on the `host` stream with the time since the stop
+was asked for (`Stop: the palworld extension asked the server to stop (0.4 s
+after the stop was asked for).`). That is what lets a probe's evidence show a
+stop was clean rather than only that it finished. `Engine::run` drops these
+lines, since its callers are Minecraft's.
 
 ## The bridge — `engine.*`
 
@@ -724,7 +722,7 @@ reason at the top of this page. Each arm is a thin call into the module above.
 | `engine.invocation` | the command line |
 | `engine.classify` | ready / joined / left, for one console line |
 | `engine.console` | stdin, or which RCON where |
-| `engine.stopLadder` | the rungs (an `http` rung carries the port and secret by name) |
+| `engine.stopLadder` | the rungs (an `extension` rung carries nothing) |
 | `engine.readyTimeoutMs` | how long to wait |
 | `engine.forwards` | the wireproxy forwards |
 
@@ -761,7 +759,7 @@ And in `homerun-supervisor`, behind `game-engine`:
 |---|---|
 | `fetcher.rs` | download, resume, verify, unpack; steamcmd, anonymous only |
 | `rcon.rs` | Valve's binary RCON and Facepunch's WebSocket dialect |
-| `stop_http.rs` | a stop sent to the server's admin API on loopback |
+| `local_http.rs` | plain HTTP to a server's own admin API on loopback, for its extension |
 | `platform.rs` | every OS assumption in the crate, in one place |
 | `process_engine.rs` | `Supervision` — readiness, roster, console and stop, per game |
 | `vendor_http.rs` | HTTPS to a game extension's allowed hosts only (`docs/game-extensions.md`) |
@@ -822,13 +820,15 @@ front of it: `engine.classify` with that exact line answers in one call, and
 `platform::graceful_interrupt` refuses, the ladder climbs past it, and the
 save is whatever the game managed before the terminate. `engine::validate`
 warns about it at authoring time. If the game has an admin API on a port it
-can be told to keep on loopback, `stop.via: http` is the way out.
+can be told to keep on loopback, a stop through its extension
+(`stop.via: extension`) is the way out.
 
-**An HTTP stop falls to the terminate.** Read the `host` lines the stop
-wrote: they name each request and what it answered. `401` is a password the
-game was not given — check the launch or config file carries the same
-`{secret:<name>}`. Nothing answering is a port the game is not listening on,
-or not on loopback. A `2xx` for every request followed by a terminate is a
+**An extension's stop falls to the terminate.** Read the `host` lines the
+stop wrote: "could not ask the server to stop" is followed by the
+extension's reason. A refused password is one the game was not given — check
+the launch or config file carries the same `{secret:<name>}`. "Nothing
+answered on the server's admin port" is a port the game is not listening on,
+or not on loopback. "Asked the server to stop" followed by a terminate is a
 game that took longer than `graceMs` to exit.
 
 **The console works for Minecraft and not for a new game.** The route is in
