@@ -266,8 +266,9 @@ A **config file's** managed key does have an equivalent, and it is removal.
 The key reflects the setting, so a setting that went from set to unset takes
 its key out of the file rather than leaving the value from the launch before —
 a cleared seed that kept generating the old world is the failure that decided
-it. `properties::remove` and the JSON branch of the runner's `prepare` do
-that; everything unmanaged in the file survives either way.
+it. `properties::remove`, `json_config` and `ini_config` do that; everything
+unmanaged in the file survives either way. In an INI file a cleared struct
+member leaves its struct and the struct stays, as `()` if it was the last.
 
 ### A private port stays on this computer, and it is checked
 

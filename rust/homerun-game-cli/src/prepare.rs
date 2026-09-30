@@ -421,9 +421,15 @@ pub fn launch(
         let mut cleared = Vec::new();
         for (key, template) in &config.keys {
             let invalid = |e: homerun_core::Error| fail(codes::DESCRIPTOR_INVALID, e.to_string());
-            if matches!(config.format, ConfigFormat::Json) {
-                // JSON keeps a setting's type: a number stays a number.
-                match engine::template::fill_value(template, &bindings).map_err(invalid)? {
+            if matches!(config.format, ConfigFormat::Json | ConfigFormat::Ini) {
+                // JSON and INI keep a setting's type: a number stays a number.
+                // INI also spells a port as one; see `fill_value_with_ports`.
+                let value = if matches!(config.format, ConfigFormat::Ini) {
+                    engine::template::fill_value_with_ports(template, &bindings)
+                } else {
+                    engine::template::fill_value(template, &bindings)
+                };
+                match value.map_err(invalid)? {
                     Some(value) => typed.push((key.clone(), value)),
                     None => cleared.push(key.clone()),
                 }
@@ -434,15 +440,24 @@ pub fn launch(
                 Filled::Dropped => cleared.push(key.clone()),
             }
         }
-        let existing = match fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(_) => {
-                return Err(fail(
-                    codes::SPAWN_FAILED,
-                    "A game configuration file cannot be read.",
-                ))
-            }
+        let unreadable = || {
+            fail(
+                codes::SPAWN_FAILED,
+                "A game configuration file cannot be read.",
+            )
+        };
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return Err(unreadable()),
+        };
+        // An Unreal server saves its INI as UTF-16 once it holds anything
+        // outside ASCII; `ini_config` reads that and writes it back as found.
+        let (existing, encoding) = if matches!(config.format, ConfigFormat::Ini) {
+            homerun_core::ini_config::decode(&bytes).ok_or_else(unreadable)?
+        } else {
+            let text = String::from_utf8(bytes).map_err(|_| unreadable())?;
+            (text, homerun_core::ini_config::Encoding::Utf8)
         };
         let contents = match config.format {
             ConfigFormat::Properties => {
@@ -454,9 +469,11 @@ pub fn launch(
             }
             ConfigFormat::Json => homerun_core::json_config::merge(&existing, &typed, &cleared)
                 .map_err(|e| fail(codes::SPAWN_FAILED, format!("This server's configuration cannot be updated: {e}.")))?,
-            _ => return Err(fail(codes::DESCRIPTOR_INVALID, "This runner supports JSON and properties configuration files. This game's format needs an engine extension.")),
+            ConfigFormat::Ini => homerun_core::ini_config::merge(&existing, &typed, &cleared)
+                .map_err(|e| fail(codes::SPAWN_FAILED, format!("This server's configuration cannot be updated: {e}.")))?,
+            _ => return Err(fail(codes::DESCRIPTOR_INVALID, "This runner supports JSON, INI and properties configuration files. This game's format needs an engine extension.")),
         };
-        write(&path, &contents)?;
+        write(&path, homerun_core::ini_config::encode(&contents, encoding))?;
     }
     for file in engine::licence::gate(d, true)
         .map_err(|e| fail(codes::LICENCE_NOT_ACCEPTED, e.to_string()))?
@@ -551,7 +568,7 @@ pub fn launch(
     })
 }
 
-fn write(path: &Path, text: &str) -> Result<()> {
+fn write(path: &Path, text: impl AsRef<[u8]>) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|_| {
             fail(

@@ -1351,6 +1351,73 @@ fn json_config_values_keep_their_type_and_dotted_keys_nest() {
     h.eof();
 }
 
+/// An Unreal server's INI files, which do not exist before its first start:
+/// one struct of settings on one key, and a plain key added to an engine
+/// file the game already wrote. A port is a bare number in the struct, a
+/// secret a quoted string, and a cleared setting leaves the struct.
+#[test]
+fn ini_config_writes_struct_members_and_plain_keys_into_new_folders() {
+    let mut f = Fixture::new();
+    f.d["settings"] = json!([
+        {"key":"hostname","type":"string","default":"{serverName}"},
+        {"key":"pvp","type":"bool","default":false},
+        {"key":"motd","type":"string"}
+    ]);
+    let section = "[/Script/Pal.PalGameWorldSettings]OptionSettings";
+    f.d["config"] = json!([
+        {"file":"Saved/Config/WindowsServer/PalWorldSettings.ini","format":"ini","keys":{
+            (format!("{section}(ServerName)")):"{setting:hostname}",
+            (format!("{section}(AdminPassword)")):"{secret:rcon}",
+            (format!("{section}(bIsPvP)")):"{setting:pvp}",
+            (format!("{section}(RESTAPIPort)")):"{port:game}",
+            (format!("{section}(ServerDescription)")):"{setting:motd}"
+        }},
+        {"file":"Engine.ini","format":"ini","keys":{
+            "[HTTPServer.Listeners]DefaultBindAddress":"{bindAddress}"
+        }}
+    ]);
+    fs::create_dir_all(f.root.join("server")).unwrap();
+    fs::write(
+        f.root.join("server/Engine.ini"),
+        "[Core.System]
+Paths=../../../Engine/Content
+
+",
+    )
+    .unwrap();
+
+    let mut h = Host::new();
+    let mut start = f.start();
+    start["settings"] = json!({ "hostname": "Homerun probe", "pvp": true });
+    h.send(start);
+    h.until("server-started");
+
+    let settings = fs::read_to_string(
+        f.root
+            .join("server/Saved/Config/WindowsServer/PalWorldSettings.ini"),
+    )
+    .unwrap();
+    assert_eq!(
+        settings,
+        format!(
+            "[/Script/Pal.PalGameWorldSettings]
+OptionSettings=(AdminPassword=\"do-not-print-this\",RESTAPIPort={},ServerName=\"Homerun probe\",bIsPvP=True)
+",
+            f.port
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/Engine.ini")).unwrap(),
+        "[Core.System]
+Paths=../../../Engine/Content
+
+[HTTPServer.Listeners]
+DefaultBindAddress=127.0.0.1
+"
+    );
+    h.eof();
+}
+
 #[test]
 fn malformed_known_commands_reply_without_starting_and_keep_stdin_usable() {
     let f = Fixture::new();

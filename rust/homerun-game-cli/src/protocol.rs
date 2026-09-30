@@ -88,6 +88,11 @@ pub const FEATURES: &[&str] = &[
     // checks. An older runner ignores both fields and has no program to run,
     // so a host must require this name for such a descriptor.
     "host-java",
+    // `config[].format: "ini"`: sections, plain keys and members of an Unreal
+    // struct value (`homerun_core::ini_config`). An older runner refuses the
+    // format by name at launch, so a host must require this name for a
+    // descriptor with an INI config entry.
+    "config-ini",
 ];
 
 /// What Electron sends.
@@ -648,6 +653,13 @@ mod tests {
     fn this_runner_advertises_the_vendor_runtime() {
         assert!(FEATURES.contains(&"runtime-mounts"));
         assert!(FEATURES.contains(&"vendor-runtime"));
+    }
+
+    /// A host refuses a descriptor with an INI config entry on a runner that
+    /// does not advertise this, so it has to be exactly this name.
+    #[test]
+    fn this_runner_advertises_the_ini_config_writer() {
+        assert!(FEATURES.contains(&"config-ini"));
     }
 
     /// Absent is the answer for every source but vendor, and for a desktop

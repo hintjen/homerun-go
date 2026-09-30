@@ -369,6 +369,42 @@ pub fn fill_value(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
     })
 }
 
+/// [`fill_value`], and a value that is exactly one `{port:…}` is a number.
+///
+/// For the INI writer, where the type is spelled in the file: inside an
+/// Unreal struct text is quoted and a number is not, so a port written as
+/// text would be `RESTAPIPort="8212"` for a setting the game reads as an
+/// integer. JSON keeps [`fill_value`]'s rule, under which a port is text,
+/// because changing it would change files every JSON descriptor already
+/// writes.
+///
+/// The same holds for a constant: a descriptor that switches a game's own
+/// admin API on writes `"true"`, and as text that would be
+/// `RESTAPIEnabled="true"`. So a value with no placeholder at all that reads
+/// as `true`, `false` or a number is written as one. Only the signed
+/// descriptor can spell a constant; a player's text always arrives through
+/// `{setting:…}` and keeps its type.
+pub fn fill_value_with_ports(input: &str, bindings: &Bindings) -> Result<Option<Value>> {
+    match scan(input).as_deref() {
+        Ok([Piece::Placeholder(Placeholder::Port(name))]) => {
+            if let Some(port) = bindings.ports.get(name) {
+                return Ok(Some(Value::from(*port)));
+            }
+        }
+        Ok([Piece::Literal(text)]) => match text.as_str() {
+            "true" => return Ok(Some(Value::Bool(true))),
+            "false" => return Ok(Some(Value::Bool(false))),
+            number => {
+                if let Ok(n @ Value::Number(_)) = serde_json::from_str::<Value>(number) {
+                    return Ok(Some(n));
+                }
+            }
+        },
+        _ => {}
+    }
+    fill_value(input, bindings)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -471,6 +507,24 @@ mod tests {
             Some(json!("25 players"))
         );
         assert_eq!(value("{port:game}"), Some(json!("28015")));
+    }
+
+    #[test]
+    fn a_sole_port_is_a_number_only_where_the_writer_asks_for_one() {
+        let f = Fixture::new();
+        let ported = |input| fill_value_with_ports(input, &f.bindings()).unwrap();
+        assert_eq!(ported("{port:game}"), Some(json!(28015)));
+        assert_eq!(ported("{port:game}/tcp"), Some(json!("28015/tcp")));
+        assert_eq!(ported("{setting:maxPlayers}"), Some(json!(25)));
+        assert_eq!(ported("{setting:seed}"), None);
+        assert!(fill_value_with_ports("{port:nope}", &f.bindings()).is_err());
+        // A constant the descriptor spells is typed; a player's text is not.
+        assert_eq!(ported("true"), Some(json!(true)));
+        assert_eq!(ported("false"), Some(json!(false)));
+        assert_eq!(ported("30.5"), Some(json!(30.5)));
+        assert_eq!(ported("True"), Some(json!("True")));
+        assert_eq!(ported("127.0.0.1"), Some(json!("127.0.0.1")));
+        assert_eq!(ported("{setting:hostname}"), Some(json!("Ruined Keep")));
     }
 
     #[test]
