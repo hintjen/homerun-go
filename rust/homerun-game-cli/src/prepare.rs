@@ -16,7 +16,7 @@ use homerun_supervisor::{
         descriptor_ladder, ConsoleRoute, Invocation, Presence, ProcessEngine, Readiness,
         Supervision,
     },
-    rcon, stop_http,
+    rcon,
 };
 use std::{
     collections::BTreeMap,
@@ -335,7 +335,7 @@ pub struct Prepared {
 
 // Each argument is a different half of one launch -- the descriptor, three
 // places on disk, the player's choices, the host's secrets, the address, the
-// host's Java and the extension's values -- and a struct would only rename
+// host's Java and the game's extension -- and a struct would only rename
 // them.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
@@ -347,7 +347,7 @@ pub fn launch(
     secrets: &BTreeMap<String, String>,
     bind: Option<&str>,
     java: Option<&Path>,
-    extension: &BTreeMap<String, String>,
+    extension: Option<&crate::extensions::Active>,
 ) -> Result<Prepared> {
     // v1 binds descriptor games on loopback and nowhere else: the tunnel
     // connects to loopback, and a port the descriptor marks `expose: false`
@@ -387,6 +387,7 @@ pub fn launch(
         }
         ports.insert(p.name.clone(), p.port);
     }
+    let supplied = extension.map(|e| e.supplied().clone()).unwrap_or_default();
     let bindings = Bindings {
         settings: &resolved,
         ports: &ports,
@@ -395,7 +396,7 @@ pub fn launch(
         server_dir: &server.to_string_lossy(),
         bind_address: bind,
         runtime_dir: &runtime.to_string_lossy(),
-        extension,
+        extension: &supplied,
     };
     let inv = engine::invocation::compose(d, platform::HOST, &bindings)
         .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e.to_string()))?;
@@ -487,39 +488,12 @@ pub fn launch(
         }),
         _ => None,
     };
-    // An HTTP stop's names, resolved the way the console's are: the port to
-    // what the server was told to bind, the secret to its value. There is no
-    // address to resolve -- the target is always 127.0.0.1.
-    let http_stop = match &d.stop.http {
-        Some(http) if d.stop.via == engine::descriptor::StopVia::Http => {
-            let basic = match http.auth.as_ref().and_then(|a| a.basic.as_ref()) {
-                Some(basic) => Some((
-                    basic.user.as_str(),
-                    secrets
-                        .get(&basic.secret)
-                        .filter(|s| !s.is_empty())
-                        .ok_or_else(|| {
-                            fail(
-                                codes::DESCRIPTOR_INVALID,
-                                "The host has not provided the password for the server's admin API.",
-                            )
-                        })?
-                        .as_str(),
-                )),
-                None => None,
-            };
-            let port = *ports.get(&http.port).ok_or_else(|| {
-                fail(
-                    codes::DESCRIPTOR_INVALID,
-                    "This game's stop names a port it does not declare.",
-                )
-            })?;
-            Some(
-                stop_http::Stop::new(stop_http::Target::new(port, basic), &http.requests)
-                    .map_err(|e| fail(codes::DESCRIPTOR_INVALID, e))?,
-            )
-        }
-        _ => None,
+    // The extension's stop, when it has one, with what it may reach on
+    // loopback resolved the way the console's names are: the port to what
+    // the server was told to bind, the secret to the host's value.
+    let hook = match extension {
+        Some(extension) => extension.stop_hook(d, &ports, secrets)?,
+        None => None,
     };
     let route = if let Some(target) = &console {
         ConsoleRoute::Rcon(target.clone())
@@ -565,7 +539,7 @@ pub fn launch(
             })
             .unwrap_or(Presence::None),
         console: route,
-        ladder: descriptor_ladder(&engine::control::stop_ladder(d), http_stop.as_ref()),
+        ladder: descriptor_ladder(&engine::control::stop_ladder(d), hook.as_ref()),
     };
     Ok(Prepared {
         engine: ProcessEngine::supervised(

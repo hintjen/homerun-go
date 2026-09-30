@@ -155,17 +155,20 @@ fn fake_game() {
         println!("Command line: -batchmode +rcon.password {echo}");
         std::io::stdout().flush().unwrap();
     }
-    // A game whose only stop is its REST API, as Palworld's is. Bound before
-    // it says it is ready, on loopback, the way the descriptor's bind
-    // address tells a well-behaved one to.
-    let rest = std::env::var("HOMERUN_TEST_REST_PORT")
-        .ok()
-        .map(|rest| TcpListener::bind(("127.0.0.1", rest.parse::<u16>().unwrap())).unwrap());
+    // A game whose only stop is its own admin API: the one-route API the
+    // fixture extension stops. Bound before it says it is ready, on loopback, the way the descriptor's bind address tells a
+    // well-behaved one to. Stdin is never read -- this game has no console.
+    let bind_admin = |var: &str| {
+        std::env::var(var)
+            .ok()
+            .map(|p| TcpListener::bind(("127.0.0.1", p.parse::<u16>().unwrap())).unwrap())
+    };
+    let admin = bind_admin("HOMERUN_TEST_ADMIN_PORT");
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
     }
-    if let Some(rest) = rest {
-        serve_rest(rest, &save);
+    if let Some(admin) = admin {
+        serve_admin(admin, &save);
         return;
     }
     if std::env::var("HOMERUN_TEST_MODE").as_deref() == Ok("flood-then-widen") {
@@ -226,22 +229,25 @@ fn fake_game() {
     }
 }
 
-/// Palworld's REST API, as much of it as a stop uses: `POST /v1/api/save`
-/// writes the save and `POST /v1/api/shutdown` exits, each only for the
-/// admin password the launch handed the game (`HOMERUN_TEST_ADMIN_PASSWORD`).
-/// Stdin is never read -- this game has no console.
-///
-/// It is strict where a sloppy stop would get away with something: a wrong
-/// or missing `Authorization` is 401, and a shutdown before a save is 409
-/// and does not exit, so only save-then-shutdown with the right password
-/// ends with "world flushed". Every request is appended to `rest-log` for
-/// the test to read the order back. `HOMERUN_TEST_REST_REFUSE` makes the
-/// save answer 500.
-fn serve_rest(listener: TcpListener, save: &str) {
+/// Append one request an admin API received to `rest-log`, for the test to
+/// read the order back.
+fn log_request(line: &str) {
+    let mut log = fs::read_to_string("rest-log").unwrap_or_default();
+    log.push_str(line);
+    log.push('\n');
+    fs::write("rest-log", log).unwrap();
+}
+
+/// An admin API with one route, for the fixture extension's stop: an
+/// authorised `POST /exit` writes the save, answers 200 and exits. Anything
+/// unauthorised is 401 and any other route 404, and neither exits. Signed in
+/// as `admin` with `HOMERUN_TEST_ADMIN_PASSWORD`.
+fn serve_admin(listener: TcpListener, save: &str) {
     let password = std::env::var("HOMERUN_TEST_ADMIN_PASSWORD").unwrap_or_default();
-    let expected = format!("Basic {}", base64(format!("admin:{password}").as_bytes()));
-    let refuse = std::env::var("HOMERUN_TEST_REST_REFUSE").is_ok();
-    let mut saved = false;
+    let expected = format!(
+        "Basic {}",
+        base64(format!("admin:{password}").as_bytes())
+    );
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let mut reader = BufReader::new(stream);
@@ -249,52 +255,37 @@ fn serve_rest(listener: TcpListener, save: &str) {
         if reader.read_line(&mut request_line).is_err() {
             continue;
         }
-        let (mut authorized, mut length, mut json) = (false, 0usize, false);
+        let mut authorized = false;
         loop {
             let mut header = String::new();
             if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
                 break;
             }
-            let (name, value) = header.trim_end().split_once(": ").unwrap_or_default();
-            match name.to_ascii_lowercase().as_str() {
-                "authorization" => authorized = value == expected,
-                "content-length" => length = value.parse().unwrap_or(0),
-                "content-type" => json = value == "application/json",
-                _ => {}
+            if let Some(value) = header.trim_end().strip_prefix("Authorization: ") {
+                authorized = value == expected;
             }
         }
-        let mut body = vec![0; length];
-        reader.read_exact(&mut body).unwrap();
-        let body = String::from_utf8(body).unwrap();
         let route = request_line.trim_end().to_string();
-        let mut log = fs::read_to_string("rest-log").unwrap_or_default();
-        log.push_str(&format!("{route} auth={authorized} json={json} {body}\n"));
-        fs::write("rest-log", log).unwrap();
-
+        log_request(&format!("{route} auth={authorized}"));
         let (status, exit) = match route.as_str() {
             _ if !authorized => ("401 Unauthorized", false),
-            "POST /v1/api/save HTTP/1.1" if refuse => ("500 Internal Server Error", false),
-            "POST /v1/api/save HTTP/1.1" => {
-                fs::write(save, "world flushed").unwrap();
-                saved = true;
-                ("200 OK", false)
-            }
-            "POST /v1/api/shutdown HTTP/1.1" if !saved => ("409 Conflict", false),
-            "POST /v1/api/shutdown HTTP/1.1" => ("200 OK", true),
+            "POST /exit HTTP/1.1" => ("200 OK", true),
             _ => ("404 Not Found", false),
         };
+        if exit {
+            fs::write(save, "world flushed").unwrap();
+        }
         let mut stream = reader.into_inner();
         let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
         let _ = stream.flush();
         if exit {
-            // Palworld's `waittime`: it answers, then goes a moment later.
             thread::sleep(Duration::from_millis(300));
             return;
         }
     }
 }
 
-/// Standard base64, for the fake's expected `Authorization`.
+/// Standard base64, for the expected `Authorization`.
 fn base64(input: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
@@ -1057,30 +1048,6 @@ fn a_private_port_on_loopback_is_not_refused() {
     h.eof();
 }
 
-/// A start for a game stopped the way Palworld is: no console, and a save
-/// then a shutdown sent to its REST API on a private port, signed in as
-/// `admin` with the host's secret -- which the launch hands the game too.
-fn http_stop_start(f: &Fixture) -> Value {
-    let mut start = f.start();
-    let d = &mut start["descriptor"];
-    d["ports"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name":"rest","proto":"tcp","port":free_port(),"expose":false}));
-    let env = &mut d["platforms"][platform::HOST]["launch"]["env"];
-    env["HOMERUN_TEST_REST_PORT"] = json!("{port:rest}");
-    env["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("{secret:rcon}");
-    d["console"] = json!({"via":"none"});
-    d["stop"] = json!({"via":"http","graceMs":5000,"http":{
-    "port":"rest",
-    "auth":{"basic":{"user":"admin","secret":"rcon"}},
-    "requests":[
-        {"method":"POST","path":"/v1/api/save","body":{}},
-        {"method":"POST","path":"/v1/api/shutdown","body":{"waittime":1,"message":"Server stopping"}}
-    ]}});
-    start
-}
-
 /// What the stop said about itself, on the runner's own stream.
 fn stop_notes(h: &Host) -> Vec<String> {
     h.seen
@@ -1090,130 +1057,22 @@ fn stop_notes(h: &Host) -> Vec<String> {
         .collect()
 }
 
-/// The whole stop, against a game that insists on the password and on the
-/// order: the save is written, the game exits on its own inside the grace,
-/// and the stop's account of itself names each request and the rung.
-#[test]
-fn an_http_stop_saves_then_shuts_the_game_down() {
-    let f = Fixture::new();
-    let mut h = Host::new();
+fn noted(notes: &[String], expected: &str) {
     assert!(
-        h.seen[0]["features"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("stop-http")),
-        "a host has to be able to require this: {}",
-        h.seen[0]
+        notes.iter().any(|n| n.contains(expected)),
+        "{expected}: {notes:#?}"
     );
-    h.send(http_stop_start(&f));
-    h.until("server-started");
-    let asked = Instant::now();
-    h.send(json!({"cmd":"stop","serverId":"s1"}));
-    h.until("server-stopped");
-    assert!(
-        asked.elapsed() < Duration::from_secs(5),
-        "the game should have exited on its own, not at the terminate: {:?}",
-        asked.elapsed()
-    );
-
-    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
-    let requests: Vec<&str> = log.lines().collect();
-    assert_eq!(requests.len(), 2, "{log}");
-    assert_eq!(
-        requests[0],
-        "POST /v1/api/save HTTP/1.1 auth=true json=true {}"
-    );
-    assert_eq!(
-        requests[1],
-        r#"POST /v1/api/shutdown HTTP/1.1 auth=true json=true {"message":"Server stopping","waittime":1}"#
-    );
-    assert_eq!(
-        fs::read_to_string(f.root.join("server/saved")).unwrap(),
-        "world flushed"
-    );
-
-    let notes = stop_notes(&h);
-    for expected in [
-        "POST /v1/api/save answered 200",
-        "POST /v1/api/shutdown answered 200",
-        "exited during the http step",
-    ] {
-        assert!(
-            notes.iter().any(|n| n.contains(expected)),
-            "{expected}: {notes:#?}"
-        );
-    }
-    assert!(!notes.iter().any(|n| n.contains("terminate")), "{notes:#?}");
-    assert!(
-        !h.seen
-            .iter()
-            .any(|v| v.to_string().contains("do-not-print-this")),
-        "the password reached the host"
-    );
-    h.eof();
 }
 
-/// A save the game refuses ends the sequence there: the shutdown is never
-/// sent, and the ladder waits out the grace and falls to the terminate.
-#[test]
-fn an_http_stop_the_game_refuses_falls_through_to_terminate() {
-    let f = Fixture::new();
-    let mut start = http_stop_start(&f);
-    start["descriptor"]["stop"]["graceMs"] = json!(1000);
-    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_REST_REFUSE"] =
-        json!("1");
-    let mut h = Host::new();
-    h.send(start);
-    h.until("server-started");
-    h.send(json!({"cmd":"stop","serverId":"s1"}));
-    h.until("server-stopped");
-
-    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
-    assert_eq!(
-        log.lines().count(),
-        1,
-        "the shutdown must not follow a failed save: {log}"
-    );
-    assert!(!f.root.join("server/saved").exists());
-    let notes = stop_notes(&h);
-    for expected in [
-        "POST /v1/api/save answered 500, so the rest was not sent",
-        "moving on to the terminate step",
-        "exited during the terminate step",
-    ] {
+/// No host secret reached the host, in any event.
+fn no_secret_leaked(h: &Host) {
+    for event in &h.seen {
+        let text = event.to_string();
         assert!(
-            notes.iter().any(|n| n.contains(expected)),
-            "{expected}: {notes:#?}"
+            !text.contains("do-not-print-this"),
+            "a password reached the host: {event}"
         );
     }
-    h.eof();
-}
-
-/// A password the game was not given is refused by it, and the stop says
-/// so without saying the password.
-#[test]
-fn an_http_stop_with_the_wrong_password_is_refused_by_the_game() {
-    let f = Fixture::new();
-    let mut start = http_stop_start(&f);
-    start["descriptor"]["stop"]["graceMs"] = json!(1000);
-    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]
-        ["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("something-else");
-    let mut h = Host::new();
-    h.send(start);
-    h.until("server-started");
-    h.send(json!({"cmd":"stop","serverId":"s1"}));
-    h.until("server-stopped");
-    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
-    assert!(
-        log.starts_with("POST /v1/api/save HTTP/1.1 auth=false"),
-        "{log}"
-    );
-    assert!(stop_notes(&h).iter().any(|n| n.contains("answered 401")));
-    assert!(!h
-        .seen
-        .iter()
-        .any(|v| v.to_string().contains("do-not-print-this")));
-    h.eof();
 }
 
 /// The runner has no API in front of it, so core's backstop is the only
@@ -2514,6 +2373,129 @@ mod extensions {
         h.send(json!({"cmd":"extension-status","extension":"hytale","runtimeRoot":f.runtime}));
         assert_eq!(h.until("extension-status")["signedIn"], true);
         h.eof();
+    }
+
+    // ─── a stop the extension asks for ─────────────────────────────────────
+    //
+    // The fixture's stop, against a fake game whose only way out is its
+    // admin API's `POST /exit`: what the rung does when the extension asks,
+    // fails, hangs, or waits past the server's exit.
+
+    /// A fake game with no console, stopped by the fixture: `how` and the
+    /// rest of the fixture's `stop`, with a grace of `grace_ms`.
+    fn stopped_by_fixture(stop: Value, grace_ms: u64) -> Fixture {
+        let mut merged = json!({ "port": "admin", "secret": "rcon" });
+        for (k, v) in stop.as_object().unwrap() {
+            merged[k] = v.clone();
+        }
+        let mut f = with_extension(json!({ "stop": merged }));
+        f.d["ports"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"admin","proto":"tcp","port":free_port(),"expose":false}));
+        let env = &mut f.d["platforms"][platform::HOST]["launch"]["env"];
+        env["HOMERUN_TEST_ADMIN_PORT"] = json!("{port:admin}");
+        env["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("{secret:rcon}");
+        f.d["console"] = json!({"via":"none"});
+        f.d["stop"] = json!({"via":"extension","graceMs":grace_ms});
+        f
+    }
+
+    /// Start `f`, stop it, and say how long the stop took.
+    fn start_then_stop(f: &Fixture, h: &mut Host) -> Duration {
+        h.send(f.start());
+        h.until("server-started");
+        let asked = Instant::now();
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        asked.elapsed()
+    }
+
+    #[test]
+    fn an_extension_stop_asks_and_the_game_exits_on_it() {
+        let f = stopped_by_fixture(json!({}), 20_000);
+        let mut h = Host::new();
+        let took = start_then_stop(&f, &mut h);
+        assert!(took < Duration::from_secs(8), "{took:?}");
+        assert_eq!(
+            fs::read_to_string(f.root.join("server/rest-log")).unwrap(),
+            "POST /exit HTTP/1.1 auth=true\n"
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("server/saved")).unwrap(),
+            "world flushed"
+        );
+        let notes = stop_notes(&h);
+        noted(&notes, "Stop: the fixture asked (");
+        noted(&notes, "the fixture extension asked the server to stop");
+        noted(&notes, "exited during the extension step");
+        assert!(!notes.iter().any(|n| n.contains("terminate")), "{notes:#?}");
+        no_secret_leaked(&h);
+        h.eof();
+    }
+
+    /// Not asked -- here, a route the game does not have -- and the ladder
+    /// goes straight on to the terminate rather than wait out the grace.
+    #[test]
+    fn an_extension_stop_that_fails_falls_through_to_terminate() {
+        let f = stopped_by_fixture(json!({ "path": "/nope" }), 30_000);
+        let mut h = Host::new();
+        let took = start_then_stop(&f, &mut h);
+        assert!(took < Duration::from_secs(15), "{took:?}");
+        assert!(!f.root.join("server/saved").exists());
+        let notes = stop_notes(&h);
+        noted(
+            &notes,
+            "the fixture extension could not ask the server to stop: The fixture's admin API \
+             answered 404",
+        );
+        noted(&notes, "moving on to the terminate step");
+        noted(&notes, "exited during the terminate step");
+        h.eof();
+    }
+
+    /// An extension that never returns is abandoned when the grace is spent.
+    #[test]
+    fn an_extension_stop_that_hangs_is_abandoned_at_the_end_of_the_grace() {
+        let f = stopped_by_fixture(json!({ "how": "hang" }), 1_000);
+        let mut h = Host::new();
+        let took = start_then_stop(&f, &mut h);
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        let notes = stop_notes(&h);
+        noted(&notes, "it had not finished after 1.0 s");
+        noted(&notes, "exited during the terminate step");
+        h.eof();
+    }
+
+    /// The server going is the extension's cue to stop waiting: a stop that
+    /// asked and then waited ends with the server, not with the grace.
+    #[test]
+    fn an_extension_stop_is_cancelled_once_the_server_has_gone() {
+        let f = stopped_by_fixture(json!({ "how": "exit-then-wait" }), 20_000);
+        let mut h = Host::new();
+        let took = start_then_stop(&f, &mut h);
+        assert!(took < Duration::from_secs(8), "{took:?}");
+        let notes = stop_notes(&h);
+        noted(&notes, "the fixture saw its stop was over");
+        noted(&notes, "exited during the extension step");
+        h.eof();
+    }
+
+    #[test]
+    fn an_extension_stop_that_refuses_or_panics_falls_through_to_terminate() {
+        for (how, said) in [
+            ("refuse", "The fixture was told not to ask"),
+            ("panic", "it failed unexpectedly"),
+        ] {
+            let f = stopped_by_fixture(json!({ "how": how }), 30_000);
+            let mut h = Host::new();
+            let took = start_then_stop(&f, &mut h);
+            assert!(took < Duration::from_secs(15), "{how}: {took:?}");
+            let notes = stop_notes(&h);
+            noted(&notes, said);
+            noted(&notes, "exited during the terminate step");
+            h.eof();
+        }
     }
 
     #[test]

@@ -27,8 +27,8 @@
 //!    server's admin password.
 //!  - **An RCON port may not be exposed.** Exposing it puts an
 //!    administrative console on the public internet behind one password.
-//!    An HTTP stop's port is held to the same rule, and its requests to a
-//!    fixed shape — see [`check_http_stop`].
+//!    A port an extension reaches on loopback -- a game's own admin API --
+//!    is held to the same rule; see [`check_extension`].
 //!
 //! # Paths
 //!
@@ -40,10 +40,10 @@
 use std::collections::{BTreeSet, HashSet};
 
 use super::descriptor::{
-    BasicAuth, ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, HttpMethod, LaunchProgram,
-    PlayersVia, Setting, SettingKind, StopVia, SCHEMA_VERSION,
+    ConfigFile, ConfigFormat, ConsoleVia, GameDescriptor, LaunchProgram, PlayersVia, Setting,
+    SettingKind, StopVia, SCHEMA_VERSION,
 };
-use super::extensions::{self, ExtensionSpec};
+use super::extensions::{self, ExtensionSpec, Loopback};
 use super::settings::SERVER_NAME_PLACEHOLDER;
 use super::template::{self, Placeholder};
 use crate::tunnel::Protocol;
@@ -107,7 +107,7 @@ pub fn required_secrets(descriptor: &GameDescriptor) -> Vec<String> {
         }
     }
     // A console secret is needed whether or not anything templates it: the
-    // supervisor authenticates with it. So is an HTTP stop's.
+    // supervisor authenticates with it.
     if descriptor.console.via == ConsoleVia::Rcon {
         if let Some(rcon) = &descriptor.console.rcon {
             if !rcon.secret.is_empty() {
@@ -115,20 +115,40 @@ pub fn required_secrets(descriptor: &GameDescriptor) -> Vec<String> {
             }
         }
     }
-    if let Some(basic) = http_stop_basic(descriptor) {
-        if !basic.secret.is_empty() {
-            names.insert(basic.secret.clone());
-        }
-    }
+    // So is one an extension signs in to the server's own API with: the
+    // runner resolves it for the extension.
+    names.extend(
+        extension_loopback(descriptor)
+            .secrets
+            .into_iter()
+            .filter(|s| !s.is_empty()),
+    );
     names.into_iter().collect()
 }
 
-/// The HTTP stop's basic credentials, when that is how this game stops.
-fn http_stop_basic(d: &GameDescriptor) -> Option<&BasicAuth> {
-    if d.stop.via != StopVia::Http {
-        return None;
+/// What the descriptor's extension may reach on loopback. Nothing for no
+/// extension, one this build lacks, or a config that is not an object.
+fn extension_loopback(d: &GameDescriptor) -> Loopback {
+    let Some(ext) = &d.extension else {
+        return Loopback::default();
+    };
+    let Some(spec) = extensions::spec(&ext.name) else {
+        return Loopback::default();
+    };
+    match &ext.config {
+        Value::Null => (spec.loopback)(&Value::Object(Default::default())),
+        config @ Value::Object(_) => (spec.loopback)(config),
+        _ => Loopback::default(),
     }
-    d.stop.http.as_ref()?.auth.as_ref()?.basic.as_ref()
+}
+
+/// Whether anything the host templates hands the game `{secret:<name>}`.
+fn gives_secret(d: &GameDescriptor, name: &str) -> bool {
+    templated_strings(d).iter().any(|s| {
+        template::placeholders(s)
+            .map(|found| found.contains(&Placeholder::Secret(name.to_string())))
+            .unwrap_or(false)
+    })
 }
 
 /// Every host-side templated string, for the scans above.
@@ -423,7 +443,7 @@ fn check_ports(d: &GameDescriptor, r: &mut Report) {
 /// and in the second case the descriptor is still the best available and the
 /// runner's check is what stands behind it.
 fn check_bind_address(d: &GameDescriptor, r: &mut Report) {
-    if d.console.via != ConsoleVia::Rcon && d.stop.via != StopVia::Http {
+    if d.console.via != ConsoleVia::Rcon && extension_loopback(d).ports.is_empty() {
         return;
     }
     let used = templated_strings(d).iter().any(|s| {
@@ -433,8 +453,8 @@ fn check_bind_address(d: &GameDescriptor, r: &mut Report) {
     });
     if !used {
         r.warnings.push(
-            "this game has an administrative console and nothing in its launch line \
-             says which address to bind it to, so the game will choose — and most \
+            "this game has an administrative console or API and nothing in its launch \
+             line says which address to bind it to, so the game will choose — and most \
              choose every network interface. Pass {bindAddress} where this game \
              takes a bind address."
                 .into(),
@@ -526,11 +546,21 @@ fn check_lifecycle(d: &GameDescriptor, r: &mut Report) {
                     .into(),
             );
         }
-        StopVia::Http => check_http_stop(d, r),
-    }
-    if d.stop.via != StopVia::Http && d.stop.http.is_some() {
-        r.warnings
-            .push("this game describes an HTTP stop it does not use.".into());
+        // An extension this build lacks is `check_extension`'s to report.
+        StopVia::Extension => match &d.extension {
+            None => r
+                .problems
+                .push("this game is stopped by its extension, but names no extension.".into()),
+            Some(ext) => {
+                if extensions::spec(&ext.name).is_some_and(|spec| !spec.stops) {
+                    r.problems.push(format!(
+                        "this game is stopped by its \"{}\" extension, which cannot stop \
+                         a server.",
+                        ext.name
+                    ));
+                }
+            }
+        },
     }
 
     if d.stop.grace_ms == 0 {
@@ -540,190 +570,6 @@ fn check_lifecycle(d: &GameDescriptor, r: &mut Report) {
                 .into(),
         );
     }
-}
-
-/// How many requests an HTTP stop may make. Palworld needs two.
-pub const MAX_HTTP_STOP_REQUESTS: usize = 8;
-/// The longest path, query included, an HTTP stop may request.
-pub const MAX_HTTP_STOP_PATH: usize = 256;
-/// The largest body an HTTP stop may send, as serialised JSON.
-pub const MAX_HTTP_STOP_BODY: usize = 4096;
-
-/// A stop that is HTTP requests to the server's own admin API.
-///
-/// What makes it safe is what it cannot say. It names a port and never a
-/// host, so the runner connects to `127.0.0.1` and nowhere else; the port
-/// must be private, so the runner's bind check stops a server that puts it
-/// anywhere but loopback; the password is a secret the host generates, never
-/// a literal; and every request is a fixed method, path and body from the
-/// signed descriptor, with nothing templated into any of them.
-fn check_http_stop(d: &GameDescriptor, r: &mut Report) {
-    let Some(http) = &d.stop.http else {
-        r.problems.push(
-            "this game is stopped over HTTP, but the descriptor does not say which \
-             port or which requests to send."
-                .into(),
-        );
-        return;
-    };
-    match d.port(&http.port) {
-        None => r.problems.push(format!(
-            "this game's stop uses a port called \"{}\", which it does not declare.",
-            http.port
-        )),
-        Some(port) => {
-            if port.expose {
-                r.problems.push(format!(
-                    "the port \"{}\" carries this game's admin API and must not be \
-                     published to the internet.",
-                    port.name
-                ));
-            }
-            if port.proto != Protocol::Tcp {
-                r.problems.push(format!(
-                    "the port \"{}\" carries this game's stop over HTTP, so it has to \
-                     be TCP.",
-                    port.name
-                ));
-            }
-        }
-    }
-
-    if let Some(auth) = &http.auth {
-        match &auth.basic {
-            None => r.problems.push(
-                "this game's HTTP stop names an authentication scheme Homerun does not \
-                 know; only basic is supported."
-                    .into(),
-            ),
-            Some(basic) => {
-                if basic.user.is_empty()
-                    || basic.user.len() > 64
-                    || basic.user.contains(':')
-                    || basic.user.chars().any(char::is_control)
-                {
-                    r.problems.push(format!(
-                        "the user \"{}\" for this game's HTTP stop is not one basic \
-                         authentication can carry.",
-                        basic.user.escape_debug()
-                    ));
-                }
-                if basic.secret.is_empty() || basic.secret.contains(['{', '}', ':']) {
-                    r.problems.push(
-                        "this game's HTTP stop has to name its password as a secret \
-                         Homerun generates, by name alone."
-                            .into(),
-                    );
-                } else if !templated_strings(d).iter().any(|s| {
-                    template::placeholders(s)
-                        .map(|found| found.contains(&Placeholder::Secret(basic.secret.clone())))
-                        .unwrap_or(false)
-                }) {
-                    r.warnings.push(format!(
-                        "this game's HTTP stop signs in with the secret \"{}\", and nothing \
-                         in its launch line or configuration gives that password to the \
-                         game, so the stop will be refused.",
-                        basic.secret
-                    ));
-                }
-            }
-        }
-    }
-
-    if http.requests.is_empty() {
-        r.problems
-            .push("this game's HTTP stop sends no requests.".into());
-    }
-    if http.requests.len() > MAX_HTTP_STOP_REQUESTS {
-        r.problems.push(format!(
-            "this game's HTTP stop sends {} requests; at most \
-             {MAX_HTTP_STOP_REQUESTS} are allowed.",
-            http.requests.len()
-        ));
-    }
-    for request in &http.requests {
-        if request.method == HttpMethod::Unknown {
-            r.problems.push(format!(
-                "the request to \"{}\" in this game's HTTP stop uses a method Homerun \
-                 does not send; a stop may use POST or PUT.",
-                request.path.escape_debug()
-            ));
-        }
-        if !http_path_is_safe(&request.path) {
-            r.problems.push(format!(
-                "\"{}\" is not a path this game's HTTP stop may request: it has to be \
-                 an absolute path on the server, at most {MAX_HTTP_STOP_PATH} plain \
-                 characters, with no host and no \"..\".",
-                request.path.escape_debug()
-            ));
-        }
-        if let Some(body) = &request.body {
-            let size = serde_json::to_string(body)
-                .map(|b| b.len())
-                .unwrap_or(usize::MAX);
-            if size > MAX_HTTP_STOP_BODY {
-                r.problems.push(format!(
-                    "the body sent to \"{}\" is {size} bytes; an HTTP stop may send at \
-                     most {MAX_HTTP_STOP_BODY}.",
-                    request.path.escape_debug()
-                ));
-            }
-            if json_strings(body).iter().any(|s| {
-                template::placeholders(s)
-                    .map(|found| !found.is_empty())
-                    .unwrap_or(false)
-            }) {
-                r.problems.push(format!(
-                    "the body sent to \"{}\" contains a placeholder, and an HTTP stop's \
-                     body is sent exactly as written.",
-                    request.path.escape_debug()
-                ));
-            }
-        }
-    }
-}
-
-/// Whether `path` may go on an HTTP stop's request line.
-///
-/// Absolute, bounded, printable ASCII without the characters that would end
-/// the request line or make it a different URL, and no `.` or `..` segment --
-/// spelled out or percent-encoded -- so the path a reviewer reads is the one
-/// the server routes. The supervisor asks again before it sends.
-pub fn http_path_is_safe(path: &str) -> bool {
-    const REFUSED: &[u8] = b"\\#\"<>{}|^`";
-    let route = path.split('?').next().unwrap_or_default();
-    let lower = path.to_ascii_lowercase();
-    path.starts_with('/')
-        && !path.starts_with("//")
-        && path.len() <= MAX_HTTP_STOP_PATH
-        && path
-            .bytes()
-            .all(|b| b.is_ascii_graphic() && !REFUSED.contains(&b))
-        && !route
-            .split('/')
-            .any(|segment| segment == ".." || segment == ".")
-        && !lower.contains("%2e")
-        && !lower.contains("%2f")
-}
-
-/// Every string in a JSON value, keys included.
-fn json_strings(value: &Value) -> Vec<&str> {
-    fn walk<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
-        match value {
-            Value::String(s) => out.push(s),
-            Value::Array(items) => items.iter().for_each(|v| walk(v, out)),
-            Value::Object(map) => {
-                for (key, v) in map {
-                    out.push(key);
-                    walk(v, out);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    walk(value, &mut out);
-    out
 }
 
 fn check_platforms(d: &GameDescriptor, r: &mut Report) {
@@ -1309,6 +1155,7 @@ fn check_extension(d: &GameDescriptor, r: &mut Report) {
                         ext.name
                     )),
                 }
+                check_extension_loopback(d, &ext.name, r);
                 Some(spec)
             }
         },
@@ -1354,6 +1201,47 @@ fn check_extension(d: &GameDescriptor, r: &mut Report) {
                 }
                 Some(_) => {}
             }
+        }
+    }
+}
+
+/// What an extension reaches on loopback is held to the RCON console's rules.
+///
+/// Every port a declared TCP one with `expose: false`, so the runner's bind
+/// check stops a server that puts it anywhere but loopback; every secret one
+/// the host generates, which the game had better be given too.
+fn check_extension_loopback(d: &GameDescriptor, name: &str, r: &mut Report) {
+    let loopback = extension_loopback(d);
+    for port_name in &loopback.ports {
+        match d.port(port_name) {
+            None => r.problems.push(format!(
+                "the \"{name}\" extension reaches a port called \"{port_name}\", which this \
+                 game does not declare."
+            )),
+            Some(port) => {
+                if port.expose {
+                    r.problems.push(format!(
+                        "the port \"{port_name}\" carries this game's admin API, which its \
+                         \"{name}\" extension reaches, and must not be published to the \
+                         internet."
+                    ));
+                }
+                if port.proto != Protocol::Tcp {
+                    r.problems.push(format!(
+                        "the port \"{port_name}\", which the \"{name}\" extension reaches over \
+                         HTTP, has to be TCP."
+                    ));
+                }
+            }
+        }
+    }
+    for secret in &loopback.secrets {
+        if !secret.is_empty() && !gives_secret(d, secret) {
+            r.warnings.push(format!(
+                "the \"{name}\" extension signs in to the server with the secret \
+                 \"{secret}\", and nothing in this game's launch line or configuration \
+                 gives that password to the game, so the server will refuse it."
+            ));
         }
     }
 }
@@ -1715,6 +1603,78 @@ mod tests {
         deep_merge(&mut value, &with_fixture(json!({})));
         let d: GameDescriptor = serde_json::from_value(value).unwrap();
         assert_eq!(required_secrets(&d), vec!["rcon".to_string()]);
+    }
+
+    // ─── a stop an extension asks for ──────────────────────────────────────
+
+    /// The pilot, stopped by the fixture through the RCON port and password
+    /// it already has, which the launch line hands the game.
+    fn extension_stop(patch: serde_json::Value) -> serde_json::Value {
+        let mut base = with_fixture(json!({
+            "console": { "via": "none", "rcon": null },
+            "observe": { "players": "none", "playersCommand": null },
+            "stop": { "via": "extension", "command": null },
+            "extension": { "config": { "stop": { "port": "rcon", "secret": "rcon" } } }
+        }));
+        deep_merge(&mut base, &patch);
+        base
+    }
+
+    #[test]
+    fn an_extension_that_stops_a_server_may_be_the_stop() {
+        let p = problems_of(extension_stop(json!({})));
+        assert!(p.is_empty(), "{p:#?}");
+        let w = warnings_of(extension_stop(json!({})));
+        assert!(!says(&w, "extension"), "{w:#?}");
+    }
+
+    #[test]
+    fn an_extension_stop_needs_an_extension_that_can_stop() {
+        let mut value = extension_stop(json!({}));
+        value["extension"] = serde_json::Value::Null;
+        let p = problems_of(value);
+        assert!(says(&p, "names no extension"), "{p:#?}");
+
+        let p = problems_of(extension_stop(json!({ "extension": { "name": "hytale" } })));
+        assert!(
+            says(&p, "\"hytale\" extension, which cannot stop a server"),
+            "{p:#?}"
+        );
+    }
+
+    /// Exposing it would put the admin API, and the password in front of
+    /// it, on the internet; and an HTTP API is TCP.
+    #[test]
+    fn a_port_an_extension_reaches_is_declared_private_and_tcp() {
+        let at = |port: &str| {
+            problems_of(extension_stop(
+                json!({ "extension": { "config": { "stop": { "port": port } } } }),
+            ))
+        };
+        assert!(says(&at("nope"), "which this game does not declare"));
+        let exposed = at("game");
+        assert!(says(&exposed, "must not be published"), "{exposed:#?}");
+        assert!(says(&exposed, "has to be TCP"), "{exposed:#?}");
+    }
+
+    /// A password the game was never given is a stop that is always refused.
+    #[test]
+    fn a_secret_an_extension_signs_in_with_is_generated_and_given_to_the_game() {
+        let value = extension_stop(json!({
+            "extension": { "config": { "stop": { "secret": "admin" } } }
+        }));
+        let w = warnings_of(value.clone());
+        assert!(says(&w, "the server will refuse it"), "{w:#?}");
+        let d: GameDescriptor = {
+            let mut base: serde_json::Value =
+                serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+            deep_merge(&mut base, &value);
+            serde_json::from_value(base).unwrap()
+        };
+        assert_eq!(
+            required_secrets(&d),
+            vec!["admin".to_string(), "rcon".to_string()]
+        );
     }
 
     // ─── host-supplied Java ─────────────────────────────────────────────────
@@ -2325,206 +2285,6 @@ mod tests {
         let p = problems_of(json!({ "platforms": { "win32-x64": { "runtime": {
             "stripComponents": 1 } } } }));
         assert!(says(&p, "not unpacked as an archive"), "{p:#?}");
-    }
-
-    // ─── a stop over HTTP ──────────────────────────────────────────────────
-
-    /// The pilot, stopped the way Palworld is: a save and a shutdown to its
-    /// REST API on a private port, signed in with a generated password that
-    /// the launch line hands the game.
-    fn http_stop(patch: serde_json::Value) -> Report {
-        let mut base: serde_json::Value =
-            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
-        base["ports"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({ "name": "rest", "proto": "tcp", "port": 8212, "expose": false }));
-        base["platforms"]["win32-x64"]["launch"]["args"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!("-adminpassword={secret:admin}"));
-        base["stop"] = json!({ "via": "http", "graceMs": 30000, "http": {
-            "port": "rest",
-            "auth": { "basic": { "user": "admin", "secret": "admin" } },
-            "requests": [
-                { "method": "POST", "path": "/v1/api/save", "body": {} },
-                { "method": "POST", "path": "/v1/api/shutdown",
-                  "body": { "waittime": 1, "message": "Server stopping" } }
-            ]
-        } });
-        deep_merge(&mut base, &patch);
-        report(&serde_json::from_value(base).unwrap())
-    }
-
-    #[test]
-    fn an_http_stop_to_a_private_port_is_accepted() {
-        let r = http_stop(json!({}));
-        assert!(r.ok(), "{:#?}", r.problems);
-        assert!(!says(&r.warnings, "HTTP"), "{:#?}", r.warnings);
-    }
-
-    #[test]
-    fn an_http_stop_needs_somewhere_to_go() {
-        let r = http_stop(json!({ "stop": { "http": null } }));
-        assert!(
-            says(&r.problems, "does not say which port"),
-            "{:#?}",
-            r.problems
-        );
-    }
-
-    /// Exposing it would put the admin API, and the password in front of
-    /// it, on the internet.
-    #[test]
-    fn an_http_stop_to_an_exposed_port_is_refused() {
-        let mut base: serde_json::Value = json!({});
-        base["ports"] = json!([
-            { "name": "game", "proto": "udp", "port": 28015, "expose": true, "service": "game" },
-            { "name": "query", "proto": "udp", "port": 28017, "expose": true, "service": "game" },
-            { "name": "rcon", "proto": "tcp", "port": 28016 },
-            { "name": "rest", "proto": "tcp", "port": 8212, "expose": true }
-        ]);
-        let r = http_stop(base);
-        assert!(
-            says(&r.problems, "must not be published"),
-            "{:#?}",
-            r.problems
-        );
-    }
-
-    #[test]
-    fn an_http_stop_to_an_undeclared_or_udp_port_is_refused() {
-        let r = http_stop(json!({ "stop": { "http": { "port": "nope" } } }));
-        assert!(
-            says(&r.problems, "which it does not declare"),
-            "{:#?}",
-            r.problems
-        );
-        let r = http_stop(json!({ "stop": { "http": { "port": "query" } } }));
-        assert!(says(&r.problems, "has to be TCP"), "{:#?}", r.problems);
-    }
-
-    /// The runner is only ever given a path. Anything that could make it a
-    /// different URL, or end the request line, is refused.
-    #[test]
-    fn an_http_stop_path_is_a_plain_absolute_path() {
-        for bad in [
-            "",
-            "v1/api/save",
-            "http://evil.example/v1/api/save",
-            "//evil.example/v1/api/save",
-            "/v1/../admin",
-            "/v1/./api",
-            "/v1/%2e%2e/admin",
-            "/v1/api%2Fsave",
-            "/v1/api/save HTTP/1.1\r\nHost: x",
-            "/v1/api/save\n",
-            "/v1/api/save#x",
-            "/v1\\api",
-            "/v1/ api",
-            "/v1/api/sav\u{e9}",
-        ] {
-            assert!(!http_path_is_safe(bad), "{bad:?} was accepted");
-        }
-        assert!(!http_path_is_safe(&format!(
-            "/{}",
-            "a".repeat(MAX_HTTP_STOP_PATH)
-        )));
-        for good in ["/v1/api/save", "/", "/api/stop?now=1&why=update", "/a..b/c"] {
-            assert!(http_path_is_safe(good), "{good:?} was refused");
-        }
-
-        let r = http_stop(json!({ "stop": { "http": { "requests": [
-            { "method": "POST", "path": "http://127.0.0.1:8212/v1/api/save" }
-        ] } } }));
-        assert!(says(&r.problems, "is not a path"), "{:#?}", r.problems);
-    }
-
-    /// Basic credentials in the descriptor would be a password in a file
-    /// anyone can read. A secret is a name the host resolves.
-    #[test]
-    fn an_http_stop_password_is_a_secret_name_and_never_a_literal() {
-        for secret in ["", "{secret:admin}", "secret:admin"] {
-            let r = http_stop(
-                json!({ "stop": { "http": { "auth": { "basic": { "secret": secret } } } } }),
-            );
-            assert!(
-                says(&r.problems, "by name alone"),
-                "{secret:?}: {:#?}",
-                r.problems
-            );
-        }
-        let r =
-            http_stop(json!({ "stop": { "http": { "auth": { "basic": { "user": "ad:min" } } } } }));
-        assert!(
-            says(&r.problems, "basic authentication can carry"),
-            "{:#?}",
-            r.problems
-        );
-        let r =
-            http_stop(json!({ "stop": { "http": { "auth": { "bearer": "x", "basic": null } } } }));
-        assert!(says(&r.problems, "only basic"), "{:#?}", r.problems);
-    }
-
-    /// A password the game was never given is a stop that is always refused.
-    #[test]
-    fn an_http_stop_password_the_game_never_gets_is_warned_about() {
-        let r = http_stop(
-            json!({ "stop": { "http": { "auth": { "basic": { "secret": "other" } } } } }),
-        );
-        assert!(r.ok(), "{:#?}", r.problems);
-        assert!(says(&r.warnings, "will be refused"), "{:#?}", r.warnings);
-    }
-
-    #[test]
-    fn an_http_stop_body_is_bounded_and_never_templated() {
-        let r = http_stop(json!({ "stop": { "http": { "requests": [
-            { "path": "/v1/api/shutdown", "body": { "message": "x".repeat(MAX_HTTP_STOP_BODY) } }
-        ] } } }));
-        assert!(
-            says(&r.problems, "an HTTP stop may send at most"),
-            "{:#?}",
-            r.problems
-        );
-
-        let r = http_stop(json!({ "stop": { "http": { "requests": [
-            { "path": "/v1/api/shutdown", "body": { "message": "{serverName} is stopping" } }
-        ] } } }));
-        assert!(
-            says(&r.problems, "sent exactly as written"),
-            "{:#?}",
-            r.problems
-        );
-    }
-
-    #[test]
-    fn an_http_stop_uses_a_closed_set_of_methods_and_a_bounded_count() {
-        let r = http_stop(json!({ "stop": { "http": { "requests": [
-            { "method": "DELETE", "path": "/v1/api/world" }
-        ] } } }));
-        assert!(says(&r.problems, "POST or PUT"), "{:#?}", r.problems);
-
-        let many: Vec<_> = (0..=MAX_HTTP_STOP_REQUESTS)
-            .map(|_| json!({ "path": "/v1/api/save" }))
-            .collect();
-        let r = http_stop(json!({ "stop": { "http": { "requests": many } } }));
-        assert!(says(&r.problems, "are allowed"), "{:#?}", r.problems);
-        let r = http_stop(json!({ "stop": { "http": { "requests": [] } } }));
-        assert!(says(&r.problems, "sends no requests"), "{:#?}", r.problems);
-    }
-
-    #[test]
-    fn an_http_stop_secret_is_one_the_host_generates() {
-        let mut base: serde_json::Value =
-            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
-        base["stop"] = json!({ "via": "http", "http": { "port": "rcon",
-            "auth": { "basic": { "user": "admin", "secret": "admin" } },
-            "requests": [{ "path": "/save" }] } });
-        let d: GameDescriptor = serde_json::from_value(base).unwrap();
-        assert_eq!(
-            required_secrets(&d),
-            vec!["admin".to_string(), "rcon".to_string()]
-        );
     }
 
     // ─── secrets ───────────────────────────────────────────────────────────

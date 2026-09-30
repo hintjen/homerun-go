@@ -32,6 +32,13 @@
 //!    secret is the spec's answer, never the extension's.
 //!  - **A stop never waits on a vendor.** [`Run::on_stop`] gets
 //!    [`STOP_BUDGET`] in total and is then abandoned.
+//!  - **An extension that stops a server does it within the stop's grace.**
+//!    [`GameExtension::stop`] runs as the polite rung of the ladder, on a
+//!    thread of its own; a failure, a panic or no answer in time is the
+//!    terminate's cue, never a stop that hangs.
+//!  - **The server's own admin API is reached by name.** `local_http` takes
+//!    a port and a secret by name, each one the spec's `loopback` lists; the
+//!    runner resolves them, and only ever connects to `127.0.0.1`.
 
 // The interface is wider than the extensions that exist today use: it is
 // what every future extension is written against, and trimming it to fit
@@ -50,10 +57,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use homerun_core::engine::{extensions as specs, extensions::ExtensionSpec, GameDescriptor};
+use homerun_core::{
+    engine::{descriptor::StopVia, extensions as specs, extensions::ExtensionSpec, GameDescriptor},
+    tunnel::Protocol,
+};
 use homerun_supervisor::{
     engine::{Engine, StopSignal},
-    process_engine::ProcessEngine,
+    local_http,
+    process_engine::{Asking, ProcessEngine, StopHook},
     rcon,
 };
 use serde::Serialize;
@@ -77,6 +88,9 @@ pub use prompt::{Choice, Prompt, Prompts};
 pub use store::{MachineStore, ServerStore};
 // What an extension builds its requests from. Part of the interface whether
 // or not today's extensions use every name.
+/// What an extension builds a request to the server's own admin API from.
+#[allow(unused_imports)]
+pub use homerun_supervisor::local_http::{Method as LocalMethod, Request as LocalRequest};
 #[allow(unused_imports)]
 pub use homerun_supervisor::vendor_http::{Method, Request, Response};
 
@@ -127,6 +141,24 @@ pub trait GameExtension: Send + Sync {
     /// What the host may show without starting anything.
     fn status(&self, _ctx: &MachineContext) -> ExtensionStatus {
         ExtensionStatus::default()
+    }
+
+    /// Ask the server to stop: the polite rung of a descriptor that says
+    /// `stop.via: "extension"`, for an extension whose spec `stops`.
+    ///
+    /// Runs on a thread of its own while the stop ladder waits, within the
+    /// stop's grace, and must return promptly once
+    /// [`StopRungContext::cancelled`] is true. `Ok` means the server was
+    /// asked, and the ladder waits for it to exit; an error, a panic or no
+    /// return in time means it was not, and the ladder goes on to terminate.
+    /// On the extension rather than its [`Run`]: observers take the run's
+    /// lock without waiting, and a stop that held it for seconds would
+    /// silence them -- `Stopping` included.
+    fn stop(&self, _ctx: &StopRungContext) -> std::result::Result<(), ExtError> {
+        Err(ExtError::new(
+            codes::EXTENSION_FAILED,
+            "This game's extension cannot stop a server.",
+        ))
     }
 }
 
@@ -361,6 +393,133 @@ impl StopContext {
     }
 }
 
+/// `stop`'s view: the server, still running, and nothing else.
+pub struct StopRungContext<'a> {
+    name: &'static str,
+    config: &'a Value,
+    server_id: &'a str,
+    local: &'a Local,
+    asking: &'a Asking<'a>,
+}
+
+impl StopRungContext<'_> {
+    pub fn config(&self) -> &Value {
+        self.config
+    }
+    pub fn server_id(&self) -> &str {
+        self.server_id
+    }
+    /// The server has exited, or the stop's grace is spent. Nobody is
+    /// waiting for this stop any more.
+    pub fn cancelled(&self) -> bool {
+        self.asking.cancelled()
+    }
+    /// A line in the stop's own account of itself (`Stop: …`), on the
+    /// `host` stream with the server's output.
+    pub fn note(&self, message: impl Into<String>) {
+        self.asking.note(message);
+    }
+    /// Plain HTTP to the server's own admin API: `127.0.0.1` on the private
+    /// port called `port`, signed in with the host secret the request names.
+    /// Both must be ones the spec's `loopback` lists. Ends early once
+    /// [`Self::cancelled`].
+    pub fn local_http(
+        &self,
+        port: &str,
+        request: &LocalRequest,
+    ) -> std::result::Result<Response, ExtError> {
+        local_http_to(self.name, self.local, port, request, &|| self.cancelled())
+    }
+}
+
+/// What an extension may reach on loopback, resolved: each private port its
+/// spec's `loopback` names, as the server was told to bind it, and each
+/// secret, as the host gave it.
+#[derive(Clone, Default)]
+pub struct Local {
+    ports: BTreeMap<String, u16>,
+    secrets: BTreeMap<String, String>,
+}
+
+/// Resolve what the extension's spec says it may reach.
+///
+/// A port that is not a declared, private TCP port is left out -- `validate`
+/// refuses such a descriptor, and this is the check next to the socket -- so
+/// a request to it is refused. A secret the host did not provide fails the
+/// start, as an RCON console's does, before anything is spawned.
+pub fn resolve_local(
+    spec: &ExtensionSpec,
+    config: &Value,
+    d: &GameDescriptor,
+    ports: &BTreeMap<String, u16>,
+    secrets: &BTreeMap<String, String>,
+) -> Result<Local> {
+    let wanted = (spec.loopback)(config);
+    let mut local = Local::default();
+    for name in wanted.ports {
+        let private = d
+            .ports
+            .iter()
+            .any(|p| p.name == name && !p.expose && p.proto == Protocol::Tcp);
+        if let (true, Some(&port)) = (private, ports.get(&name)) {
+            local.ports.insert(name, port);
+        }
+    }
+    for name in wanted.secrets {
+        let value = secrets
+            .get(&name)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                fail(
+                    codes::DESCRIPTOR_INVALID,
+                    "The host has not provided the password for the server's admin API.",
+                )
+            })?;
+        local.secrets.insert(name, value.clone());
+    }
+    Ok(local)
+}
+
+fn local_http_to(
+    name: &str,
+    local: &Local,
+    port: &str,
+    request: &LocalRequest,
+    cancelled: &dyn Fn() -> bool,
+) -> std::result::Result<Response, ExtError> {
+    let refused = || {
+        eprintln!(
+            "The \"{name}\" extension asked to reach a port or a secret its spec does not \
+             name."
+        );
+        ExtError::new(
+            codes::EXTENSION_FAILED,
+            "This game tried to reach a part of its server Homerun does not allow, so it was \
+             not contacted.",
+        )
+    };
+    let port = *local.ports.get(port).ok_or_else(refused)?;
+    let password = match &request.basic {
+        None => None,
+        Some(basic) => Some(
+            local
+                .secrets
+                .get(&basic.secret)
+                .ok_or_else(refused)?
+                .clone(),
+        ),
+    };
+    local_http::send(&local_http::Target::new(port, password), request, cancelled).map_err(
+        |failure| match failure {
+            local_http::Failure::NotAllowed => refused(),
+            local_http::Failure::Cancelled => ExtError::cancelled(),
+            local_http::Failure::Unreachable(message) => {
+                ExtError::new(codes::EXTENSION_FAILED, message)
+            }
+        },
+    )
+}
+
 /// `forget` and `status`'s view: no server, only the extension itself.
 pub struct MachineContext {
     spec: &'static ExtensionSpec,
@@ -519,6 +678,39 @@ impl Active {
     /// The values for `{extension:<key>}`.
     pub fn supplied(&self) -> &BTreeMap<String, String> {
         &self.supplied
+    }
+
+    /// The polite rung of this run's stop, when the descriptor stops through
+    /// this extension: its [`GameExtension::stop`], with what it may reach
+    /// on loopback resolved against what the server was told to bind.
+    pub fn stop_hook(
+        &self,
+        d: &GameDescriptor,
+        ports: &BTreeMap<String, u16>,
+        secrets: &BTreeMap<String, String>,
+    ) -> Result<Option<StopHook>> {
+        if d.stop.via != StopVia::Extension || !self.spec.stops {
+            return Ok(None);
+        }
+        let Some((extension, _)) = find(self.spec.name) else {
+            return Ok(None);
+        };
+        let local = resolve_local(self.spec, &self.config, d, ports, secrets)?;
+        let (name, config, server_id) =
+            (self.spec.name, self.config.clone(), self.server_id.clone());
+        Ok(Some(StopHook::new(
+            format!("the {name} extension"),
+            move |asking| {
+                let ctx = StopRungContext {
+                    name,
+                    config: &config,
+                    server_id: &server_id,
+                    local: &local,
+                    asking,
+                };
+                extension.stop(&ctx).map_err(|e| e.message)
+            },
+        )))
     }
 
     /// Every supplied value the spec marks secret, for redaction.
@@ -934,6 +1126,90 @@ mod tests {
         assert_eq!(features[0], "extensions");
         for extension in registry() {
             assert!(features.contains(&format!("extension:{}", extension.name())));
+        }
+    }
+
+    // ─── what an extension reaches on loopback ─────────────────────────────
+
+    /// The fixture, asking for the port `rest` and the secret `admin`.
+    #[cfg(feature = "test-extensions")]
+    fn resolve(rest: Value, secrets: &[(&str, &str)]) -> Result<Local> {
+        let d: GameDescriptor = serde_json::from_value(serde_json::json!({
+            "id": "g", "ports": [rest], "stop": { "via": "extension" }
+        }))
+        .unwrap();
+        let ports = BTreeMap::from([("rest".to_string(), 8212)]);
+        let secrets = secrets
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let spec = specs::spec("fixture").unwrap();
+        let config = serde_json::json!({ "stop": { "port": "rest", "secret": "admin" } });
+        resolve_local(spec, &config, &d, &ports, &secrets)
+    }
+
+    /// Only a declared, private TCP port is ever reachable. `validate`
+    /// refuses the rest; this is the check beside the socket.
+    #[cfg(feature = "test-extensions")]
+    #[test]
+    fn only_a_declared_private_tcp_port_is_resolved() {
+        let port = |p: Value| resolve(p, &[("admin", "pw")]).unwrap().ports;
+        let rest = serde_json::json!({ "name": "rest", "proto": "tcp", "port": 8212 });
+        assert_eq!(port(rest.clone()), BTreeMap::from([("rest".into(), 8212)]));
+        for other in [
+            serde_json::json!({ "name": "rest", "proto": "tcp", "port": 8212, "expose": true }),
+            serde_json::json!({ "name": "rest", "proto": "udp", "port": 8212 }),
+            serde_json::json!({ "name": "game", "proto": "tcp", "port": 8212 }),
+        ] {
+            assert!(port(other.clone()).is_empty(), "{other}");
+        }
+    }
+
+    #[cfg(feature = "test-extensions")]
+    #[test]
+    fn a_secret_the_host_did_not_provide_fails_the_start() {
+        let rest = serde_json::json!({ "name": "rest", "proto": "tcp", "port": 8212 });
+        for secrets in [&[][..], &[("admin", "")][..], &[("rcon", "pw")][..]] {
+            let Err((code, _)) = resolve(rest.clone(), secrets) else {
+                panic!("{secrets:?} resolved");
+            };
+            assert_eq!(code, codes::DESCRIPTOR_INVALID);
+        }
+    }
+
+    /// A port or a secret the spec does not name, or a request the
+    /// primitive's rules refuse, is refused before anything is sent -- and
+    /// the refusal quotes no password.
+    #[cfg(feature = "test-extensions")]
+    #[test]
+    fn what_the_spec_does_not_name_is_refused_before_anything_is_sent() {
+        let rest = serde_json::json!({ "name": "rest", "proto": "tcp", "port": 8212 });
+        let local = resolve(rest, &[("admin", "hunter2")]).unwrap();
+        let never = || false;
+        for (port, request) in [
+            ("game", LocalRequest::post("/v1/api/save")),
+            (
+                "rest",
+                LocalRequest::post("/v1/api/save").basic("admin", "rcon"),
+            ),
+            ("rest", LocalRequest::post("http://evil.example/")),
+            (
+                "rest",
+                LocalRequest::post(
+                    "/v1/api/save
+X: y",
+                )
+                .basic("admin", "admin"),
+            ),
+        ] {
+            let error = local_http_to("fixture", &local, port, &request, &never).unwrap_err();
+            assert_eq!(error.code, codes::EXTENSION_FAILED, "{request:?}");
+            assert!(
+                error.message.contains("does not allow"),
+                "{}",
+                error.message
+            );
+            assert!(!error.message.contains("hunter2"));
         }
     }
 

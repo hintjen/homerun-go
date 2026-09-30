@@ -5,11 +5,13 @@
 //! and so a new extension has a small, complete example to copy.
 //!
 //! Its config names one vendor host, and it supplies a secret `token` (which
-//! may only go in `launch.env`) and a plain `profile`.
+//! may only go in `launch.env`) and a plain `profile`. It can stop a server:
+//! its config's `stop` names the private port and the host secret its stop
+//! uses, which is everything it may reach on loopback.
 
 use serde_json::{json, Value};
 
-use super::{ExtensionSpec, Supply};
+use super::{ExtensionSpec, Loopback, Supply};
 use crate::engine::descriptor::GameDescriptor;
 use crate::engine::validate::Report;
 
@@ -28,6 +30,8 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     validate,
     hosts,
     config_schema,
+    stops: true,
+    loopback,
 };
 
 fn validate(config: &Value, _descriptor: &GameDescriptor, report: &mut Report) {
@@ -39,6 +43,20 @@ fn validate(config: &Value, _descriptor: &GameDescriptor, report: &mut Report) {
             format!("the fixture extension's host \"{host}\" is not a bare host name."),
         ),
         Some(_) => {}
+    }
+}
+
+/// `stop.port` and `stop.secret`, when the config has a stop.
+fn loopback(config: &Value) -> Loopback {
+    let named = |key: &str| {
+        config["stop"][key]
+            .as_str()
+            .map(|name| vec![name.to_string()])
+            .unwrap_or_default()
+    };
+    Loopback {
+        ports: named("port"),
+        secrets: named("secret"),
     }
 }
 
@@ -55,7 +73,8 @@ fn config_schema() -> Value {
         "type": "object",
         "required": ["host"],
         "properties": {
-            "host": { "type": "string", "description": "The vendor host, e.g. vendor.example." }
+            "host": { "type": "string", "description": "The vendor host, e.g. vendor.example." },
+            "stop": { "type": "object", "description": "How the fixture stops a server." }
         }
     })
 }

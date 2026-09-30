@@ -26,7 +26,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::descriptor::{ConsoleVia, GameDescriptor, HttpAuth, HttpRequest, RconProtocol, StopVia};
+use super::descriptor::{ConsoleVia, GameDescriptor, RconProtocol, StopVia};
+use super::extensions;
 use crate::{Error, Result};
 
 /// Whether this line means the server is up.
@@ -139,16 +140,10 @@ pub enum Action {
     Console { command: String },
     /// A console control event — `SIGINT`, or its Windows equivalent.
     Interrupt,
-    /// Send these requests, in order, to the named loopback port. Names
-    /// only, like [`ConsoleKind::Rcon`]: the supervisor resolves the port to
-    /// what was bound and the secret to its value, and always connects to
-    /// `127.0.0.1`.
-    Http {
-        port: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        auth: Option<HttpAuth>,
-        requests: Vec<HttpRequest>,
-    },
+    /// Ask the game's extension to ask the server to stop. Carries nothing:
+    /// what it sends, and where, is the extension's, and the runner hands
+    /// the supervisor the extension's hook for this rung.
+    Extension,
     /// Ask the process to exit. A JVM runs its shutdown hook here; many
     /// games flush a save.
     Terminate,
@@ -191,21 +186,17 @@ pub fn stop_ladder(descriptor: &GameDescriptor) -> Vec<Rung> {
             action: Action::Interrupt,
             wait_ms: grace,
         }),
-        // The console stop's rule again: nowhere to send it or nothing to
-        // send, and the ladder starts lower. `validate` refuses both.
-        StopVia::Http => {
-            if let Some(http) = descriptor
-                .stop
-                .http
+        // The console stop's rule again: no extension that can stop the
+        // server, and the ladder starts lower. `validate` refuses it.
+        StopVia::Extension => {
+            let stops = descriptor
+                .extension
                 .as_ref()
-                .filter(|h| !h.port.is_empty() && !h.requests.is_empty())
-            {
+                .and_then(|e| extensions::spec(&e.name))
+                .is_some_and(|spec| spec.stops);
+            if stops {
                 ladder.push(Rung {
-                    action: Action::Http {
-                        port: http.port.clone(),
-                        auth: http.auth.clone(),
-                        requests: http.requests.clone(),
-                    },
+                    action: Action::Extension,
                     wait_ms: grace,
                 });
             }
@@ -357,7 +348,7 @@ mod tests {
             rust(),
             GameDescriptor::default(),
             serde_json::from_value(json!({ "id": "g", "stop": { "via": "interrupt" } })).unwrap(),
-            palworld_like(),
+            extension_stop("fixture"),
         ] {
             let ladder = stop_ladder(&descriptor);
             assert_eq!(ladder.last().unwrap().action, Action::Kill);
@@ -412,41 +403,20 @@ mod tests {
         assert_eq!(stdin["kind"], "stdin");
     }
 
-    fn palworld_like() -> GameDescriptor {
+    /// A game stopped by its extension, named `extension`.
+    fn extension_stop(extension: &str) -> GameDescriptor {
         serde_json::from_value(json!({
             "id": "g", "console": { "via": "none" },
-            "ports": [{ "name": "rest", "proto": "tcp", "port": 8212 }],
-            "stop": { "via": "http", "graceMs": 30000, "http": {
-                "port": "rest",
-                "auth": { "basic": { "user": "admin", "secret": "admin" } },
-                "requests": [
-                    { "method": "POST", "path": "/v1/api/save", "body": {} },
-                    { "method": "POST", "path": "/v1/api/shutdown",
-                      "body": { "waittime": 1, "message": "Server stopping" } }
-                ]
-            } }
+            "stop": { "via": "extension", "graceMs": 30000 },
+            "extension": { "name": extension, "config": { "host": "vendor.example" } }
         }))
         .unwrap()
     }
 
     #[test]
-    fn an_http_stop_is_the_polite_rung_and_carries_only_names() {
-        let ladder = stop_ladder(&palworld_like());
-        let Action::Http {
-            port,
-            auth,
-            requests,
-        } = &ladder[0].action
-        else {
-            panic!("{:?}", ladder[0]);
-        };
-        assert_eq!(port, "rest");
-        assert_eq!(
-            auth.as_ref().unwrap().basic.as_ref().unwrap().secret,
-            "admin"
-        );
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].path, "/v1/api/save");
+    fn an_extension_stop_is_the_polite_rung_and_carries_nothing() {
+        let ladder = stop_ladder(&extension_stop("fixture"));
+        assert_eq!(ladder[0].action, Action::Extension);
         assert_eq!(ladder[0].wait_ms, 30_000);
         assert_eq!(
             ladder[1..]
@@ -457,19 +427,23 @@ mod tests {
         );
 
         let wire = serde_json::to_value(&ladder).unwrap();
-        assert_eq!(wire[0]["action"], "http", "{wire}");
-        assert_eq!(wire[0]["port"], "rest");
-        assert_eq!(wire[0]["requests"][1]["body"]["waittime"], 1);
-        assert_eq!(wire[0]["waitMs"], 30_000);
+        assert_eq!(wire[0], json!({ "action": "extension", "waitMs": 30_000 }));
     }
 
+    /// No extension, one this build lacks, or one that cannot stop a server:
+    /// nothing polite to do, so the ladder starts lower.
     #[test]
-    fn an_http_stop_with_nothing_to_send_starts_lower() {
-        let mut d = palworld_like();
-        d.stop.http.as_mut().unwrap().requests.clear();
-        assert_eq!(stop_ladder(&d)[0].action, Action::Terminate);
-        d.stop.http = None;
-        assert_eq!(stop_ladder(&d)[0].action, Action::Terminate);
+    fn an_extension_stop_with_no_extension_that_stops_starts_lower() {
+        for d in [
+            extension_stop("nope"),
+            extension_stop("hytale"),
+            GameDescriptor {
+                extension: None,
+                ..extension_stop("fixture")
+            },
+        ] {
+            assert_eq!(stop_ladder(&d)[0].action, Action::Terminate);
+        }
     }
 
     #[test]

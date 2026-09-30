@@ -106,6 +106,41 @@ impl Harness {
         run.on_stop(&ctx, outcome);
     }
 
+    /// Run the extension's `stop`, as the ladder's polite rung does, with
+    /// what it may reach on loopback resolved against `d`, the bound `ports`
+    /// and the host's `secrets`. What it returned, and what it noted.
+    pub fn stop_rung(
+        &self,
+        d: &GameDescriptor,
+        ports: &[(&str, u16)],
+        secrets: &[(&str, &str)],
+    ) -> (std::result::Result<(), ExtError>, Vec<String>) {
+        let ports = ports.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let secrets = secrets
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let local = resolve_local(self.spec, &self.config, d, &ports, &secrets).unwrap();
+        let notes = StdMutex::new(Vec::new());
+        let note = |text: String| notes.lock().unwrap().push(text);
+        let begun = Instant::now();
+        let cancelled = || begun.elapsed() > Duration::from_secs(10);
+        let asking = Asking::new(&cancelled, &note);
+        let ctx = StopRungContext {
+            name: self.spec.name,
+            config: &self.config,
+            server_id: "s1",
+            local: &local,
+            asking: &asking,
+        };
+        let result = registry()
+            .into_iter()
+            .find(|e| e.name() == self.spec.name)
+            .unwrap()
+            .stop(&ctx);
+        (result, notes.into_inner().unwrap())
+    }
+
     /// Every event sent so far.
     pub fn events(&self) -> Vec<Event> {
         self.seen.lock().unwrap().clone()

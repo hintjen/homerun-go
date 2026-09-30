@@ -827,81 +827,11 @@
           "minimum": 0,
           "type": "integer"
         },
-        "http": {
-          "description": "For stop.via http: requests sent in order to 127.0.0.1 on a private port, each only after the one before answered 2xx. Nothing in them is templated. Feature stop-http.",
-          "properties": {
-            "auth": {
-              "properties": {
-                "basic": {
-                  "properties": {
-                    "secret": {
-                      "description": "The name of a generated secret, never a literal.",
-                      "type": "string"
-                    },
-                    "user": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "user",
-                    "secret"
-                  ],
-                  "type": "object"
-                }
-              },
-              "type": [
-                "object",
-                "null"
-              ]
-            },
-            "port": {
-              "description": "The name of a declared TCP port with expose false. Never a host.",
-              "type": "string"
-            },
-            "requests": {
-              "items": {
-                "properties": {
-                  "body": {
-                    "description": "Sent as application/json exactly as written; at most 4096 bytes. Absent sends no body."
-                  },
-                  "method": {
-                    "default": "POST",
-                    "enum": [
-                      "POST",
-                      "PUT"
-                    ]
-                  },
-                  "path": {
-                    "description": "An absolute path, query included. No host, no \"..\".",
-                    "maxLength": 256,
-                    "pattern": "^/",
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "path"
-                ],
-                "type": "object"
-              },
-              "maxItems": 8,
-              "minItems": 1,
-              "type": "array"
-            }
-          },
-          "required": [
-            "port",
-            "requests"
-          ],
-          "type": [
-            "object",
-            "null"
-          ]
-        },
         "via": {
           "enum": [
             "console",
             "interrupt",
-            "http"
+            "extension"
           ]
         }
       },

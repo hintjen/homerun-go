@@ -44,9 +44,9 @@
 //!
 //! # A stop says what it did
 //!
-//! [`ProcessEngine::run_streamed`] reports each rung it climbs past the first
-//! and each request of an HTTP stop as a line on the [`HOST`] stream, with
-//! the time since the stop was asked for, and ends with which rung the
+//! [`ProcessEngine::run_streamed`] reports each rung it climbs past the first,
+//! and what a [`StopHook`] said as it asked, as lines on the [`HOST`] stream
+//! with the time since the stop was asked for, and ends with which rung the
 //! server went on. That is what makes "the stop was clean" something a
 //! probe's evidence can show rather than assume. [`Engine::run`] drops those
 //! lines: its callers are Minecraft's, whose console never had them.
@@ -147,10 +147,10 @@ pub enum Action {
     /// Send this verb over whatever [`ConsoleRoute`] says. The rung that
     /// flushes a world.
     Console(String),
-    /// Send these requests to the server's admin API on loopback, in order,
-    /// each only if the one before answered 2xx. The other polite rung, for
-    /// a game whose vendor's way to save and exit is HTTP.
-    Http(Arc<crate::stop_http::Stop>),
+    /// Let someone else ask: a game's extension, through the server's own
+    /// admin API. The other polite rung, for a game whose way to be asked to
+    /// save and exit is not a console verb.
+    Hook(StopHook),
     /// A console control event. Unsupported on Windows, and
     /// [`platform::graceful_interrupt`] says so rather than pretending.
     Interrupt,
@@ -175,16 +175,83 @@ impl From<&jvm::Rung> for Rung {
     }
 }
 
+/// A polite stop carried out by someone other than this file: a game's
+/// extension, asking the server through the server's own admin API.
+///
+/// The supervisor knows nothing of extensions -- the runner builds this from
+/// one -- so it is a function. It is given [`Asking`] and returns `Ok` once
+/// the server has been asked, or why it could not be, in a sentence that
+/// quotes no secret. It runs on its own thread, within the rung's grace; a
+/// failure, a panic or an answer that does not come in time is the next
+/// rung's cue.
+#[derive(Clone)]
+pub struct StopHook {
+    /// Who asks, as the stop's notes name it: `the palworld extension`.
+    who: String,
+    ask: Arc<AskFn>,
+}
+
+type AskFn = dyn Fn(&Asking) -> Result<(), String> + Send + Sync;
+
+impl StopHook {
+    pub fn new(
+        who: impl Into<String>,
+        ask: impl Fn(&Asking) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            who: who.into(),
+            ask: Arc::new(ask),
+        }
+    }
+}
+
+impl std::fmt::Debug for StopHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StopHook").field("who", &self.who).finish()
+    }
+}
+
+/// The same hook, not merely one that asks alike.
+impl PartialEq for StopHook {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.ask, &other.ask)
+    }
+}
+
+impl Eq for StopHook {}
+
+/// What a [`StopHook`] is given while it asks.
+pub struct Asking<'a> {
+    cancelled: &'a dyn Fn() -> bool,
+    note: &'a dyn Fn(String),
+}
+
+impl<'a> Asking<'a> {
+    /// The ladder builds one for every ask; a test harness may build its own.
+    pub fn new(cancelled: &'a dyn Fn() -> bool, note: &'a dyn Fn(String)) -> Self {
+        Self { cancelled, note }
+    }
+    /// Whether to give up: the server has exited, or the rung's grace is
+    /// spent. Anything the hook waits on has to check it.
+    pub fn cancelled(&self) -> bool {
+        (self.cancelled)()
+    }
+    /// A line in the stop's own account of itself, on the [`HOST`] stream.
+    pub fn note(&self, text: impl Into<String>) {
+        (self.note)(text.into());
+    }
+}
+
 /// A descriptor's ladder, in this file's terms.
 ///
 /// Not a `From`, because one rung cannot be converted on its own: the core's
-/// HTTP rung carries a port *name* and a secret *name*, and `http` is what the
-/// host resolved them to once it knew what was bound. With none, the HTTP
-/// rung is left out and the ladder starts at the rung below -- the core's
+/// extension rung only says the extension asks, and `hook` is what the
+/// runner built from the extension once it knew what was bound. With none,
+/// the rung is left out and the ladder starts at the rung below -- the core's
 /// rule for a console stop with nowhere to send it.
 pub fn descriptor_ladder(
     ladder: &[homerun_core::engine::control::Rung],
-    http: Option<&crate::stop_http::Stop>,
+    hook: Option<&StopHook>,
 ) -> Vec<Rung> {
     use homerun_core::engine::control::Action as Core;
     ladder
@@ -193,7 +260,7 @@ pub fn descriptor_ladder(
             let action = match &rung.action {
                 Core::Console { command } => Action::Console(command.clone()),
                 Core::Interrupt => Action::Interrupt,
-                Core::Http { .. } => Action::Http(Arc::new(http?.clone())),
+                Core::Extension => Action::Hook(hook?.clone()),
                 Core::Terminate => Action::Terminate,
                 Core::Kill => Action::Kill,
             };
@@ -689,15 +756,11 @@ fn spawn_stop_watcher(
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        // Every note carries the time since the stop was asked for. A closed
-        // receiver means nobody is listening, which is no reason to stop.
-        let asked = Instant::now();
-        let note = |text: String| {
-            let _ = notes.send(format!(
-                "Stop: {text} ({:.1} s after the stop was asked for).",
-                asked.elapsed().as_secs_f64()
-            ));
+        let notes = Notes {
+            to: notes,
+            asked: Instant::now(),
         };
+        let note = |text: String| notes.say(text);
         // Said once the server has gone, naming the rung it went on.
         let gone = |rung: &Action| {
             note(format!("the server exited during the {} step", step(rung)));
@@ -727,34 +790,22 @@ fn spawn_stop_watcher(
                 // silence and then took a SIGTERM. The rung that exists to
                 // save the world was the one being skipped.
                 Action::Console(verb) => say(verb),
-                // Sent in order, and the first that is not answered 2xx ends
-                // the sequence -- a shutdown after a save that failed would
-                // be a stop that loses the world it was meant to keep. Either
-                // way the rung's grace is waited out below, from when the
-                // rung began: a server may be on its way out regardless, and
-                // the terminate after it is what a refusal falls to.
-                Action::Http(http) => {
+                // Asked, the server gets what is left of the grace below to
+                // go. Not asked -- a refusal, a panic, no answer in time --
+                // and there is nothing to wait for: the next rung, now.
+                Action::Hook(hook) => {
                     let grace = Duration::from_millis(rung.wait_ms);
-                    for request in &http.requests {
-                        if finished.should_stop() {
-                            break;
-                        }
-                        let timeout = crate::stop_http::REQUEST_TIMEOUT
-                            .min(grace.saturating_sub(begun.elapsed()))
-                            .max(Duration::from_millis(100));
-                        let what = format!("{} {}", request.method, request.path);
-                        match crate::stop_http::send(&http.target, request, timeout) {
-                            Ok(code) if (200..300).contains(&code) => {
-                                note(format!("{what} answered {code}"))
-                            }
-                            Ok(code) => {
-                                note(format!("{what} answered {code}, so the rest was not sent"));
-                                break;
-                            }
-                            Err(why) => {
-                                note(format!("{what} failed: {why}, so the rest was not sent"));
-                                break;
-                            }
+                    match ask(hook, grace, &finished, &notes) {
+                        Asked::Yes => note(format!("{} asked the server to stop", hook.who)),
+                        // The wait below sees it and says so.
+                        Asked::Exited => {}
+                        Asked::No(why) => {
+                            note(format!(
+                                "{} could not ask the server to stop: {}",
+                                hook.who,
+                                why.trim_end_matches('.')
+                            ));
+                            continue;
                         }
                     }
                 }
@@ -779,9 +830,9 @@ fn spawn_stop_watcher(
                 },
             }
 
-            // An HTTP rung's grace includes its requests; see above.
+            // A hook's grace includes its asking; see above.
             let from = match rung.action {
-                Action::Http(_) => begun,
+                Action::Hook(_) => begun,
                 _ => Instant::now(),
             };
             let deadline = from + Duration::from_millis(rung.wait_ms);
@@ -805,11 +856,97 @@ fn spawn_stop_watcher(
     }
 }
 
+/// The stop's own account of itself, on its way to the [`HOST`] stream.
+struct Notes {
+    to: std::sync::mpsc::Sender<String>,
+    asked: Instant,
+}
+
+impl Notes {
+    /// Every note carries the time since the stop was asked for. A closed
+    /// receiver means nobody is listening, which is no reason to stop.
+    fn say(&self, text: String) {
+        let _ = self.to.send(format!(
+            "Stop: {text} ({:.1} s after the stop was asked for).",
+            self.asked.elapsed().as_secs_f64()
+        ));
+    }
+}
+
+/// How asking went.
+enum Asked {
+    Yes,
+    /// The server went while it was being asked.
+    Exited,
+    No(String),
+}
+
+/// Run `hook` on a thread of its own, for at most `grace`.
+///
+/// Its own thread, because it is someone else's code talking to a server
+/// that may not answer: a hook that ignores its cancellation is abandoned
+/// when the grace is spent rather than allowed to hold the ladder, and a
+/// panic is a refusal rather than the end of the stop.
+fn ask(hook: &StopHook, grace: Duration, exited: &Arc<StopSignal>, notes: &Notes) -> Asked {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let begun = Instant::now();
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = {
+        let (ask, exited, abandoned) = (hook.ask.clone(), exited.clone(), abandoned.clone());
+        let notes = Notes {
+            to: notes.to.clone(),
+            asked: notes.asked,
+        };
+        std::thread::Builder::new()
+            .name("stop-hook".into())
+            .spawn(move || {
+                let cancelled = || {
+                    exited.should_stop()
+                        || abandoned.load(Ordering::SeqCst)
+                        || begun.elapsed() >= grace
+                };
+                let note = |text: String| notes.say(text);
+                let asking = Asking::new(&cancelled, &note);
+                let result =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| ask(&asking)))
+                        .unwrap_or_else(|_| Err("it failed unexpectedly".into()));
+                let _ = tx.send(result);
+            })
+    };
+    if spawned.is_err() {
+        return Asked::No("it could not be started".into());
+    }
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(Ok(())) => return Asked::Yes,
+            Ok(Err(_)) if exited.should_stop() => return Asked::Exited,
+            Ok(Err(why)) => return Asked::No(why),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Asked::No("it failed unexpectedly".into())
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if exited.should_stop() {
+                    abandoned.store(true, Ordering::SeqCst);
+                    return Asked::Exited;
+                }
+                if begun.elapsed() >= grace {
+                    abandoned.store(true, Ordering::SeqCst);
+                    return Asked::No(format!(
+                        "it had not finished after {:.1} s",
+                        grace.as_secs_f64()
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// A rung, as a stop's notes name it.
 fn step(action: &Action) -> &'static str {
     match action {
         Action::Console(_) => "console",
-        Action::Http(_) => "http",
+        Action::Hook(_) => "extension",
         Action::Interrupt => "interrupt",
         Action::Terminate => "terminate",
         Action::Kill => "kill",
@@ -1519,32 +1656,218 @@ mod tests {
         assert_eq!(converted.last().unwrap().action, Action::Kill);
     }
 
-    /// The core's HTTP rung only names its port and secret. Resolved, it is
-    /// the polite rung with its grace; unresolved, it is left out rather
-    /// than kept as a rung that could only time out.
+    /// The core's extension rung only says the extension asks. With the
+    /// runner's hook, it is the polite rung with its grace; without one, it
+    /// is left out rather than kept as a rung that could only time out.
     #[test]
-    fn an_http_rung_is_kept_only_once_it_has_somewhere_to_go() {
-        let descriptor: GameDescriptor = serde_json::from_str(
-            r#"{ "id": "g", "console": { "via": "none" },
-                 "stop": { "via": "http", "graceMs": 30000, "http": { "port": "rest",
-                   "requests": [{ "method": "POST", "path": "/v1/api/save" }] } } }"#,
-        )
-        .unwrap();
-        let core = homerun_core::engine::control::stop_ladder(&descriptor);
-        let resolved = crate::stop_http::Stop::new(
-            crate::stop_http::Target::new(8212, Some(("admin", "pw"))),
-            &descriptor.stop.http.as_ref().unwrap().requests,
-        )
-        .unwrap();
+    fn an_extension_rung_is_kept_only_once_it_has_a_hook() {
+        use homerun_core::engine::control::{Action as Core, Rung as CoreRung};
+        let core = [
+            (Core::Extension, 30_000),
+            (Core::Terminate, 8_000),
+            (Core::Kill, 0),
+        ]
+        .map(|(action, wait_ms)| CoreRung { action, wait_ms });
+        let hook = StopHook::new("the test", |_| Ok(()));
 
-        let ladder = descriptor_ladder(&core, Some(&resolved));
-        assert_eq!(ladder[0].action, Action::Http(Arc::new(resolved)));
+        let ladder = descriptor_ladder(&core, Some(&hook));
+        assert_eq!(ladder[0].action, Action::Hook(hook.clone()));
         assert_eq!(ladder[0].wait_ms, 30_000);
         assert_eq!(ladder.last().unwrap().action, Action::Kill);
+        assert_ne!(
+            Action::Hook(hook),
+            Action::Hook(StopHook::new("the test", |_| Ok(()))),
+            "a hook is itself, not any hook that looks like it"
+        );
 
-        let unresolved = descriptor_ladder(&core, None);
-        assert_eq!(unresolved[0].action, Action::Terminate);
-        assert_eq!(unresolved.len(), ladder.len() - 1);
+        let without = descriptor_ladder(&core, None);
+        assert_eq!(without[0].action, Action::Terminate);
+        assert_eq!(without.len(), ladder.len() - 1);
+    }
+
+    // ─── a stop someone else asks for ──────────────────────────────────────
+    //
+    // The fake "game" exits on `quit` and on nothing else, so a hook that
+    // succeeds sends it `quit` through the engine, and every other hook
+    // leaves the terminate to end it.
+
+    /// Run the fake game with `hook` as the polite rung, `grace_ms` long,
+    /// stop it, and return the stop's notes and how long the stop took.
+    fn stop_with_hook(
+        grace_ms: u64,
+        hook: impl Fn(&Asking, &ProcessEngine) -> Result<(), String> + Send + Sync + 'static,
+    ) -> (Vec<String>, Duration) {
+        let slot: Arc<std::sync::OnceLock<Arc<ProcessEngine>>> = Arc::default();
+        let for_hook = slot.clone();
+        let hook = StopHook::new("the test hook", move |asking| {
+            hook(
+                asking,
+                for_hook.get().expect("the engine is set before a stop"),
+            )
+        });
+        let supervision = Supervision {
+            readiness: Readiness::Marker("Server startup complete".into()),
+            presence: Presence::None,
+            console: ConsoleRoute::Stdin,
+            ladder: vec![
+                Rung {
+                    action: Action::Hook(hook),
+                    wait_ms: grace_ms,
+                },
+                Rung {
+                    action: Action::Terminate,
+                    wait_ms: 5_000,
+                },
+                Rung {
+                    action: Action::Kill,
+                    wait_ms: 0,
+                },
+            ],
+        };
+        let engine = Arc::new(ProcessEngine::supervised(fake_server("game"), supervision));
+        let _ = slot.set(engine.clone());
+        let stop = StopSignal::default();
+        let request = RunRequest {
+            server_id: "s1".into(),
+            data_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            java_port: 0,
+            settings: None,
+            local_network: false,
+        };
+        let notes = Arc::new(Mutex::new(Vec::<String>::new()));
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let took = std::thread::scope(|scope| {
+            let (engine, stop_for_run, notes, ready_for_run) =
+                (engine.clone(), stop.clone(), notes.clone(), ready.clone());
+            let run = scope.spawn(move || {
+                engine.run_streamed(
+                    &request,
+                    stop_for_run,
+                    &|line, stream| {
+                        if stream == HOST {
+                            notes.lock().unwrap().push(line)
+                        }
+                    },
+                    &|| ready_for_run.store(true, std::sync::atomic::Ordering::SeqCst),
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline && !ready.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let asked = Instant::now();
+            stop.request_stop();
+            run.join().expect("the run thread must not panic");
+            asked.elapsed()
+        });
+        let notes = notes.lock().unwrap().clone();
+        (notes, took)
+    }
+
+    fn noted(notes: &[String], needle: &str) -> bool {
+        notes.iter().any(|n| n.contains(needle))
+    }
+
+    #[test]
+    fn a_hook_that_asks_is_given_the_grace_and_the_server_goes_on_it() {
+        let (notes, took) = stop_with_hook(10_000, |asking, engine| {
+            asking.note("the test hook is asking");
+            engine.command("quit")
+        });
+        assert!(
+            noted(&notes, "Stop: the test hook is asking ("),
+            "{notes:#?}"
+        );
+        assert!(
+            noted(&notes, "the test hook asked the server to stop"),
+            "{notes:#?}"
+        );
+        assert!(
+            noted(&notes, "exited during the extension step"),
+            "{notes:#?}"
+        );
+        assert!(!noted(&notes, "terminate"), "{notes:#?}");
+        assert!(took < Duration::from_secs(8), "{took:?}");
+    }
+
+    /// Not asked means nothing to wait for: the terminate follows at once,
+    /// not at the end of a grace that could only run out.
+    #[test]
+    fn a_hook_that_could_not_ask_falls_straight_to_the_terminate() {
+        let (notes, took) = stop_with_hook(30_000, |_, _| Err("the server said no (401).".into()));
+        assert!(
+            noted(
+                &notes,
+                "the test hook could not ask the server to stop: the server said no (401) ("
+            ),
+            "{notes:#?}"
+        );
+        assert!(
+            noted(&notes, "moving on to the terminate step"),
+            "{notes:#?}"
+        );
+        assert!(
+            noted(&notes, "exited during the terminate step"),
+            "{notes:#?}"
+        );
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    #[test]
+    fn a_hook_that_panics_is_a_hook_that_could_not_ask() {
+        let (notes, _) = stop_with_hook(30_000, |_, _| panic!("a hook bug"));
+        assert!(noted(&notes, "failed unexpectedly"), "{notes:#?}");
+        assert!(
+            noted(&notes, "exited during the terminate step"),
+            "{notes:#?}"
+        );
+    }
+
+    /// A hook that ignores its cancellation is abandoned when the grace is
+    /// spent: it cannot hold the ladder.
+    #[test]
+    fn a_hook_that_never_returns_is_abandoned_at_the_end_of_the_grace() {
+        let (notes, took) = stop_with_hook(1_000, |_, _| {
+            std::thread::sleep(Duration::from_secs(60));
+            Ok(())
+        });
+        assert!(
+            noted(
+                &notes,
+                "could not ask the server to stop: it had not finished after 1.0 s"
+            ),
+            "{notes:#?}"
+        );
+        assert!(
+            noted(&notes, "exited during the terminate step"),
+            "{notes:#?}"
+        );
+        assert!(took < Duration::from_secs(10), "{took:?}");
+    }
+
+    /// What a hook waits on it waits on through `cancelled`, which turns
+    /// true when the grace is spent.
+    #[test]
+    fn a_hook_is_told_when_to_give_up() {
+        let (seen, saw) = std::sync::mpsc::channel();
+        let seen = Mutex::new(seen);
+        let (notes, _) = stop_with_hook(700, move |asking, _| {
+            let begun = Instant::now();
+            while !asking.cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = seen.lock().unwrap().send(begun.elapsed());
+            Err("given up".into())
+        });
+        let after = saw.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            after >= Duration::from_millis(600) && after < Duration::from_secs(3),
+            "{after:?}"
+        );
+        assert!(
+            noted(&notes, "exited during the terminate step"),
+            "{notes:#?}"
+        );
     }
 
     fn drive(script: &str, on_running: impl FnOnce(&ProcessEngine, &StopSignal)) -> RunOutcome {

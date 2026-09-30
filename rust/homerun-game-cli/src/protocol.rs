@@ -88,12 +88,6 @@ pub const FEATURES: &[&str] = &[
     // checks. An older runner ignores both fields and has no program to run,
     // so a host must require this name for such a descriptor.
     "host-java",
-    // `stop.via: "http"` with `stop.http`: the polite rung is a fixed sequence
-    // of requests to the server's own admin API on a private loopback port
-    // (Palworld's save, then shutdown). An older runner cannot parse the
-    // route, so a host must require this name for such a descriptor --
-    // without it the game could only ever be terminated.
-    "stop-http",
 ];
 
 /// What Electron sends.
