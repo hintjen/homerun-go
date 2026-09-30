@@ -155,17 +155,34 @@ fn fake_game() {
         println!("Command line: -batchmode +rcon.password {echo}");
         std::io::stdout().flush().unwrap();
     }
-    // A game whose only stop is its own admin API: the one-route API the
-    // fixture extension stops. Bound before it says it is ready, on loopback, the way the descriptor's bind address tells a
+    // A game whose only stop is its own admin API: Palworld's REST API, or
+    // the one-route API the fixture extension stops. Bound before it says it
+    // is ready, on loopback, the way the descriptor's bind address tells a
     // well-behaved one to. Stdin is never read -- this game has no console.
     let bind_admin = |var: &str| {
         std::env::var(var)
             .ok()
             .map(|p| TcpListener::bind(("127.0.0.1", p.parse::<u16>().unwrap())).unwrap())
     };
+    let rest = bind_admin("HOMERUN_TEST_REST_PORT");
     let admin = bind_admin("HOMERUN_TEST_ADMIN_PORT");
     if std::env::var("HOMERUN_TEST_MODE").as_deref() != Ok("silent") {
         eprintln!("FAKE READY"); // Deliberately stderr, with stdout otherwise quiet.
+    }
+    if let Some(rest) = rest {
+        let behaviour = fake_palworld::Behaviour {
+            password: std::env::var("HOMERUN_TEST_ADMIN_PASSWORD").unwrap_or_default(),
+            refuse_save: std::env::var("HOMERUN_TEST_REST_REFUSE")
+                .ok()
+                .map(|s| s.parse().unwrap()),
+        };
+        fake_palworld::serve(
+            rest,
+            &behaviour,
+            &mut |line| log_request(&line),
+            &mut || fs::write(&save, "world flushed").unwrap(),
+        );
+        return;
     }
     if let Some(admin) = admin {
         serve_admin(admin, &save);
@@ -306,6 +323,11 @@ fn base64(input: &[u8]) -> String {
     }
     out
 }
+
+/// A fake of Palworld's REST API, served by the fake game above and by the
+/// runner's extension harness.
+#[path = "support/fake_palworld.rs"]
+mod fake_palworld;
 
 /// One runtime, at one path per machine, for fixtures whose game listens on
 /// every interface on purpose.
@@ -1048,6 +1070,26 @@ fn a_private_port_on_loopback_is_not_refused() {
     h.eof();
 }
 
+/// A start for a game stopped the way Palworld is: no console, a REST API on
+/// a private port, and the `palworld` extension, which signs in as `admin`
+/// with the host's secret -- which the launch hands the game too.
+fn palworld_start(f: &Fixture) -> Value {
+    let mut start = f.start();
+    start["secrets"]["admin"] = json!("do-not-print-this-either");
+    let d = &mut start["descriptor"];
+    d["ports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"rest","proto":"tcp","port":free_port(),"expose":false}));
+    let env = &mut d["platforms"][platform::HOST]["launch"]["env"];
+    env["HOMERUN_TEST_REST_PORT"] = json!("{port:rest}");
+    env["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("{secret:admin}");
+    d["console"] = json!({"via":"none"});
+    d["stop"] = json!({"via":"extension","graceMs":5000});
+    d["extension"] = json!({"name":"palworld","config":{"shutdownMessage":"Back soon"}});
+    start
+}
+
 /// What the stop said about itself, on the runner's own stream.
 fn stop_notes(h: &Host) -> Vec<String> {
     h.seen
@@ -1073,6 +1115,113 @@ fn no_secret_leaked(h: &Host) {
             "a password reached the host: {event}"
         );
     }
+}
+
+/// The whole stop, against a fake of Palworld's REST API that insists on
+/// the password and on the order: the save is written, the game exits on
+/// its own inside the grace, and the stop's account of itself names the
+/// extension and the rung.
+#[test]
+fn palworld_saves_then_shuts_the_game_down() {
+    let f = Fixture::new();
+    let mut h = Host::new();
+    assert!(
+        h.seen[0]["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("extension:palworld")),
+        "a host has to be able to require this: {}",
+        h.seen[0]
+    );
+    h.send(palworld_start(&f));
+    h.until("server-started");
+    let asked = Instant::now();
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "the game should have exited on its own, not at the terminate: {:?}",
+        asked.elapsed()
+    );
+
+    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
+    let requests: Vec<&str> = log.lines().collect();
+    assert_eq!(
+        requests,
+        [
+            "POST /v1/api/save HTTP/1.1 auth=true json=true {}",
+            r#"POST /v1/api/shutdown HTTP/1.1 auth=true json=true {"message":"Back soon","waittime":1}"#
+        ],
+        "{log}"
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/saved")).unwrap(),
+        "world flushed"
+    );
+
+    let notes = stop_notes(&h);
+    noted(&notes, "Palworld saved the world");
+    noted(&notes, "the palworld extension asked the server to stop");
+    noted(&notes, "exited during the extension step");
+    assert!(!notes.iter().any(|n| n.contains("terminate")), "{notes:#?}");
+    no_secret_leaked(&h);
+    h.eof();
+}
+
+/// A save the game refuses ends the stop's asking there: the shutdown is
+/// never sent, and the ladder goes straight on to the terminate.
+#[test]
+fn palworld_refusing_the_save_falls_through_to_terminate() {
+    let f = Fixture::new();
+    let mut start = palworld_start(&f);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_REST_REFUSE"] =
+        json!("500");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+
+    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
+    assert_eq!(
+        log.lines().count(),
+        1,
+        "the shutdown must not follow a failed save: {log}"
+    );
+    assert!(!f.root.join("server/saved").exists());
+    let notes = stop_notes(&h);
+    noted(
+        &notes,
+        "could not ask the server to stop: Palworld answered 500 when asked to save the world",
+    );
+    noted(&notes, "moving on to the terminate step");
+    noted(&notes, "exited during the terminate step");
+    h.eof();
+}
+
+/// A password the game was not given is refused by it, and the stop says
+/// so in words that name the password without quoting it.
+#[test]
+fn palworld_with_the_wrong_password_is_refused_by_the_game() {
+    let f = Fixture::new();
+    let mut start = palworld_start(&f);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]
+        ["HOMERUN_TEST_ADMIN_PASSWORD"] = json!("something-else");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    let log = fs::read_to_string(f.root.join("server/rest-log")).unwrap();
+    assert!(
+        log.starts_with("POST /v1/api/save HTTP/1.1 auth=false"),
+        "{log}"
+    );
+    let notes = stop_notes(&h);
+    noted(&notes, "did not accept the admin password");
+    noted(&notes, "exited during the terminate step");
+    no_secret_leaked(&h);
+    h.eof();
 }
 
 /// The runner has no API in front of it, so core's backstop is the only

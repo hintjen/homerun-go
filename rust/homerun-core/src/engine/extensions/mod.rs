@@ -47,6 +47,7 @@ use super::validate::Report;
 #[cfg(any(test, feature = "test-extensions"))]
 pub mod fixture;
 pub mod hytale;
+pub mod palworld;
 
 /// The pure half of one extension. See the module header.
 #[derive(Debug, Clone, Copy)]
@@ -126,7 +127,7 @@ pub const FEATURE: &str = "extensions";
 
 /// Extensions a release build carries, and the only ones the published
 /// schema describes.
-pub const PUBLISHED: &[ExtensionSpec] = &[hytale::SPEC];
+pub const PUBLISHED: &[ExtensionSpec] = &[hytale::SPEC, palworld::SPEC];
 
 /// Every extension this build can run: [`PUBLISHED`], plus the test-only
 /// reference extension when built for tests.

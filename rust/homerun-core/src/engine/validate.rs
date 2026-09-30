@@ -1677,6 +1677,41 @@ mod tests {
         );
     }
 
+    /// Palworld's shape: a REST port kept private, and the admin password
+    /// written into the game's settings file.
+    #[test]
+    fn a_palworld_stop_is_accepted() {
+        let mut value = json!({
+            "console": { "via": "none", "rcon": null },
+            "observe": { "players": "none", "playersCommand": null },
+            "stop": { "via": "extension", "command": null, "graceMs": 30000 },
+            "extension": { "name": "palworld" },
+            "config": [{ "file": "admin.json", "format": "json",
+                         "keys": { "AdminPassword": "{secret:admin}" } }]
+        });
+        value["ports"] = json!([
+            { "name": "game", "proto": "udp", "port": 8211, "expose": true, "service": "game" },
+            { "name": "rest", "proto": "tcp", "port": 8212, "expose": false }
+        ]);
+        let mut base: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/rust.json")).unwrap();
+        base["platforms"]["win32-x64"]["launch"]["args"] = json!([
+            "-port={port:game}",
+            "-bind={bindAddress}",
+            "-rest={port:rest}"
+        ]);
+        deep_merge(&mut base, &value);
+        let d: GameDescriptor = serde_json::from_value(base).unwrap();
+        let r = report(&d);
+        assert!(r.ok(), "{:#?}", r.problems);
+        assert!(!says(&r.warnings, "extension"), "{:#?}", r.warnings);
+        assert_eq!(required_secrets(&d), vec!["admin".to_string()]);
+        assert_eq!(
+            super::super::control::stop_ladder(&d)[0].action,
+            super::super::control::Action::Extension
+        );
+    }
+
     // ─── host-supplied Java ─────────────────────────────────────────────────
 
     fn host_java(patch: serde_json::Value) -> Vec<String> {

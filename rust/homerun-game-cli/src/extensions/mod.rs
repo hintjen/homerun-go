@@ -81,6 +81,7 @@ mod fixture;
 #[cfg(all(test, windows, feature = "test-extensions"))]
 mod harness;
 mod hytale;
+mod palworld;
 mod prompt;
 mod store;
 
@@ -545,6 +546,7 @@ pub fn registry() -> Vec<&'static dyn GameExtension> {
     #[allow(unused_mut)]
     let mut all: Vec<&'static dyn GameExtension> = vec![];
     all.push(&hytale::Hytale);
+    all.push(&palworld::Palworld);
     #[cfg(feature = "test-extensions")]
     all.push(&fixture::Fixture);
     all
