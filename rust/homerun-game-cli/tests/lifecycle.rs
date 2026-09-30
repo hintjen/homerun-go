@@ -261,10 +261,7 @@ fn log_request(line: &str) {
 /// as `admin` with `HOMERUN_TEST_ADMIN_PASSWORD`.
 fn serve_admin(listener: TcpListener, save: &str) {
     let password = std::env::var("HOMERUN_TEST_ADMIN_PASSWORD").unwrap_or_default();
-    let expected = format!(
-        "Basic {}",
-        base64(format!("admin:{password}").as_bytes())
-    );
+    let expected = format!("Basic {}", base64(format!("admin:{password}").as_bytes()));
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let mut reader = BufReader::new(stream);
