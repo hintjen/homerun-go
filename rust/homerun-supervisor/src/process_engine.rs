@@ -881,6 +881,10 @@ enum Asked {
     No(String),
 }
 
+/// How long a hook that is still asking when the server exits has to notice
+/// and finish, so what it says lands before the stop's own notes.
+const HOOK_SETTLE: Duration = Duration::from_secs(1);
+
 /// Run `hook` on a thread of its own, for at most `grace`.
 ///
 /// Its own thread, because it is someone else's code talking to a server
@@ -928,6 +932,10 @@ fn ask(hook: &StopHook, grace: Duration, exited: &Arc<StopSignal>, notes: &Notes
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if exited.should_stop() {
                     abandoned.store(true, Ordering::SeqCst);
+                    // A hook that is watching its cancellation sees it now and
+                    // may say so. Give it a moment to, so its last notes land
+                    // before the stop's own -- a deaf one is abandoned all the same.
+                    let _ = rx.recv_timeout(HOOK_SETTLE);
                     return Asked::Exited;
                 }
                 if begun.elapsed() >= grace {
