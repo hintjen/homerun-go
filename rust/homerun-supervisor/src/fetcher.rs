@@ -1080,25 +1080,34 @@ fn steamcmd(
     });
 
     let args = steamcmd_args(dir, app_id, build_id, verify);
-    let output = run_streaming(&binary, &args, "steamcmd", ctx)?;
+    for run in 1..=STEAMCMD_RUNS {
+        let output = run_streaming(&binary, &args, "steamcmd", ctx)?;
 
-    if prompt_detected(&output) {
-        return Err(
-            "Steam is asking someone to agree to its terms before it will download \
-             this game's server. Homerun will not answer that for you — run \
-             steamcmd yourself once, read what it asks, and answer it."
-                .to_string(),
-        );
-    }
+        if prompt_detected(&output) {
+            return Err(
+                "Steam is asking someone to agree to its terms before it will download \
+                 this game's server. Homerun will not answer that for you — run \
+                 steamcmd yourself once, read what it asks, and answer it."
+                    .to_string(),
+            );
+        }
 
-    // steamcmd's exit code is unreliable across versions; its own success
-    // line is not. Both are checked, and the line is what decides.
-    if !output.contains("Success! App") && !output.contains("fully installed") {
-        return Err(
-            "Steam did not finish downloading this game's server. Trying again \
-             usually fixes this."
-                .to_string(),
-        );
+        match steamcmd_outcome(&output) {
+            SteamcmdOutcome::Installed => break,
+            SteamcmdOutcome::NotReady if run < STEAMCMD_RUNS => {
+                (ctx.on_progress)(Progress::Note {
+                    phase: "steamcmd",
+                    message: "Steam was still getting ready; asking again".to_string(),
+                });
+            }
+            _ => {
+                return Err(
+                    "Steam did not finish downloading this game's server. Trying again \
+                     usually fixes this."
+                        .to_string(),
+                );
+            }
+        }
     }
 
     let stamped = build_id.map(str::to_string).unwrap_or_else(|| {
@@ -1112,6 +1121,39 @@ fn steamcmd(
         dir: dir.to_path_buf(),
         build_id: stamped,
     })
+}
+
+/// How many times steamcmd is run for one fetch, at most.
+///
+/// A steamcmd that has just bootstrapped and updated itself asks for the
+/// app's install configuration before its app-info cache has finished
+/// filling ("UpdatesJob: apps still needs updates, run again" in its
+/// appinfo log), and `app_update` answers `ERROR! Failed to install app
+/// '<id>' (Missing configuration)`. The same command run again succeeds:
+/// observed for Palworld (2394010) on 2026-10-01, a fresh steamcmd under a
+/// fresh install root, which is every player's first steam-sourced game. So
+/// that one answer is worth one more run; nothing else is.
+const STEAMCMD_RUNS: usize = 2;
+
+/// What one steamcmd run came to.
+#[derive(Debug, PartialEq, Eq)]
+enum SteamcmdOutcome {
+    Installed,
+    /// The fresh-steamcmd race above: worth running again.
+    NotReady,
+    Failed,
+}
+
+/// steamcmd's exit code is unreliable across versions; its own success line
+/// is not, so the line decides.
+fn steamcmd_outcome(output: &str) -> SteamcmdOutcome {
+    if output.contains("Success! App") || output.contains("fully installed") {
+        SteamcmdOutcome::Installed
+    } else if output.contains("(Missing configuration)") {
+        SteamcmdOutcome::NotReady
+    } else {
+        SteamcmdOutcome::Failed
+    }
 }
 
 /// What steamcmd is told to do, and nothing else.
@@ -1933,6 +1975,34 @@ mod tests {
         // A pin is a beta branch to steamcmd, and it belongs to the update.
         assert_eq!(args[at("-beta") + 1], "1928", "{args:?}");
         assert_eq!(args.last().unwrap(), "+quit", "{args:?}");
+    }
+
+    #[test]
+    fn a_fresh_steamcmds_missing_configuration_is_worth_one_more_run() {
+        // What steamcmd printed on 2026-10-01: a first run after its
+        // self-update, then the same command again.
+        let first = "Loading Steam API...\nOK\nConnecting anonymously to Steam Public...\nOK\n\
+                     Waiting for user info...\nOK\n\
+                     ERROR! Failed to install app '2394010' (Missing configuration)\n";
+        let second =
+            " Update state (0x81) verifying update, progress: 11.48 (667814245 / 5816529537)\n\
+                      Success! App '2394010' fully installed.\n";
+        assert_eq!(steamcmd_outcome(first), SteamcmdOutcome::NotReady);
+        assert_eq!(steamcmd_outcome(second), SteamcmdOutcome::Installed);
+        assert_eq!(STEAMCMD_RUNS, 2, "one more run, not a loop");
+    }
+
+    #[test]
+    fn any_other_unfinished_run_is_a_failure() {
+        assert_eq!(
+            steamcmd_outcome("ERROR! Failed to install app '2394010' (No subscription)\n"),
+            SteamcmdOutcome::Failed
+        );
+        assert_eq!(
+            steamcmd_outcome("ERROR! Failed to install app '2394010' (Disk write failure)\n"),
+            SteamcmdOutcome::Failed
+        );
+        assert_eq!(steamcmd_outcome(""), SteamcmdOutcome::Failed);
     }
 
     #[test]
