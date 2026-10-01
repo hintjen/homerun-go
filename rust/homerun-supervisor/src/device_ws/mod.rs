@@ -1155,7 +1155,7 @@ mod tests {
     use super::*;
 
     /// A scratch crash directory, and the lock that stops two tests sharing one.
-    fn scratch(name: &str) -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+    fn scratch(name: &str) -> (std::path::PathBuf, crate::crash::TestGuard) {
         let guard = crate::crash::test_guard();
         let root = std::env::temp_dir().join(format!(
             "homerun-cert-{name}-{}",

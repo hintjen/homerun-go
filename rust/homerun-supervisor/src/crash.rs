@@ -92,6 +92,9 @@ fn describe(info: &PanicHookInfo<'_>) -> String {
 }
 
 fn record_panic(info: &PanicHookInfo<'_>) {
+    if !records_here() {
+        return;
+    }
     let message = describe(info);
 
     if let Ok(mut guard) = last_panic().lock() {
@@ -141,14 +144,57 @@ pub(crate) fn clear_app_crash_dir() {
 /// One server runs per process, so a single crash directory and last-panic
 /// slot are right in production — but Rust runs tests in parallel threads,
 /// which would otherwise race on them.
+///
+/// Holding the lock is only half of it. The hook is global too, and plenty
+/// of tests panic on purpose without it (inside their own `catch_unwind`);
+/// each of those used to land in whichever crash directory and last-panic
+/// slot the guarded test had just set up: a `panic-<second>.txt` overwriting
+/// the guarded test's own, or a 41st report in a drain that expected 40. So
+/// in a test build the hook records only panics on the thread that holds
+/// this guard ([`records_here`]).
 #[cfg(test)]
-pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn test_guard() -> TestGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    let lock = LOCK
+        .get_or_init(|| Mutex::new(()))
         .lock()
         // A failing assertion inside the guard poisons it; later tests
         // should still run rather than cascade.
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(|e| e.into_inner());
+    HOLDS_TEST_GUARD.with(|holds| holds.set(true));
+    TestGuard { _lock: lock }
+}
+
+/// What [`test_guard`] hands back: the lock, and this thread's say in what
+/// the hook records, for as long as it is held.
+#[cfg(test)]
+pub(crate) struct TestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for TestGuard {
+    fn drop(&mut self) {
+        HOLDS_TEST_GUARD.with(|holds| holds.set(false));
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static HOLDS_TEST_GUARD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the hook should record a panic on this thread: always in a real
+/// build, and in a test build only on the thread holding [`test_guard`].
+fn records_here() -> bool {
+    #[cfg(test)]
+    {
+        HOLDS_TEST_GUARD.with(|holds| holds.get())
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
 }
 
 #[cfg(test)]
