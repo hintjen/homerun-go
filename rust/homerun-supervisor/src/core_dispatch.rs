@@ -2301,7 +2301,7 @@ mod tests {
     /// Shared with `crate::errors`' own tests through the same lock — the
     /// ledger is one per process on purpose, so the tests over it have to be
     /// one at a time.
-    fn error_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    fn error_test_guard() -> crate::crash::TestGuard {
         let guard = crate::crash::test_guard();
         crate::errors::reset_ledger();
         guard

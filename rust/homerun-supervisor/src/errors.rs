@@ -313,7 +313,7 @@ mod tests {
 
     /// A fresh, isolated crash directory, and the process-global lock that
     /// keeps two tests from sharing one.
-    fn scratch(name: &str) -> (PathBuf, MutexGuard<'static, ()>) {
+    fn scratch(name: &str) -> (PathBuf, crash::TestGuard) {
         let guard = crash::test_guard();
         reset_ledger();
         let root = std::env::temp_dir().join(format!(
