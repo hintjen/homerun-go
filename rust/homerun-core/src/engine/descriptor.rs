@@ -217,6 +217,14 @@ pub struct Client {
     /// never templated: a placeholder in it would be shown, not filled.
     #[serde(default)]
     pub join_hint: Option<String>,
+    /// Launch arguments that make the game join a server, for a store with
+    /// `join: "args"`: each element a flag (`-join`) or exactly `{host}`,
+    /// `{port:<name>}` or both joined by `:`. Terraria's is
+    /// `["-join", "{host}", "-port", "{port:game}"]`, which Steam passes to
+    /// the game with `-applaunch`. See [`super::client::join::build_join_args`]
+    /// for what each element may be.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_args: Option<Vec<String>>,
     /// Where a player can own the game, for the Play button that starts
     /// their copy. Empty means Homerun cannot start this game's client, only
     /// show its address. See [`super::client`].
@@ -279,6 +287,11 @@ pub enum JoinVia {
     /// seen it work: `steam://connect` reaches a game only if the game wired
     /// it up, and does nothing visible for most that did not.
     Url,
+    /// Start the game with `client.joinArgs` filled in, which joins. Steam
+    /// only (`steam.exe -applaunch <appId> <args>`), for a game whose own
+    /// command line takes a server, and only where a person has seen it work:
+    /// Terraria's `-join <host> -port <port>` was, on 2026-10-07.
+    Args,
     /// Start the game, then show the address and `client.joinHint` for the
     /// player to type in. The default, because it is true of every game.
     #[default]
@@ -1059,6 +1072,7 @@ mod tests {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
                 srv: None,
                 join_hint: None,
+                join_args: None,
                 stores: vec![
                     ClientStore {
                         store: StoreKind::Steam,

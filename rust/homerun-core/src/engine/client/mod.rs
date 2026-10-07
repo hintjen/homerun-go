@@ -250,22 +250,44 @@ fn steam_candidate(
         .iter()
         .find(|i| i.manifest.app_id == app_id)?;
 
+    // `-silent` keeps Steam's own window from opening over the game.
     let mut join = JoinVia::Info;
     let mut join_refusal = None;
-    let mut target = format!("steam://rungameid/{app_id}");
-    if store.join == JoinVia::Url {
-        let built = match (d.client.join_url.as_deref(), address) {
-            (Some(template), Some(address)) => join::build_join_url(template.trim(), address),
-            (None, _) => Err(join::NO_LINK),
-            (Some(_), None) => Err(join::NO_PUBLIC_PORT),
-        };
-        match built {
-            Ok(url) => {
-                target = url;
-                join = JoinVia::Url;
+    let mut args = vec!["-silent".to_string(), format!("steam://rungameid/{app_id}")];
+    match store.join {
+        JoinVia::Url => {
+            let built = match (d.client.join_url.as_deref(), address) {
+                (Some(template), Some(address)) => join::build_join_url(template.trim(), address),
+                (None, _) => Err(join::NO_LINK),
+                (Some(_), None) => Err(join::NO_PUBLIC_PORT),
+            };
+            match built {
+                Ok(url) => {
+                    args = vec!["-silent".into(), url];
+                    join = JoinVia::Url;
+                }
+                Err(reason) => join_refusal = Some(reason.to_string()),
             }
-            Err(reason) => join_refusal = Some(reason.to_string()),
         }
+        JoinVia::Args => {
+            let built = match (d.client.join_args.as_deref(), address) {
+                (Some(template), Some(address)) => join::build_join_args(template, address),
+                (None, _) => Err(join::NO_LINK),
+                (Some(_), None) => Err(join::NO_PUBLIC_PORT),
+            };
+            match built {
+                // The program and everything before the game's own
+                // arguments are fixed here; only the template's checked
+                // elements follow `-applaunch <appId>`.
+                Ok(game_args) => {
+                    args = vec!["-silent".into(), "-applaunch".into(), app_id.to_string()];
+                    args.extend(game_args);
+                    join = JoinVia::Args;
+                }
+                Err(reason) => join_refusal = Some(reason.to_string()),
+            }
+        }
+        JoinVia::Info => {}
     }
 
     Some(Launch {
@@ -274,8 +296,7 @@ fn steam_candidate(
         // Steam records no executable per app, so the folder is watched.
         executable: None,
         program: Program::Steam { exe },
-        // `-silent` keeps Steam's own window from opening over the game.
-        args: vec!["-silent".into(), target],
+        args,
         join,
         join_refusal,
     })
@@ -477,6 +498,48 @@ mod tests {
             ..Default::default()
         };
         let Plan::Launch(launch) = plan(&palworld(JoinVia::Url), &machine, None) else {
+            panic!()
+        };
+        assert_eq!(launch.args, ["-silent", "steam://rungameid/1623730"]);
+        assert_eq!(launch.join, JoinVia::Info);
+        assert_eq!(launch.join_refusal.as_deref(), Some(join::NO_PUBLIC_PORT));
+    }
+
+    /// Terraria's shape: Steam starts the game with its join arguments.
+    #[test]
+    fn a_game_that_takes_join_arguments_is_started_with_them() {
+        let mut d = palworld(JoinVia::Args);
+        d.client.join_args = Some(
+            ["-join", "{host}", "-port", "{port:game}"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let machine = Machine {
+            steam: Some(steam_found()),
+            ..Default::default()
+        };
+        let Plan::Launch(launch) = plan(&d, &machine, Some(&address())) else {
+            panic!()
+        };
+        assert_eq!(
+            launch.args,
+            [
+                "-silent",
+                "-applaunch",
+                "1623730",
+                "-join",
+                "us-east.gethomerun.app",
+                "-port",
+                "20011"
+            ]
+        );
+        assert_eq!(launch.join, JoinVia::Args);
+        assert_eq!(launch.join_refusal, None);
+
+        // No address: the game still starts, and the player is told why it
+        // won't join by itself.
+        let Plan::Launch(launch) = plan(&d, &machine, None) else {
             panic!()
         };
         assert_eq!(launch.args, ["-silent", "steam://rungameid/1623730"]);

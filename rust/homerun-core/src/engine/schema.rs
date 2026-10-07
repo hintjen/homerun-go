@@ -239,6 +239,12 @@ pub fn schema() -> Value {
                         "maxLength": 200,
                         "description": "One sentence on where the address goes in the game's own UI. Display only; never templated."
                     },
+                    "joinArgs": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": { "type": "string" },
+                        "description": "Launch arguments that make the game join a server, for a store with join: args. Each element a flag (-join), {host}, {port:<name>}, or {host}:{port:<name>}."
+                    },
                     "stores": {
                         "type": "array",
                         "description": "Where a player can own the game, so Play can start their copy. Steam is preferred when several are installed.",
@@ -264,8 +270,8 @@ pub fn schema() -> Value {
                                     "description": "Xbox: the manifest's Application Id, declared because a package can have several or none."
                                 },
                                 "join": {
-                                    "enum": ["url", "info"],
-                                    "description": "url opens client.joinUrl, which starts the game and joins; only for a game that honours it. info starts the game and shows the address."
+                                    "enum": ["url", "args", "info"],
+                                    "description": "url opens client.joinUrl, which starts the game and joins; args starts it with client.joinArgs (Steam only), which joins; both only for a game that honours them. info starts the game and shows the address."
                                 }
                             }
                         }
@@ -619,6 +625,7 @@ mod tests {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
                 srv: Some("_example".into()),
                 join_hint: None,
+                join_args: Some(vec!["-join".into(), "{host}".into()]),
                 // One entry carrying every store field, so the drift test
                 // sees each key; validation would refuse the mix.
                 stores: vec![ClientStore {

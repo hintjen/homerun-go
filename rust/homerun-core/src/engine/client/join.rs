@@ -209,6 +209,117 @@ pub fn build_join_url(template: &str, address: &JoinAddress) -> Result<String, &
     Ok(out)
 }
 
+/// The most elements a `joinArgs` template may have. Terraria's has four.
+const MAX_ARGS: usize = 16;
+
+/// Fill a `client.joinArgs` template: the launch arguments that make a game
+/// join a server, which Steam passes to it with `-applaunch`.
+///
+/// # Every element is one of three shapes, or it is refused
+///
+/// - **A flag:** `-` or `+`, a letter, then letters, digits, `_`, `.`, `-`.
+///   `-join`, `-port`, `+connect`. Not a value, ever: values come from the
+///   address, so a descriptor cannot smuggle a path or a second command in.
+/// - **`{host}` or `{port:<name>}`**, the whole element.
+/// - **Both, joined by `:`** (`{host}:{port:game}`), for a game that takes one
+///   `host:port` argument.
+///
+/// A filled value never begins with `-` or `+`, so the game cannot read the
+/// server's address as a flag: a host is held to [`is_join_host`] and must
+/// not start with either. The program and the arguments before these are the
+/// core's own (`steam.exe -silent -applaunch <appId>`), never the
+/// descriptor's.
+pub fn build_join_args(
+    template: &[String],
+    address: &JoinAddress,
+) -> Result<Vec<String>, &'static str> {
+    check_join_args(template).map_err(|_| CANNOT_OPEN)?;
+    template
+        .iter()
+        .map(|element| {
+            if is_flag(element) {
+                Ok(element.clone())
+            } else {
+                fill_value(element, address)
+            }
+        })
+        .collect()
+}
+
+/// The shape check alone, for validation, which has no address to fill in.
+/// `Err` names the first element that is not one of the three shapes.
+pub fn check_join_args(template: &[String]) -> Result<(), String> {
+    if template.is_empty() || template.len() > MAX_ARGS {
+        return Err(format!("client.joinArgs has 1 to {MAX_ARGS} elements"));
+    }
+    for element in template {
+        if !is_flag(element) && value_placeholders(element).is_none() {
+            return Err(format!(
+                "client.joinArgs element \"{element}\" is not a flag, {{host}}, {{port:<name>}} or the two joined by ':'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The port names a template uses, for validation to check they are declared.
+pub fn join_args_ports(template: &[String]) -> Vec<String> {
+    template
+        .iter()
+        .filter_map(|e| value_placeholders(e))
+        .flatten()
+        .filter_map(|p| p.strip_prefix("port:").map(str::to_string))
+        .collect()
+}
+
+fn is_flag(element: &str) -> bool {
+    let mut bytes = element.bytes();
+    matches!(bytes.next(), Some(b'-' | b'+'))
+        && matches!(bytes.next(), Some(b) if b.is_ascii_alphabetic())
+        && element.len() <= 32
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+}
+
+/// The placeholder names of a value element (`host`, `port:<name>`): one
+/// whole-element placeholder, or two joined by `:`. `None` for anything else.
+fn value_placeholders(element: &str) -> Option<Vec<String>> {
+    fn single(part: &str) -> Option<String> {
+        let name = part.strip_prefix('{')?.strip_suffix('}')?;
+        let ok = name == "host" || name.strip_prefix("port:").is_some_and(port_name_is_plain);
+        ok.then(|| name.to_string())
+    }
+    if let Some(one) = single(element) {
+        return Some(vec![one]);
+    }
+    // `{host}:{port:game}`: split at the `}:{` between the two halves.
+    let (left, right) = element.split_once("}:{")?;
+    Some(vec![
+        single(&format!("{left}}}"))?,
+        single(&format!("{{{right}"))?,
+    ])
+}
+
+fn fill_value(element: &str, address: &JoinAddress) -> Result<String, &'static str> {
+    let names = value_placeholders(element).ok_or(CANNOT_OPEN)?;
+    let mut parts = Vec::with_capacity(names.len());
+    for name in names {
+        if name == "host" {
+            // Never a flag: a host the game read as `-something` would be one.
+            if !is_join_host(&address.host) || address.host.starts_with('-') {
+                return Err(CANNOT_OPEN);
+            }
+            parts.push(address.host.clone());
+        } else {
+            let port_name = name.strip_prefix("port:").ok_or(CANNOT_OPEN)?;
+            match address.ports.get(port_name) {
+                Some(port) if *port != 0 => parts.push(port.to_string()),
+                _ => return Err(NO_PUBLIC_PORT),
+            }
+        }
+    }
+    Ok(parts.join(":"))
+}
+
 /// Template text outside placeholders: letters, digits and the URL
 /// punctuation a connect link uses. No `@`, `#`, `\`, `}`, whitespace or
 /// control character, and nothing non-ASCII.
@@ -493,5 +604,87 @@ mod tests {
         let a = address_from_link(&ports(), &link(json!({ "fqdn": "us-east.gethomerun.app" })))
             .unwrap();
         assert_eq!(a.host, "us-east.gethomerun.app");
+    }
+
+    fn args(elements: &[&str]) -> Vec<String> {
+        elements.iter().map(|e| e.to_string()).collect()
+    }
+
+    /// Terraria's, which a person saw join on 2026-10-07.
+    #[test]
+    fn terrarias_join_arguments_are_filled_in() {
+        assert_eq!(
+            build_join_args(
+                &args(&["-join", "{host}", "-port", "{port:game}"]),
+                &address()
+            )
+            .unwrap(),
+            ["-join", "us-east.gethomerun.app", "-port", "20011"]
+        );
+        assert_eq!(
+            build_join_args(&args(&["+connect", "{host}:{port:game}"]), &address()).unwrap(),
+            ["+connect", "us-east.gethomerun.app:20011"]
+        );
+    }
+
+    #[test]
+    fn an_element_that_is_not_a_flag_or_a_placeholder_is_refused() {
+        for bad in [
+            &["-join", "C:\\Windows\\System32\\cmd.exe"][..],
+            &["-join", "{host}", "-exec", "calc"],
+            &["-join", "{secret:rcon}"],
+            &["-join", "{setting:hostname}"],
+            &["-join", "{serverDir}"],
+            &["-join", "x{host}"],
+            &["-join", "{host}:{port:game}:{port:query}"],
+            &["join"],
+            &["-"],
+            &["--"],
+            &["-1"],
+            &["-a b"],
+            &["-a\"b"],
+            &[],
+        ] {
+            assert!(check_join_args(&args(bad)).is_err(), "{bad:?}");
+            assert_eq!(
+                build_join_args(&args(bad), &address()),
+                Err(CANNOT_OPEN),
+                "{bad:?}"
+            );
+        }
+        assert!(
+            check_join_args(&args(&["-a"; 17])).is_err(),
+            "at most sixteen"
+        );
+    }
+
+    #[test]
+    fn a_host_that_reads_as_a_flag_or_a_missing_port_is_refused() {
+        let flagged = JoinAddress {
+            host: "-password".into(),
+            ..address()
+        };
+        assert_eq!(
+            build_join_args(&args(&["-join", "{host}"]), &flagged),
+            Err(CANNOT_OPEN)
+        );
+        assert_eq!(
+            build_join_args(&args(&["-port", "{port:nope}"]), &address()),
+            Err(NO_PUBLIC_PORT)
+        );
+    }
+
+    #[test]
+    fn the_ports_a_template_uses_are_listed_for_validation() {
+        assert_eq!(
+            join_args_ports(&args(&[
+                "-join",
+                "{host}",
+                "-port",
+                "{port:game}",
+                "{host}:{port:query}"
+            ])),
+            ["game", "query"]
+        );
     }
 }

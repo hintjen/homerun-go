@@ -59,8 +59,43 @@ desktop repository.
     joins. Use it only for a game that honours it and that a person has seen
     work: `steam://connect` reaches a game only if the game wired it up, and
     does nothing visible for most that didn't (Rust, Valheim, Squad, Arma 3).
+  - `args` starts the game with `client.joinArgs` filled in, which joins.
+    Steam only: `steam.exe -silent -applaunch <appId> <args>`. The same rule
+    applies: only for a game a person has seen it work for.
   - `info`, the default, starts the game and has the UI show the address and
     `joinHint`.
+
+### `client.joinArgs`: Terraria joins by itself
+
+Terraria's client takes `-join <host> -port <port>`. With the arguments, it
+goes from character selection straight to connecting; seen on 2026-10-07,
+through Steam's `-applaunch`, which passes them to the game unchanged and
+without a prompt.
+
+```json
+"joinArgs": ["-join", "{host}", "-port", "{port:game}"],
+"stores": [{ "store": "steam", "appId": 105600, "join": "args" }]
+```
+
+Each element is one of three shapes, or the template is refused
+(`client::join::build_join_args`):
+
+- **a flag:** `-` or `+`, a letter, then letters, digits, `_`, `.`, `-`
+  (`-join`, `+connect`). Never a value, so a descriptor can't put a path or a
+  second command into the game's command line;
+- **`{host}` or `{port:<name>}`**, the whole element;
+- **both, joined by `:`** (`{host}:{port:game}`), for a game that takes one
+  `host:port` argument.
+
+A filled host is held to `is_join_host` **and must not start with `-` or
+`+`**, so the game can't read the server's address as a flag. Everything before
+the template's elements (`steam.exe -silent -applaunch <appId>`) is the core's.
+The address arrives from the desktop as `--link-file`, the server's link as the
+API returned it, and goes through `address_from_link` like any other.
+
+Without an address, or with a port the gateway hasn't assigned, the game still
+starts, as `rungameid` with `join: info`, and `joinRefusal` says why it won't
+join by itself.
 
 ### What validation refuses
 
@@ -69,7 +104,11 @@ desktop repository.
 - an entry missing its store's ids, or carrying the other store's;
 - a family name or application id not in Windows' shape;
 - the same store twice;
-- `join: url` with no `client.joinUrl`, or on Xbox, which has no connect link.
+- `join: url` with no `client.joinUrl`, or on Xbox, which has no connect link;
+- `join: args` with no `client.joinArgs`, or on Xbox, whose launch takes no
+  arguments;
+- a `joinArgs` element in none of the three shapes, or naming a port the game
+  doesn't declare or doesn't expose.
 
 ## The plan: `client::plan`
 
