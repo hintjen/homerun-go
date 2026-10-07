@@ -54,6 +54,9 @@ desktop repository.
   `shell:AppsFolder\<family>!<application>`. The application is **declared,
   never taken from the manifest's first entry**: Age of Empires IV's package
   has `Game` and `Editor`, and an add-on content package has none at all.
+- **`storeId`** (Xbox, optional) is the game's Microsoft Store product id,
+  the `StoreId` in its `MicrosoftGame.config` (Palworld's is `9NKV34XDW014`).
+  It's used only for the store page below.
 - **`join`**:
   - `url` opens `client.joinUrl` through Steam, which starts the game and
     joins. Use it only for a game that honours it and that a person has seen
@@ -120,7 +123,7 @@ the server's join address if the caller has one. It answers one of:
 |---|---|
 | `launch` | a `Program` (`steam` with its exe, or `explorer`), its `args`, the `installDir`, and the `join` it will do |
 | `already-running` | a copy is running from an installed store's folder; nothing starts |
-| `not-installed` | the game declares stores and none has it |
+| `not-installed` | the game declares stores and none has it, with `pages`: each store's page for it (`https://store.steampowered.com/app/<appId>/`, `https://apps.microsoft.com/detail/<storeId>`), built from checked ids on those two hosts only |
 | `no-stores` | the descriptor declares no store this build can start |
 
 **Steam first.** When both copies are installed, Steam's starts.

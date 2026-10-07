@@ -165,7 +165,7 @@ fn human(d: &GameDescriptor, outcome: Outcome) -> Result<(), String> {
         Outcome::Planned(Plan::AlreadyRunning { pid, install_dir, .. }) => Err(format!(
             "{name} is already running (process {pid}, from {install_dir}). If you can't see it, close it in Task Manager and try again."
         )),
-        Outcome::Planned(Plan::NotInstalled { stores }) => Err(format!(
+        Outcome::Planned(Plan::NotInstalled { stores, .. }) => Err(format!(
             "{name} isn't installed from {}.",
             stores
                 .iter()
@@ -236,10 +236,16 @@ mod tests {
     fn the_json_lines_are_spelled_for_the_desktop() {
         let plan = Plan::NotInstalled {
             stores: vec![StoreKind::Steam],
+            pages: vec![homerun_core::engine::client::StorePage {
+                store: StoreKind::Steam,
+                url: "https://store.steampowered.com/app/105600/".into(),
+            }],
         };
         let line = serde_json::to_value(ClientEvent::Plan { plan: &plan }).unwrap();
         assert_eq!(line["event"], "client-plan");
         assert_eq!(line["plan"]["outcome"], "not-installed");
+        assert_eq!(line["plan"]["pages"][0]["store"], "steam");
+        assert_eq!(line["plan"]["pages"][0]["url"], "https://store.steampowered.com/app/105600/");
 
         let l = launch();
         let started = serde_json::to_value(ClientEvent::Started { launch: &l, pid: 4 }).unwrap();

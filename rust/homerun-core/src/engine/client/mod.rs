@@ -133,6 +133,9 @@ pub enum Plan {
     /// The game declares stores and none has it installed.
     NotInstalled {
         stores: Vec<StoreKind>,
+        /// Where to get it, in [`PREFERENCE`] order: each store's page for
+        /// this game, for the stores the descriptor gives one for.
+        pages: Vec<StorePage>,
     },
     /// The descriptor declares no store this build can start.
     NoStores,
@@ -181,7 +184,10 @@ pub fn plan(descriptor: &GameDescriptor, machine: &Machine, address: Option<&Joi
 
     match candidates.into_iter().next() {
         Some(launch) => Plan::Launch(launch),
-        None => Plan::NotInstalled { stores: declared },
+        None => Plan::NotInstalled {
+            stores: declared,
+            pages: store_pages(descriptor),
+        },
     }
 }
 
@@ -215,6 +221,41 @@ pub fn started(install_dir: &str, before: &[Process], now: &[Process]) -> Option
         .filter(|p| is_under(install_dir, &p.path))
         .find(|p| !before.iter().any(|b| b.pid == p.pid))
         .map(|p| p.pid)
+}
+
+/// A store's page for a game, where a player who does not have it can get it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorePage {
+    pub store: StoreKind,
+    pub url: String,
+}
+
+/// Each declared store's page for the game, in [`PREFERENCE`] order.
+///
+/// Built here from checked ids, on two fixed hosts, so whatever opens the
+/// link opens a store and nothing else: Steam's from `appId`, the Microsoft
+/// Store's from `storeId` (a Game Pass entry without one has no page).
+pub fn store_pages(d: &GameDescriptor) -> Vec<StorePage> {
+    PREFERENCE
+        .into_iter()
+        .filter_map(|kind| {
+            let entry = entry(d, kind)?;
+            let url = match kind {
+                StoreKind::Steam => {
+                    format!("https://store.steampowered.com/app/{}/", entry.app_id?)
+                }
+                StoreKind::Xbox => {
+                    let id = entry
+                        .store_id
+                        .as_deref()
+                        .filter(|id| xbox::is_store_id(id))?;
+                    format!("https://apps.microsoft.com/detail/{id}")
+                }
+                StoreKind::Unknown => return None,
+            };
+            Some(StorePage { store: kind, url })
+        })
+        .collect()
 }
 
 /// The first entry for a store with the ids that store needs, checked.
@@ -548,13 +589,38 @@ mod tests {
     }
 
     #[test]
-    fn nothing_installed_names_the_stores_to_get_it_from() {
+    fn nothing_installed_names_the_stores_and_their_pages() {
+        let mut d = palworld(JoinVia::Info);
+        // Without a store id, Game Pass has no page to link to.
         assert_eq!(
-            plan(&palworld(JoinVia::Info), &Machine::default(), None),
+            plan(&d, &Machine::default(), None),
             Plan::NotInstalled {
-                stores: vec![StoreKind::Steam, StoreKind::Xbox]
+                stores: vec![StoreKind::Steam, StoreKind::Xbox],
+                pages: vec![StorePage {
+                    store: StoreKind::Steam,
+                    url: "https://store.steampowered.com/app/1623730/".into()
+                }],
             }
         );
+
+        d.client.stores[0].store_id = Some("9NKV34XDW014".into());
+        let Plan::NotInstalled { pages, .. } = plan(&d, &Machine::default(), None) else {
+            panic!()
+        };
+        assert_eq!(
+            pages.iter().map(|p| p.url.as_str()).collect::<Vec<_>>(),
+            [
+                "https://store.steampowered.com/app/1623730/",
+                "https://apps.microsoft.com/detail/9NKV34XDW014"
+            ]
+        );
+
+        // A store id out of shape is no page, not a link to somewhere else.
+        d.client.stores[0].store_id = Some("../../evil".into());
+        let Plan::NotInstalled { pages, .. } = plan(&d, &Machine::default(), None) else {
+            panic!()
+        };
+        assert_eq!(pages.len(), 1);
     }
 
     #[test]

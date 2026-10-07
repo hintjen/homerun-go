@@ -162,6 +162,15 @@ pub fn is_application_id(value: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'.')
 }
 
+/// A Microsoft Store product id: twelve upper-case letters and digits
+/// (`9NKV34XDW014`).
+pub fn is_store_id(value: &str) -> bool {
+    value.len() == 12
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
 /// The one argument `explorer.exe` is given. Both halves are re-checked here
 /// so that no caller can build a launch line from unchecked text.
 pub fn apps_folder_target(family: &str, application: &str) -> Option<String> {

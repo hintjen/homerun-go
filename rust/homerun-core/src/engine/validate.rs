@@ -1067,9 +1067,12 @@ fn check_client_stores(d: &GameDescriptor, r: &mut Report) {
                     r.problems
                         .push(format!("{at} is Steam and needs the game's appId."));
                 }
-                if s.package_family_name.is_some() || s.application_id.is_some() {
+                if s.package_family_name.is_some()
+                    || s.application_id.is_some()
+                    || s.store_id.is_some()
+                {
                     r.problems.push(format!(
-                        "{at} is Steam; packageFamilyName and applicationId belong to an xbox entry."
+                        "{at} is Steam; packageFamilyName, applicationId and storeId belong to an xbox entry."
                     ));
                 }
             }
@@ -1097,6 +1100,14 @@ fn check_client_stores(d: &GameDescriptor, r: &mut Report) {
                 if s.app_id.is_some() {
                     r.problems
                         .push(format!("{at} is Xbox; appId belongs to a steam entry."));
+                }
+                if s.store_id
+                    .as_deref()
+                    .is_some_and(|id| !xbox::is_store_id(id))
+                {
+                    r.problems.push(format!(
+                        "{at} has a storeId that is not a Microsoft Store product id: twelve                          upper-case letters and digits, the StoreId in MicrosoftGame.config."
+                    ));
                 }
                 if s.join == JoinVia::Url {
                     r.problems.push(format!(
@@ -1724,6 +1735,14 @@ mod tests {
         assert!(!says(&ok, "joinArgs"), "{ok:?}");
 
         assert!(says(&with(json!(["-join", "C:\\x.exe"])), "is not a flag"));
+        let store_id = |id: &str| {
+            problems_of(json!({ "client": { "stores": [{ "store": "xbox",
+                "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt",
+                "applicationId": "AppPalShipping", "storeId": id }] } }))
+        };
+        assert!(!says(&store_id("9NKV34XDW014"), "storeId"));
+        assert!(says(&store_id("9nkv34xdw014"), "storeId"));
+        assert!(says(&store_id("https://evil"), "storeId"));
         assert!(says(
             &with(json!(["-join", "{secret:rcon}"])),
             "is not a flag"

@@ -259,6 +259,12 @@ pub struct ClientStore {
     /// all (an add-on content package).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub application_id: Option<String>,
+    /// Xbox only, optional: the game's Microsoft Store product id (Palworld's
+    /// is `9NKV34XDW014`, the `StoreId` in its `MicrosoftGame.config`), for a
+    /// link to its store page when it is not installed. Steam's page comes
+    /// from `appId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_id: Option<String>,
     /// What Play does once the game is starting.
     #[serde(default)]
     pub join: JoinVia,

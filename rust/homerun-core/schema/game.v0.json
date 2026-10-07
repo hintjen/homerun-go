@@ -84,6 +84,10 @@
               "store": {
                 "description": "steam or xbox. An unknown store is skipped with a warning.",
                 "type": "string"
+              },
+              "storeId": {
+                "description": "Xbox, optional: the Microsoft Store product id (StoreId in MicrosoftGame.config), for a link to the store page when the game is not installed.",
+                "type": "string"
               }
             },
             "required": [

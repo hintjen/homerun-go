@@ -269,6 +269,10 @@ pub fn schema() -> Value {
                                     "type": "string",
                                     "description": "Xbox: the manifest's Application Id, declared because a package can have several or none."
                                 },
+                                "storeId": {
+                                    "type": "string",
+                                    "description": "Xbox, optional: the Microsoft Store product id (StoreId in MicrosoftGame.config), for a link to the store page when the game is not installed."
+                                },
                                 "join": {
                                     "enum": ["url", "args", "info"],
                                     "description": "url opens client.joinUrl, which starts the game and joins; args starts it with client.joinArgs (Steam only), which joins; both only for a game that honours them. info starts the game and shows the address."
@@ -633,6 +637,7 @@ mod tests {
                     app_id: Some(1623730),
                     package_family_name: Some("Example.Game_0123456789abc".into()),
                     application_id: Some("Game".into()),
+                    store_id: Some("9NKV34XDW014".into()),
                     join: JoinVia::Url,
                 }],
             },
