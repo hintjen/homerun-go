@@ -17,9 +17,10 @@ It comes in the engine's two halves:
 - **The decisions,** in `homerun-core::engine::client`: which copy to start,
   exactly what to run, and whether that also joins. Pure, like the rest of the
   crate.
-- **The effects,** in the runner (`homerun-game client launch`, phase 3 of
-  the plan): reading the registry and the store files, asking Windows for its
-  packages and processes, starting the program. Not built yet.
+- **The effects,** in `homerun-supervisor::client_launch`, run by the runner
+  as `homerun-game client plan|launch`: reading the registry and the store
+  files, asking Windows for its packages and processes, and starting the
+  program. See [The runner](#the-runner-homerun-game-client) below.
 
 Source: `rust/homerun-core/src/engine/client/`. The plan, with the research
 behind it and the decisions taken, is `plans/game-client-launch.md` in the
@@ -241,10 +242,111 @@ letters, digits and `:/._~-+%=&?`, so a filled link contains nothing a URL
 parser rewrites. That refuses a few templates the round trip would allow, and
 admits none it refused.
 
+## The runner: `homerun-game client`
+
+```text
+homerun-game client plan   games/palworld/game.json --json
+homerun-game client launch games/palworld/game.json --json [--link-file link.json] [--timeout-seconds 120]
+```
+
+- **`plan`** surveys the machine and prints the plan, and **starts nothing**.
+  The desktop asks it before anyone presses Play, to show the button's state:
+  not installed, already running, or which store will start.
+- **`launch`** prints the plan as soon as it has one, so the UI can open the
+  join modal while the game loads. It then runs the launch and prints whether
+  the game appeared.
+- **`--link-file`** is the server's link as the API returned it. Only a store
+  that joins by link needs it; the core turns it into the join address.
+
+Both are one short-lived invocation per press, **separate from `supervise`**,
+so a launch never touches a hosted server's session. `--json` prints one line
+per event:
+
+| `event` | Fields |
+|---|---|
+| `client-plan` | `plan`: the core's `Plan`, tagged by `outcome` (`launch`, `already-running`, `not-installed`, `no-stores`) |
+| `client-started` | `launch`, `pid` |
+| `client-not-started` | `launch`: nothing appeared before the timeout |
+| `client-failed` | `launch`, `message`: the program couldn't be started at all |
+
+A refusal is an answer, so it exits 0 with the plan on stdout. A non-zero exit
+means the command itself couldn't run (no descriptor, a bad argument).
+
+The runner advertises **`client-launch`** in `--features` and in `ready`. The
+desktop requires it before it offers Play, so an older runner leaves the button
+out rather than failing when it's pressed.
+
+### `homerun-supervisor/src/client_launch.rs`
+
+Behind the supervisor's **`client-launch`** feature, which turns on the core's
+`client-manifests`. Only the runner enables it; `npm run test:rust` does too.
+
+Everything that touches the machine is behind a small `Probe` trait. The whole
+flow (survey, plan, spawn, wait) is therefore tested on any computer against an
+in-memory fake, and only `WindowsProbe` needs Windows:
+
+| Question | How Windows answers it |
+|---|---|
+| Where is Steam? | `reg query HKCU\Software\Valve\Steam /v SteamPath` |
+| Which Store packages? | one `Get-AppxPackage` call, for the names before the `_` in the declared families, passed through an environment variable and never into the script's text |
+| What is running? | a Toolhelp snapshot, then each process's full image path (`QueryFullProcessImageNameW` with limited query rights, which is enough for the player's own processes) |
+| Start it | the plan's program with its argument list, detached and in its own process group, so it doesn't belong to the short-lived runner |
+
+**What's read.**
+- **Steam:** only the libraries Steam says may hold the declared app id. Steam's
+  own folder is always searched, because the older library file never listed it.
+- **Game Pass:** only the declared families, plus each one's two manifests.
+
+Files are read with `std`, capped at 1 MB, lossily as UTF-8, and never written.
+A file that's missing or unreadable costs precision, not the launch: see the
+manifests section.
+
+**Install folders are resolved through their links, and this is load-bearing.**
+A Game Pass game installed to another drive or folder runs from there, and
+Windows reports its process from there. On the dev machine:
+
+- The package's install location is
+  `C:\Program Files\WindowsApps\PocketpairInc.Palworld_…`.
+- That's a junction to `D:\WindowsApps\PocketpairInc.Palworld_…`, which is a
+  junction to `D:\XboxGames\Palworld\Content`.
+- The game runs as
+  `D:\XboxGames\Palworld\Content\Pal\Binaries\WinGDK\Palworld-WinGDK-Shipping.exe`.
+
+Compared as Windows reports the package, the game was never seen: not as
+started, and not as already running. The first real launch test ran into this.
+
+So the probe's `resolve` follows every link before the core sees a folder:
+
+- It uses `canonicalize` where the folder can be opened.
+- Otherwise it follows `read_link` hop by hop, up to 8, because `WindowsApps`
+  lets a user read a junction's target without opening what's behind it.
+- It writes the result without the `\\?\` prefix.
+
+Steam libraries get the same treatment. Note that `Get-CimInstance
+Win32_Process` reports the *unresolved* path, which makes a by-hand comparison
+look like it should have matched.
+
+**Waiting.** The process list is read before the launch and then every 500 ms,
+for up to 120 s by default. Steam may have to start, sign in and update first.
+The launch counts once `Launch::started` sees a new process.
+
+A survey is fast. On the dev machine, `client plan` for Palworld (Steam
+installed without it, Game Pass with it) took half a second, most of it
+`Get-AppxPackage`.
+
+`survey_this_machine` is an ignored test that surveys the machine it runs on
+and prints the plan, starting nothing:
+
+```text
+cargo test --manifest-path rust/homerun-supervisor/Cargo.toml --features client-launch survey_this_machine -- --ignored --nocapture
+```
+
 ## File map
 
 | File | Role |
 |---|---|
+| `homerun-supervisor/src/client_launch.rs` | `Probe`, `WindowsProbe`, `survey`, `launch`, `Outcome` |
+| `homerun-game-cli/src/client.rs` | `homerun-game client plan\|launch`, its arguments and its JSON lines |
 | `engine/client/mod.rs` | `plan`, `Launch::started`, `started`, `is_under`, `PREFERENCE` |
 | `engine/client/steam.rs` | KeyValues reader, `libraryfolders.vdf`, `appmanifest_*.acf`, `steam_exe` |
 | `engine/client/xbox.rs` | `Package`, `GameExecutable`, `find`, `executable_for`, id and path shapes, `apps_folder_target` |
@@ -257,6 +359,9 @@ admits none it refused.
 
 ## Triage
 
+Start with `homerun-game client plan <game> --json`: it shows what the runner
+found and decided, and starts nothing.
+
 - **Play says "not installed" and the game is installed on Steam.** Check
   that `libraryfolders.vdf` lists the library, that
   `appmanifest_<appid>.acf` is there, and that the registry's `SteamPath`
@@ -266,8 +371,11 @@ admits none it refused.
   descriptor's `applicationId` must be among the manifest's application ids.
 - **Play says "already running" and nothing is on screen.** A lingering
   process (Palworld does this). Close it in Task Manager and press Play again.
-- **The game opened but Homerun said it didn't start.** The timeout ran out
-  before a *new* process appeared.
+- **The game opened but Homerun said it didn't start, or it's running and Play
+  doesn't say so.** Most likely an install folder that wasn't resolved through
+  its junctions: compare the plan's `installDir` with the folder the process
+  really runs from. Otherwise the timeout ran out before a *new* process
+  appeared.
   - With an `executable` in the plan (Game Pass), compare it to the running
     game's path: a game update can move its executable, and
     `MicrosoftGame.config` is re-read on every launch.

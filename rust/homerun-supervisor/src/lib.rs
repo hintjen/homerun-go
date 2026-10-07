@@ -31,6 +31,10 @@
 /// compiled: a host registers its source at launch, long before it knows
 /// whether a socket will ever come up.
 pub mod app_logs;
+/// Starting a player's own copy of a game from Steam or Game Pass: the
+/// effects half of `homerun_core::engine::client`. Desktop only.
+#[cfg(feature = "client-launch")]
+pub mod client_launch;
 pub mod crash;
 /// Where this crate's own diagnostics go on a platform that captures neither
 /// stdout nor stderr. Android wires the `log` facade to logcat itself; iOS

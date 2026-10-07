@@ -102,6 +102,13 @@ device-ws = [
 
 ]
 
+# Starting a player's own copy of a game from Steam or Game Pass, for the
+# desktop's Play button: `client_launch.rs`, the effects half of
+# `homerun_core::engine::client`. Desktop only, so it turns on the core's
+# `client-manifests` (an XML reader no phone needs). Implies `process-engine`
+# for the Windows bindings it lists processes with.
+client-launch = ["process-engine", "homerun-core/client-manifests"]
+
 [dependencies]
 # Pumpkin stays an ordinary dependency at a pinned rev. Keeping our FFI in
 # this crate means upstream's Cargo.toml needs no crate-type change, which is
@@ -308,6 +315,9 @@ windows-sys = { version = "0.61", default-features = false, features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Diagnostics_Debug",
+    # A snapshot of every process, for the Play button's "is the game running
+    # yet" check. `client_launch.rs`.
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_WindowsProgramming",
     "Win32_System_SystemServices",
     "Win32_System_JobObjects",

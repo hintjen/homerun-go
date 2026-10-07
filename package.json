@@ -55,7 +55,7 @@
     "schema:descriptor": "cargo run --quiet --manifest-path rust/homerun-core/Cargo.toml --example descriptor-schema --",
     "test:core": "cargo test --manifest-path rust/homerun-core/Cargo.toml --features client-manifests",
     "test:core:lint": "cargo fmt --manifest-path rust/homerun-core/Cargo.toml --check && cargo clippy --manifest-path rust/homerun-core/Cargo.toml --all-targets --features client-manifests -- -D warnings",
-    "test:rust": "cargo test --manifest-path rust/homerun-supervisor/Cargo.toml --features game-engine",
+    "test:rust": "cargo test --manifest-path rust/homerun-supervisor/Cargo.toml --features game-engine,client-launch",
     "sync-contract": "node scripts/sync-contract.js",
     "conformance:ios": "node shared/conformance/check-coverage.js ios ios/HomerunHost/BridgeRouter.swift",
     "conformance:android": "node shared/conformance/check-coverage.js android android/app/src/main/java/app/gethomerun/mobile/BridgeRouter.kt"

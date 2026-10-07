@@ -23,8 +23,11 @@ path = "src/main.rs"
 # that cannot spawn one.
 #
 # `game-engine` implies `process-engine`, which is everything this needs.
+# `client-launch` is the Play button's `homerun-game client launch`, and it
+# turns on the core's desktop-only Game Pass manifest reader.
 homerun-supervisor = { package = "homerun-supervisor", path = "../homerun-supervisor", features = [
     "game-engine",
+    "client-launch",
 ] }
 homerun-core = { path = "../homerun-core" }
 

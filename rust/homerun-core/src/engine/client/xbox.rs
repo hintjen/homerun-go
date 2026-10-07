@@ -49,7 +49,9 @@ pub struct Package {
     pub signature_kind: String,
     pub is_framework: bool,
     /// The `Application Id`s in the package's manifest. Empty for a content
-    /// package with nothing to start.
+    /// package with nothing to start, and absent from what Windows itself
+    /// reports: the runner fills it from the manifest afterwards.
+    #[serde(default)]
     pub applications: Vec<String>,
     /// What `MicrosoftGame.config` says each application really runs. Empty
     /// when the package has no such file, or the runner could not read it;

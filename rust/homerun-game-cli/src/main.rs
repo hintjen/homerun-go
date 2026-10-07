@@ -1,4 +1,5 @@
 mod cli;
+mod client;
 mod extensions;
 mod network;
 mod prepare;
