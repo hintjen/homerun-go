@@ -47,6 +47,42 @@
             "string",
             "null"
           ]
+        },
+        "stores": {
+          "description": "Where a player can own the game, so Play can start their copy. Steam is preferred when several are installed.",
+          "items": {
+            "properties": {
+              "appId": {
+                "description": "Steam: the game's app id.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "applicationId": {
+                "description": "Xbox: the manifest's Application Id, declared because a package can have several or none.",
+                "type": "string"
+              },
+              "join": {
+                "description": "url opens client.joinUrl, which starts the game and joins; only for a game that honours it. info starts the game and shows the address.",
+                "enum": [
+                  "url",
+                  "info"
+                ]
+              },
+              "packageFamilyName": {
+                "description": "Xbox: the Store package's family name, <Name>_<publisher hash>.",
+                "type": "string"
+              },
+              "store": {
+                "description": "steam or xbox. An unknown store is skipped with a warning.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "type": "object"

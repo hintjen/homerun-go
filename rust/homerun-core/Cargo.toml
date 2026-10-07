@@ -31,7 +31,22 @@ serde_json = "1"
 # pulls in no `getrandom` and nothing platform-specific.
 ed25519-dalek = "2"
 
+# The second exception, and desktop-only: behind `client-manifests`, which no
+# mobile build enables. Starting a Game Pass game means reading two XML files
+# Windows games ship, `AppxManifest.xml` (which applications a package has)
+# and `MicrosoftGame.config` (which executable each one really runs). Both use
+# namespaces, entities and comments, which a hand-rolled reader gets quietly
+# wrong. roxmltree is a read-only tree with no dependencies of its own, and it
+# refuses a DTD by default, so an entity-expansion file is a parse error
+# rather than a memory bomb. See `engine::client::manifest`.
+roxmltree = { version = "0.21", optional = true }
+
 [features]
+# Reading Windows game manifests (`engine::client::manifest`). For the
+# desktop's runner only: a phone never starts a Game Pass game, so the
+# mobile builds leave it off and ship no XML parser.
+client-manifests = ["dep:roxmltree"]
+
 # The reference game extension (`engine::extensions::fixture`), for the
 # runner's tests. Never enabled in a release build: it is always on for this
 # crate's own tests, and nothing a player runs should know its name.

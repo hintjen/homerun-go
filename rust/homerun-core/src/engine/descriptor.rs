@@ -217,6 +217,73 @@ pub struct Client {
     /// never templated: a placeholder in it would be shown, not filled.
     #[serde(default)]
     pub join_hint: Option<String>,
+    /// Where a player can own the game, for the Play button that starts
+    /// their copy. Empty means Homerun cannot start this game's client, only
+    /// show its address. See [`super::client`].
+    #[serde(default)]
+    pub stores: Vec<ClientStore>,
+}
+
+/// One store a player can own the game on.
+///
+/// A flat struct with a `store` discriminant rather than a tagged enum, for
+/// [`RuntimeSource`]'s reason: a store added after this build shipped has to
+/// survive parsing, so that validation can warn about it in a sentence and
+/// the rest of the descriptor still loads, rather than serde refusing the
+/// whole file.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClientStore {
+    #[serde(default)]
+    pub store: StoreKind,
+    /// Steam only: the game's Steam app id (`steam://rungameid/<appId>`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<u32>,
+    /// Xbox only: the Store package's family name,
+    /// `<Name>_<publisher hash>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_family_name: Option<String>,
+    /// Xbox only: the `Application Id` in the package's manifest, the part
+    /// after the `!` in `shell:AppsFolder\<family>!<application>`.
+    ///
+    /// Declared, never taken from the manifest's first entry: a package can
+    /// carry several (Age of Empires IV has `Game` and `Editor`), or none at
+    /// all (an add-on content package).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    /// What Play does once the game is starting.
+    #[serde(default)]
+    pub join: JoinVia,
+}
+
+/// A store a game can be owned on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StoreKind {
+    Steam,
+    /// Xbox Game Pass and the Microsoft Store: one package system.
+    Xbox,
+    /// A store added after this build shipped. Skipped with a warning, so
+    /// the stores this build knows still work.
+    #[default]
+    #[serde(other)]
+    Unknown,
+}
+
+/// How a player gets from a started game to this server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JoinVia {
+    /// Open `client.joinUrl` through the store, which starts the game *and*
+    /// joins. Only for a game that honours it, and only where a person has
+    /// seen it work: `steam://connect` reaches a game only if the game wired
+    /// it up, and does nothing visible for most that did not.
+    Url,
+    /// Start the game, then show the address and `client.joinHint` for the
+    /// player to type in. The default, because it is true of every game.
+    #[default]
+    #[serde(other)]
+    Info,
 }
 
 /// What a setting is.
@@ -992,10 +1059,42 @@ mod tests {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
                 srv: None,
                 join_hint: None,
+                stores: vec![
+                    ClientStore {
+                        store: StoreKind::Steam,
+                        app_id: Some(1623730),
+                        join: JoinVia::Url,
+                        ..Default::default()
+                    },
+                    ClientStore {
+                        store: StoreKind::Xbox,
+                        package_family_name: Some("PocketpairInc.Palworld_ad4psfrxyesvt".into()),
+                        application_id: Some("AppPalShipping".into()),
+                        ..Default::default()
+                    },
+                ],
             },
             ..Default::default()
         })
         .unwrap();
+
+        assert_eq!(json["client"]["stores"][0]["store"], "steam");
+        assert_eq!(json["client"]["stores"][0]["appId"], 1623730);
+        assert_eq!(json["client"]["stores"][0]["join"], "url");
+        assert_eq!(json["client"]["stores"][1]["store"], "xbox");
+        assert_eq!(
+            json["client"]["stores"][1]["packageFamilyName"],
+            "PocketpairInc.Palworld_ad4psfrxyesvt"
+        );
+        assert_eq!(
+            json["client"]["stores"][1]["applicationId"],
+            "AppPalShipping"
+        );
+        assert_eq!(json["client"]["stores"][1]["join"], "info");
+        assert!(
+            json["client"]["stores"][1].get("appId").is_none(),
+            "a field a store does not use is left out, not written as null"
+        );
 
         assert_eq!(json["requires"]["ramMb"], 8192);
         assert_eq!(json["requires"]["diskMb"], 16000);
@@ -1052,6 +1151,28 @@ mod tests {
     fn a_port_without_a_protocol_is_udp() {
         let p: Port = serde_json::from_str(r#"{ "name": "game", "port": 28015 }"#).unwrap();
         assert_eq!(p.proto, Protocol::Udp);
+    }
+
+    /// A store or a join method this build has never heard of must not take
+    /// the descriptor down with it: the stores it does know still launch.
+    #[test]
+    fn an_unknown_store_or_join_method_still_parses() {
+        let d: GameDescriptor = serde_json::from_str(
+            r#"{ "id": "x", "client": { "stores": [
+                { "store": "epic", "catalogItemId": "abc" },
+                { "store": "steam", "appId": 7, "join": "teleport" }
+            ] } }"#,
+        )
+        .expect("unknown store values must be tolerated");
+        assert_eq!(d.client.stores[0].store, StoreKind::Unknown);
+        assert_eq!(d.client.stores[1].store, StoreKind::Steam);
+        assert_eq!(d.client.stores[1].join, JoinVia::Info);
+    }
+
+    #[test]
+    fn a_descriptor_without_stores_has_none() {
+        let d: GameDescriptor = serde_json::from_str(r#"{ "id": "x", "client": {} }"#).unwrap();
+        assert!(d.client.stores.is_empty());
     }
 
     #[test]

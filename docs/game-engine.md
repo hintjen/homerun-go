@@ -444,8 +444,8 @@ file and the types disagree, and names the command that regenerates it:
 npm run schema:descriptor -- rust/homerun-core/schema/game.v0.json
 ```
 
-Hand-written because `homerun-core` has three dependencies and a standing
-argument for each; `schemars` would be a fourth, pulled in to generate a
+Hand-written because `homerun-core` has three dependencies (and a desktop-only
+fourth behind a feature) and a standing argument for each; `schemars` would be a fourth, pulled in to generate a
 document that changes a few times a year. The risk is drift, and
 `the_schema_names_every_field_the_types_serialise` is the alarm: it serialises
 a descriptor with every field populated and asserts the schema describes each

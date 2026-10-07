@@ -57,6 +57,7 @@
 //!  - **steamcmd is anonymous only** ([`fetch`]) — a game needing an account
 //!    that owns it is out of scope rather than a credential to find.
 
+pub mod client;
 pub mod control;
 pub mod descriptor;
 pub mod doctor;
