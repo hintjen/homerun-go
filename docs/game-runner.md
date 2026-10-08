@@ -336,7 +336,12 @@ homerun-game launch games/example/game.json --accept-licence --server-dir server
 homerun-game stop --server-dir servers/example
 homerun-game probe games/example/game.json --accept-licence --observe-seconds 10
 homerun-game verify games/example/game.json --accept-licence --json
+homerun-game client plan games/palworld/game.json --json
+homerun-game client launch games/palworld/game.json --json
 ```
+
+`client` starts a player's own copy of a game, not a server: the Play button.
+It has its own page, [`game-client.md`](./game-client.md).
 
 Only pass --accept-licence after a person has actually accepted the applicable
 terms. Settings and host-generated secrets come from separate JSON files via

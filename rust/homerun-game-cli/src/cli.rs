@@ -22,6 +22,7 @@ use std::{
 const HELP: &str = "homerun-game supervise
 homerun-game doctor|fetch|launch|probe|verify <game.json or slug> [options]
 homerun-game stop --server-dir <folder> [--json]
+homerun-game client launch <game.json or slug> [--link-file <json>] [--json]
 
 Options:
   --accept-licence          Record your own acceptance of the game's terms
@@ -79,6 +80,11 @@ pub fn run() -> std::result::Result<(), String> {
             return Err("supervise accepts commands on stdin, not command-line options.".into());
         }
         return crate::runner::supervise();
+    }
+    // Starting a player's own copy of the game, for the Play button. Its own
+    // arguments and its own output; see `client.rs`.
+    if verb == "client" {
+        return crate::client::run(args);
     }
     if !["doctor", "fetch", "launch", "stop", "probe", "verify"].contains(&verb.as_str()) {
         return Err(HELP.into());

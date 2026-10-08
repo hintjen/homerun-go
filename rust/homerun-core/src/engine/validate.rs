@@ -1035,6 +1035,130 @@ fn check_servable(d: &GameDescriptor, r: &mut Report) {
             );
         }
     }
+    check_client_stores(d, r);
+}
+
+/// `client.stores`: the ids each store needs, in the shape it needs them, and
+/// a join link only where there is one to open.
+///
+/// An unknown store is a warning, not a problem: it comes from a newer
+/// schema, and the stores this build knows still start the game.
+fn check_client_stores(d: &GameDescriptor, r: &mut Report) {
+    use super::client::xbox;
+    use super::descriptor::{JoinVia, StoreKind};
+
+    let mut seen = HashSet::new();
+    for (i, s) in d.client.stores.iter().enumerate() {
+        let at = format!("client.stores[{i}]");
+        if s.store == StoreKind::Unknown {
+            r.warnings.push(format!(
+                "{at} names a store this build does not know, so Play skips it."
+            ));
+            continue;
+        }
+        if !seen.insert(s.store) {
+            r.problems.push(format!(
+                "{at} lists the same store twice; give each store one entry."
+            ));
+        }
+        match s.store {
+            StoreKind::Steam => {
+                if s.app_id.unwrap_or(0) == 0 {
+                    r.problems
+                        .push(format!("{at} is Steam and needs the game's appId."));
+                }
+                if s.package_family_name.is_some()
+                    || s.application_id.is_some()
+                    || s.store_id.is_some()
+                {
+                    r.problems.push(format!(
+                        "{at} is Steam; packageFamilyName, applicationId and storeId belong to an xbox entry."
+                    ));
+                }
+            }
+            StoreKind::Xbox => {
+                if !s
+                    .package_family_name
+                    .as_deref()
+                    .is_some_and(xbox::is_package_family_name)
+                {
+                    r.problems.push(format!(
+                        "{at} is Xbox and needs the package's packageFamilyName, \
+                         <Name>_<publisher hash>, as Get-AppxPackage shows it."
+                    ));
+                }
+                if !s
+                    .application_id
+                    .as_deref()
+                    .is_some_and(xbox::is_application_id)
+                {
+                    r.problems.push(format!(
+                        "{at} is Xbox and needs the applicationId from the package's \
+                         manifest: a letter, then letters, digits and dots."
+                    ));
+                }
+                if s.app_id.is_some() {
+                    r.problems
+                        .push(format!("{at} is Xbox; appId belongs to a steam entry."));
+                }
+                if s.store_id
+                    .as_deref()
+                    .is_some_and(|id| !xbox::is_store_id(id))
+                {
+                    r.problems.push(format!(
+                        "{at} has a storeId that is not a Microsoft Store product id: twelve                          upper-case letters and digits, the StoreId in MicrosoftGame.config."
+                    ));
+                }
+                if s.join == JoinVia::Url {
+                    r.problems.push(format!(
+                        "{at} joins by link, and Xbox has no connect link; use join \"info\"."
+                    ));
+                }
+                if s.join == JoinVia::Args {
+                    r.problems.push(format!(
+                        "{at} joins by launch arguments, and a Game Pass launch takes none; use join \"info\"."
+                    ));
+                }
+            }
+            StoreKind::Unknown => {}
+        }
+        if s.join == JoinVia::Url && d.client.join_url.is_none() {
+            r.problems.push(format!(
+                "{at} joins by link, and this game has no client.joinUrl to open."
+            ));
+        }
+        if s.join == JoinVia::Args && d.client.join_args.is_none() {
+            r.problems.push(format!(
+                "{at} joins by launch arguments, and this game has no client.joinArgs."
+            ));
+        }
+    }
+    check_join_args(d, r);
+}
+
+/// `client.joinArgs`: each element a flag or the address, and every port it
+/// names one the gateway carries. See `client::join::build_join_args`.
+fn check_join_args(d: &GameDescriptor, r: &mut Report) {
+    use super::client::join;
+
+    let Some(template) = &d.client.join_args else {
+        return;
+    };
+    if let Err(problem) = join::check_join_args(template) {
+        r.problems.push(problem);
+        return;
+    }
+    for name in join::join_args_ports(template) {
+        match d.ports.iter().find(|p| p.name == name) {
+            None => r.problems.push(format!(
+                "client.joinArgs uses a port called \"{name}\" that this game does not declare."
+            )),
+            Some(p) if !p.expose => r.problems.push(format!(
+                "client.joinArgs uses the \"{name}\" port, which players cannot reach: it is not exposed."
+            )),
+            Some(_) => {}
+        }
+    }
 }
 
 fn check_observe(d: &GameDescriptor, r: &mut Report) {
@@ -1525,6 +1649,121 @@ mod tests {
         assert!(says(&hint("Paste {host} into the box."), "joinHint"));
         assert!(says(&hint("Two\nlines."), "joinHint"));
         assert!(says(&hint(&"a".repeat(201)), "joinHint"));
+    }
+
+    #[test]
+    fn palworlds_two_stores_are_valid() {
+        let problems = problems_of(json!({ "client": { "stores": [
+            { "store": "steam", "appId": 1623730, "join": "info" },
+            { "store": "xbox", "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt",
+              "applicationId": "AppPalShipping", "join": "info" }
+        ] } }));
+        assert!(!says(&problems, "client.stores"), "{problems:?}");
+    }
+
+    #[test]
+    fn each_store_needs_its_own_ids_in_their_shape() {
+        let stores = |s: serde_json::Value| problems_of(json!({ "client": { "stores": [s] } }));
+        assert!(says(&stores(json!({ "store": "steam" })), "appId"));
+        assert!(says(
+            &stores(json!({ "store": "steam", "appId": 0 })),
+            "appId"
+        ));
+        assert!(says(
+            &stores(json!({ "store": "steam", "appId": 1, "applicationId": "Game" })),
+            "belong to an xbox entry"
+        ));
+        assert!(says(
+            &stores(
+                json!({ "store": "xbox", "packageFamilyName": "Palworld", "applicationId": "Game" })
+            ),
+            "packageFamilyName"
+        ));
+        assert!(says(
+            &stores(
+                json!({ "store": "xbox", "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt" })
+            ),
+            "applicationId"
+        ));
+        assert!(says(
+            &stores(
+                json!({ "store": "xbox", "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt",
+                            "applicationId": "Game", "appId": 5 })
+            ),
+            "belongs to a steam entry"
+        ));
+    }
+
+    #[test]
+    fn a_store_joins_by_link_only_where_there_is_one() {
+        let without_url = problems_of(json!({ "client": {
+            "joinUrl": null,
+            "stores": [{ "store": "steam", "appId": 1, "join": "url" }]
+        } }));
+        assert!(says(&without_url, "no client.joinUrl"));
+
+        let xbox = problems_of(json!({ "client": {
+            "joinUrl": "steam://connect/{host}:{port:game}",
+            "stores": [{ "store": "xbox", "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt",
+                         "applicationId": "Game", "join": "url" }]
+        } }));
+        assert!(says(&xbox, "no connect link"));
+    }
+
+    #[test]
+    fn a_store_listed_twice_is_refused_and_an_unknown_one_only_warned_about() {
+        let twice = problems_of(json!({ "client": { "stores": [
+            { "store": "steam", "appId": 1 }, { "store": "steam", "appId": 2 }
+        ] } }));
+        assert!(says(&twice, "same store twice"));
+
+        let unknown = json!({ "client": { "stores": [{ "store": "epic", "id": "x" }] } });
+        assert!(!says(&problems_of(unknown.clone()), "client.stores"));
+        assert!(says(&warnings_of(unknown), "does not know"));
+    }
+
+    /// The pilot (Rust) declares an exposed `game` port and a private `rcon`.
+    #[test]
+    fn join_arguments_are_flags_and_the_address_on_reachable_ports() {
+        let with = |args: serde_json::Value| {
+            problems_of(json!({ "client": {
+                "joinArgs": args,
+                "stores": [{ "store": "steam", "appId": 252490, "join": "args" }]
+            } }))
+        };
+        let ok = with(json!(["-join", "{host}", "-port", "{port:game}"]));
+        assert!(!says(&ok, "joinArgs"), "{ok:?}");
+
+        assert!(says(&with(json!(["-join", "C:\\x.exe"])), "is not a flag"));
+        let store_id = |id: &str| {
+            problems_of(json!({ "client": { "stores": [{ "store": "xbox",
+                "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt",
+                "applicationId": "AppPalShipping", "storeId": id }] } }))
+        };
+        assert!(!says(&store_id("9NKV34XDW014"), "storeId"));
+        assert!(says(&store_id("9nkv34xdw014"), "storeId"));
+        assert!(says(&store_id("https://evil"), "storeId"));
+        assert!(says(
+            &with(json!(["-join", "{secret:rcon}"])),
+            "is not a flag"
+        ));
+        assert!(says(
+            &with(json!(["-port", "{port:nope}"])),
+            "does not declare"
+        ));
+        assert!(says(&with(json!(["-port", "{port:rcon}"])), "not exposed"));
+
+        let missing = problems_of(json!({ "client": {
+            "stores": [{ "store": "steam", "appId": 252490, "join": "args" }]
+        } }));
+        assert!(says(&missing, "no client.joinArgs"));
+
+        let xbox = problems_of(json!({ "client": {
+            "joinArgs": ["-join", "{host}"],
+            "stores": [{ "store": "xbox", "packageFamilyName": "PocketpairInc.Palworld_ad4psfrxyesvt",
+                         "applicationId": "Game", "join": "args" }]
+        } }));
+        assert!(says(&xbox, "takes none"));
     }
 
     fn problems_of(patch: serde_json::Value) -> Vec<String> {

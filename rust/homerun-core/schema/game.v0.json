@@ -27,6 +27,14 @@
     },
     "client": {
       "properties": {
+        "joinArgs": {
+          "description": "Launch arguments that make the game join a server, for a store with join: args. Each element a flag (-join), {host}, {port:<name>}, or {host}:{port:<name>}.",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
         "joinHint": {
           "description": "One sentence on where the address goes in the game's own UI. Display only; never templated.",
           "maxLength": 200,
@@ -47,6 +55,47 @@
             "string",
             "null"
           ]
+        },
+        "stores": {
+          "description": "Where a player can own the game, so Play can start their copy. Steam is preferred when several are installed.",
+          "items": {
+            "properties": {
+              "appId": {
+                "description": "Steam: the game's app id.",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "applicationId": {
+                "description": "Xbox: the manifest's Application Id, declared because a package can have several or none.",
+                "type": "string"
+              },
+              "join": {
+                "description": "url opens client.joinUrl, which starts the game and joins; args starts it with client.joinArgs (Steam only), which joins; both only for a game that honours them. info starts the game and shows the address.",
+                "enum": [
+                  "url",
+                  "args",
+                  "info"
+                ]
+              },
+              "packageFamilyName": {
+                "description": "Xbox: the Store package's family name, <Name>_<publisher hash>.",
+                "type": "string"
+              },
+              "store": {
+                "description": "steam or xbox. An unknown store is skipped with a warning.",
+                "type": "string"
+              },
+              "storeId": {
+                "description": "Xbox, optional: the Microsoft Store product id (StoreId in MicrosoftGame.config), for a link to the store page when the game is not installed.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "type": "object"

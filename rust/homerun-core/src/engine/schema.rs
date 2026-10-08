@@ -238,6 +238,47 @@ pub fn schema() -> Value {
                         "type": ["string", "null"],
                         "maxLength": 200,
                         "description": "One sentence on where the address goes in the game's own UI. Display only; never templated."
+                    },
+                    "joinArgs": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": { "type": "string" },
+                        "description": "Launch arguments that make the game join a server, for a store with join: args. Each element a flag (-join), {host}, {port:<name>}, or {host}:{port:<name>}."
+                    },
+                    "stores": {
+                        "type": "array",
+                        "description": "Where a player can own the game, so Play can start their copy. Steam is preferred when several are installed.",
+                        "items": {
+                            "type": "object",
+                            "required": ["store"],
+                            "properties": {
+                                "store": {
+                                    "type": "string",
+                                    "description": "steam or xbox. An unknown store is skipped with a warning."
+                                },
+                                "appId": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "Steam: the game's app id."
+                                },
+                                "packageFamilyName": {
+                                    "type": "string",
+                                    "description": "Xbox: the Store package's family name, <Name>_<publisher hash>."
+                                },
+                                "applicationId": {
+                                    "type": "string",
+                                    "description": "Xbox: the manifest's Application Id, declared because a package can have several or none."
+                                },
+                                "storeId": {
+                                    "type": "string",
+                                    "description": "Xbox, optional: the Microsoft Store product id (StoreId in MicrosoftGame.config), for a link to the store page when the game is not installed."
+                                },
+                                "join": {
+                                    "enum": ["url", "args", "info"],
+                                    "description": "url opens client.joinUrl, which starts the game and joins; args starts it with client.joinArgs (Steam only), which joins; both only for a game that honours them. info starts the game and shows the address."
+                                }
+                            }
+                        }
                     }
                 }
             },
@@ -588,6 +629,17 @@ mod tests {
                 join_url: Some("steam://connect/{host}:{port:game}".into()),
                 srv: Some("_example".into()),
                 join_hint: None,
+                join_args: Some(vec!["-join".into(), "{host}".into()]),
+                // One entry carrying every store field, so the drift test
+                // sees each key; validation would refuse the mix.
+                stores: vec![ClientStore {
+                    store: StoreKind::Steam,
+                    app_id: Some(1623730),
+                    package_family_name: Some("Example.Game_0123456789abc".into()),
+                    application_id: Some("Game".into()),
+                    store_id: Some("9NKV34XDW014".into()),
+                    join: JoinVia::Url,
+                }],
             },
             settings: vec![Setting {
                 key: "maxPlayers".into(),

@@ -93,6 +93,12 @@ pub const FEATURES: &[&str] = &[
     // format by name at launch, so a host must require this name for a
     // descriptor with an INI config entry.
     "config-ini",
+    // `homerun-game client launch`: start a player's own copy of a game from
+    // Steam or Game Pass and say whether it appeared (`client.stores`,
+    // `homerun_core::engine::client`). The desktop requires this name before
+    // it offers Play, so an older runner leaves the button out rather than
+    // failing when it is pressed.
+    "client-launch",
 ];
 
 /// What Electron sends.
@@ -660,6 +666,13 @@ mod tests {
     #[test]
     fn this_runner_advertises_the_ini_config_writer() {
         assert!(FEATURES.contains(&"config-ini"));
+    }
+
+    /// The desktop offers Play only on a runner that advertises this, so it
+    /// has to be exactly this name.
+    #[test]
+    fn this_runner_advertises_client_launch() {
+        assert!(FEATURES.contains(&"client-launch"));
     }
 
     /// Absent is the answer for every source but vendor, and for a desktop

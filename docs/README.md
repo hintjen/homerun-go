@@ -26,6 +26,13 @@ September 21 review fixes, unresolved risks and corrections to validation claims
 Remote branches, completed engine work, Windows validation, and remaining
 desktop integration and real-game onboarding work.
 
+### [Starting a player's game client](./game-client.md)
+
+The Play button for a descriptor game: `client.stores`, the Steam and Xbox
+adapters, Steam first, the already-running check, the desktop-only manifest
+reader and why it may take an XML parser, and the join link ported from the
+desktop.
+
 ### [Game extensions](./game-extensions.md)
 
 Code only one game needs, compiled into the runner and chosen by name from its

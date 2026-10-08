@@ -33,7 +33,8 @@ running. It still runs; this is the source of truth.
 ## The shape: decisions in the core, transport in the hosts
 
 `homerun-core` is a pure crate — serde, serde_json, ed25519-dalek and nothing
-else. Its header states the rule: *decisions and shapes belong here, transport
+else (plus `roxmltree`, only in the desktop runner's `client-manifests`
+build; see [`game-client.md`](./game-client.md)). Its header states the rule: *decisions and shapes belong here, transport
 and processes do not.* The reporter obeys it. It is a **decision module**, not a
 transport: it returns a `reporting::Request { method, path, body, auth }` and
 the host performs it, exactly as `reporting::crash` already worked.
