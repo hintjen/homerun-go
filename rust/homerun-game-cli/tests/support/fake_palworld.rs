@@ -1,12 +1,14 @@
-//! A fake of Palworld's REST API on loopback, as much of it as a stop uses.
+//! A fake of Palworld's REST API on loopback, as much of it as a stop and the
+//! readiness probe use.
 //!
 //! `POST /v1/api/save` writes the world and `POST /v1/api/shutdown` exits,
-//! each only for `admin` and the password the game was given. It is strict
-//! where a sloppy stop would get away with something: a wrong or missing
-//! `Authorization` is 401, and a shutdown before a save is 409 and does not
-//! exit, so only save-then-shutdown with the right password ends the game
-//! with its world saved. The real server (v1.0.5) answered both with 200 and
-//! an empty body, which is what this answers.
+//! each only for `admin` and the password the game was given; `GET
+//! /v1/api/info` answers the server's name and version, for the same. It is
+//! strict where a sloppy stop would get away with something: a wrong or
+//! missing `Authorization` is 401, and a shutdown before a save is 409 and
+//! does not exit, so only save-then-shutdown with the right password ends the
+//! game with its world saved. The real server (v1.0.5) answered both with 200
+//! and an empty body, which is what this answers.
 //!
 //! Shared, through `#[path]`, by the runner's extension harness (a thread
 //! serving it) and the lifecycle tests' fake game (a process serving it),
@@ -70,8 +72,13 @@ pub fn serve(
         let route = request_line.trim_end().to_string();
         seen(format!("{route} auth={authorized} json={json} {body}"));
 
+        let mut answer = String::new();
         let (status, exit) = match route.as_str() {
             _ if !authorized => (401, false),
+            "GET /v1/api/info HTTP/1.1" => {
+                answer = r#"{"version":"v1.0.5.102999","servername":"Fake","description":"","worldguid":"0"}"#.into();
+                (200, false)
+            }
             "POST /v1/api/save HTTP/1.1" => match behaviour.refuse_save {
                 Some(status) => (status, false),
                 None => {
@@ -87,7 +94,8 @@ pub fn serve(
         let mut stream = reader.into_inner();
         let _ = write!(
             stream,
-            "HTTP/1.1 {status} Fake\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 {status} Fake\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}",
+            answer.len()
         );
         let _ = stream.flush();
         if exit {

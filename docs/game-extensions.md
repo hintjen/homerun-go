@@ -35,8 +35,8 @@ console. That is what keeps an extension small enough to review and
 unable to get the safety rules wrong.
 
 **Two release extensions exist: `hytale`**, Hytale's server sign-in, and
-**`palworld`**, Palworld's stop through its REST API (both below). The
-test-only `fixture` is the third, and the example to copy.
+**`palworld`**, Palworld's stop and readiness through its REST API (both
+below). The test-only `fixture` is the third, and the example to copy.
 
 ### When something belongs in an extension
 
@@ -69,6 +69,7 @@ half may not add one:
 | `hosts` | where the extension may reach over HTTPS, and send a person to sign in |
 | `config_schema` | its config's JSON Schema, spliced into `game.v0.json` |
 | `stops` | whether it can ask a server to stop, so a descriptor may say `stop.via: "extension"` |
+| `probes_ready` | whether it can tell a starting server is up without its log, so the runner runs its `probe_ready` beside the `ready.marker` |
 | `loopback` | the server's own private ports it may reach, and the host secrets it may sign in to them with, both by name (`no_loopback` for none) |
 
 **The registry is two lists.** `PUBLISHED` is what a release build carries and
@@ -116,8 +117,8 @@ text.
 
 The pure half of the reference extension: it requires a bare `host`,
 supplies `token` (secret) and `profile` (plain), and allows exactly its
-`host`. It `stops`, and reaches on loopback the port and secret its config's
-`stop.port` and `stop.secret` name.
+`host`. It `stops` and `probes_ready`, and reaches on loopback the port and
+secret its config's `stop.port` and `stop.secret` name.
 
 ## The effects half — `homerun-game-cli/src/extensions/mod.rs`
 
@@ -132,6 +133,7 @@ does nothing.
 | `Run::on_line` | every output line, already redacted | output pump | **no**: returns `Action`s |
 | `Run::on_state` | `Started` (with `server-started`); `Stopping` (the first stop seen) | sampler | **no**: returns `Action`s |
 | `stop` | the polite rung of a stop, for `stop.via: "extension"` | its own | up to the stop's `graceMs`, then abandoned |
+| `probe_ready` | every 2 s while the server starts, for a spec that `probes_ready`, until a yes, the marker, or a stop | its own | until `ctx.cancelled()` |
 | `Run::on_stop` | after the process tree has exited, before the terminal event | its own | up to `STOP_BUDGET` (10 s), then abandoned |
 | `forget` | `extension-forget`: delete what it keeps on this machine | main | briefly |
 | `status` | `extension-status`: signed in or not, and as whom | main | briefly |
@@ -150,6 +152,19 @@ kill. Either way the `host` lines name what happened (`Stop: the palworld
 extension could not ask the server to stop: … (0.1 s after the stop was
 asked for).`). An extension that cannot stop a server keeps the default,
 which refuses.
+
+**`probe_ready` is the other road to ready.** A server's `ready.marker` is
+log text, and log text can be lost: Palworld on Windows prints some startup
+lines through a wide-character path that arrives garbled or not at all, and
+a server that never prints its marker stays "Starting" with no tunnel. An
+extension whose spec `probes_ready` is asked on a thread of its own every
+`PROBE_INTERVAL` (2 s) while the server starts; its first `Ok(true)` sets the
+same flag the marker does, with a `host` line (`Ready: the palworld extension
+found the server answering.`). Whichever comes first wins, and then nobody
+asks again. `server-started` still waits for every declared port to be
+bound. `Ok(false)`, an error or a panic is "not yet" (a panic also ends the
+probing for that run): a probe can make a server ready, never fail one —
+the ready timeout still does that.
 
 ### The rules the runner enforces, so no extension can get them wrong
 
@@ -194,6 +209,9 @@ stop is the only thing that may talk to it: `config()`, `server_id()`,
 (a line in the stop's own account, on the `host` stream), and
 `local_http(port, request)` — nothing else. The stores, prompts and
 vendor HTTPS are withheld: a stop has a grace to keep, not a sign-in to do.
+`probe_ready`'s context is the same reach without `note`: `config()`,
+`server_id()`, `cancelled()` (ready the other way, a stop, or the server
+gone) and `local_http`, resolved from the same `loopback` list.
 
 **Withheld on purpose:** processes, files and sockets outside the list above;
 the host's secrets (an extension never sees `rcon` or any other generated
@@ -260,6 +278,7 @@ and every capability, which makes it the example a new extension starts from:
 | `remember` | count starts in the sealed machine store |
 | `vendorUrl` / `vendorOnStop` | `GET` in `begin`, `DELETE` in `on_stop` |
 | `stop` | its stop: `port`, `secret`, `user`, `path`, and `how` — `http` (`POST` the path, the default), `exit-then-wait`, `refuse`, `hang`, `panic` |
+| `readyPath` | its readiness probe: `GET` it the way the stop reaches the admin API; any 2xx is ready |
 
 ## The primitives — `homerun-supervisor`, behind `game-engine`
 
@@ -438,7 +457,7 @@ against one is what proves them. Whether a passthrough server survives a failed
 hourly session refresh — the case the console fallback exists for — is also
 open.
 
-## `palworld` — Palworld's stop
+## `palworld` — Palworld's stop and readiness
 
 A Palworld dedicated server reads nothing on stdin, so a console stop has
 nowhere to go, and on Windows a piped child has no console for a control
@@ -448,6 +467,7 @@ and whatever it had not saved is lost. This extension is its polite rung.
 | When | What happens |
 |---|---|
 | Start | Nothing. The server needs nothing from Homerun but its settings; the admin password is a host secret the descriptor writes into `PalWorldSettings.ini`. |
+| Starting | `GET /v1/api/info` every 2 s, the same way the stop signs in; the first 2xx makes the server ready even if its `ready.marker` line never arrives (see `probe_ready` above). |
 | Stop | `POST /v1/api/save` with `{}`, then — only if that answered 2xx — `POST /v1/api/shutdown` with `{"waittime": <s>, "message": <m>}`, both as `admin` with the host's admin password, on the REST port on loopback. Any other answer, or none, is a stop that did not happen, and the ladder goes on to terminate. |
 
 **The descriptor** keeps the REST port private and stops through the

@@ -73,6 +73,12 @@ pub struct ExtensionSpec {
     /// that says `stop.via: "extension"`. `validate` refuses that stop for an
     /// extension that cannot.
     pub stops: bool,
+    /// Whether it can tell that a starting server is ready without reading
+    /// its log: the runner then asks it every few seconds while the server
+    /// starts, and the server is ready on whichever comes first, that answer
+    /// or the descriptor's `ready.marker`. Either way, `server-started` still
+    /// waits for every declared port to be bound.
+    pub probes_ready: bool,
     /// The server's own private ports the extension may reach on loopback,
     /// and the host secrets it may sign in to them with -- both by name, read
     /// from a config that has passed [`Self::validate`].

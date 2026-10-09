@@ -1227,6 +1227,75 @@ fn palworld_with_the_wrong_password_is_refused_by_the_game() {
     h.eof();
 }
 
+/// The requests the fake Palworld saw, in order.
+fn rest_log(f: &Fixture) -> Vec<String> {
+    fs::read_to_string(f.root.join("server/rest-log"))
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// A Palworld whose marker line never arrives -- as on the Windows server
+/// that printed it garbled, or not at all -- is still started, by its REST
+/// API answering; once it has, the probing stops, and the stop still saves.
+#[test]
+fn palworld_is_ready_by_its_rest_api_when_the_marker_never_comes() {
+    let f = Fixture::new();
+    let mut start = palworld_start(&f);
+    start["descriptor"]["ready"]["marker"] = json!("a line this game never prints");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    noted(
+        &stop_notes(&h),
+        "Ready: the palworld extension found the server answering",
+    );
+    let at_start = rest_log(&f);
+    assert_eq!(
+        at_start,
+        ["GET /v1/api/info HTTP/1.1 auth=true json=false "],
+        "one answered probe is all it takes"
+    );
+    // Longer than two probe intervals: no more asking once started.
+    thread::sleep(Duration::from_secs(5));
+    assert_eq!(rest_log(&f), at_start, "the probing went on after ready");
+
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    let log = rest_log(&f);
+    assert_eq!(log.len(), 3, "{log:#?}");
+    assert!(log[1].starts_with("POST /v1/api/save"), "{log:#?}");
+    assert!(log[2].starts_with("POST /v1/api/shutdown"), "{log:#?}");
+    no_secret_leaked(&h);
+    h.eof();
+}
+
+/// A probe the game refuses never makes it ready: with no marker either,
+/// the start ends at the ready timeout as it always has.
+#[test]
+fn palworld_refusing_the_probe_is_not_ready() {
+    let f = Fixture::new();
+    let mut start = palworld_start(&f);
+    let d = &mut start["descriptor"];
+    d["ready"] = json!({"marker":"a line this game never prints","timeoutMs":5000});
+    d["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_ADMIN_PASSWORD"] =
+        json!("something-else");
+    let mut h = Host::new();
+    h.send(start);
+    assert_eq!(h.until("error")["code"], "ready_timeout");
+    h.until("server-crashed");
+    assert!(!h.seen.iter().any(|v| v["event"] == "server-started"));
+    let log = rest_log(&f);
+    assert!(
+        log.iter()
+            .any(|l| l == "GET /v1/api/info HTTP/1.1 auth=false json=false "),
+        "{log:#?}"
+    );
+    no_secret_leaked(&h);
+    h.eof();
+}
+
 /// The runner has no API in front of it, so core's backstop is the only
 /// thing between a server name and a game's own argument parser. A name that
 /// *is* a switch must be refused before anything is spawned, not passed along

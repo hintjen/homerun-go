@@ -1,4 +1,4 @@
-//! Palworld's stop — the pure half.
+//! Palworld's stop and readiness — the pure half.
 //!
 //! A Palworld dedicated server reads nothing on stdin, so a console stop has
 //! nowhere to go, and on Windows a piped child has no console for a control
@@ -28,9 +28,17 @@
 //! descriptor also writes into `PalWorldSettings.ini`. The extension names
 //! it and the runner resolves it; the extension never sees it.
 //!
-//! What this half decides: the config and its defaults, the two requests,
-//! and how a refusal is explained. The runner's `extensions/palworld.rs`
-//! only sends them.
+//! **Readiness.** The same API also says when the server is up: while it
+//! starts, the runner has the extension ask `GET /v1/api/info` (as `admin`,
+//! the same way) every few seconds, and the first 2xx makes the server
+//! ready, whether or not the descriptor's `ready.marker` was printed. The
+//! marker alone is not enough on Windows: some of the server's startup lines
+//! go through a wide-character path and arrive as mojibake or not at all,
+//! and a server that never prints its marker stays "Starting" with no tunnel.
+//!
+//! What this half decides: the config and its defaults, the requests, and
+//! how a refusal is explained. The runner's `extensions/palworld.rs` only
+//! sends them.
 
 use serde_json::{json, Value};
 
@@ -45,6 +53,7 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     hosts,
     config_schema,
     stops: true,
+    probes_ready: true,
     loopback,
 };
 
@@ -56,6 +65,10 @@ pub const SAVE: &str = "/v1/api/save";
 
 /// Exits after `waittime` seconds, telling players `message`.
 pub const SHUTDOWN: &str = "/v1/api/shutdown";
+
+/// The server's name and version. Any 2xx means its REST API is up, which is
+/// the readiness probe's whole question.
+pub const INFO: &str = "/v1/api/info";
 
 /// The longest `shutdownWait`. It is spent inside the stop's grace.
 pub const MAX_WAIT_SECS: u64 = 300;
@@ -165,7 +178,7 @@ fn validate(config: &Value, descriptor: &GameDescriptor, report: &mut Report) {
     }
     if descriptor.stop.via != StopVia::Extension {
         report.warnings.push(
-            "this game names the Palworld extension, whose only job is its stop, and does \
+            "this game names the Palworld extension, whose main job is its stop, and does \
              not stop through it (stop.via \"extension\")."
                 .into(),
         );
@@ -287,7 +300,7 @@ mod tests {
             }
         );
         assert!(hosts(&config).is_empty());
-        const { assert!(SPEC.stops) };
+        const { assert!(SPEC.stops && SPEC.probes_ready) };
         assert!(SPEC.supplies.is_empty());
     }
 

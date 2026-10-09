@@ -98,7 +98,13 @@ with port_unavailable; this version does not choose replacement ports. As
 with any bind preflight, another process can race the check. Readiness is not
 published until both the marker and the owned process tree's declared listening ports
 are observed. Ports are emitted before server-started. A missing marker or
-port reaches ready_timeout and follows the game's stop ladder.
+port reaches ready_timeout and follows the game's stop ladder. A game whose
+extension's spec `probes_ready` (Palworld's) has a second road to the first
+half: the extension asks the server itself every 2 s while it starts
+(Palworld: `GET /v1/api/info` on its private REST port), and the first yes
+counts as the marker would, with a `host` line saying so; the ports are still
+required. No feature name: no descriptor field changed, a host has nothing
+to require, and an older runner simply waits for the marker alone.
 
 Windows inspects native IPv4/IPv6 TCP and UDP tables for the entire owned Job
 Object, continuously from spawn through shutdown. Inspection runs independently
@@ -386,7 +392,8 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 **Stopped before server-started:** inspect error and server-log events. A
 runtime stamp alone is not enough; its executable must exist too.
 
-**Ready marker but no server-started:** a declared port has not been observed
+**Ready marker (or `Ready: the <name> extension found the server
+answering`) but no server-started:** a declared port has not been observed
 in the owned Windows process tree (or the root PID on the Linux development
 adapter). Do not publish guessed ports to get past the check.
 
