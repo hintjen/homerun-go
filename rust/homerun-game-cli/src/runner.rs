@@ -453,7 +453,7 @@ fn run(
     // The game's extension, if it has one, goes first: it may need a person
     // to sign in, and what it supplies is part of the launch line below.
     let mut extension = extensions::begin(d, &id, &root, &server, stop, out, prompts)?;
-    let prepared = (|| -> Result<prepare::Prepared> {
+    let prepared = (|| -> Result<(prepare::Prepared, Option<extensions::Local>)> {
         if stop.should_stop() {
             return Err(fail(codes::SPAWN_FAILED, "The start was cancelled."));
         }
@@ -468,6 +468,12 @@ fn run(
             java.as_deref(),
             extension.as_ref(),
         )?;
+        // What the extension's readiness probe may reach, resolved like its
+        // stop's, so a missing secret fails here rather than after a spawn.
+        let probe = match &extension {
+            Some(extension) => extension.probe_local(d, &p.ports, &secrets)?,
+            None => None,
+        };
         runtime_owner.install(d, &server)?;
         if let Some(job) = runtime_owner.process_job() {
             p.engine.require_job(job);
@@ -477,10 +483,10 @@ fn run(
                 ProcessJob::required_process().map_err(|e| fail(codes::SPAWN_FAILED, e))?,
             ));
         }
-        Ok(p)
+        Ok((p, probe))
     })();
-    let p = match prepared {
-        Ok(p) => p,
+    let (p, probe) = match prepared {
+        Ok(prepared) => prepared,
         Err(e) => {
             // Nothing was spawned, but `begin` may have made something the
             // extension has to undo.
@@ -514,6 +520,20 @@ fn run(
     let timed_out = Arc::new(AtomicBool::new(false));
     let exposed = Arc::new(AtomicBool::new(false));
     let started = Arc::new(AtomicBool::new(false));
+    // The extension's other road to ready, beside the marker: it sets the
+    // same `ready`, and the sampler below still waits for every port.
+    let prober = match (&extension, probe) {
+        (Some(extension), Some(local)) => {
+            let (done, stop) = (done.clone(), stop.clone());
+            extension.ready_probe(
+                local,
+                ready.clone(),
+                move || done.load(Ordering::SeqCst) || stop.should_stop(),
+                out.clone(),
+            )
+        }
+        _ => None,
+    };
     let tail = Mutex::new(VecDeque::new());
     let observed_ports = Arc::new(Mutex::new(Vec::new()));
     let network_failure = Arc::new(Mutex::new(None));
@@ -727,6 +747,9 @@ fn run(
     done.store(true, Ordering::SeqCst);
     let _ = monitor.join();
     let _ = sampler.join();
+    if let Some(prober) = prober {
+        let _ = prober.join();
+    }
     let extension_failure = extension.as_ref().and_then(|e| e.failure());
     if let Some(failure) = network_failure.lock().unwrap().take() {
         out.error(Some(&id), failure);

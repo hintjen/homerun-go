@@ -21,6 +21,7 @@
 //! | `vendorUrl` | `GET` it in `begin` and note what came back |
 //! | `vendorOnStop` | `DELETE` it in `on_stop` and note the status |
 //! | `stop` | how it stops a server, below |
+//! | `readyPath` | its readiness probe: `GET` this path the way its stop reaches the admin API; any 2xx is ready. Without it, never ready this way |
 //!
 //! It always supplies `token` (secret, [`TOKEN`]) and `profile` (plain).
 //!
@@ -40,8 +41,8 @@ use serde_json::{json, Value};
 
 use super::{
     Action, Begun, Choice, ExtError, ExtensionStatus, GameExtension, LocalRequest, MachineContext,
-    Outcome, Prompt, Purpose, Request, Run, RunState, SignIn, StartContext, StopContext,
-    StopRungContext,
+    Outcome, ProbeContext, Prompt, Purpose, Request, Run, RunState, SignIn, StartContext,
+    StopContext, StopRungContext,
 };
 use crate::protocol::codes;
 
@@ -198,6 +199,16 @@ impl GameExtension for Fixture {
             ctx.note("the fixture saw its stop was over");
         }
         Ok(())
+    }
+
+    fn probe_ready(&self, ctx: &ProbeContext) -> Result<bool, ExtError> {
+        let Some(path) = ctx.config()["readyPath"].as_str() else {
+            return Ok(false);
+        };
+        let stop = &ctx.config()["stop"];
+        let text = |key: &str, default: &str| stop[key].as_str().unwrap_or(default).to_string();
+        let request = LocalRequest::get(path).basic(text("user", "admin"), text("secret", ""));
+        Ok(ctx.local_http(&text("port", ""), &request)?.ok())
     }
 }
 

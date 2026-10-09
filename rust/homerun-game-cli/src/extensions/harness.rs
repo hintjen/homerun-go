@@ -145,6 +145,36 @@ impl Harness {
         (result, notes.into_inner().unwrap())
     }
 
+    /// Ask the extension's `probe_ready` once, as the runner's probe thread
+    /// does, with what it may reach resolved as for `stop_rung`.
+    pub fn probe(
+        &self,
+        d: &GameDescriptor,
+        ports: &[(&str, u16)],
+        secrets: &[(&str, &str)],
+    ) -> std::result::Result<bool, ExtError> {
+        let ports = ports.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let secrets = secrets
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let local = resolve_local(self.spec, &self.config, d, &ports, &secrets).unwrap();
+        let begun = Instant::now();
+        let cancelled = || begun.elapsed() > Duration::from_secs(10);
+        let ctx = ProbeContext {
+            name: self.spec.name,
+            config: &self.config,
+            server_id: "s1",
+            local: &local,
+            cancelled: &cancelled,
+        };
+        registry()
+            .into_iter()
+            .find(|e| e.name() == self.spec.name)
+            .unwrap()
+            .probe_ready(&ctx)
+    }
+
     /// Every event sent so far.
     pub fn events(&self) -> Vec<Event> {
         self.seen.lock().unwrap().clone()
@@ -355,5 +385,52 @@ mod palworld {
             result.unwrap_err().message.contains("Nothing answered"),
             "a closed port answered"
         );
+    }
+
+    // ─── readiness ───────────────────────────────────────────────────────
+
+    /// Ready once its REST API answers, asked the way the stop asks: a GET
+    /// of the server's info as `admin` with the host's password, and nothing
+    /// that changes the server.
+    #[test]
+    fn it_is_ready_once_the_rest_api_answers() {
+        let (port, served) = fake(Behaviour {
+            password: "hunter2".into(),
+            ..Behaviour::default()
+        });
+        let h = Harness::for_extension("palworld", json!({}));
+        let probed = h.probe(&descriptor(), &[("rest", port)], &[("admin", "hunter2")]);
+        assert_eq!(probed, Ok(true));
+        let (seen, saved) = served.lock().unwrap().clone();
+        assert_eq!(seen, ["GET /v1/api/info HTTP/1.1 auth=true json=false "]);
+        assert!(!saved);
+    }
+
+    /// A refused password is an answer, but not a yes.
+    #[test]
+    fn a_refused_probe_is_not_ready() {
+        let (port, served) = fake(Behaviour {
+            password: "hunter2".into(),
+            ..Behaviour::default()
+        });
+        let h = Harness::for_extension("palworld", json!({}));
+        let probed = h.probe(&descriptor(), &[("rest", port)], &[("admin", "wrong")]);
+        assert_eq!(probed, Ok(false));
+        let (seen, _) = served.lock().unwrap().clone();
+        assert_eq!(seen, ["GET /v1/api/info HTTP/1.1 auth=false json=false "]);
+    }
+
+    /// Before the API is up there is nothing listening: not ready, and not
+    /// a yes by mistake. The runner takes the error as "not yet".
+    #[test]
+    fn nothing_listening_yet_is_not_ready() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let h = Harness::for_extension("palworld", json!({}));
+        let probed = h.probe(&descriptor(), &[("rest", port)], &[("admin", "x")]);
+        assert_ne!(probed, Ok(true));
     }
 }

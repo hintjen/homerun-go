@@ -54,6 +54,7 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     hosts,
     config_schema,
     stops: false,
+    probes_ready: false,
     loopback: super::no_loopback,
 };
 

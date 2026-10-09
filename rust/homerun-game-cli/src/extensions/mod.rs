@@ -39,6 +39,12 @@
 //!  - **The server's own admin API is reached by name.** `local_http` takes
 //!    a port and a secret by name, each one the spec's `loopback` lists; the
 //!    runner resolves them, and only ever connects to `127.0.0.1`.
+//!  - **A readiness probe only ever makes a server ready.**
+//!    [`GameExtension::probe_ready`] runs on a thread of its own every
+//!    [`PROBE_INTERVAL`] while the server starts, and stops at the first yes,
+//!    the marker, or a stop. A no, an error or a panic is never a failed
+//!    start: the ready timeout still decides that, and `server-started` still
+//!    waits for every declared port.
 
 // The interface is wider than the extensions that exist today use: it is
 // what every future extension is written against, and trimming it to fit
@@ -105,6 +111,10 @@ const LOOPBACK_HTTP: bool = cfg!(feature = "test-extensions");
 /// waiting for it.
 pub const STOP_BUDGET: Duration = Duration::from_secs(10);
 
+/// How long before the first readiness probe, and between two of them.
+/// Each is one request to loopback.
+pub const PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
 /// The least time between two console commands one run's extension sends.
 const CONSOLE_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -160,6 +170,19 @@ pub trait GameExtension: Send + Sync {
             codes::EXTENSION_FAILED,
             "This game's extension cannot stop a server.",
         ))
+    }
+
+    /// Whether the starting server is up, for an extension whose spec
+    /// `probes_ready`: the other road to ready, beside the descriptor's
+    /// `ready.marker`, for a server whose log cannot be trusted to print it.
+    ///
+    /// Asked on a thread of its own every [`PROBE_INTERVAL`] while the server
+    /// starts, until it answers `Ok(true)`, the marker is seen, or a stop is
+    /// asked for -- never after. `Ok(false)` and an error both mean "not
+    /// yet": a probe cannot fail a start. Must return promptly once
+    /// [`ProbeContext::cancelled`] is true.
+    fn probe_ready(&self, _ctx: &ProbeContext) -> std::result::Result<bool, ExtError> {
+        Ok(false)
     }
 }
 
@@ -430,6 +453,39 @@ impl StopRungContext<'_> {
         request: &LocalRequest,
     ) -> std::result::Result<Response, ExtError> {
         local_http_to(self.name, self.local, port, request, &|| self.cancelled())
+    }
+}
+
+/// `probe_ready`'s view: the starting server's own admin API, and nothing
+/// else -- the same reach as a stop's.
+pub struct ProbeContext<'a> {
+    name: &'static str,
+    config: &'a Value,
+    server_id: &'a str,
+    local: &'a Local,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl ProbeContext<'_> {
+    pub fn config(&self) -> &Value {
+        self.config
+    }
+    pub fn server_id(&self) -> &str {
+        self.server_id
+    }
+    /// The server is ready some other way, a stop was asked for, or it has
+    /// exited. Nobody wants this answer any more.
+    pub fn cancelled(&self) -> bool {
+        (self.cancelled)()
+    }
+    /// As [`StopRungContext::local_http`]: `127.0.0.1` on a private port the
+    /// spec's `loopback` names, signed in with a secret it names.
+    pub fn local_http(
+        &self,
+        port: &str,
+        request: &LocalRequest,
+    ) -> std::result::Result<Response, ExtError> {
+        local_http_to(self.name, self.local, port, request, self.cancelled)
     }
 }
 
@@ -715,6 +771,69 @@ impl Active {
         )))
     }
 
+    /// What the readiness probe may reach, resolved as the stop's is, when
+    /// the extension's spec `probes_ready`. Fails the start, before anything
+    /// is spawned, for a secret the host did not provide.
+    pub fn probe_local(
+        &self,
+        d: &GameDescriptor,
+        ports: &BTreeMap<String, u16>,
+        secrets: &BTreeMap<String, String>,
+    ) -> Result<Option<Local>> {
+        if !self.spec.probes_ready {
+            return Ok(None);
+        }
+        resolve_local(self.spec, &self.config, d, ports, secrets).map(Some)
+    }
+
+    /// Ask the extension whether the server is ready, on a thread of its
+    /// own, every [`PROBE_INTERVAL`] -- until it says yes, which sets `ready`
+    /// as the marker does; or `ready` is set the other way; or `quit`.
+    pub fn ready_probe(
+        &self,
+        local: Local,
+        ready: Arc<AtomicBool>,
+        quit: impl Fn() -> bool + Send + 'static,
+        out: Output,
+    ) -> Option<JoinHandle<()>> {
+        let (extension, _) = find(self.spec.name)?;
+        let (name, config, server_id) =
+            (self.spec.name, self.config.clone(), self.server_id.clone());
+        thread::Builder::new()
+            .name("game-extension-ready".into())
+            .spawn(move || {
+                probe_loop(PROBE_INTERVAL, &ready, &quit, &mut |cancelled| {
+                    let ctx = ProbeContext {
+                        name,
+                        config: &config,
+                        server_id: &server_id,
+                        local: &local,
+                        cancelled,
+                    };
+                    match catch_unwind(AssertUnwindSafe(|| extension.probe_ready(&ctx))) {
+                        // Said before `ready` is set, so the line is in
+                        // the log ahead of the `server-started` it leads to.
+                        Ok(Ok(true)) if !cancelled() => {
+                            out.send(host_line(
+                                &server_id,
+                                format!("Ready: the {name} extension found the server answering."),
+                            ));
+                            Probed::Ready
+                        }
+                        Ok(_) => Probed::NotYet,
+                        Err(_) => {
+                            eprintln!(
+                                "The \"{name}\" extension panicked checking whether a server \
+                                 was ready; only its log can say so for the rest of this run."
+                            );
+                            Probed::Broken
+                        }
+                    }
+                });
+            })
+            .ok()
+    }
+
     /// Every supplied value the spec marks secret, for redaction.
     pub fn secret_values(&self) -> Vec<String> {
         self.supplied
@@ -837,6 +956,45 @@ impl Active {
                     self.spec.name
                 );
             }
+        }
+    }
+}
+
+/// One readiness probe's answer, as the loop takes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probed {
+    Ready,
+    NotYet,
+    /// It panicked: no more asking this run.
+    Broken,
+}
+
+/// The readiness probe's loop, apart from any extension: wait `interval`,
+/// ask, and again, until an answer is yes, `ready` is set another way, or
+/// `quit`. `ask` is given what its request should end early on. `true` when
+/// it was this loop's yes that set `ready`.
+fn probe_loop(
+    interval: Duration,
+    ready: &AtomicBool,
+    quit: &dyn Fn() -> bool,
+    ask: &mut dyn FnMut(&dyn Fn() -> bool) -> Probed,
+) -> bool {
+    let over = || quit() || ready.load(Ordering::SeqCst);
+    loop {
+        let until = Instant::now() + interval;
+        while Instant::now() < until {
+            if over() {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(25).min(until - Instant::now()));
+        }
+        if over() {
+            return false;
+        }
+        match ask(&over) {
+            Probed::Ready => return !quit() && !ready.swap(true, Ordering::SeqCst),
+            Probed::NotYet => {}
+            Probed::Broken => return false,
         }
     }
 }
@@ -1228,5 +1386,88 @@ X: y",
         assert!(begun.elapsed() < Duration::from_secs(2));
         t.join().unwrap();
         assert!(!wait(&StopSignal::default(), Duration::from_millis(10)));
+    }
+
+    // ─── the readiness probe's loop ────────────────────────────────────────
+
+    const TICK: Duration = Duration::from_millis(10);
+
+    /// Asks until the answer is yes, then sets `ready` and asks no more.
+    #[test]
+    fn a_yes_makes_the_server_ready_and_ends_the_asking() {
+        let ready = AtomicBool::new(false);
+        let mut asked = 0;
+        let made_ready = probe_loop(TICK, &ready, &|| false, &mut |_| {
+            asked += 1;
+            if asked < 3 {
+                Probed::NotYet
+            } else {
+                Probed::Ready
+            }
+        });
+        assert!(made_ready);
+        assert!(ready.load(Ordering::SeqCst));
+        assert_eq!(asked, 3);
+    }
+
+    /// The marker got there first: the loop ends without asking again, and
+    /// does not claim the readiness as its own.
+    #[test]
+    fn ready_by_the_marker_ends_the_asking() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(Mutex::new(0));
+        let (r, a) = (ready.clone(), asked.clone());
+        let t = thread::spawn(move || {
+            probe_loop(TICK, &r, &|| false, &mut |_| {
+                *a.lock().unwrap() += 1;
+                Probed::NotYet
+            })
+        });
+        thread::sleep(TICK * 5);
+        ready.store(true, Ordering::SeqCst);
+        assert!(!t.join().unwrap());
+        let after = *asked.lock().unwrap();
+        thread::sleep(TICK * 5);
+        assert_eq!(*asked.lock().unwrap(), after);
+    }
+
+    /// A stop ends the asking, even mid-request, and a yes that arrives
+    /// after it never makes a stopping server ready.
+    #[test]
+    fn a_stop_ends_the_asking_and_a_late_yes_does_not_count() {
+        let ready = AtomicBool::new(false);
+        let stop = StopSignal::default();
+        let quit = || stop.should_stop();
+        let begun = Instant::now();
+        let made_ready = probe_loop(TICK, &ready, &quit, &mut |cancelled| {
+            stop.request_stop();
+            assert!(cancelled(), "the request is told to end early");
+            Probed::Ready
+        });
+        assert!(!made_ready);
+        assert!(!ready.load(Ordering::SeqCst));
+        assert!(begun.elapsed() < Duration::from_secs(1));
+
+        // Quitting before the first ask asks nothing at all.
+        let mut asked = 0;
+        probe_loop(TICK, &ready, &|| true, &mut |_| {
+            asked += 1;
+            Probed::Ready
+        });
+        assert_eq!(asked, 0);
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    /// A probe that panicked is asked no more, and never made anything ready.
+    #[test]
+    fn a_broken_probe_is_asked_no_more() {
+        let ready = AtomicBool::new(false);
+        let mut asked = 0;
+        assert!(!probe_loop(TICK, &ready, &|| false, &mut |_| {
+            asked += 1;
+            Probed::Broken
+        }));
+        assert_eq!(asked, 1);
+        assert!(!ready.load(Ordering::SeqCst));
     }
 }

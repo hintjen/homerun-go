@@ -7,7 +7,8 @@
 //! Its config names one vendor host, and it supplies a secret `token` (which
 //! may only go in `launch.env`) and a plain `profile`. It can stop a server:
 //! its config's `stop` names the private port and the host secret its stop
-//! uses, which is everything it may reach on loopback.
+//! uses, which is everything it may reach on loopback. Its readiness probe
+//! (`readyPath`) reaches the same.
 
 use serde_json::{json, Value};
 
@@ -31,6 +32,7 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     hosts,
     config_schema,
     stops: true,
+    probes_ready: true,
     loopback,
 };
 
