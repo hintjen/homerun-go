@@ -242,7 +242,7 @@ fn step(source: &Source, ctx: &Context) -> Step {
                 let count = players(source, w).len();
                 Candidate {
                     id: w.clone(),
-                    label: world_name(source, w),
+                    label: String::new(),
                     detail: Some(match count {
                         1 => "1 player".to_string(),
                         n => format!("{n} players"),
@@ -251,7 +251,14 @@ fn step(source: &Source, ctx: &Context) -> Step {
                 }
             })
             .collect();
-        candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then(a.label.cmp(&b.label)));
+        // Largest first: the world that has been played most is the likely
+        // one. Labelled by that order, because a folder id means nothing to
+        // a player and the name they gave the world is out of reach (see
+        // `plan_one`); the players and the size tell them apart.
+        candidates.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes).then(a.id.cmp(&b.id)));
+        for (n, candidate) in candidates.iter_mut().enumerate() {
+            candidate.label = format!("World {}", n + 1);
+        }
         return Step::Choose(candidates);
     }
     let only = found.remove(0);
@@ -492,6 +499,9 @@ mod tests {
         };
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].detail.as_deref(), Some("2 players"));
+        // Never the folder id: "World 1", "World 2", largest first.
+        let labels: Vec<&str> = c.iter().map(|x| x.label.as_str()).collect();
+        assert_eq!(labels, ["World 1", "World 2"]);
         let chosen = Context {
             runtime_version: None,
             world: Some("SaveGames/0/AAAA"),
