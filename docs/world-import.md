@@ -3,8 +3,9 @@
 ## Overview
 
 A player who already has a world can start a new server with it instead of a
-fresh one: a Terraria `.wld`, or a Palworld world downloaded from another
-host's dedicated server. Importing is something a **game implements**, not
+fresh one: a Terraria `.wld`, a Palworld world downloaded from another host's
+dedicated server, or a Hytale universe from another server or a single-player
+save. Importing is something a **game implements**, not
 something a host knows how to do. A game that supports it has an
 **importer**; a game without one can't import.
 
@@ -62,7 +63,10 @@ or a section, and the copy fits in 4 GB.
 
 The staging folder holds `files/`, laid out as the files land in the server's
 folder, and `import.json` (`Staged`, format 1): the world's name and facts,
-the `present` patterns and the INI edits.
+the `present` patterns, and the INI and JSON edits (`json`, a dotted key and
+a text value, applied with `json_config::merge`; absent in a world staged
+before Hytale). A world with no name a player would recognise has an empty
+`name`, and its facts say which it is.
 
 ## The importers
 
@@ -113,6 +117,28 @@ Players keep their characters because a dedicated server names each player's
 file after their own account. Tested 2026-10-12 by moving one world between
 two servers and back, with a Steam player and a Game Pass player: both kept
 their characters, items and guild, and the second server reused their files.
+
+### Hytale
+
+A universe from another server, or a single-player save
+(`%APPDATA%\Hytale\UserData\Saves\<save>\`), which has the same layout
+because single-player runs the same server inside the game. A universe is a
+folder holding `worlds/<world>/config.json`. The importer copies it to
+`universe/` without the `.bak` copies the server keeps, brings `mods/`,
+`permissions.json`, `whitelist.json` and `bans.json` from beside it, and sets
+`Defaults.World` in the server's `config.json`: the world the old server's
+config named, else `default`, else the first.
+
+- **Never copied, never read:** `auth.enc`, `auth.key` (the server's sign-in,
+  which only decrypts on the machine that wrote it), any other `.key`, `.keys`
+  or `.enc` file, `account.dat`, `keyutil_*`, and the client's
+  `client_metadata`. `hytale::never_copied` matches them on every part of a
+  path, so a download that nests them anywhere is covered.
+- Warned about: a world config `Version` above 4 (a newer Hytale; worlds
+  upgrade one way), `DeleteOnUniverseStart: true`, and `RequiredPlugins`.
+- Players are keyed by account UUID (`universe/players/<uuid>.json`) in a save
+  and on a server alike, so characters carry over. Observed on a Homerun
+  server 2026-10-12; a single-player save's player file is unverified.
 
 ## Adding an importer
 

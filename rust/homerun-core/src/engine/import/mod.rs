@@ -38,8 +38,8 @@
 //! - **`present`**: patterns that mean "this server already has a world". The
 //!   runner imports nothing when one matches, which is how a backup restore
 //!   wins over an import.
-//! - **`ini`**: keys to set in an INI file after the copy, such as the one
-//!   that tells Palworld which world folder to load.
+//! - **`ini`** and **`json`**: keys to set in an INI or JSON file after the
+//!   copy, such as the ones that tell Palworld and Hytale which world to load.
 //! - **`settings`**: values for the game's create-only settings that the world
 //!   decides (Terraria's size). The host sends them with the new server; the
 //!   runner never applies settings itself.
@@ -53,6 +53,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub mod hytale;
 pub mod palworld;
 pub mod terraria;
 
@@ -180,6 +181,17 @@ impl IniEdit {
     }
 }
 
+/// One text value to set in a JSON file after the copy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonEdit {
+    /// Relative to the server's folder.
+    pub file: String,
+    /// A dotted path, as [`crate::json_config::merge`] reads it
+    /// (`Defaults.World`).
+    pub key: String,
+    pub value: String,
+}
+
 /// What to import, and what follows from it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Plan {
@@ -189,6 +201,7 @@ pub struct Plan {
     pub copy: Vec<CopyFile>,
     pub present: Vec<String>,
     pub ini: Vec<IniEdit>,
+    pub json: Vec<JsonEdit>,
 }
 
 /// Why a world cannot be imported. Spelled as the contract spells it.
@@ -238,7 +251,7 @@ pub struct Importer {
 }
 
 /// Every importer this build carries.
-pub const IMPORTERS: &[Importer] = &[palworld::IMPORTER, terraria::IMPORTER];
+pub const IMPORTERS: &[Importer] = &[hytale::IMPORTER, palworld::IMPORTER, terraria::IMPORTER];
 
 /// The importer for the game whose descriptor `id` is `game`.
 pub fn importer(game: &str) -> Option<&'static Importer> {
@@ -254,6 +267,9 @@ pub struct Staged {
     pub world: Option<World>,
     pub present: Vec<String>,
     pub ini: Vec<IniEdit>,
+    /// Added with Hytale; absent in a world staged before it.
+    #[serde(default)]
+    pub json: Vec<JsonEdit>,
 }
 
 impl Staged {
@@ -264,6 +280,7 @@ impl Staged {
             world: plan.world.clone(),
             present: plan.present.clone(),
             ini: plan.ini.clone(),
+            json: plan.json.clone(),
         }
     }
 
@@ -278,7 +295,10 @@ impl Staged {
         if self.game != game {
             return Err("This world was prepared for a different game.".into());
         }
-        if self.present.iter().any(|p| !safe_pattern(p)) || self.ini.iter().any(|e| !safe_ini(e)) {
+        if self.present.iter().any(|p| !safe_pattern(p))
+            || self.ini.iter().any(|e| !safe_ini(e))
+            || self.json.iter().any(|e| !safe_json(e))
+        {
             return Err("This world's import instructions cannot be used.".into());
         }
         Ok(())
@@ -331,7 +351,7 @@ fn check(plan: &Plan, source: &Source) -> Result<(), Refusal> {
     if plan.present.is_empty() || plan.present.iter().any(|p| !safe_pattern(p)) {
         return Err(unsafe_path());
     }
-    if plan.ini.iter().any(|e| !safe_ini(e)) {
+    if plan.ini.iter().any(|e| !safe_ini(e)) || plan.json.iter().any(|e| !safe_json(e)) {
         return Err(unsafe_path());
     }
     Ok(())
@@ -382,6 +402,16 @@ fn safe_ini(edit: &IniEdit) -> bool {
         && line(&edit.key)
         && !edit.key.contains(['=', '(', ')', '[', ']'])
         && line(&edit.value)
+}
+
+fn safe_json(edit: &JsonEdit) -> bool {
+    safe_relative(&edit.file)
+        && !edit.key.is_empty()
+        && edit
+            .key
+            .split('.')
+            .all(|part| !part.is_empty() && !part.chars().any(char::is_control))
+        && !edit.value.chars().any(char::is_control)
 }
 
 /// Whether `path` (relative, `/`-separated) matches a `present` pattern,
@@ -530,6 +560,23 @@ mod tests {
         assert!(!safe_ini(&edit("S]x", "K", "v")));
         assert!(!safe_ini(&edit("S", "K=1", "v")));
         assert!(!safe_ini(&edit("S", "K(M)", "v")));
+    }
+
+    #[test]
+    fn a_json_edit_names_a_path_and_holds_one_line() {
+        let edit = |key: &str, value: &str| JsonEdit {
+            file: "config.json".into(),
+            key: key.into(),
+            value: value.into(),
+        };
+        assert!(safe_json(&edit("Defaults.World", "default")));
+        assert!(!safe_json(&edit("Defaults..World", "x")));
+        assert!(!safe_json(&edit("", "x")));
+        assert!(!safe_json(&edit("A", "a\nb")));
+        assert!(!safe_json(&JsonEdit {
+            file: "../config.json".into(),
+            ..edit("A", "b")
+        }));
     }
 
     #[test]

@@ -436,6 +436,32 @@ pub fn apply(
         fs::write(&path, homerun_core::ini_config::encode(&merged, encoding))
             .map_err(|_| failed("A server settings file can't be saved."))?;
     }
+    let mut json_by_file: BTreeMap<&str, Vec<(String, Value)>> = BTreeMap::new();
+    for edit in &staged.json {
+        json_by_file
+            .entry(edit.file.as_str())
+            .or_default()
+            .push((edit.key.clone(), Value::String(edit.value.clone())));
+    }
+    for (file, keys) in json_by_file {
+        let path = prepare::confined(server, file).map_err(|_| {
+            failed("The imported world's settings file would leave the server's folder.")
+        })?;
+        let existing = match fs::read(&path) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map_err(|_| failed("A server settings file can't be read."))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(_) => return Err(failed("A server settings file can't be read.")),
+        };
+        let merged = homerun_core::json_config::merge(&existing, &keys, &[]).map_err(|_| {
+            failed("The server's settings could not be pointed at the imported world.")
+        })?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|_| failed("A server settings folder can't be created."))?;
+        }
+        fs::write(&path, merged).map_err(|_| failed("A server settings file can't be saved."))?;
+    }
     log(format!("Imported the world{named}."));
     Ok(())
 }
@@ -681,6 +707,60 @@ mod tests {
         })
         .unwrap();
         assert_eq!(staged["event"], "import-staged");
+    }
+
+    /// A Hytale universe staged and applied: the world lands, the server's
+    /// config points at it, other keys in that config stay, and the sign-in
+    /// files beside it are never copied.
+    #[test]
+    fn a_hytale_universe_lands_and_the_server_spawns_in_its_world() {
+        let dir = scratch("hytale");
+        let src = dir.join("download");
+        fs::create_dir_all(src.join("universe/worlds/Arena/chunks")).unwrap();
+        fs::create_dir_all(src.join("universe/players")).unwrap();
+        fs::write(
+            src.join("universe/worlds/Arena/config.json"),
+            "{\"Version\":4}",
+        )
+        .unwrap();
+        fs::write(
+            src.join("universe/worlds/Arena/chunks/0.0.region.bin"),
+            b"chunk",
+        )
+        .unwrap();
+        fs::write(src.join("universe/players/eded0cd8.json"), b"{}").unwrap();
+        fs::write(
+            src.join("config.json"),
+            "{\"Defaults\":{\"World\":\"Arena\"}}",
+        )
+        .unwrap();
+        fs::write(src.join("auth.enc"), b"not for copying").unwrap();
+        fs::write(src.join("auth.key"), b"not for copying").unwrap();
+        let d = descriptor("hytale");
+        let stage = dir.join("stage");
+        stage_world(&d, &src, &stage, &Context::default(), &mut |_, _| ()).unwrap();
+        assert!(!stage.join("files/auth.enc").exists() && !stage.join("files/auth.key").exists());
+
+        let server = dir.join("server");
+        fs::create_dir_all(&server).unwrap();
+        fs::write(
+            server.join("config.json"),
+            "{\"ServerName\":\"Mine\",\"Defaults\":{\"GameMode\":\"Adventure\"}}",
+        )
+        .unwrap();
+        let (out, _) = output();
+        apply(&d, &server, &stage.to_string_lossy(), "s1", &out).unwrap();
+        assert_eq!(
+            fs::read(server.join("universe/worlds/Arena/chunks/0.0.region.bin")).unwrap(),
+            b"chunk"
+        );
+        let config: Value =
+            serde_json::from_slice(&fs::read(server.join("config.json")).unwrap()).unwrap();
+        assert_eq!(config["Defaults"]["World"], "Arena");
+        assert_eq!(config["Defaults"]["GameMode"], "Adventure");
+        assert_eq!(config["ServerName"], "Mine");
+        assert!(!server.join("auth.enc").exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A small 1.4.5.8 world's header, enough for the importer.

@@ -333,6 +333,7 @@ fn plan_one(source: &Source, dir: &str) -> Step {
             key: WORLD_KEY.into(),
             value: name,
         }],
+        json: Vec::new(),
     })
 }
 

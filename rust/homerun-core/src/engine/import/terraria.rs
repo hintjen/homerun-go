@@ -395,6 +395,7 @@ fn plan_one(source: &Source, ctx: &Context, world: &str) -> Step {
         copy,
         present: vec![WORLD.into()],
         ini: Vec::new(),
+        json: Vec::new(),
     })
 }
 
