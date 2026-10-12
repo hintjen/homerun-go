@@ -63,6 +63,7 @@ pub mod descriptor;
 pub mod doctor;
 pub mod extensions;
 pub mod fetch;
+pub mod import;
 pub mod invocation;
 pub mod java;
 pub mod licence;

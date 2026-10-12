@@ -33,6 +33,12 @@ adapters, Steam first, the already-running check, the desktop-only manifest
 reader and why it may take an XML parser, and the join link ported from the
 desktop.
 
+### [Importing a player's world](./world-import.md)
+
+A player's existing world for a new server: the per-game importers in the
+core, `homerun-game import` staging it, `start.import` applying it at the first
+start, and what Terraria and Palworld import and refuse.
+
 ### [Game extensions](./game-extensions.md)
 
 Code only one game needs, compiled into the runner and chosen by name from its

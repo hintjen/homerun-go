@@ -1,6 +1,7 @@
 mod cli;
 mod client;
 mod extensions;
+mod import;
 mod network;
 mod prepare;
 mod protocol;

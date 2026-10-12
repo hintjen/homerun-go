@@ -63,6 +63,11 @@ pub const PROTOCOL: u32 = 1;
 pub fn features() -> Vec<String> {
     let mut out: Vec<String> = FEATURES.iter().map(|f| f.to_string()).collect();
     out.extend(crate::extensions::features());
+    out.extend(
+        homerun_core::engine::import::IMPORTERS
+            .iter()
+            .map(|i| homerun_core::engine::import::feature(i.game)),
+    );
     out
 }
 
@@ -99,6 +104,13 @@ pub const FEATURES: &[&str] = &[
     // it offers Play, so an older runner leaves the button out rather than
     // failing when it is pressed.
     "client-launch",
+    // A player's existing world for a new server: `homerun-game import`
+    // stages it, `start.import` applies it at the first start
+    // (`homerun_core::engine::import`). Each game that can import is also
+    // advertised as `world-import:<game>`. The desktop requires both before it
+    // offers import, and this one before it sends `start.import`, because an
+    // older runner ignores the field and would start an empty world.
+    "world-import",
 ];
 
 /// What Electron sends.
@@ -160,6 +172,11 @@ pub enum Command {
         /// As on `Fetch`: the host's Java, which the server is launched with.
         #[serde(default)]
         java_path: Option<String>,
+        /// A world staged by `homerun-game import`: the staging folder's
+        /// absolute path. Applied before the game's config is written, only
+        /// when the server has no world yet. Feature `world-import`.
+        #[serde(default)]
+        import: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     StartTunnel {
@@ -472,11 +489,15 @@ pub mod codes {
     /// would give up on a start that is still waiting for a good answer. The
     /// prompt stays open.
     pub const PROMPT_INVALID: &str = "prompt_invalid";
+    /// A world staged by `homerun-game import` could not be put into the
+    /// server's folder. The server does not start: starting an empty world
+    /// instead would create one, and the import would then never land.
+    pub const IMPORT_FAILED: &str = "import_failed";
 
     /// Every one of them, for the test that keeps this list and the
     /// document's in step.
     #[cfg(test)]
-    pub const ALL: [&str; 16] = [
+    pub const ALL: [&str; 17] = [
         LICENCE_NOT_ACCEPTED,
         DESCRIPTOR_INVALID,
         REQUIRES_UNMET,
@@ -493,6 +514,7 @@ pub mod codes {
         VENDOR_UNAVAILABLE,
         EXTENSION_FAILED,
         PROMPT_INVALID,
+        IMPORT_FAILED,
     ];
 }
 
@@ -673,6 +695,31 @@ mod tests {
     #[test]
     fn this_runner_advertises_client_launch() {
         assert!(FEATURES.contains(&"client-launch"));
+    }
+
+    /// The desktop offers import only on a runner that advertises the
+    /// mechanism and the game, so both have to be exactly these names.
+    #[test]
+    fn this_runner_advertises_world_import_and_each_game_it_imports() {
+        let all = features();
+        for name in [
+            "world-import",
+            "world-import:palworld",
+            "world-import:terraria",
+        ] {
+            assert!(all.iter().any(|f| f == name), "{name} missing from {all:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_may_carry_a_staged_world() {
+        let Command::Start { import, .. } = parse(
+            r#"{"cmd":"start","serverId":"s1","descriptor":{},"serverDir":"/s",
+                "runtimeRoot":"/rt","import":"C:/worlds-cache/imported-s1"}"#,
+        ) else {
+            panic!("expected a start");
+        };
+        assert_eq!(import.as_deref(), Some("C:/worlds-cache/imported-s1"));
     }
 
     /// Absent is the answer for every source but vendor, and for a desktop
@@ -923,6 +970,7 @@ mod tests {
                 "vendor_unavailable",
                 "extension_failed",
                 "prompt_invalid",
+                "import_failed",
             ]
         );
     }

@@ -383,6 +383,8 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 | `src/prepare.rs` | Validation, fetch, invocation and confined configuration writes |
 | `src/cli.rs` | Arguments, local ownership, stop requests and probe evidence |
 | `src/extensions/` | Game extensions; files listed in `docs/game-extensions.md` |
+| `src/import.rs` | `homerun-game import` and applying `start.import`; see `docs/world-import.md` |
+| `rust/homerun-supervisor/src/world_import.rs` | Listing and reading a folder, zip or file a player picked to import |
 | `tests/lifecycle.rs` | A self-reinvoking fake game, local HTTP and real subprocess tests |
 | `rust/homerun-supervisor/src/process_engine.rs` | Process lifecycle and independent pipe draining |
 | `rust/homerun-supervisor/src/fetcher.rs` | Cancellable effects, including a silent download peer |

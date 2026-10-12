@@ -198,7 +198,7 @@ fn store_name(launch: &Launch) -> &'static str {
     }
 }
 
-fn read_descriptor(path: &str) -> Result<GameDescriptor, String> {
+pub(crate) fn read_descriptor(path: &str) -> Result<GameDescriptor, String> {
     let path = if Path::new(path).is_file() {
         PathBuf::from(path)
     } else {
