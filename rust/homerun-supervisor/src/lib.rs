@@ -53,6 +53,10 @@ pub mod errors;
 /// licence on anyone's behalf.
 #[cfg(feature = "game-engine")]
 pub mod fetcher;
+/// Reading a world a player picked to import: the effects half of
+/// `homerun_core::engine::import`.
+#[cfg(feature = "game-engine")]
+pub mod world_import;
 pub mod log_buffer;
 /// Every OS assumption in this crate, in one place, so that everything else
 /// here builds and tests on any machine. Gated with the process engine rather

@@ -435,6 +435,7 @@ fn run(
         settings,
         secrets,
         bind_address,
+        import,
         ..
     } = command
     else {
@@ -456,6 +457,14 @@ fn run(
     let prepared = (|| -> Result<(prepare::Prepared, Option<extensions::Local>)> {
         if stop.should_stop() {
             return Err(fail(codes::SPAWN_FAILED, "The start was cancelled."));
+        }
+        // A world the player imported, before the game's config is written:
+        // its settings file may come with it, and the game's managed keys
+        // then go into that file rather than a fresh one.
+        if let Some(stage) = &import {
+            std::fs::create_dir_all(&server)
+                .map_err(|_| fail(codes::SPAWN_FAILED, "The server folder cannot be created."))?;
+            crate::import::apply(d, &server, stage, &id, out)?;
         }
         let mut p = prepare::launch(
             d,

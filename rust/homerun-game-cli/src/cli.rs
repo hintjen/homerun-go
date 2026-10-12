@@ -23,6 +23,7 @@ const HELP: &str = "homerun-game supervise
 homerun-game doctor|fetch|launch|probe|verify <game.json or slug> [options]
 homerun-game stop --server-dir <folder> [--json]
 homerun-game client launch <game.json or slug> [--link-file <json>] [--json]
+homerun-game import <game.json or slug> --source <path> --stage <folder> [--json]
 
 Options:
   --accept-licence          Record your own acceptance of the game's terms
@@ -36,6 +37,8 @@ Options:
   --server-name <name>      Default: descriptor name
   --settings-file <json>    Object of setting values
   --secrets-file <json>     Object of host-generated secret strings
+  --import <folder>         A world staged by `homerun-game import`, applied at
+                            this start when the server has no world yet
   --observe-seconds <n>    Probe/verify time after readiness (default 5)
   --evidence <folder>       Default: evidence/<host>
   --json                   Emit the same NDJSON events as supervise
@@ -86,6 +89,14 @@ pub fn run() -> std::result::Result<(), String> {
     if verb == "client" {
         return crate::client::run(args);
     }
+    // Staging a player's existing world for a new server; see `import.rs`.
+    if verb == "import" {
+        let code = crate::import::run(args)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
     if !["doctor", "fetch", "launch", "stop", "probe", "verify"].contains(&verb.as_str()) {
         return Err(HELP.into());
     }
@@ -101,7 +112,7 @@ pub fn run() -> std::result::Result<(), String> {
             }
             "--runtime-root" | "--runtime-version" | "--java" | "--server-dir" | "--server-id"
             | "--server-name" | "--settings-file" | "--secrets-file" | "--observe-seconds"
-            | "--evidence" => {
+            | "--evidence" | "--import" => {
                 let value = args.next().ok_or_else(|| format!("{arg} needs a value."))?;
                 if options.insert(arg.clone(), value).is_some() {
                     return Err(format!("{arg} was supplied twice."));
@@ -337,6 +348,7 @@ pub fn run() -> std::result::Result<(), String> {
             bind_address: Some("127.0.0.1".into()),
             runtime_version: version,
             java_path: java,
+            import: options.get("--import").cloned(),
         }
     };
     runner.command(command);
