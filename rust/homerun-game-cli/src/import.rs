@@ -186,7 +186,11 @@ fn human(event: &ImportEvent) {
             world, warnings, ..
         } => {
             if let Some(world) = world {
-                println!("Staged {}.", world.name);
+                if world.name.is_empty() {
+                    println!("Staged the world.");
+                } else {
+                    println!("Staged {}.", world.name);
+                }
                 for fact in &world.facts {
                     println!("  {}: {}", fact.label, fact.value);
                 }
@@ -359,11 +363,14 @@ pub fn apply(
             failed("The imported world can't be found on this computer. Import it again.")
         })?;
     staged.check(&d.id).map_err(|m| failed(&m))?;
-    let name = staged
+    // " Terrarua", or nothing for a world with no name to show.
+    let named = staged
         .world
         .as_ref()
-        .map(|w| w.name.clone())
-        .unwrap_or_else(|| "world".into());
+        .map(|w| w.name.trim())
+        .filter(|n| !n.is_empty())
+        .map(|n| format!(" {n}"))
+        .unwrap_or_default();
     let log = |line: String| {
         out.send(Event::ServerLog {
             server_id: id.into(),
@@ -374,7 +381,7 @@ pub fn apply(
 
     if staged.present.iter().any(|p| present(server, p)) {
         log(format!(
-            "This server already has a world, so the imported world ({name}) was not copied in."
+            "This server already has a world, so the imported world{named} was not copied in."
         ));
         return Ok(());
     }
@@ -429,7 +436,7 @@ pub fn apply(
         fs::write(&path, homerun_core::ini_config::encode(&merged, encoding))
             .map_err(|_| failed("A server settings file can't be saved."))?;
     }
-    log(format!("Imported the world {name}."));
+    log(format!("Imported the world{named}."));
     Ok(())
 }
 
@@ -551,7 +558,7 @@ mod tests {
         assert!(text.contains("DedicatedServerName=ABCD\r\n"), "{text:?}");
         assert!(text.contains("Audio=1\r\n"));
         assert!(!text.contains("OLD"));
-        assert!(lines.lock().unwrap()[0].contains("Imported the world ABCD"));
+        assert_eq!(lines.lock().unwrap()[0], "Imported the world.");
         let _ = fs::remove_dir_all(&dir);
     }
 

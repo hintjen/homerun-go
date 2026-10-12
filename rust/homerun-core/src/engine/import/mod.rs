@@ -150,6 +150,8 @@ pub struct Fact {
 /// The world a plan imports, as a player is shown it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct World {
+    /// Empty for a world with no name a player would recognise (Palworld's
+    /// is a folder id); its facts say what it is.
     pub name: String,
     pub facts: Vec<Fact>,
 }

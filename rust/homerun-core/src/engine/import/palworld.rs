@@ -300,7 +300,11 @@ fn plan_one(source: &Source, dir: &str) -> Step {
     let size = world_size(source, dir);
     Step::Plan(Plan {
         world: Some(World {
-            name: name.clone(),
+            // The folder's name is a 32-digit id nobody chose, and the name
+            // a player gave the world is inside `LevelMeta.sav`, which is
+            // compressed with a library this does not carry. So none: the
+            // players and the size say which world it is.
+            name: String::new(),
             facts: vec![
                 Fact {
                     label: "Players".into(),
@@ -392,7 +396,9 @@ mod tests {
         );
         assert_eq!(p.ini[0].value, WORLD);
         assert_eq!(p.present, vec!["Saved/SaveGames/0/*/Level.sav".to_string()]);
-        assert_eq!(p.world.unwrap().facts[0].value, "2");
+        let world = p.world.unwrap();
+        assert_eq!(world.name, "", "a folder id is not a name to show");
+        assert_eq!(world.facts[0].value, "2");
     }
 
     #[test]
