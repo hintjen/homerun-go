@@ -151,8 +151,9 @@ pub enum Action {
     /// admin API. The other polite rung, for a game whose way to be asked to
     /// save and exit is not a console verb.
     Hook(StopHook),
-    /// A console control event. Unsupported on Windows, and
-    /// [`platform::graceful_interrupt`] says so rather than pretending.
+    /// A console control event: `SIGINT`, or Ctrl+Break on Windows for a
+    /// console-subsystem server. [`platform::graceful_interrupt`] says when it
+    /// cannot, rather than pretending.
     Interrupt,
     /// Ask the process to exit.
     Terminate,
@@ -809,15 +810,21 @@ fn spawn_stop_watcher(
                         }
                     }
                 }
-                // A failure here is not fatal to the stop: the next rung
-                // handles it, and on Windows this rung always fails because
-                // the platform cannot do it. Saying so on the diagnostics
-                // stream and carrying on is the whole behaviour.
-                Action::Interrupt => {
-                    if let Err(why) = platform::graceful_interrupt(pid) {
-                        log::warn!("{why}");
+                // Like a hook: asked, the server gets the grace below to go.
+                // Not asked -- a windowed Windows server has no console to
+                // interrupt -- and there is nothing to wait for, so the next
+                // rung, now. It used to wait the whole grace anyway, back
+                // when this rung could never succeed on Windows.
+                Action::Interrupt => match platform::graceful_interrupt(pid) {
+                    Ok(()) => note("an interrupt asked the server to stop".into()),
+                    Err(why) => {
+                        note(format!(
+                            "could not interrupt the server: {}",
+                            why.trim_end_matches('.')
+                        ));
+                        continue;
                     }
-                }
+                },
                 Action::Terminate => terminate(pid),
                 // The rung that cannot be refused, and on Windows that now
                 // means the whole subtree. A launcher-style server -- which

@@ -314,6 +314,9 @@ windows-sys = { version = "0.61", default-features = false, features = [
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Pipes",
+    # Attaching to a server's console to send it Ctrl+Break, from a helper
+    # process -- never the runner. `console_interrupt.rs`.
+    "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     # A snapshot of every process, for the Play button's "is the game running
     # yet" check. `client_launch.rs`.

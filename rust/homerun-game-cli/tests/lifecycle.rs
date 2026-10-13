@@ -148,6 +148,29 @@ fn fake_game() {
     }
 
     fs::write("pid", std::process::id().to_string()).unwrap();
+    // A game whose only clean shutdown is a console interrupt, like a Unity
+    // dedicated server with no console verb and no admin API: it saves on
+    // Ctrl+Break and exits 0. Nothing else ends it promptly -- stdin is never
+    // read -- so a quick, clean exit can only have come from the interrupt.
+    #[cfg(windows)]
+    if std::env::var("HOMERUN_TEST_BREAK").is_ok() {
+        use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT};
+        unsafe extern "system" fn on_event(event: u32) -> i32 {
+            if event != CTRL_BREAK_EVENT {
+                return 0;
+            }
+            let save = std::env::var("HOMERUN_TEST_SAVE").unwrap_or_else(|_| "saved".into());
+            fs::write(save, "saved on break").unwrap();
+            println!("fixture: saved on break");
+            std::io::stdout().flush().unwrap();
+            std::process::exit(0);
+        }
+        // SAFETY: a handler that lives as long as the process.
+        assert_ne!(unsafe { SetConsoleCtrlHandler(Some(on_event), 1) }, 0);
+        eprintln!("FAKE READY");
+        thread::sleep(Duration::from_secs(30));
+        std::process::exit(3);
+    }
     // A vendor that prints its own launch line. Rust does exactly this: its
     // RCON password is a `+rcon.password` argument and the line is echoed at
     // startup, so the host would publish it to the player's console.
@@ -975,6 +998,64 @@ fn a_game_that_starts_another_program_has_all_of_it_stopped() {
         port_freed(grandchild),
         "the server was stopped and the program it started kept running on port {grandchild}"
     );
+    h.eof();
+}
+
+/// `stop.via: interrupt` on Windows, end to end: the real runner spawns the
+/// game the way it spawns every game (`CREATE_NO_WINDOW`, piped stdio, a
+/// job), and its stop ladder has `homerun-game __console-break` send
+/// Ctrl+Break to the game's own console. The game saves and exits 0 well
+/// inside the grace, and the runner -- which must not be on that console --
+/// carries on and shuts down normally afterwards.
+#[test]
+#[cfg(windows)]
+fn an_interrupt_stopped_console_game_saves_on_ctrl_break() {
+    let f = Fixture::new();
+    let mut start = f.start();
+    start["descriptor"]["stop"] = json!({"via":"interrupt","graceMs":15000});
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]["HOMERUN_TEST_BREAK"] =
+        json!("1");
+
+    let mut h = Host::new();
+    assert!(
+        h.seen[0]["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("stop-interrupt")),
+        "a host has to be able to require this: {}",
+        h.seen[0]
+    );
+    h.send(start);
+    h.until("server-started");
+    let asked = Instant::now();
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    // `server-stopped` carries no exit code for a requested stop; the clean
+    // exit is the supervisor's own test. Here it is the save, the line, and
+    // the rung the stop notes say the server left on.
+    h.until("server-stopped");
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "the game should have exited on the interrupt, not at the terminate: {:?}",
+        asked.elapsed()
+    );
+    assert!(
+        h.seen.iter().any(|v| v["event"] == "server-log"
+            && v["stream"] == "stdout"
+            // After libtest's own "test fake_game ... ", which has no newline.
+            && v["line"]
+                .as_str()
+                .is_some_and(|l| l.ends_with("fixture: saved on break"))),
+        "{:#?}",
+        h.seen
+    );
+    assert_eq!(
+        fs::read_to_string(f.root.join("server/saved")).unwrap(),
+        "saved on break"
+    );
+    let notes = stop_notes(&h);
+    noted(&notes, "an interrupt asked the server to stop");
+    noted(&notes, "exited during the interrupt step");
+    assert!(!notes.iter().any(|n| n.contains("terminate")), "{notes:#?}");
     h.eof();
 }
 

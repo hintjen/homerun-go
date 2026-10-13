@@ -296,19 +296,29 @@ pub fn machine_capacity(path: &Path) -> homerun_core::engine::doctor::Machine {
     machine
 }
 
-/// Ask a process to stop the way a person pressing Ctrl+C would.
+/// Ask a process to stop the way a person at its console would.
 ///
-/// `Err` on Windows, always, and that is a platform fact rather than a gap to
-/// fill in later. A console control event can only be sent to a process group
-/// attached to a console, and a server spawned with piped stdio has neither;
-/// `GenerateConsoleCtrlEvent` would signal *this* process's group, which
-/// includes the app. A game whose only clean stop is an interrupt is
-/// therefore unsupported on the one platform that ships, which is why
-/// `engine::validate` warns about `stop.via: interrupt` rather than accepting
-/// it quietly.
+/// `SIGINT` on Unix. On Windows, Ctrl+Break delivered to the console the
+/// server is attached to, by a short-lived helper process and never by this
+/// one -- see `console_interrupt.rs` for why it is Ctrl+Break and not Ctrl+C,
+/// and why a helper. A console-subsystem server spawned the way `job/owned.rs`
+/// spawns one has a hidden console of its own, so this reaches it; a windowed
+/// (GUI-subsystem) server has none, and that is an `Err`.
+///
+/// `Ok` means asked, not gone: the stop ladder waits out the rung's grace to
+/// find out. `Err` means nothing was asked, and the ladder climbs at once. On
+/// Windows it is also `Err` in a binary that never named its helper with
+/// [`set_interrupt_helper`] -- `homerun-game` does, at startup.
 pub fn graceful_interrupt(pid: u32) -> Result<(), String> {
     imp::graceful_interrupt(pid)
 }
+
+#[path = "console_interrupt.rs"]
+mod console_interrupt;
+pub use console_interrupt::{
+    console_break, console_break_args, exit as console_break_exit, set_interrupt_helper,
+    InterruptHelper, CONSOLE_BREAK_VERB,
+};
 
 /// Where a game may write outside its own directory.
 ///
@@ -690,14 +700,8 @@ mod imp {
         })
     }
 
-    pub fn graceful_interrupt(_pid: u32) -> Result<(), String> {
-        // See the note on `super::graceful_interrupt`: this is a platform
-        // fact, not an unfinished implementation.
-        Err(
-            "this computer cannot interrupt a server the way Ctrl+C would, so \
-             this game has no way to shut down cleanly here."
-                .to_string(),
-        )
+    pub fn graceful_interrupt(pid: u32) -> Result<(), String> {
+        super::console_interrupt::graceful_interrupt(pid)
     }
 
     pub fn user_data_roots() -> Vec<PathBuf> {
