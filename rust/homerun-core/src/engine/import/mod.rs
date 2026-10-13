@@ -3,11 +3,11 @@
 //! # What this is
 //!
 //! A player who already has a world (a Terraria `.wld`, a Palworld world
-//! downloaded from another host) can start a new server with it instead of a
-//! fresh one. What that takes is different for every game, so each game that
-//! supports it has an **importer**: a function that looks at what the player
-//! picked and says what to do with it. Most games have none, and a game
-//! without one simply cannot import.
+//! downloaded from another host, a Valheim world folder) can start a new
+//! server with it instead of a fresh one. What that takes is different for
+//! every game, so each game that supports it has an **importer**: a function
+//! that looks at what the player picked and says what to do with it. Most
+//! games have none, and a game without one simply cannot import.
 //!
 //! The split is the engine's usual one. Everything here is pure: an importer
 //! never opens a file. The runner (`homerun-game import`) lists the source,
@@ -56,6 +56,7 @@ use serde_json::{Map, Value};
 pub mod hytale;
 pub mod palworld;
 pub mod terraria;
+pub mod valheim;
 
 /// The version of [`Staged`]. A runner refuses a staged world of another one.
 pub const FORMAT: u32 = 1;
@@ -251,7 +252,12 @@ pub struct Importer {
 }
 
 /// Every importer this build carries.
-pub const IMPORTERS: &[Importer] = &[hytale::IMPORTER, palworld::IMPORTER, terraria::IMPORTER];
+pub const IMPORTERS: &[Importer] = &[
+    hytale::IMPORTER,
+    palworld::IMPORTER,
+    terraria::IMPORTER,
+    valheim::IMPORTER,
+];
 
 /// The importer for the game whose descriptor `id` is `game`.
 pub fn importer(game: &str) -> Option<&'static Importer> {

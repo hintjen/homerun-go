@@ -4,8 +4,8 @@
 
 A player who already has a world can start a new server with it instead of a
 fresh one: a Terraria `.wld`, a Palworld world downloaded from another host's
-dedicated server, or a Hytale universe from another server or a single-player
-save. Importing is something a **game implements**, not
+dedicated server, a Hytale universe from another server or a single-player
+save, or a Valheim world from 1.0 or before it. Importing is something a **game implements**, not
 something a host knows how to do. A game that supports it has an
 **importer**; a game without one can't import.
 
@@ -139,6 +139,48 @@ config named, else `default`, else the first.
 - Players are keyed by account UUID (`universe/players/<uuid>.json`) in a save
   and on a server alike, so characters carry over. Observed on a Homerun
   server 2026-10-12; a single-player save's player file is unverified.
+
+### Valheim
+
+A world from Valheim's `worlds_local` (or the older `worlds`) folder, a
+server's save folder, or the whole `IronGate/Valheim` folder, as a folder or a
+zip. The descriptor runs the server with `-savedir save` and `-world
+{setting:worldName}`, and `-world` picks a world by its **folder or file
+name**, so the importer places the world under a name and returns that name as
+`worldName`, a create-only setting.
+
+- **1.0 worlds** are folders: `_main.<n>.fwl2`, `.db2`, `.chunks` and `.ok`
+  for the newest save generation `n`, plus `*.chunk` files. The generation's
+  files and every chunk land in `save/worlds_local/<name>/`. A generation
+  with no `.ok` is a save that didn't finish and is skipped; a folder with
+  only `_main.0.fwl2` was generated and never saved, and is refused
+  (`read_failed`).
+- **Pre-1.0 worlds** are a `<name>.fwl` and `<name>.db`, staged as
+  `save/worlds_local/<name>.fwl|.db`. The 1.0 server converts them the first
+  time it loads them: one way, silent, and minutes long for a large world,
+  which the import warns about. A `.fwl` without its `.db` is refused.
+- **Backups** (`<name>_backup_<yyyymmdd-hhmmss>.fwl/.db`) are offered, with
+  a label saying so, only when the world they back up isn't in the source:
+  after 1.0 converted a world, a backup is often the only copy left. One lands
+  under the world's own name, without the suffix, when the suffix is exactly
+  that date. `.old` files and `_backup_auto-*` copies are never offered.
+- **Never read or copied:** characters (`*.fch`, `characters*`), the
+  permission lists, `prefs`, logs, the map texture caches and
+  `steam_autocloud.vdf`. `valheim::never_read` matches them on every part of
+  a path.
+- A Game Pass save (`containers.index`) is refused: it is a container of
+  unnamed blobs, not world files.
+
+The metadata both formats start with is an int32 length of the rest, an int32
+save format, the name and the seed text as .NET strings, and the int32 seed.
+That is all the importer reads, plus the version at the start of a `.db` and
+the `.ok` (four bytes: the save format again). Server 1.0.17 writes format 41
+(`valheim::RELEASES`); a newer world is refused when `--runtime-version`
+names a release there, and warned about otherwise.
+
+Not yet verified on a running server: that a 1.0 folder loads under a name
+other than the one in its `.fwl2`, and how long a large pre-1.0 world takes
+to convert against the descriptor's ready timeout.
 
 ## Adding an importer
 
