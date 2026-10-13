@@ -95,6 +95,10 @@ pub mod exit {
     pub const UNSUPPORTED: i32 = 68;
     /// No such process: the server had already gone.
     pub const GONE: i32 = 69;
+    /// Not the helper's own code: Windows' `STATUS_CONTROL_C_EXIT`, the
+    /// status of a process ended by a console control event -- here, the one
+    /// it had just generated.
+    pub const ENDED_BY_BREAK: i32 = 0xC000_013A_u32 as i32;
 }
 
 /// `Some` when `args` (without the program name) invoke the helper verb, with
@@ -123,7 +127,10 @@ pub fn console_break_args(args: &[String]) -> Option<Result<u32, String>> {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn meaning(code: Option<i32>) -> Result<(), String> {
     match code {
-        Some(exit::SENT) => Ok(()),
+        // Ended by the very Ctrl+Break it generated: the event was sent, and
+        // the server has it too. Reading that as a failure would climb to
+        // terminate while the server is saving.
+        Some(exit::SENT) | Some(exit::ENDED_BY_BREAK) => Ok(()),
         Some(exit::NO_CONSOLE) => Err("the server is not a console program, so it cannot be \
              interrupted the way Ctrl+Break would."
             .into()),
@@ -233,7 +240,11 @@ mod imp {
         Ok(())
     }
 
+    /// Set by [`swallow`] once the event has reached this helper too.
+    static SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     unsafe extern "system" fn swallow(_event: u32) -> i32 {
+        SEEN.store(true, std::sync::atomic::Ordering::SeqCst);
         TRUE
     }
 
@@ -258,6 +269,19 @@ mod imp {
             if GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0) == FALSE {
                 return exit::NOT_SENT;
             }
+        }
+        // The event reaches this helper on a thread Windows starts for it, after
+        // the call above has returned. Exiting before that thread has run raced
+        // it: once in a real Valheim stop the helper ended with Windows' own
+        // "ended by Ctrl+Break" status instead of SENT, and the runner, reading
+        // a failed helper, terminated a server that was already saving. So
+        // wait until the event has been seen here -- by then it has been
+        // handed to every process on the console -- and only then exit.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !SEEN.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         exit::SENT
     }
@@ -342,6 +366,9 @@ mod tests {
     #[test]
     fn every_exit_code_is_a_sentence_and_only_sent_is_ok() {
         assert_eq!(meaning(Some(exit::SENT)), Ok(()));
+        // A helper ended by its own Ctrl+Break did send it.
+        assert_eq!(meaning(Some(exit::ENDED_BY_BREAK)), Ok(()));
+        assert_eq!(exit::ENDED_BY_BREAK, -1_073_741_510);
         for code in [
             Some(exit::USAGE),
             Some(exit::NO_CONSOLE),
