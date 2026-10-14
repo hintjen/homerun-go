@@ -706,6 +706,7 @@ mod tests {
             "world-import",
             "world-import:palworld",
             "world-import:terraria",
+            "world-import:valheim",
         ] {
             assert!(all.iter().any(|f| f == name), "{name} missing from {all:?}");
         }
