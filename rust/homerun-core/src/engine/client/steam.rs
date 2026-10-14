@@ -37,6 +37,10 @@ pub struct Library {
 impl Library {
     /// Whether this library might hold `app_id`. True when Steam's list does
     /// not say, so the caller reads the manifest to find out.
+    ///
+    /// A hint for where to look first, never a verdict: Steam writes the lists
+    /// lazily, and a game installed minutes ago can be missing from every one
+    /// of them while its manifest is already in its library.
     pub fn may_hold(&self, app_id: u32) -> bool {
         self.apps.as_ref().is_none_or(|apps| apps.contains(&app_id))
     }

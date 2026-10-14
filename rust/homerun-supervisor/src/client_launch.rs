@@ -160,7 +160,13 @@ fn survey_steam(app_ids: &[u32], probe: &dyn Probe) -> Option<steam::SteamFound>
 
     let mut installed = Vec::new();
     for app_id in app_ids {
-        for library in libraries.iter().filter(|l| l.may_hold(*app_id)) {
+        // The libraries Steam says hold the game first, then every other one.
+        // Steam's lists lag a fresh install: a game installed minutes ago, even
+        // one running, can be missing from every list while its manifest is in
+        // its library. The list orders the search; only a manifest decides.
+        let (listed, unlisted): (Vec<_>, Vec<_>) =
+            libraries.iter().partition(|l| l.may_hold(*app_id));
+        for library in listed.into_iter().chain(unlisted) {
             let Some(text) = probe.read(Path::new(&library.manifest_path(*app_id))) else {
                 continue;
             };
@@ -667,6 +673,32 @@ mod tests {
             &mut |p| plans.push(p.clone()),
         );
         (outcome, plans)
+    }
+
+    /// The case that was seen: a game installed to a second library minutes
+    /// earlier, and running, which Steam had not yet written into any
+    /// library's `apps` list. Its manifest was there all along.
+    #[test]
+    fn a_game_missing_from_steams_lists_is_still_found_by_its_manifest() {
+        let mut fake = steam();
+        fake.files.insert(
+            r"c:\program files (x86)\steam\steamapps\libraryfolders.vdf".into(),
+            "\"libraryfolders\" { \"0\" { \"path\" \"c:\\\\program files (x86)\\\\steam\" \"apps\" { } } \
+             \"1\" { \"path\" \"D:\\\\SteamLibrary\" \"apps\" { \"105600\" \"1\" } } }"
+                .into(),
+        );
+        let found = survey_steam(&[1623730], &fake).unwrap();
+        assert_eq!(found.installed.len(), 1);
+        assert_eq!(found.installed[0].library, r"D:\SteamLibrary");
+        assert_eq!(found.installed[0].manifest.app_id, 1623730);
+    }
+
+    #[test]
+    fn a_game_with_no_manifest_in_any_library_is_not_installed() {
+        let mut fake = steam();
+        fake.files
+            .remove(r"D:\SteamLibrary\steamapps\appmanifest_1623730.acf");
+        assert!(survey_steam(&[1623730], &fake).unwrap().installed.is_empty());
     }
 
     #[test]
