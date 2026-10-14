@@ -736,9 +736,10 @@ pub enum StopVia {
     /// Send [`Stop::command`] over whatever [`Console::via`] says.
     #[default]
     Console,
-    /// A console control event. Unsupported on `win32` for a server we did
-    /// not start in its own console group — which is why a game whose only
-    /// stop is an interrupt is a platform gap, not a descriptor detail.
+    /// A console control event: `SIGINT`, or on `win32` Ctrl+Break sent to
+    /// the server's own (hidden) console by a helper process. That reaches a
+    /// console-subsystem server only -- a windowed one has no console -- and
+    /// needs a runner advertising `stop-interrupt`, which a host must require.
     Interrupt,
     /// The game's extension asks the server to stop, through whatever the
     /// server offers for it -- Palworld's REST API. For a game with no

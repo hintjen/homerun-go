@@ -645,17 +645,27 @@ assumptions live in one module behind functions with one meaning each.
 |---|---|---|---|
 | `listening_ports(pid)` | `netstat -ano` | `/proc/net/*` joined to `/proc/<pid>/fd` by inode | `lsof` |
 | `process_stats(pid)` | `Get-Process` | `/proc/<pid>/{status,stat}` | `ps` |
-| `graceful_interrupt(pid)` | **refuses** | `SIGINT` | `SIGINT` |
+| `graceful_interrupt(pid)` | Ctrl+Break to the server's console, from a helper | `SIGINT` | `SIGINT` |
 | `user_data_roots()` | `%APPDATA%` and friends | `~/.config`, `~/.local/share` | + `~/Library/Application Support` |
 | `executable(dir, name)` | adds `.exe` | as given | as given |
 
-`graceful_interrupt` failing on Windows is a **platform fact, not a gap**. A
-console control event can only be sent to a process group attached to a
-console, and a server spawned with piped stdio has neither;
-`GenerateConsoleCtrlEvent` would signal *this* process's group, which
-includes the app. That is why `engine::validate` warns about
-`stop.via: interrupt` rather than accepting it quietly, and why the stop
-ladder treats a failed interrupt rung as something to log and climb past.
+`graceful_interrupt` on Windows was once documented as impossible -- "a
+server spawned with piped stdio has no console" -- and that was wrong. A
+**console-subsystem** server spawned with `CREATE_NO_WINDOW` (`job/owned.rs`)
+has a hidden console of its own; pipes replace its standard handles, not its
+console. What *is* true is that sending the event means attaching to that
+console, which is process-wide and signals the sender too, so the supervisor
+never does it in-process: a helper the linking binary registered
+(`set_interrupt_helper`; `homerun-game __console-break <pid>`) attaches and
+generates **Ctrl+Break** -- not Ctrl+C, which a child can inherit an
+instruction to ignore. `console_interrupt.rs` has the evidence and the rest.
+
+A **windowed** (GUI-subsystem) server still has no console, and its interrupt
+is an `Err`; the ladder notes why and climbs to the terminate at once rather
+than waiting out a grace nothing was asked to use. Since a descriptor cannot
+say which kind its server is, `engine::validate` still warns about
+`stop.via: interrupt`, and a host must require the runner feature
+`stop-interrupt` (`docs/game-runner.md`).
 
 Two parsing traps are worth knowing, because both produce a plausible wrong
 answer:
@@ -799,6 +809,7 @@ And in `homerun-supervisor`, behind `game-engine`:
 | `rcon.rs` | Valve's binary RCON and Facepunch's WebSocket dialect |
 | `local_http.rs` | plain HTTP to a server's own admin API on loopback, for its extension |
 | `platform.rs` | every OS assumption in the crate, in one place |
+| `console_interrupt.rs` | Ctrl+Break to a Windows server's own console, from a helper process the linking binary registers |
 | `process_engine.rs` | `Supervision` — readiness, roster, console and stop, per game |
 | `vendor_http.rs` | HTTPS to a game extension's allowed hosts only (`docs/game-extensions.md`) |
 | `local_secret.rs` | DPAPI sealing for what a game extension keeps (`docs/game-extensions.md`) |
@@ -854,12 +865,14 @@ front of it: `engine.classify` with that exact line answers in one call, and
 `game verify` is what re-checks the marker against the real binary.
 
 **A game that will not stop cleanly on Windows.** If its descriptor says
-`stop.via: interrupt`, that is unsupported on the only platform that ships —
-`platform::graceful_interrupt` refuses, the ladder climbs past it, and the
-save is whatever the game managed before the terminate. `engine::validate`
-warns about it at authoring time. If the game has an admin API on a port it
-can be told to keep on loopback, a stop through its extension
-(`stop.via: extension`) is the way out.
+`stop.via: interrupt`, read the stop's `host` lines. "an interrupt asked the
+server to stop" followed by the terminate step means the server got
+Ctrl+Break and did not exit within `graceMs` -- try a longer grace before
+anything else. "could not interrupt the server: the server is not a console
+program" means a windowed executable, which no console event reaches; if the
+game has an admin API on a port it can be told to keep on loopback, a stop
+through its extension (`stop.via: extension`) is the way out. A runner too
+old to advertise `stop-interrupt` writes no interrupt line and terminates.
 
 **An extension's stop falls to the terminate.** Read the `host` lines the
 stop wrote: "could not ask the server to stop" is followed by the

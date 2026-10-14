@@ -8,7 +8,36 @@ mod protocol;
 mod runner;
 mod runtime;
 
+use homerun_supervisor::platform;
+
+/// The program that interrupts a Windows server for the stop ladder: this
+/// one, re-run with the hidden verb. A separate process because attaching to
+/// a console is process-wide and the event reaches whoever sends it; see the
+/// supervisor's `console_interrupt.rs`.
+fn interrupt_helper(pid: u32) -> Result<std::process::Command, String> {
+    let exe = std::env::current_exe()
+        .map_err(|_| "this program could not find itself to interrupt the server.".to_string())?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg(platform::CONSOLE_BREAK_VERB)
+        .arg(pid.to_string());
+    Ok(command)
+}
+
 fn main() {
+    // Before anything else, and before `cli::run` installs a Ctrl+C handler:
+    // the helper is a process that exists only to send one event.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(parsed) = platform::console_break_args(&args) {
+        std::process::exit(match parsed {
+            Ok(pid) => platform::console_break(pid),
+            Err(message) => {
+                eprintln!("{message}");
+                platform::console_break_exit::USAGE
+            }
+        });
+    }
+    platform::set_interrupt_helper(interrupt_helper);
     if let Err(message) = cli::run() {
         eprintln!("{message}");
         std::process::exit(1);

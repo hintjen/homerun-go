@@ -271,6 +271,48 @@ save, and exits only on save-then-shutdown; and a one-route API the test
 `fixture` extension stops, for the rung's own behaviour — asked, refused,
 hung, panicked, and cancelled by the server's exit.
 
+## An interrupt stop on Windows: `stop-interrupt`
+
+`stop.via: "interrupt"` is for a game whose only clean shutdown is the one a
+person gets by pressing a key in its console -- a Unity dedicated server with
+no console verb, no RCON and no admin API is the first. On Unix the rung is
+`SIGINT`. On Windows the rung sends **Ctrl+Break** to the server's console.
+
+A console-subsystem server spawned the way every game is spawned
+(`CREATE_NO_WINDOW`, piped stdio, a job) has a console of its own, hidden and
+holding nothing else. Pipes replace its standard handles, not its console, so
+the event reaches it. Ctrl+Break and not Ctrl+C: a runner started from a
+background shell passes "ignore Ctrl+C" on to every child, and a real server
+ignored Ctrl+C for over a minute where it saved and exited in three seconds on
+Ctrl+Break.
+
+The runner never sends it itself. Attaching to another console is
+process-wide, the runner is multithreaded, and the event reaches every process
+on the console -- the sender included. So the ladder runs a helper,
+`homerun-game __console-break <pid>`, hidden: it frees its own console,
+attaches to the server's, installs a handler that swallows every event, and
+generates Ctrl+Break for the whole console. Its exit code is the answer
+(`platform::console_break_exit`): 0 asked; 65 the server is not a console
+program; 69 it had already gone. `main.rs` answers the verb before anything
+else and registers itself as the helper with
+`platform::set_interrupt_helper`; a binary that does not register one cannot
+interrupt. The runner also refuses to interrupt a server that shares its own
+console, since that would interrupt the runner.
+
+Asked, the server gets the rung's grace to exit, and the stop notes say "an
+interrupt asked the server to stop". Not asked -- a **windowed** server, which
+has no console -- and the note says why and the ladder goes to the terminate
+at once. Nothing a descriptor says tells a console server from a windowed one,
+so `validate` keeps a warning for every interrupt-stopped game; the onboarding
+probe is what finds out.
+
+Hosts must require feature `stop-interrupt` for a descriptor with
+`stop.via: "interrupt"`. An older runner accepts the descriptor, fails the
+rung on Windows, and terminates the server, losing whatever it had not saved.
+The lifecycle test `an_interrupt_stopped_console_game_saves_on_ctrl_break`
+runs the whole path: the real runner, the real helper verb, a fake game that
+saves on Ctrl+Break.
+
 ## `prepare.rs`: directories, settings and resources
 
 For cwd-relative assets, `launch.cwdBase: "runtime"` selects the shared runtime
@@ -387,6 +429,8 @@ go to stderr, and refusals are error events. Human mode prints its full verdict.
 | `rust/homerun-supervisor/src/world_import.rs` | Listing and reading a folder, zip or file a player picked to import |
 | `tests/lifecycle.rs` | A self-reinvoking fake game, local HTTP and real subprocess tests |
 | `rust/homerun-supervisor/src/process_engine.rs` | Process lifecycle and independent pipe draining |
+| `src/main.rs` | The hidden `__console-break` helper verb, and registering this binary as the interrupt helper |
+| `rust/homerun-supervisor/src/console_interrupt.rs` | Ctrl+Break to a Windows server's console, from the helper |
 | `rust/homerun-supervisor/src/fetcher.rs` | Cancellable effects, including a silent download peer |
 
 ## Triage
@@ -406,6 +450,14 @@ Nothing was run. Find out why before deleting that version's entry from
 
 **Standalone lock left behind:** confirm the old runner and server have exited,
 then remove that folder's `.homerun-runner.lock`. A stale PID is never killed.
+
+**An interrupt-stopped game falls to the terminate:** read the stop's `host`
+lines. "could not interrupt the server: the server is not a console program"
+means a windowed executable, which no console event reaches; look for a
+console-subsystem build of the server, or another way to stop it. "this
+program cannot interrupt a server" means the supervisor was linked into a
+binary that never registered a helper. On a runner without `stop-interrupt`
+there is no interrupt line at all: update the runner.
 
 **verify passed but joining fails:** verify does not test the gateway or client.
 The evidence says exactly which facts were and were not observed.

@@ -111,6 +111,13 @@ pub const FEATURES: &[&str] = &[
     // offers import, and this one before it sends `start.import`, because an
     // older runner ignores the field and would start an empty world.
     "world-import",
+    // `stop.via: "interrupt"` works on Windows: the stop ladder's interrupt
+    // rung sends Ctrl+Break to a console-subsystem server's own console, from
+    // a helper process (`homerun-game __console-break <pid>`). An older runner
+    // has the rung fail on Windows and climbs straight past it to the
+    // terminate, losing whatever the game had not saved -- so a host must
+    // require this name for such a descriptor.
+    "stop-interrupt",
 ];
 
 /// What Electron sends.
@@ -695,6 +702,13 @@ mod tests {
     #[test]
     fn this_runner_advertises_client_launch() {
         assert!(FEATURES.contains(&"client-launch"));
+    }
+
+    /// A host refuses an interrupt-stopped game on a runner that does not
+    /// advertise this, so it has to be exactly this name.
+    #[test]
+    fn this_runner_advertises_the_interrupt_stop() {
+        assert!(FEATURES.contains(&"stop-interrupt"));
     }
 
     /// The desktop offers import only on a runner that advertises the

@@ -56,7 +56,7 @@ strip = true
 [target.'cfg(windows)'.dev-dependencies]
 # Hold a second job handle in recovery tests to make asynchronous tree death
 # deterministic. Production uses only the supervisor's ownership API.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_SystemServices"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Console"] }
 
 [dev-dependencies]
 # Builds the vendor archives the lifecycle tests serve. Already in the graph

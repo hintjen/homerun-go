@@ -539,10 +539,17 @@ fn check_lifecycle(d: &GameDescriptor, r: &mut Report) {
                     .push("this game is stopped through its console and has no console.".into());
             }
         }
+        // Not a refusal: on Windows the runner sends Ctrl+Break to the
+        // server's own console (feature `stop-interrupt`), which a console
+        // program receives. What the descriptor cannot say is whether the
+        // server *is* one -- a windowed executable has no console, and its
+        // stop falls through to the terminate.
         StopVia::Interrupt => {
             r.warnings.push(
-                "this game can only be stopped by interrupting it, which Windows \
-                 cannot always do cleanly; a save may be lost on shutdown."
+                "this game is stopped by interrupting it, which on Windows needs a \
+                 runner with the stop-interrupt feature and works only for a console \
+                 program; a windowed server cannot be interrupted, and a save may be \
+                 lost on shutdown."
                     .into(),
             );
         }
@@ -2414,7 +2421,9 @@ mod tests {
         let r = report(&serde_json::from_value(base).unwrap());
         assert!(r.ok(), "{:#?}", r.problems);
         assert!(
-            r.warnings.iter().any(|w| w.contains("save may be lost")),
+            r.warnings
+                .iter()
+                .any(|w| w.contains("stop-interrupt") && w.contains("save may be lost")),
             "{:#?}",
             r.warnings
         );
