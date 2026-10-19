@@ -109,6 +109,10 @@ pub struct Request {
     /// Sent as `application/json`. `None` sends no body.
     pub body: Option<Value>,
     pub basic: Option<Basic>,
+    /// Leave a 2xx out of the diagnostics stream. For a request made every
+    /// few seconds, whose every success would otherwise be a line in the
+    /// host's log; anything else is still written.
+    pub quiet: bool,
 }
 
 impl Request {
@@ -127,7 +131,13 @@ impl Request {
             path: path.into(),
             body: None,
             basic: None,
+            quiet: false,
         }
+    }
+    /// See [`Request::quiet`].
+    pub fn quiet(mut self) -> Self {
+        self.quiet = true;
+        self
     }
     pub fn json(mut self, value: Value) -> Self {
         self.body = Some(value);
@@ -179,6 +189,13 @@ pub fn send(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Response, Failure> {
     let result = perform(target, request, cancelled);
+    if request.quiet
+        && result
+            .as_ref()
+            .is_ok_and(|r| (200..300).contains(&r.status))
+    {
+        return result;
+    }
     let status = match &result {
         Ok(response) => response.status.to_string(),
         Err(Failure::NotAllowed) => "refused".into(),

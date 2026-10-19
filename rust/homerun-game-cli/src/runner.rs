@@ -454,7 +454,14 @@ fn run(
     // The game's extension, if it has one, goes first: it may need a person
     // to sign in, and what it supplies is part of the launch line below.
     let mut extension = extensions::begin(d, &id, &root, &server, stop, out, prompts)?;
-    let prepared = (|| -> Result<(prepare::Prepared, Option<extensions::Local>)> {
+    // The launch, what the readiness probe may reach, and what the players
+    // request may reach.
+    type Prepared = (
+        prepare::Prepared,
+        Option<extensions::Local>,
+        Option<extensions::Local>,
+    );
+    let prepared = (|| -> Result<Prepared> {
         if stop.should_stop() {
             return Err(fail(codes::SPAWN_FAILED, "The start was cancelled."));
         }
@@ -483,6 +490,11 @@ fn run(
             Some(extension) => extension.probe_local(d, &p.ports, &secrets)?,
             None => None,
         };
+        // And what its players request may reach, the same way.
+        let players_local = match &extension {
+            Some(extension) => extension.players_local(d, &p.ports, &secrets)?,
+            None => None,
+        };
         runtime_owner.install(d, &server)?;
         if let Some(job) = runtime_owner.process_job() {
             p.engine.require_job(job);
@@ -492,9 +504,9 @@ fn run(
                 ProcessJob::required_process().map_err(|e| fail(codes::SPAWN_FAILED, e))?,
             ));
         }
-        Ok((p, probe))
+        Ok((p, probe, players_local))
     })();
-    let (p, probe) = match prepared {
+    let (p, probe, players_local) = match prepared {
         Ok(prepared) => prepared,
         Err(e) => {
             // Nothing was spawned, but `begin` may have made something the
@@ -678,7 +690,24 @@ fn run(
                             cpu_seconds,
                         });
                     }
-                    if matches!(d.observe.players, PlayersVia::LogRegex) {
+                    // The extension's answer first, when it can give one:
+                    // what the server says, not what its log has let
+                    // through so far.
+                    let from_extension = match (&extension, &players_local) {
+                        (Some(extension), Some(local)) => {
+                            let stop = stop.clone();
+                            extension.players(local, &move || stop.should_stop())
+                        }
+                        _ => None,
+                    };
+                    if let Some(players) = from_extension {
+                        out.send(Event::Players {
+                            server_id: id.clone(),
+                            count: players.len() as u32,
+                            max: None,
+                            players,
+                        });
+                    } else if matches!(d.observe.players, PlayersVia::LogRegex) {
                         if let Some((players, max)) = engine.players() {
                             out.send(Event::Players {
                                 server_id: id.clone(),
@@ -728,6 +757,11 @@ fn run(
                 line = line.replace(secret.as_str(), "[redacted]");
             }
             if let Some(extension) = &extension {
+                // The server's record of the extension's own request, every
+                // few seconds: not the server's news.
+                if extension.echoes(&line) {
+                    return;
+                }
                 extension.on_line(&line, stream);
             }
             if lines.len() == 100 {
