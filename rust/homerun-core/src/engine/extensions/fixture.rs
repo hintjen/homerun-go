@@ -33,6 +33,8 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     config_schema,
     stops: true,
     probes_ready: true,
+    observes_players: false,
+    echoes: super::no_echoes,
     loopback,
 };
 

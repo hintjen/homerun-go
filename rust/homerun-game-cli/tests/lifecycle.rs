@@ -198,11 +198,20 @@ fn fake_game() {
             refuse_save: std::env::var("HOMERUN_TEST_REST_REFUSE")
                 .ok()
                 .map(|s| s.parse().unwrap()),
+            players: std::env::var("HOMERUN_TEST_REST_PLAYERS")
+                .ok()
+                .map(|spec| players_body(&spec)),
         };
         fake_palworld::serve(
             rest,
             &behaviour,
-            &mut |line| log_request(&line),
+            &mut |line| {
+                log_request(&line);
+                // The real server logs every request it serves, to stdout.
+                if let Some(path) = line.split_whitespace().nth(1) {
+                    println!("[2026-10-19 15:57:31] [LOG] REST accessed endpoint {path} OK");
+                }
+            },
             &mut || fs::write(&save, "world flushed").unwrap(),
         );
         return;
@@ -277,6 +286,21 @@ fn fake_game() {
 
 /// Append one request an admin API received to `rest-log`, for the test to
 /// read the order back.
+/// `/v1/api/players` from `name=userId,...` -- a launch env value cannot carry
+/// braces, which are placeholders there -- or `unreadable` for a body that is
+/// not an answer.
+fn players_body(spec: &str) -> String {
+    if spec == "unreadable" {
+        return "not an answer".into();
+    }
+    let players: Vec<Value> = spec
+        .split(',')
+        .filter_map(|p| p.split_once('='))
+        .map(|(name, user_id)| json!({"name": name, "userId": user_id, "level": 3}))
+        .collect();
+    json!({ "players": players }).to_string()
+}
+
 fn log_request(line: &str) {
     let mut log = fs::read_to_string("rest-log").unwrap_or_default();
     log.push_str(line);
@@ -1308,8 +1332,16 @@ fn palworld_with_the_wrong_password_is_refused_by_the_game() {
     h.eof();
 }
 
-/// The requests the fake Palworld saw, in order.
+/// The requests the fake Palworld saw, in order, leaving out the players
+/// sample's: it asks every couple of seconds once the server has started.
 fn rest_log(f: &Fixture) -> Vec<String> {
+    every_request(f)
+        .into_iter()
+        .filter(|l| !l.starts_with("GET /v1/api/players "))
+        .collect()
+}
+
+fn every_request(f: &Fixture) -> Vec<String> {
     fs::read_to_string(f.root.join("server/rest-log"))
         .unwrap_or_default()
         .lines()
@@ -1349,6 +1381,95 @@ fn palworld_is_ready_by_its_rest_api_when_the_marker_never_comes() {
     assert!(log[1].starts_with("POST /v1/api/save"), "{log:#?}");
     assert!(log[2].starts_with("POST /v1/api/shutdown"), "{log:#?}");
     no_secret_leaked(&h);
+    h.eof();
+}
+
+/// Who is on comes from the REST API, by name and platform id -- not from
+/// join lines, which the real server's buffered stdout holds back for
+/// minutes -- and the server's line for each of those requests stays out of
+/// the log, where one every two seconds would bury everything else.
+#[test]
+fn palworld_says_who_is_playing_from_its_rest_api() {
+    let f = Fixture::new();
+    let mut start = palworld_start(&f);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]
+        ["HOMERUN_TEST_REST_PLAYERS"] =
+        json!("Craig=steam_76561198000000001,Dana=gdk_2535400000000000");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    let players = h.until("players");
+    assert_eq!(players["count"], 2, "{players}");
+    assert_eq!(
+        players["players"],
+        json!([
+            {"name":"Craig","platformId":"76561198000000001","platform":"steam"},
+            {"name":"Dana","platformId":"2535400000000000","platform":"xbox"},
+        ])
+    );
+    // Several samples' worth, so their lines have had time to arrive.
+    thread::sleep(Duration::from_secs(5));
+    let asked = every_request(&f)
+        .iter()
+        .filter(|l| l.starts_with("GET /v1/api/players HTTP/1.1 auth=true"))
+        .count();
+    assert!(asked >= 2, "{:#?}", every_request(&f));
+    let logged: Vec<&str> = h
+        .seen
+        .iter()
+        .filter(|v| v["event"] == "server-log")
+        .filter_map(|v| v["line"].as_str())
+        .collect();
+    assert!(
+        !logged.iter().any(|l| l.contains("/v1/api/players")),
+        "{logged:#?}"
+    );
+
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
+    // The game's other request lines are its own news, and stay.
+    let logged: Vec<String> = h
+        .seen
+        .iter()
+        .filter(|v| v["event"] == "server-log")
+        .filter_map(|v| v["line"].as_str().map(String::from))
+        .collect();
+    assert!(
+        logged
+            .iter()
+            .any(|l| l.contains("REST accessed endpoint /v1/api/save OK")),
+        "{logged:#?}"
+    );
+    no_secret_leaked(&h);
+    h.eof();
+}
+
+/// An answer that cannot be read is not "nobody is on": with no count from
+/// the log to stand in, no players are reported at all.
+#[test]
+fn palworld_with_an_unreadable_players_answer_reports_nothing() {
+    let f = Fixture::new();
+    let mut start = palworld_start(&f);
+    start["descriptor"]["platforms"][platform::HOST]["launch"]["env"]
+        ["HOMERUN_TEST_REST_PLAYERS"] = json!("unreadable");
+    let mut h = Host::new();
+    h.send(start);
+    h.until("server-started");
+    thread::sleep(Duration::from_secs(5));
+    assert!(
+        every_request(&f)
+            .iter()
+            .any(|l| l.starts_with("GET /v1/api/players ")),
+        "{:#?}",
+        every_request(&f)
+    );
+    assert!(
+        !h.seen.iter().any(|v| v["event"] == "players"),
+        "{:#?}",
+        h.seen
+    );
+    h.send(json!({"cmd":"stop","serverId":"s1"}));
+    h.until("server-stopped");
     h.eof();
 }
 

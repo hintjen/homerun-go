@@ -36,8 +36,18 @@
 //! go through a wide-character path and arrive as mojibake or not at all,
 //! and a server that never prints its marker stays "Starting" with no tunnel.
 //!
-//! What this half decides: the config and its defaults, the requests, and
-//! how a refusal is explained. The runner's `extensions/palworld.rs` only
+//! **Players.** The same API says who is playing: `GET /v1/api/players`,
+//! asked on every players sample. The log cannot be trusted for that either.
+//! The server's own `[LOG]` lines -- "joined the server", "left the server"
+//! -- go through a stdout that a pipe makes block-buffered, so a join reaches
+//! the runner only once about 4 KB of later lines have pushed it out: minutes
+//! on a quiet server, or never (observed 2026-10-19, v1.0.5). The REST answer
+//! also names each player and carries their platform id, which a join line's
+//! count did not. The server logs every request it serves, so the runner
+//! keeps its own `players` requests out of the log ([`echoes`]).
+//!
+//! What this half decides: the config and its defaults, the requests, what
+//! a players answer means, and how a refusal is explained. The runner's `extensions/palworld.rs` only
 //! sends them.
 
 use serde_json::{json, Value};
@@ -54,6 +64,8 @@ pub const SPEC: ExtensionSpec = ExtensionSpec {
     config_schema,
     stops: true,
     probes_ready: true,
+    observes_players: true,
+    echoes,
     loopback,
 };
 
@@ -69,6 +81,74 @@ pub const SHUTDOWN: &str = "/v1/api/shutdown";
 /// The server's name and version. Any 2xx means its REST API is up, which is
 /// the readiness probe's whole question.
 pub const INFO: &str = "/v1/api/info";
+
+/// Who is playing, as `{"players": [{"name", "userId", ...}]}`.
+pub const PLAYERS: &str = "/v1/api/players";
+
+/// One player the server says is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Present {
+    pub name: String,
+    /// `steam` or `xbox`, from the `userId` prefix. `None` for a prefix this
+    /// has not seen, and then there is no id either.
+    pub platform: Option<String>,
+    pub platform_id: Option<String>,
+}
+
+/// Read a `/v1/api/players` answer. `None` for a body that is not one, so
+/// the runner falls back to the log's count rather than reporting nobody.
+pub fn players(body: &str) -> Option<Vec<Present>> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let list = value.get("players")?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|p| {
+                let name = p.get("name")?.as_str()?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                let (platform, platform_id) = p
+                    .get("userId")
+                    .and_then(Value::as_str)
+                    .and_then(platform_of)
+                    .map_or((None, None), |(platform, id)| {
+                        (Some(platform.to_string()), Some(id.to_string()))
+                    });
+                Some(Present {
+                    name: name.to_string(),
+                    platform,
+                    platform_id,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// `steam_<SteamID64>` and `gdk_<id>` (the Xbox and Microsoft Store build),
+/// as the join lines and the REST answer both write them.
+fn platform_of(user_id: &str) -> Option<(&'static str, &str)> {
+    let (prefix, id) = user_id.split_once('_')?;
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    match prefix {
+        "steam" => Some(("steam", id)),
+        "gdk" => Some(("xbox", id)),
+        _ => None,
+    }
+}
+
+/// The line Palworld logs for each `players` request: `[<time>] [LOG] REST
+/// accessed endpoint /v1/api/players OK`. One every few seconds would bury
+/// everything a person reads the console for. The other requests -- the
+/// readiness probe's, the stop's -- are rare, and stay.
+pub fn echoes(line: &str) -> bool {
+    line.contains("[LOG] REST accessed endpoint ")
+        && line
+            .split("REST accessed endpoint ")
+            .nth(1)
+            .is_some_and(|rest| rest.split_whitespace().next() == Some(PLAYERS))
+}
 
 /// The longest `shutdownWait`. It is spent inside the stop's grace.
 pub const MAX_WAIT_SECS: u64 = 300;
@@ -300,8 +380,66 @@ mod tests {
             }
         );
         assert!(hosts(&config).is_empty());
-        const { assert!(SPEC.stops && SPEC.probes_ready) };
+        const { assert!(SPEC.stops && SPEC.probes_ready && SPEC.observes_players) };
         assert!(SPEC.supplies.is_empty());
+    }
+
+    /// The shape observed on v1.0.5, with made-up values.
+    #[test]
+    fn a_players_answer_names_each_player_and_their_platform() {
+        let body = r#"{"players":[
+            {"name":"Craig","accountName":"craig","playerId":"0A1B","userId":"steam_76561198000000001","iP":"127.0.0.1","ping":12.5,"location_x":1.0,"location_y":2.0,"level":3},
+            {"name":"Dana","userId":"gdk_2535400000000000","level":1},
+            {"name":"Eli","userId":"psn_123"},
+            {"name":"  ","userId":"steam_76561198000000009"}
+        ]}"#;
+        assert_eq!(
+            players(body),
+            Some(vec![
+                Present {
+                    name: "Craig".into(),
+                    platform: Some("steam".into()),
+                    platform_id: Some("76561198000000001".into()),
+                },
+                Present {
+                    name: "Dana".into(),
+                    platform: Some("xbox".into()),
+                    platform_id: Some("2535400000000000".into()),
+                },
+                // A platform this has not seen: named, with no id rather
+                // than a guessed one.
+                Present {
+                    name: "Eli".into(),
+                    platform: None,
+                    platform_id: None,
+                },
+            ])
+        );
+        assert_eq!(players(r#"{"players":[]}"#), Some(vec![]));
+    }
+
+    /// Not an answer is not "nobody": the runner falls back to the count.
+    #[test]
+    fn a_body_that_is_not_an_answer_is_none() {
+        for body in ["", "Unauthorized", "{}", r#"{"players":{}}"#, "[]"] {
+            assert_eq!(players(body), None, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn only_its_own_players_requests_are_hidden_from_the_log() {
+        assert!(echoes(
+            "[2026-10-19 15:57:31] [LOG] REST accessed endpoint /v1/api/players OK"
+        ));
+        for kept in [
+            "[2026-10-19 15:54:04] [LOG] REST accessed endpoint /v1/api/info OK",
+            "[2026-10-19 15:54:04] [LOG] REST accessed endpoint /v1/api/save OK",
+            "[2026-10-19 15:55:28] [LOG] Craig joined the server. (User id: steam_1)",
+            // Typed in chat: not the server's record of a request.
+            "[2026-10-19 15:56:00] [CHAT] <Craig> REST accessed endpoint /v1/api/players OK",
+        ] {
+            assert!(!echoes(kept), "{kept}");
+        }
     }
 
     #[test]

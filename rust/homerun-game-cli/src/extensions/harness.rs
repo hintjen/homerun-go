@@ -358,6 +358,7 @@ mod palworld {
         let (port, served) = fake(Behaviour {
             password: "hunter2".into(),
             refuse_save: Some(500),
+            ..Behaviour::default()
         });
         let h = Harness::for_extension("palworld", json!({}));
         let (result, notes) =

@@ -35,7 +35,7 @@ console. That is what keeps an extension small enough to review and
 unable to get the safety rules wrong.
 
 **Two release extensions exist: `hytale`**, Hytale's server sign-in, and
-**`palworld`**, Palworld's stop and readiness through its REST API (both
+**`palworld`**, Palworld's stop, readiness and players through its REST API (both
 below). The test-only `fixture` is the third, and the example to copy.
 
 ### When something belongs in an extension
@@ -70,6 +70,8 @@ half may not add one:
 | `config_schema` | its config's JSON Schema, spliced into `game.v0.json` |
 | `stops` | whether it can ask a server to stop, so a descriptor may say `stop.via: "extension"` |
 | `probes_ready` | whether it can tell a starting server is up without its log, so the runner runs its `probe_ready` beside the `ready.marker` |
+| `observes_players` | whether it can say who is playing without the log, so the runner asks its `players` on every players sample, ahead of `observe.players` |
+| `echoes` | whether a line is the server's own record of a request the extension made; the runner keeps such lines out of the log (`no_echoes` for none) |
 | `loopback` | the server's own private ports it may reach, and the host secrets it may sign in to them with, both by name (`no_loopback` for none) |
 
 **The registry is two lists.** `PUBLISHED` is what a release build carries and
@@ -134,6 +136,7 @@ does nothing.
 | `Run::on_state` | `Started` (with `server-started`); `Stopping` (the first stop seen) | sampler | **no**: returns `Action`s |
 | `stop` | the polite rung of a stop, for `stop.via: "extension"` | its own | up to the stop's `graceMs`, then abandoned |
 | `probe_ready` | every 2 s while the server starts, for a spec that `probes_ready`, until a yes, the marker, or a stop | its own | until `ctx.cancelled()` |
+| `players` | every players sample (2 s) once started, for a spec that `observes_players` | sampler | until `ctx.cancelled()`, at most `PLAYERS_BUDGET` (2 s) |
 | `Run::on_stop` | after the process tree has exited, before the terminal event | its own | up to `STOP_BUDGET` (10 s), then abandoned |
 | `forget` | `extension-forget`: delete what it keeps on this machine | main | briefly |
 | `status` | `extension-status`: signed in or not, and as whom | main | briefly |
@@ -165,6 +168,18 @@ asks again. `server-started` still waits for every declared port to be
 bound. `Ok(false)`, an error or a panic is "not yet" (a panic also ends the
 probing for that run): a probe can make a server ready, never fail one —
 the ready timeout still does that.
+
+**`players` says who is on when the log cannot.** A spec that
+`observes_players` is asked on every players sample once the server has
+started, on the sampler's thread, and its answer is the `players` event:
+names and platform ids, counted by the runner. An error, an answer cut off at
+`PLAYERS_BUDGET`, or a panic (which also ends the asking for that run) is
+"cannot tell now", and the sample falls back to the descriptor's
+`observe.players` -- so an extension that breaks is the count it replaced,
+never a report of nobody. A request made this often should be built
+`.quiet()`, which leaves its successes out of the runner's stderr; and if the
+server logs each request it serves, the spec's `echoes` keeps those lines out
+of the person's console.
 
 ### The rules the runner enforces, so no extension can get them wrong
 
@@ -457,7 +472,7 @@ against one is what proves them. Whether a passthrough server survives a failed
 hourly session refresh — the case the console fallback exists for — is also
 open.
 
-## `palworld` — Palworld's stop and readiness
+## `palworld` — Palworld's stop, readiness and players
 
 A Palworld dedicated server reads nothing on stdin, so a console stop has
 nowhere to go, and on Windows a piped child has no console for a control
@@ -468,6 +483,7 @@ and whatever it had not saved is lost. This extension is its polite rung.
 |---|---|
 | Start | Nothing. The server needs nothing from Homerun but its settings; the admin password is a host secret the descriptor writes into `PalWorldSettings.ini`. |
 | Starting | `GET /v1/api/info` every 2 s, the same way the stop signs in; the first 2xx makes the server ready even if its `ready.marker` line never arrives (see `probe_ready` above). |
+| Running | `GET /v1/api/players` every 2 s, the same way: each player's `name`, and their platform from `userId` (`steam_<id>` is `steam`, `gdk_<id>` is `xbox`). The server's `[LOG] REST accessed endpoint /v1/api/players OK` line for each is kept out of the log. A failed or unreadable answer falls back to counting `observe.presence` lines. |
 | Stop | `POST /v1/api/save` with `{}`, then — only if that answered 2xx — `POST /v1/api/shutdown` with `{"waittime": <s>, "message": <m>}`, both as `admin` with the host's admin password, on the REST port on loopback. Any other answer, or none, is a stop that did not happen, and the ladder goes on to terminate. |
 
 **The descriptor** keeps the REST port private and stops through the
@@ -495,6 +511,15 @@ but does not stop through it.
 setting to keep it on loopback, which the runner's bind check would refuse;
 the vendor has deprecated it; and its `Shutdown` alone did not save. The REST
 API can be bound to loopback, and has a save of its own.
+
+**Why players from REST and not the join lines.** The server's own `[LOG]`
+lines -- "joined the server", "left the server" -- go to a stdout that a
+pipe makes block-buffered, so a join reaches the runner only once about 4 KB
+of later lines push it out: minutes on a quiet server, or never. Seen on
+Windows v1.0.5 (2026-10-19): a player on for five minutes, `/v1/api/metrics`
+saying one player, and no join line until 80 requests' worth of log lines
+had filled the buffer. The descriptor keeps its `observe.presence` markers
+as the fallback.
 
 **Why the save first.** A shutdown after a save that failed would be a stop
 that loses the world it was meant to keep, so a refused save ends the

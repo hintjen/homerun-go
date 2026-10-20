@@ -79,6 +79,17 @@ pub struct ExtensionSpec {
     /// or the descriptor's `ready.marker`. Either way, `server-started` still
     /// waits for every declared port to be bound.
     pub probes_ready: bool,
+    /// Whether it can say who is playing without reading the log: the runner
+    /// then asks it on every players sample, and reports its answer in place
+    /// of what `observe.presence` counted. When it cannot answer -- the
+    /// request failed, the server is not up yet -- the runner falls back to
+    /// the count, so an extension that breaks is the count it replaced.
+    pub observes_players: bool,
+    /// Whether a line is the server's own record of a request the extension
+    /// made, which the runner keeps out of the log. A server that logs every
+    /// request it serves would otherwise fill a person's console with the
+    /// runner asking who is playing.
+    pub echoes: fn(line: &str) -> bool,
     /// The server's own private ports the extension may reach on loopback,
     /// and the host secrets it may sign in to them with -- both by name, read
     /// from a config that has passed [`Self::validate`].
@@ -95,6 +106,11 @@ pub struct ExtensionSpec {
 pub struct Loopback {
     pub ports: Vec<String>,
     pub secrets: Vec<String>,
+}
+
+/// [`ExtensionSpec::echoes`] for an extension whose requests leave no line.
+pub fn no_echoes(_line: &str) -> bool {
+    false
 }
 
 /// [`ExtensionSpec::loopback`] for an extension that reaches nothing local.

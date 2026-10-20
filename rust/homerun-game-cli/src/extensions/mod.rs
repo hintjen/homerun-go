@@ -78,7 +78,7 @@ use serde_json::Value;
 
 use crate::{
     prepare::{fail, Failure, Result},
-    protocol::{codes, Event},
+    protocol::{codes, Event, Player},
     runner::Output,
 };
 
@@ -110,6 +110,11 @@ const LOOPBACK_HTTP: bool = cfg!(feature = "test-extensions");
 /// How long [`Run::on_stop`] may take, in total, before the runner stops
 /// waiting for it.
 pub const STOP_BUDGET: Duration = Duration::from_secs(10);
+
+/// The longest one players request may take. It is asked on the sampler's
+/// thread, which also carries the run's stats and its stop notice, so a
+/// server that does not answer is given up on rather than waited for.
+pub const PLAYERS_BUDGET: Duration = Duration::from_secs(2);
 
 /// How long before the first readiness probe, and between two of them.
 /// Each is one request to loopback.
@@ -183,6 +188,20 @@ pub trait GameExtension: Send + Sync {
     /// [`ProbeContext::cancelled`] is true.
     fn probe_ready(&self, _ctx: &ProbeContext) -> std::result::Result<bool, ExtError> {
         Ok(false)
+    }
+
+    /// Who is playing, for an extension whose spec `observes_players`.
+    ///
+    /// Asked on the sampler's thread on every players sample once the server
+    /// has started, and must return promptly once [`ProbeContext::cancelled`]
+    /// is true -- within [`PLAYERS_BUDGET`]. An error means "cannot tell
+    /// now", and the runner reports what the log counted instead; an empty
+    /// list means nobody is on.
+    fn players(&self, _ctx: &ProbeContext) -> std::result::Result<Vec<Player>, ExtError> {
+        Err(ExtError::new(
+            codes::EXTENSION_FAILED,
+            "This game's extension cannot say who is playing.",
+        ))
     }
 }
 
@@ -636,6 +655,8 @@ pub struct Active {
     actions: Option<mpsc::SyncSender<Action>>,
     worker: Option<JoinHandle<()>>,
     stopping_seen: AtomicBool,
+    /// Its players hook panicked: not asked again this run.
+    players_broken: AtomicBool,
     machine: MachineStore,
     server: ServerStore,
     policy: Policy,
@@ -726,6 +747,7 @@ pub fn begin(
         actions: None,
         worker: None,
         stopping_seen: AtomicBool::new(false),
+        players_broken: AtomicBool::new(false),
         machine,
         server,
         policy,
@@ -832,6 +854,57 @@ impl Active {
                 });
             })
             .ok()
+    }
+
+    /// What the players request may reach, resolved as the stop's is, when
+    /// the extension's spec `observes_players`.
+    pub fn players_local(
+        &self,
+        d: &GameDescriptor,
+        ports: &BTreeMap<String, u16>,
+        secrets: &BTreeMap<String, String>,
+    ) -> Result<Option<Local>> {
+        if !self.spec.observes_players {
+            return Ok(None);
+        }
+        resolve_local(self.spec, &self.config, d, ports, secrets).map(Some)
+    }
+
+    /// Who is playing, if the extension can say right now. `None` on any
+    /// failure, a panic included -- after which it is not asked again this
+    /// run, and the log's count stands in for the rest of it.
+    pub fn players(&self, local: &Local, quit: &dyn Fn() -> bool) -> Option<Vec<Player>> {
+        if self.players_broken.load(Ordering::SeqCst) {
+            return None;
+        }
+        let (extension, _) = find(self.spec.name)?;
+        let deadline = Instant::now() + PLAYERS_BUDGET;
+        let cancelled = || quit() || Instant::now() >= deadline;
+        let ctx = ProbeContext {
+            name: self.spec.name,
+            config: &self.config,
+            server_id: &self.server_id,
+            local,
+            cancelled: &cancelled,
+        };
+        match catch_unwind(AssertUnwindSafe(|| extension.players(&ctx))) {
+            Ok(Ok(players)) => Some(players),
+            Ok(Err(_)) => None,
+            Err(_) => {
+                self.players_broken.store(true, Ordering::SeqCst);
+                eprintln!(
+                    "The \"{}\" extension panicked saying who was playing; the log's count                      stands in for the rest of this run.",
+                    self.spec.name
+                );
+                None
+            }
+        }
+    }
+
+    /// Whether `line` is the server's record of a request the extension
+    /// made, kept out of the log.
+    pub fn echoes(&self, line: &str) -> bool {
+        (self.spec.echoes)(line)
     }
 
     /// Every supplied value the spec marks secret, for redaction.
