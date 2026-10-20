@@ -29,9 +29,9 @@
  * tampered manifest must *throw*, since a refusal that came back as a verdict
  * is one a caller could log and carry on past.
  *
- * Skips rather than fails when the addon is not built: it is Windows-only and
- * an artifact, so a Mac running `npm test` has nothing to check and should say
- * so instead of going red.
+ * Skips rather than fails when the addon is not built: it is an artifact,
+ * built for Windows and Linux, so a Mac running `npm test` has nothing to
+ * check and should say so instead of going red.
  */
 const crypto = require("crypto");
 const fs = require("fs");
@@ -40,13 +40,15 @@ const path = require("path");
 const { signingPayload } = require("./sign-manifest");
 const { ROOT, TARGETS } = require("./targets");
 
-const target = TARGETS["core-node"];
+// The addon this machine can load: an addon is checked by loading it.
+const targetName = process.platform === "linux" ? "core-node-linux-x64" : "core-node";
+const target = TARGETS[targetName];
 const addon = path.join(target.outDir, target.outName);
 
 if (!fs.existsSync(addon)) {
   console.log(
     `SKIP — no addon at ${path.relative(ROOT, addon)}\n` +
-      "       Build it with: npm run rust:core-node   (Windows only)"
+      `       Build it with: npm run rust:${targetName}   (${process.platform === "linux" ? "on glibc 2.31" : "Windows only"})`
   );
   process.exit(0);
 }

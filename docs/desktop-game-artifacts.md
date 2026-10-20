@@ -23,6 +23,32 @@ Pumpkin. The addon is `homerun_core.node`, also built with the static CRT as on
 main. Both builds verify their Windows imports. Keep the addon smoke test in the Windows
 release job: a Rust compilation alone does not prove Node can load it.
 
+## Linux and macOS builds
+
+Homerun Desktop is coming to Linux, then macOS (Apple silicon), and two of
+these artifacts are needed there first:
+
+```text
+npm run rust:core-node-linux-x64                       # on glibc 2.31
+node scripts/build-wireproxy.js desktop-linux-x64     # any machine with Go
+node scripts/build-wireproxy.js desktop-linux-arm64
+node scripts/build-wireproxy.js desktop-darwin-arm64
+node scripts/build-wireproxy.js desktop-win32-x64
+```
+
+- **The Linux addon is built on its floor.** A `.node` linked on a newer
+  glibc asks for newer symbols and fails to load on an older distro, which is
+  the desktop's main process failing at startup. `core-node-linux-x64`
+  refuses a machine above glibc 2.31 (Ubuntu 20.04) and checks the symbol
+  versions the staged file asks for. Build it on Ubuntu 20.04 or in an
+  `ubuntu:20.04` container.
+- **wireproxy is the desktop's tunnel,** `homerun-desktop-server-proxy`,
+  built from the fork at `scripts/wireproxy.rev`, the revision the phones
+  ship. cgo is off, so one machine builds all four targets and the Linux
+  builds are static.
+- **Where they land:** Windows artifacts stay in `dist/desktop/`; every other
+  target's go in `dist/desktop/<target>/`.
+
 ## `scripts/publish-desktop-artifacts.js`: sign, hash, publish
 
 Sign the final binaries **before** preparing manifests. Any signing or other
@@ -113,6 +139,22 @@ where it is a build-machine input rather than something a player can set.
 | Runner | `game-runner/homerun-game-<build>.exe` | `game-runner/latest.json` | `game-runner-latest.json` |
 | Core addon | `core/homerun-core-<build>.node` | `core/latest.json` | `core-latest.json` |
 | Pumpkin | `pumpkin/homerun-desktop-minecraft-pumpkin-<build>.exe` | `pumpkin/latest.json` | `pumpkin-latest.json` |
+| wireproxy | `wireproxy/homerun-desktop-server-proxy-<build>.exe` | `wireproxy/latest.json` | `wireproxy-latest.json` |
+
+That table is `--target win32-x64`, the default and the layout every released
+desktop reads. Every other target is **keyed**, one manifest per target:
+`core/linux-x64/latest.json` naming
+`core/linux-x64/homerun-core-<build>.node`, and
+`wireproxy/linux-x64/latest.json` naming
+`wireproxy/linux-x64/homerun-desktop-server-proxy-<build>` (an executable off
+Windows has no `.exe`). A manifest per target rather than a map in one file,
+because the desktop's pin is "this manifest names one object and its
+digest". What each target has is `TARGET_KINDS`: today `linux-x64` has the
+addon and wireproxy, and `linux-arm64` and `darwin-arm64` have wireproxy.
+Anything else is refused rather than published under a key nothing reads.
+The addon is published from a machine of its own target, since its version
+and ABI are asked of the addon; wireproxy carries `rev`, the fork revision
+from `scripts/wireproxy.rev`.
 
 The runner adds `version` (Cargo package version) and `protocol: 1`. The addon
 adds `version`, `abi`, and `sourceBuild`, read from the actual locally built

@@ -71,6 +71,19 @@ const TARGETS = {
     kind: "gomobile",
     requiresMacOS: true,
   },
+  /**
+   * Homerun Desktop's tunnel, `homerun-desktop-server-proxy`, published per
+   * target by publish-desktop-artifacts.js. cgo off for all four, so one
+   * machine with Go builds every one of them, and the Linux builds are static:
+   * they ask no glibc for anything, which is the desktop's floor met for free.
+   * DNS needs no cgo here, unlike on Android: Go's resolver reads
+   * /etc/resolv.conf on Linux, and goes through the system on Windows and on
+   * macOS.
+   */
+  "desktop-win32-x64": { label: "Homerun Desktop, Windows x64", kind: "desktop", desktopTarget: "win32-x64", goos: "windows", goarch: "amd64" },
+  "desktop-linux-x64": { label: "Homerun Desktop, Linux x64", kind: "desktop", desktopTarget: "linux-x64", goos: "linux", goarch: "amd64", machine: "X86-64" },
+  "desktop-linux-arm64": { label: "Homerun Desktop, Linux arm64", kind: "desktop", desktopTarget: "linux-arm64", goos: "linux", goarch: "arm64", machine: "AArch64" },
+  "desktop-darwin-arm64": { label: "Homerun Desktop, macOS (Apple silicon)", kind: "desktop", desktopTarget: "darwin-arm64", goos: "darwin", goarch: "arm64" },
   "android-x86_64": {
     label: "Android x86_64 (emulator)",
     goarch: "amd64",
@@ -306,6 +319,55 @@ function buildXCFramework(source, go) {
   slices.forEach((slice) => console.log(`  ${slice}`));
 }
 
+/**
+ * The desktop tunnel, where publish-desktop-artifacts.js looks for it:
+ * `dist/desktop/` for Windows, beside the other Windows artifacts, and
+ * `dist/desktop/<target>/` for the rest.
+ */
+function buildDesktop(source, go) {
+  const windows = target.goos === "windows";
+  const outDir = windows
+    ? path.join(ROOT, "dist", "desktop")
+    : path.join(ROOT, "dist", "desktop", target.desktopTarget);
+  const outFile = path.join(outDir, windows ? "homerun-desktop-server-proxy.exe" : "homerun-desktop-server-proxy");
+  const version = capture("git", ["describe", "--always", "--tags"], { cwd: source }) || "unknown";
+
+  console.log(`\nBuilding wireproxy ${version} for ${target.label}`);
+  console.log(`  source  ${source}`);
+  console.log(`  output  ${outFile}\n`);
+  fs.mkdirSync(outDir, { recursive: true });
+
+  try {
+    execFileSync(
+      go,
+      [
+        "build", "-trimpath",
+        "-ldflags", `"-s -w -X 'main.version=${version}'"`,
+        "-o", `"${outFile}"`,
+        "./cmd/wireproxy",
+      ],
+      {
+        stdio: "inherit", shell: true, cwd: source,
+        env: { ...process.env, GOOS: target.goos, GOARCH: target.goarch, CGO_ENABLED: "0" },
+      }
+    );
+  } catch {
+    fail("go build failed — see the output above.");
+  }
+
+  if (target.goos === "linux") {
+    const elf = readElf(outFile);
+    if (elf.machine !== target.machine) {
+      fail(`Built, but it is ${elf.machine} and ${target.label} needs ${target.machine}.`);
+    }
+    // No interpreter is no dynamic loader: nothing for any distro's glibc to lack.
+    if (elf.interpreter) {
+      fail(`Built, but it asks for a dynamic loader (${elf.interpreter}). The desktop build must be static: is cgo on?`);
+    }
+  }
+  console.log(`\nhomerun-desktop-server-proxy -> ${outFile}`);
+}
+
 // ---------------------------------------------------------------------------
 
 const source = sourceDir();
@@ -320,6 +382,11 @@ if (target.requiresMacOS && process.platform !== "darwin") {
 
 if (target.kind === "gomobile") {
   buildXCFramework(source, go);
+  process.exit(0);
+}
+
+if (target.kind === "desktop") {
+  buildDesktop(source, go);
   process.exit(0);
 }
 
