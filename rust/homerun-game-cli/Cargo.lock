@@ -507,6 +507,7 @@ dependencies = [
  "libc",
  "log",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

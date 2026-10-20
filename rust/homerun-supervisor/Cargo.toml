@@ -80,6 +80,7 @@ game-engine = [
     "dep:tungstenite",
     "dep:sha2",
     "dep:zip",
+    "dep:ring",
 ]
 
 # Serves `wss://<device-fqdn>` so the dashboard can reach this device's console
@@ -248,6 +249,10 @@ log = "0.4"
 # SIGKILL and nothing else, so a terminate rung — which is what lets a JVM run
 # its shutdown hook and flush the world — has no std spelling.
 libc = { version = "0.2", optional = true }
+# AES-256-GCM for a sign-in sealed under a key the host keeps
+# (`local_secret.rs`, Linux). Already in the build behind rustls, at this
+# version, so naming it adds no crate.
+ring = { version = "0.17", optional = true }
 
 # The backup engine. iOS cannot spawn a process, so restic-as-a-binary is not
 # available to it and the engine is linked instead. rustic is restic-format

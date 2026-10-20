@@ -154,7 +154,12 @@ impl Runner {
     pub fn command(&mut self, command: Command) -> bool {
         self.tick();
         match command {
-            Command::Hello { protocol } => {
+            Command::Hello { protocol, seal_key } => {
+                if let Some(key) = seal_key {
+                    if let Err(e) = homerun_supervisor::local_secret::set_host_key(&key) {
+                        eprintln!("{e}");
+                    }
+                }
                 if protocol == PROTOCOL {
                     self.ready();
                 } else {

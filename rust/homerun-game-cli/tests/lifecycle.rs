@@ -924,6 +924,15 @@ impl Host {
     fn send(&mut self, value: Value) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{value}").unwrap();
     }
+    /// What Homerun Desktop does off Windows, where there is no DPAPI: hand
+    /// the runner the key it seals sign-ins under, from the keyring.
+    fn give_seal_key(&mut self) {
+        if cfg!(windows) {
+            return;
+        }
+        self.send(json!({"cmd":"hello","protocol":1,"sealKey":"5a".repeat(32)}));
+        self.until("ready");
+    }
     fn until(&mut self, event: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(25);
         loop {
@@ -2903,9 +2912,6 @@ mod extensions {
     /// the game's environment and never in the log, the session ended before
     /// the host hears the server stopped -- and the second start refreshes
     /// without asking anyone anything.
-    // Sealing a sign-in is DPAPI's, and only Windows has a backend yet
-    // (`local_secret.rs`); the Linux keystore brings this back there.
-    #[cfg(windows)]
     #[test]
     fn hytale_signs_in_passes_its_session_on_and_ends_it_at_stop() {
         let fake = super::fake_hytale::FakeHytale::start();
@@ -2919,6 +2925,7 @@ mod extensions {
         env["HOMERUN_TEST_ECHO"] = json!("{extension:sessionToken}");
 
         let mut h = Host::new();
+        h.give_seal_key();
         h.send(f.start());
         let sign_in = h.until("sign-in");
         assert_eq!(sign_in["purpose"], "server");
@@ -3104,12 +3111,10 @@ mod extensions {
             .collect();
         assert!(features.contains(&"extensions"), "{features:?}");
         assert!(features.contains(&"extension:fixture"), "{features:?}");
-        // Hytale keeps a sealed sign-in, which only Windows can seal so far.
-        assert_eq!(
-            features.contains(&"extension:hytale"),
-            cfg!(windows),
-            "{features:?}"
-        );
+        // Hytale keeps a sealed sign-in: DPAPI on Windows, the host's key
+        // elsewhere.
+        assert!(features.contains(&"extension:hytale"), "{features:?}");
+        assert!(features.contains(&"seal-host-key"), "{features:?}");
         h.eof();
     }
 
@@ -3401,13 +3406,11 @@ mod extensions {
 
     /// A remembered sign-in is sealed on disk, reported by status without a
     /// server running, and gone after sign-out.
-    // Sealing a sign-in is DPAPI's, and only Windows has a backend yet
-    // (`local_secret.rs`); the Linux keystore brings this back there.
-    #[cfg(windows)]
     #[test]
     fn a_remembered_sign_in_is_sealed_reported_and_forgotten() {
         let f = with_extension(json!({ "remember": true }));
         let mut h = Host::new();
+        h.give_seal_key();
         h.send(f.start());
         h.until("server-started");
         h.send(json!({"cmd":"stop","serverId":"s1"}));

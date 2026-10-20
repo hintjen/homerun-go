@@ -2314,6 +2314,7 @@ dependencies = [
  "pumpkin-data",
  "pumpkin-util",
  "reqwest 0.12.28",
+ "ring",
  "rustic_backend",
  "rustic_core",
  "serde",

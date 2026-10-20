@@ -100,7 +100,8 @@ pub mod rcon;
 #[cfg(feature = "game-engine")]
 pub mod local_http;
 
-/// Sealing what a game's extension keeps to this computer's user (DPAPI).
+/// Sealing what a game's extension keeps to this computer's user: DPAPI on
+/// Windows, a key the host keeps in the system keyring elsewhere.
 #[cfg(feature = "game-engine")]
 pub mod local_secret;
 

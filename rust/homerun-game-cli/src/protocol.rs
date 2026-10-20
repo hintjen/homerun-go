@@ -127,6 +127,11 @@ pub const FEATURES: &[&str] = &[
     // offers import, and this one before it sends `start.import`, because an
     // older runner ignores the field and would start an empty world.
     "world-import",
+    // `hello.sealKey`: off Windows, a sign-in an extension keeps is sealed
+    // under a key the host keeps in the system keyring and sends here. A host
+    // sends the key only to a runner with this name, and requires it before
+    // offering an extension that keeps a sign-in on such a platform.
+    "seal-host-key",
     // `stop.via: "interrupt"` works on Windows: the stop ladder's interrupt
     // rung sends Ctrl+Break to a console-subsystem server's own console, from
     // a helper process (`homerun-game __console-break <pid>`). An older runner
@@ -143,6 +148,11 @@ pub enum Command {
     Hello {
         #[serde(default)]
         protocol: u32,
+        /// The key a sign-in is sealed under where the OS has no DPAPI, as 64
+        /// hex digits, from the host's keyring (`local_secret.rs`). Sent only
+        /// to a runner that advertises `seal-host-key`.
+        #[serde(default, rename = "sealKey")]
+        seal_key: Option<String>,
     },
     #[serde(rename_all = "camelCase")]
     Fetch {
@@ -573,7 +583,10 @@ mod tests {
     fn every_documented_command_parses() {
         assert_eq!(
             parse(r#"{"cmd":"hello","protocol":1}"#),
-            Command::Hello { protocol: 1 }
+            Command::Hello {
+                protocol: 1,
+                seal_key: None
+            }
         );
 
         assert_eq!(

@@ -9,12 +9,16 @@
 //! its own name, so one extension's file moved into another's folder does not
 //! open either.
 //!
-//! **Elsewhere there is no sealing yet, and so no storing.** Both calls
-//! refuse on a platform without DPAPI rather than fall back to a plain file.
-//! The runner is Windows-first; the day it hosts extensions on another
-//! platform, that platform's keystore goes here -- most likely as envelope
-//! encryption: a random key held in the keystore, the data encrypted with it
-//! on disk, because keystores hold small items and DPAPI holds nothing.
+//! **Elsewhere, the key is the host's.** Linux has no DPAPI, and a runner
+//! cannot count on reaching a keystore itself. Homerun Desktop can: Electron's
+//! `safeStorage` is the system keyring. So the desktop keeps a random 256-bit
+//! key there and hands it to the runner in `hello`, and the runner seals with
+//! AES-256-GCM under it ([`Scheme::HostKey`]): envelope encryption, with the
+//! envelope's key in the keystore and the data on disk. Without a key -- a
+//! runner started by something that has none, or a desktop whose keyring is
+//! only `basic_text` -- both calls refuse rather than fall back to a plain
+//! file. For development on such a machine, `HOMERUN_SEAL_KEY_FILE` names an
+//! owner-only file holding the key in hex ([`load_key_file`]).
 //!
 //! # The first byte says how the rest was sealed
 //!
@@ -31,20 +35,76 @@
 pub enum Scheme {
     /// Windows DPAPI, current user, the label as entropy.
     Dpapi = 1,
+    /// AES-256-GCM under the key the host gave ([`set_host_key`]): a 12-byte
+    /// nonce, then the ciphertext and its tag, with the label as the
+    /// associated data.
+    HostKey = 2,
 }
 
 impl Scheme {
     fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             1 => Some(Self::Dpapi),
+            2 => Some(Self::HostKey),
             _ => None,
         }
     }
 }
 
-/// The scheme [`seal`] uses on this platform, if it can seal at all.
+/// The scheme [`seal`] uses on this platform, if it can seal at all: DPAPI
+/// on Windows, the host's key wherever one was given.
 pub fn current() -> Option<Scheme> {
-    imp::CURRENT
+    imp::CURRENT.or_else(|| host_key().map(|_| Scheme::HostKey))
+}
+
+/// Whether this build seals with a host's key when given one. True for every
+/// build: what decides whether it *can* is whether the host has a key, which
+/// `--features` cannot know.
+pub const HOST_KEY_SUPPORTED: bool = true;
+
+static HOST_KEY: std::sync::Mutex<Option<[u8; 32]>> = std::sync::Mutex::new(None);
+
+fn host_key() -> Option<[u8; 32]> {
+    *HOST_KEY.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The key the host keeps for this user, as 64 hex digits.
+pub fn set_host_key(hex: &str) -> Result<(), String> {
+    let key = parse_key(hex)?;
+    *HOST_KEY.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
+    Ok(())
+}
+
+fn parse_key(hex: &str) -> Result<[u8; 32], String> {
+    let hex = hex.trim();
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("The key for keeping sign-ins safe is not 64 hex digits.".into());
+    }
+    let mut key = [0u8; 32];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| "bad hex")?;
+    }
+    Ok(key)
+}
+
+/// `HOMERUN_SEAL_KEY_FILE`, for a runner started from a terminal: the key in
+/// hex, in a file only its owner can read. Refused when anyone else can.
+pub fn load_key_file(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta =
+            std::fs::metadata(path).map_err(|_| format!("{} is missing.", path.display()))?;
+        if meta.mode() & 0o077 != 0 {
+            return Err(format!(
+                "{} can be read by others; make it owner-only (chmod 600).",
+                path.display()
+            ));
+        }
+    }
+    let hex =
+        std::fs::read_to_string(path).map_err(|_| format!("{} cannot be read.", path.display()))?;
+    set_host_key(&hex)
 }
 
 /// How `sealed` was sealed, if this build knows the scheme.
@@ -58,7 +118,10 @@ pub fn scheme_of(sealed: &[u8]) -> Option<Scheme> {
 /// Seal `plain` for this user on this computer.
 pub fn seal(plain: &[u8], label: &str) -> Result<Vec<u8>, String> {
     let scheme = current().ok_or_else(|| imp::REFUSAL.to_string())?;
-    let body = imp::seal(plain, label)?;
+    let body = match scheme {
+        Scheme::Dpapi => imp::seal(plain, label)?,
+        Scheme::HostKey => host::seal(&host_key().expect("current() said so"), plain, label)?,
+    };
     let mut sealed = Vec::with_capacity(body.len() + 1);
     sealed.push(scheme as u8);
     sealed.extend_from_slice(&body);
@@ -72,6 +135,13 @@ pub fn open(sealed: &[u8], label: &str) -> Result<Vec<u8>, String> {
     };
     match Scheme::from_byte(first) {
         Some(Scheme::Dpapi) => imp::open_dpapi(body, label),
+        Some(Scheme::HostKey) => match host_key() {
+            Some(key) => host::open(&key, body, label),
+            None => Err(
+                "Homerun Desktop keeps the key to what was kept here, and it has not given it."
+                    .into(),
+            ),
+        },
         None => Err("This was kept by a newer version of Homerun, which can read it.".into()),
     }
 }
@@ -166,12 +236,57 @@ mod imp {
     }
 }
 
+/// The host-key scheme. The nonce is random per seal: one key seals few
+/// values (one sign-in per extension), far inside AES-GCM's random-nonce bound.
+mod host {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    fn key(bytes: &[u8; 32]) -> LessSafeKey {
+        LessSafeKey::new(UnboundKey::new(&AES_256_GCM, bytes).expect("a 32-byte key"))
+    }
+
+    pub fn seal(bytes: &[u8; 32], plain: &[u8], label: &str) -> Result<Vec<u8>, String> {
+        let mut nonce = [0u8; NONCE_LEN];
+        SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| "This computer could not keep that safe.".to_string())?;
+        let mut body = plain.to_vec();
+        key(bytes)
+            .seal_in_place_append_tag(
+                Nonce::assume_unique_for_key(nonce),
+                Aad::from(label.as_bytes()),
+                &mut body,
+            )
+            .map_err(|_| "This computer could not keep that safe.".to_string())?;
+        let mut out = nonce.to_vec();
+        out.extend_from_slice(&body);
+        Ok(out)
+    }
+
+    pub fn open(bytes: &[u8; 32], sealed: &[u8], label: &str) -> Result<Vec<u8>, String> {
+        if sealed.len() < NONCE_LEN {
+            return Err("What was kept here cannot be read on this computer.".into());
+        }
+        let (nonce, body) = sealed.split_at(NONCE_LEN);
+        let nonce = Nonce::try_assume_unique_for_key(nonce)
+            .map_err(|_| "What was kept here cannot be read on this computer.".to_string())?;
+        let mut body = body.to_vec();
+        let plain = key(bytes)
+            .open_in_place(nonce, Aad::from(label.as_bytes()), &mut body)
+            .map_err(|_| "What was kept here cannot be read on this computer.".to_string())?;
+        Ok(plain.to_vec())
+    }
+}
+
 #[cfg(not(windows))]
 mod imp {
     use super::Scheme;
 
     pub const CURRENT: Option<Scheme> = None;
-    pub const REFUSAL: &str = "This computer cannot keep a sign-in safe yet.";
+    pub const REFUSAL: &str = "Homerun can keep a sign-in safe only with your system keyring, \
+        through Homerun Desktop, and none was available. Install and unlock one \
+        (GNOME Keyring or KWallet), then start Homerun Desktop again.";
 
     pub fn seal(_plain: &[u8], _label: &str) -> Result<Vec<u8>, String> {
         Err(REFUSAL.into())
@@ -205,6 +320,70 @@ mod format_tests {
     fn the_scheme_byte_is_the_documented_one() {
         assert_eq!(Scheme::Dpapi as u8, 1);
         assert_eq!(scheme_of(&[1, 0xAA]), Some(Scheme::Dpapi));
+        assert_eq!(Scheme::HostKey as u8, 2);
+        assert_eq!(scheme_of(&[2, 0xAA]), Some(Scheme::HostKey));
+    }
+
+    const KEY: [u8; 32] = [7; 32];
+
+    #[test]
+    fn a_host_key_seal_opens_with_its_key_and_label_and_nothing_else() {
+        let secret = b"refresh-token-4f2a9c";
+        let sealed = host::seal(&KEY, secret, "hytale").unwrap();
+        assert!(!sealed.windows(secret.len()).any(|w| w == secret));
+        assert_eq!(host::open(&KEY, &sealed, "hytale").unwrap(), secret);
+        assert!(
+            host::open(&KEY, &sealed, "palworld").is_err(),
+            "another label"
+        );
+        assert!(
+            host::open(&[8; 32], &sealed, "hytale").is_err(),
+            "another key"
+        );
+        let mut tampered = sealed.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(
+            host::open(&KEY, &tampered, "hytale").is_err(),
+            "a changed byte"
+        );
+        // A fresh nonce each time: the same secret never seals the same.
+        assert_ne!(sealed, host::seal(&KEY, secret, "hytale").unwrap());
+    }
+
+    #[test]
+    fn a_key_is_64_hex_digits() {
+        assert!(parse_key(&"ab".repeat(32)).is_ok());
+        assert!(parse_key(&"ab".repeat(31)).is_err());
+        assert!(parse_key(&"zz".repeat(32)).is_err());
+        assert_eq!(
+            parse_key(&format!("{}\n", "0f".repeat(32))).unwrap(),
+            [0x0f; 32]
+        );
+    }
+
+    /// The whole path, as an extension sees it: the host gives a key, then
+    /// `seal` and `open` use it. Off Windows only, where DPAPI is not first.
+    #[test]
+    #[cfg(not(windows))]
+    fn given_a_host_key_this_platform_seals_and_opens() {
+        set_host_key(&"5a".repeat(32)).unwrap();
+        assert_eq!(current(), Some(Scheme::HostKey));
+        let sealed = seal(b"token", "fixture").unwrap();
+        assert_eq!(scheme_of(&sealed), Some(Scheme::HostKey));
+        assert_eq!(open(&sealed, "fixture").unwrap(), b"token");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_key_file_others_can_read_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("seal-key-{}", std::process::id()));
+        std::fs::write(&path, "5a".repeat(32)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(load_key_file(&path).unwrap_err().contains("chmod 600"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(load_key_file(&path).is_ok());
+        let _ = std::fs::remove_file(path);
     }
 }
 
