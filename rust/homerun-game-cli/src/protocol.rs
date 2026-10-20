@@ -149,8 +149,9 @@ pub enum Command {
         #[serde(default)]
         protocol: u32,
         /// The key a sign-in is sealed under where the OS has no DPAPI, as 64
-        /// hex digits, from the host's keyring (`local_secret.rs`). Sent only
-        /// to a runner that advertises `seal-host-key`.
+        /// hex digits, from the host's keyring (`local_secret.rs`). `hello`
+        /// goes before `ready`, so a host sends it without knowing the
+        /// runner's features; a runner without `seal-host-key` ignores it.
         #[serde(default, rename = "sealKey")]
         seal_key: Option<String>,
     },
