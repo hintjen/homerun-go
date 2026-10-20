@@ -342,17 +342,17 @@ impl ProcessEngine {
         self.required_job = Some(job);
     }
 
-    /// Windows inspects the required Job even before spawn and after root exit.
-    /// Development adapters return None when their root PID is absent.
+    /// Windows and Linux inspect the required Job even before spawn and after
+    /// root exit. Development adapters return None when their root PID is absent.
     pub fn network_snapshot(&self) -> Result<Option<Vec<(u32, platform::Listening)>>, String> {
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let Some(pid) = self.pid() else {
                 return Ok(None);
             };
             return platform::checked_listening_ports(&[pid]).map(Some);
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let job = self
                 .required_job
@@ -364,14 +364,14 @@ impl ProcessEngine {
 
     /// A network refusal must not leave an exposed listener alive for the save grace.
     pub fn terminate_owned_tree(&self) -> Result<(), String> {
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             if let Some(pid) = self.pid() {
                 kill(pid);
             }
             return Ok(());
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         {
             let job = self
                 .required_job
@@ -547,16 +547,21 @@ impl ProcessEngine {
         // Created before the spawn so that a failure to make one is known
         // before there is a process to own. See `job.rs`: on Windows this is
         // what stops a hard-killed runner leaving the game behind holding its
-        // ports and its saves, and what makes the kill rung a tree kill. It
-        // is `None` everywhere else, where a pid and a signal already are one.
+        // ports and its saves, and what makes the kill rung a tree kill. On
+        // Linux it is a tag, a group and a parent-death signal, which is why it
+        // has to see the command first. It is `None` everywhere else, where a
+        // pid and a signal already are one.
         let job = self
             .required_job
             .clone()
             .or_else(|| crate::job::Job::kill_on_close().map(Arc::new));
 
         let spawned = if let Some(job) = &self.required_job {
-            job.spawn(&command)
+            job.spawn(&mut command)
         } else {
+            if let Some(job) = &job {
+                job.prepare(&mut command);
+            }
             command.spawn().map(|child| {
                 if let Some(job) = &job {
                     if !job.adopt(&child) {
@@ -1056,12 +1061,16 @@ fn skip_to_newline(reader: &mut impl BufRead) -> bool {
 }
 
 /// Ask the process to exit — the rung before the last one.
+///
+/// Its whole group when it leads one, which on Linux an owned server does
+/// (`job/tree.rs`): a server that starts helpers expects them asked too, the
+/// way a terminal's Ctrl+C would ask them.
 #[cfg(unix)]
 fn terminate(pid: u32) {
     // SAFETY: `kill` with a pid we spawned and a valid signal. The worst a
     // reaped pid can do is return ESRCH, which is ignored.
     unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+        libc::kill(crate::platform::signal_target(pid), libc::SIGTERM);
     }
 }
 

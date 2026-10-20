@@ -636,8 +636,24 @@ fn find(name: &str) -> Option<(&'static dyn GameExtension, &'static ExtensionSpe
 /// The feature names this runner's extensions add to `ready.features`.
 pub fn features() -> Vec<String> {
     let mut out = vec![specs::FEATURE.to_string()];
-    out.extend(registry().iter().map(|e| specs::feature(e.name())));
+    out.extend(
+        registry()
+            .iter()
+            .filter(|e| can_keep_what_it_needs(e.name()))
+            .map(|e| specs::feature(e.name())),
+    );
     out
+}
+
+/// The extensions that keep a person's sign-in on this computer between runs,
+/// in their [`MachineStore`].
+const KEEPS_A_SIGN_IN: &[&str] = &["hytale"];
+
+/// An extension that keeps a sign-in can run only where it can be sealed
+/// (`local_secret`); everywhere else it would fail after the person signed
+/// in, so it is not offered at all.
+fn can_keep_what_it_needs(name: &str) -> bool {
+    !KEEPS_A_SIGN_IN.contains(&name) || homerun_supervisor::local_secret::current().is_some()
 }
 
 // ─── running one ───────────────────────────────────────────────────────────
@@ -1358,8 +1374,26 @@ mod tests {
         let features = features();
         assert_eq!(features[0], "extensions");
         for extension in registry() {
-            assert!(features.contains(&format!("extension:{}", extension.name())));
+            assert_eq!(
+                features.contains(&format!("extension:{}", extension.name())),
+                can_keep_what_it_needs(extension.name()),
+                "{}",
+                extension.name()
+            );
         }
+        // Palworld keeps nothing between runs, so it runs wherever the runner does.
+        assert!(features.contains(&"extension:palworld".to_string()));
+    }
+
+    /// Hytale would fail just after the person signed in, where the sign-in
+    /// cannot be sealed: so it is not offered there at all.
+    #[test]
+    fn an_extension_that_keeps_a_sign_in_is_offered_only_where_it_can_be_sealed() {
+        let sealing = homerun_supervisor::local_secret::current().is_some();
+        assert_eq!(
+            features().contains(&"extension:hytale".to_string()),
+            sealing
+        );
     }
 
     // ─── what an extension reaches on loopback ─────────────────────────────

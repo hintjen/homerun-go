@@ -95,10 +95,10 @@ const LAYOUT = {
   wireproxy: { file: "homerun-desktop-server-proxy.exe", prefix: "wireproxy", stem: "homerun-desktop-server-proxy", ext: "exe", manifest: "wireproxy-latest.json" },
 };
 
-/** The artifacts each desktop target has. Pumpkin and the runner come later off Windows. */
+/** The artifacts each desktop target has. Pumpkin and the runner come later on macOS. */
 const TARGET_KINDS = {
   "win32-x64": ["pumpkin", "game-runner", "core-node", "wireproxy"],
-  "linux-x64": ["core-node", "wireproxy"],
+  "linux-x64": ["pumpkin", "game-runner", "core-node", "wireproxy"],
   "linux-arm64": ["wireproxy"],
   "darwin-arm64": ["wireproxy"],
 };
@@ -272,7 +272,7 @@ function engineMinecraftVersion(file) {
   } catch (error) {
     console.error(
       `\nCould not ask ${path.relative(ROOT, file)} for its Minecraft version: ${error.message}\n` +
-        "  It has to run here, so publish from Windows, and from a build that has\n" +
+        "  It has to run here, so publish from a machine of its target, and from a build that has\n" +
         "  the --minecraft-version flag.\n"
     );
     process.exit(1);
@@ -317,7 +317,7 @@ function runnerFeatures(file) {
   } catch (error) {
     console.error(
       `\nCould not ask ${path.relative(ROOT, file)} which features it has: ${error.message}\n` +
-        "  It has to run here, so publish from Windows, and from a build that has\n" +
+        "  It has to run here, so publish from a machine of its target, and from a build that has\n" +
         "  the --features flag.\n"
     );
     process.exit(1);
@@ -394,6 +394,11 @@ function main(args, env = {}) {
       const rev = wireproxyRev();
       metadata[kind] = { version: rev.slice(0, 12), rev };
     } else {
+      // Asked of the binary itself as well, so it has to run here.
+      const host = `${process.platform}-${process.arch}`;
+      if (!isLegacyTarget(options.target) && host !== options.target) {
+        throw new Error(`The ${kind} for ${options.target} has to be published from a ${options.target} machine (this is ${host}): what it can do is asked of the binary.`);
+      }
       const crate = kind === "pumpkin" ? "homerun-pumpkin-bin" : "homerun-game-cli";
       const cargo = fs.readFileSync(path.join(ROOT, "rust", crate, "Cargo.toml"), "utf8");
       metadata[kind] = kind === "pumpkin"

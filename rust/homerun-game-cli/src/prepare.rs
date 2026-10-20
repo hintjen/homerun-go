@@ -542,6 +542,9 @@ pub fn launch(
                 "The downloaded runtime does not contain this game's server executable.",
             ));
         }
+        // A vendor zip made on Windows records no Unix modes, so a Linux
+        // server binary inside one arrives unrunnable. Nothing on Windows.
+        platform::make_executable(&executable).map_err(|e| fail(codes::SPAWN_FAILED, e))?;
         executable
     };
     let supervision = Supervision {

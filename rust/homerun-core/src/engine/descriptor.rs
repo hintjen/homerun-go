@@ -69,7 +69,7 @@ pub struct GameDescriptor {
     /// Following `minecraft::hosting`'s rule that a host declares its engines
     /// so it is never offered a server it will fail to run. A phone is not a
     /// host for a descriptor-driven game at all — it cannot exec a downloaded
-    /// binary — so this is `["win32-x64"]` for everything today.
+    /// binary — so this names desktop targets only: `win32-x64`, `linux-x64`.
     #[serde(default)]
     pub hosts: Vec<String>,
 

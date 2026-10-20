@@ -538,8 +538,13 @@ UI bundle. What is deliberately *not* imposed is an entry-count or size
 ceiling: a game runtime genuinely is tens of thousands of files and many
 gigabytes, and a ceiling tuned for a UI bundle would refuse every real game.
 
-`HOMERUN_STEAMCMD` names an existing `steamcmd` — which is how a Linux or
-macOS session uses one, since only Windows can bootstrap it.
+`HOMERUN_STEAMCMD` names an existing `steamcmd` — which is how a macOS
+session uses one, since only Windows and Linux can bootstrap it. On Linux the
+fetcher downloads Valve's `steamcmd_linux.tar.gz`, unpacks it with the
+system's `tar` (its modes matter) and runs `steamcmd.sh`, Valve's wrapper,
+which restarts steamcmd after its first-run self-update. Linux steamcmd is a
+32-bit program, so the fetcher first checks for the 32-bit loader and, when it
+is missing, says which package to install.
 
 **A vendor download is checked and remembered, because it cannot be
 pinned.** `runtime.source: "vendor"` fetches from the vendor's own HTTPS site,
@@ -645,7 +650,7 @@ assumptions live in one module behind functions with one meaning each.
 |---|---|---|---|
 | `listening_ports(pid)` | `netstat -ano` | `/proc/net/*` joined to `/proc/<pid>/fd` by inode | `lsof` |
 | `process_stats(pid)` | `Get-Process` | `/proc/<pid>/{status,stat}` | `ps` |
-| `graceful_interrupt(pid)` | Ctrl+Break to the server's console, from a helper | `SIGINT` | `SIGINT` |
+| `graceful_interrupt(pid)` | Ctrl+Break to the server's console, from a helper | `SIGINT`, to the group when the server leads one | `SIGINT` |
 | `user_data_roots()` | `%APPDATA%` and friends | `~/.config`, `~/.local/share` | + `~/Library/Application Support` |
 | `executable(dir, name)` | adds `.exe` | as given | as given |
 

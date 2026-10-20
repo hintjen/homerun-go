@@ -718,7 +718,9 @@ mod tests {
         assert_eq!(
             *fake.spawned.borrow(),
             [(
-                PathBuf::from(r"C:\Windows\explorer.exe"),
+                // Joined as the code joins it, so the separator is the host's:
+                // this suite also runs where `\` is not one.
+                PathBuf::from(r"C:\Windows").join("explorer.exe"),
                 vec![
                     r"shell:AppsFolder\PocketpairInc.Palworld_ad4psfrxyesvt!AppPalShipping"
                         .to_string()

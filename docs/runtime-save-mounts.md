@@ -98,10 +98,13 @@ refuses launch before links exist. Mounted Windows processes are assigned
 using `PROC_THREAD_ATTRIBUTE_JOB_LIST` inside `CreateProcessW`, before any game
 code runs; assignment failure fails process creation. The legacy process
 engine fallback is never used for mounted launches.
-Windows uses directory junctions via `FSCTL_SET_REPARSE_POINT`. Mounted
-launches refuse on other platforms until equivalent mandatory ownership and
-recovery are implemented; the platform's Unix symlink primitive alone is not
-sufficient. No Windows symbolic-link privilege or Developer Mode is
+Windows uses directory junctions via `FSCTL_SET_REPARSE_POINT`. Linux uses
+symbolic links, owned the same way: the named job is a tag every process of
+the game's tree inherits in its environment, the recovery record names it,
+and recovery kills whatever still carries it and waits for nothing to be left
+(`job/tree.rs` in homerun-supervisor). Mounted launches refuse on macOS until
+equivalent mandatory ownership and recovery are implemented; the symlink
+primitive alone is not sufficient. No Windows symbolic-link privilege or Developer Mode is
 required for the junction operation.
 
 Normal stop, EOF, game crash, failed spawn and preparation failure remove

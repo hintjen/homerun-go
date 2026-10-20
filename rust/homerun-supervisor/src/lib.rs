@@ -65,8 +65,9 @@ pub mod log_buffer;
 /// bottom of that file.
 #[cfg(feature = "process-engine")]
 pub mod platform;
-/// Owning a child's whole process tree, on the one platform that needs it.
-/// A no-op off Windows, so call sites carry no `cfg`.
+/// Owning a child's whole process tree: a Job Object on Windows, a tag, a
+/// group and a parent-death signal on Linux. A no-op elsewhere, so call sites
+/// carry no `cfg`.
 #[cfg(feature = "process-engine")]
 pub mod job;
 pub mod preflight;

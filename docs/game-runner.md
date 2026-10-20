@@ -142,8 +142,9 @@ processes before unlinking saves. Hard runner death closes its job handle and
 initiates termination, but recovery does not assume that termination has
 finished: it reopens the recorded job, terminates and drains it before
 unlinking or updating. Query failure or timeout preserves the links and
-journal. Mounted launches on non-Windows platforms refuse until equivalent
-ownership and recovery exist.
+journal. Linux does the same with the tree's tag: recovery finds every process
+still carrying the recorded name, kills it and waits for none to be left. Mounted
+launches on macOS refuse until equivalent ownership and recovery exist.
 
 Unmounted game and tunnel launches retain their existing best-effort job
 behavior: post-spawn assignment, a small assignment window, and fallback if
@@ -440,8 +441,8 @@ runtime stamp alone is not enough; its executable must exist too.
 
 **Ready marker (or `Ready: the <name> extension found the server
 answering`) but no server-started:** a declared port has not been observed
-in the owned Windows process tree (or the root PID on the Linux development
-adapter). Do not publish guessed ports to get past the check.
+in the owned process tree (a Job Object on Windows, the tagged tree on
+Linux). Do not publish guessed ports to get past the check.
 
 **"The vendor's file for that version changed":** the bytes served for a
 version this machine has already downloaded differ from the first download.
@@ -474,9 +475,9 @@ Declared private ports must remain loopback throughout startup, running and shut
 A breach emits `port_exposed` and immediately terminates the owned tree, bypassing the
 save grace; unsaved progress may be lost. Failure to inspect sockets or job membership
 emits `port_inspection_failed` and also terminates the tree. These are refusals, never
-successful stops. The Linux development adapter retains server-PID scope and PID termination, reports
-inspection failures and labels that narrower scope in evidence. It does not claim
-Windows Job Object descendant coverage. Other unsupported inspection adapters refuse.
+successful stops. Linux inspects and terminates the whole owned tree too: every process
+carrying the job's tag, found in `/proc`, and the root's process group (`job/tree.rs` in
+homerun-supervisor says what that does not cover). Other unsupported inspection adapters refuse.
 
 `probe`/`verify` also refuse undeclared non-loopback endpoints. Undeclared loopback
 endpoints are recorded without failing. UDP tables include all bound endpoints; they

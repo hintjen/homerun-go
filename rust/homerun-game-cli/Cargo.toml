@@ -35,6 +35,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ctrlc = "3.4"
 
+# SIGTERM and SIGHUP as well as SIGINT, on Unix only: that is how Electron
+# stops a child (`child.kill()`), and without a handler the runner dies at
+# once and the game's stop ladder never runs. Windows keeps the console events
+# it had, because a runner there shares console plumbing with the Ctrl+Break
+# helper (`console_interrupt.rs`).
+[target.'cfg(unix)'.dependencies]
+ctrlc = { version = "3.4", features = ["termination"] }
+
 [features]
 # The reference game extension, `fixture`, in both halves. Only the test suite
 # turns it on (`npm run test:game`); a release build never carries it, and

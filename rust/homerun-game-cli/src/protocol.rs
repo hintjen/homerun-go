@@ -61,7 +61,11 @@ pub const PROTOCOL: u32 = 1;
 /// and one `extension:<name>` per extension it can run. What `ready` and
 /// `homerun-game --features` report.
 pub fn features() -> Vec<String> {
-    let mut out: Vec<String> = FEATURES.iter().map(|f| f.to_string()).collect();
+    let mut out: Vec<String> = FEATURES
+        .iter()
+        .filter(|f| works_here(f))
+        .map(|f| f.to_string())
+        .collect();
     out.extend(crate::extensions::features());
     out.extend(
         homerun_core::engine::import::IMPORTERS
@@ -69,6 +73,18 @@ pub fn features() -> Vec<String> {
             .map(|i| homerun_core::engine::import::feature(i.game)),
     );
     out
+}
+
+/// Whether a feature in [`FEATURES`] works on the platform this was built
+/// for. A host requires a feature before offering what it does, so naming one
+/// that cannot work here offers a button that fails when it is pressed.
+fn works_here(feature: &str) -> bool {
+    match feature {
+        // `client_launch` reads Steam and the Store the Windows way, and
+        // starts nothing anywhere else yet.
+        "client-launch" => cfg!(windows),
+        _ => true,
+    }
 }
 
 pub const FEATURES: &[&str] = &[

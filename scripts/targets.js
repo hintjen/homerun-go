@@ -196,6 +196,20 @@ const TARGETS = {
     requiresWindows: true,
     staticCrt: true,
   },
+  // And for Homerun Desktop on Linux, on the same glibc floor as the addon
+  // below and for the same reason: the desktop runs it on the oldest distro
+  // it supports.
+  "pumpkin-bin-linux-x64": {
+    label: "Pumpkin server, Homerun Desktop (Linux x64)",
+    kind: "cargo",
+    crate: PUMPKIN_CRATE,
+    triple: "x86_64-unknown-linux-gnu",
+    artifact: "homerun-pumpkin",
+    outName: "homerun-desktop-minecraft-pumpkin",
+    outDir: path.join(ROOT, "dist", "desktop", "linux-x64"),
+    requiresLinux: true,
+    glibcFloor: "2.31",
+  },
   // Windows x64 only, because that is the only architecture Homerun Desktop
   // ships. A `.node` is a plain shared library with a renamed extension;
   // Node-API is ABI-stable across Node *and* Electron versions, so this needs
@@ -246,6 +260,16 @@ const TARGETS = {
     staticCrt: true,
     artifact: "homerun-game.exe",
     outDir: path.join(ROOT, "dist", "desktop"),
+  },
+  "game-runner-linux-x64": {
+    label: "Descriptor game runner, Linux x64 (Homerun Desktop)",
+    kind: "cargo",
+    crate: path.join(ROOT, "rust", "homerun-game-cli"),
+    triple: "x86_64-unknown-linux-gnu",
+    artifact: "homerun-game",
+    outDir: path.join(ROOT, "dist", "desktop", "linux-x64"),
+    requiresLinux: true,
+    glibcFloor: "2.31",
   },
   host: {
     label: "this machine (tests only)",
