@@ -1099,8 +1099,9 @@ fn steamcmd(
     });
 
     let args = steamcmd_args(dir, app_id, build_id, verify);
+    let env = steamcmd_env(ctx)?;
     for run in 1..=STEAMCMD_RUNS {
-        let output = run_streaming(&binary, &args, "steamcmd", ctx)?;
+        let output = run_streaming(&binary, &args, &env, "steamcmd", ctx)?;
 
         if prompt_detected(&output) {
             return Err(
@@ -1275,6 +1276,23 @@ fn steamcmd_binary(ctx: &Context) -> Result<PathBuf, String> {
     Ok(binary)
 }
 
+/// The environment steamcmd runs with, beyond the runner's own.
+///
+/// On Linux, steamcmd keeps its state (app info, logs, a library file) under
+/// `$HOME/Steam`, and can link `~/.steam` -- the folder a player's own Steam
+/// client is found through. On Windows it keeps everything beside itself. So
+/// on Linux it is given a home of its own under the tools folder: what it
+/// writes stays with the rest of Homerun's cache, and a player's Steam is
+/// never touched.
+fn steamcmd_env(ctx: &Context) -> Result<Vec<(&'static str, std::ffi::OsString)>, String> {
+    if !cfg!(target_os = "linux") {
+        return Ok(Vec::new());
+    }
+    let home = ctx.tools_dir.join("steamcmd").join("home");
+    fs::create_dir_all(&home).map_err(|_| cannot_write(&home))?;
+    Ok(vec![("HOME", home.into_os_string())])
+}
+
 /// Refuse, in words a player can act on, when 32-bit programs cannot run.
 fn has_32bit_loader(candidates: &[&str]) -> Result<(), String> {
     if candidates.iter().any(|path| Path::new(path).exists()) {
@@ -1317,6 +1335,7 @@ fn extract_tarball(archive: &Path, dir: &Path) -> Result<(), String> {
 fn run_streaming(
     program: &Path,
     args: &[String],
+    env: &[(&str, std::ffi::OsString)],
     phase: &'static str,
     ctx: &Context,
 ) -> Result<String, String> {
@@ -1330,7 +1349,8 @@ fn run_streaming(
         // this module wants: see the note on prompts in the module header.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .envs(env.iter().map(|(k, v)| (k, v)));
     // Linux's `steamcmd.sh` runs the real steamcmd as its child, so killing
     // the pid on a cancel would leave the download going. The job ends the
     // whole tree when it is dropped, on every way out of this function.
@@ -1955,6 +1975,26 @@ mod tests {
         std::process::exit(0);
     }
 
+    /// Linux steamcmd writes `$HOME/Steam` and may link `~/.steam`, which
+    /// is where a player's own Steam client is found: it gets a home of its
+    /// own, inside the tools folder.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn steamcmd_on_linux_is_given_a_home_inside_the_tools_folder() {
+        let tools = std::env::temp_dir().join(format!("steamcmd-home-{}", std::process::id()));
+        let ctx = Context {
+            tools_dir: tools.clone(),
+            on_progress: &|_| {},
+            cancelled: &|| false,
+        };
+        let env = steamcmd_env(&ctx).unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "HOME");
+        let home = PathBuf::from(&env[0].1);
+        assert!(home.starts_with(&tools) && home.is_dir(), "{home:?}");
+        let _ = fs::remove_dir_all(tools);
+    }
+
     #[test]
     fn steamcmd_output_that_is_not_utf8_still_shows_the_line_that_matters() {
         let program = std::env::current_exe().expect("the test binary must be locatable");
@@ -1973,7 +2013,7 @@ mod tests {
             on_progress: &|_| {},
             cancelled: &|| false,
         };
-        let output = run_streaming(&program, &args, "steamcmd", &ctx)
+        let output = run_streaming(&program, &args, &[], "steamcmd", &ctx)
             .expect("a program that exits cleanly is not a failure");
 
         assert!(
