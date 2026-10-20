@@ -219,6 +219,24 @@ const TARGETS = {
     requiresWindows: true,
     staticCrt: true,
   },
+  // The same addon for Homerun Desktop on Linux. Linked against glibc 2.31
+  // (Ubuntu 20.04), the oldest distro the desktop supports: a .node built on
+  // a newer distro asks for newer symbols and fails to load on an older one,
+  // which is the main process failing at startup. So it is built *on* the
+  // floor -- an Ubuntu 20.04 machine or container -- and build-rust.js refuses
+  // anything newer and checks what the result asks for. Staged under its
+  // target, beside the Windows artifacts rather than over them.
+  "core-node-linux-x64": {
+    label: "homerun-core for Homerun Desktop (Node addon, Linux x64)",
+    kind: "cargo",
+    crate: CORE_NODE_CRATE,
+    triple: "x86_64-unknown-linux-gnu",
+    artifact: "libhomerun_core_node.so",
+    outName: "homerun_core.node",
+    outDir: path.join(ROOT, "dist", "desktop", "linux-x64"),
+    requiresLinux: true,
+    glibcFloor: "2.31",
+  },
   "game-runner": {
     label: "Descriptor game runner, Windows x64 (Homerun Desktop)",
     kind: "cargo",

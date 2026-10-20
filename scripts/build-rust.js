@@ -59,6 +59,17 @@ function capture(cmd, cmdArgs) {
   }
 }
 
+/** Dotted versions, numerically: "2.31" < "2.35" < "2.100". */
+function compareVersions(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
 function fail(message) {
   console.error(`\n${message}\n`);
   process.exit(1);
@@ -88,6 +99,26 @@ if (target.requiresMacOS && process.platform !== "darwin") {
       `  You are on ${process.platform}. Build the Android targets here and\n` +
       "  leave iOS to a Mac or CI runner."
   );
+}
+
+if (target.requiresLinux && process.platform !== "linux") {
+  fail(
+    `${target.label} can only be built on Linux (on glibc ${target.glibcFloor}).\n` +
+      `  You are on ${process.platform}.`
+  );
+}
+
+if (target.glibcFloor) {
+  const host = process.report?.getReport?.()?.header?.glibcVersionRuntime;
+  if (!host || compareVersions(host, target.glibcFloor) > 0) {
+    fail(
+      `${target.label} has to be built against glibc ${target.glibcFloor}, the oldest the\n` +
+        `  desktop supports, and this machine has ${host || "no glibc"}. Linking here would ask\n` +
+        "  for newer symbols than an Ubuntu 20.04 player has, and the addon would\n" +
+        "  fail to load there. Build it in an Ubuntu 20.04 machine or container:\n" +
+        "    docker run --rm -v \"$PWD\":/src -w /src ubuntu:20.04 ..."
+    );
+  }
 }
 
 if (target.kind === "cargo" || target.kind === "ndk") {
@@ -283,6 +314,19 @@ if (crate === CRATE) {
     );
   }
   console.log(`Features verified: ${asked}`);
+}
+
+if (target.glibcFloor) {
+  // Belt and braces for the check before the build: what the staged file
+  // actually asks the loader for. The version needs are plain strings in
+  // .dynstr, so a scan finds every one.
+  const asked = [...new Set(fs.readFileSync(dest).toString("latin1").match(/GLIBC_\d+\.\d+(\.\d+)?/g) || [])]
+    .map((v) => v.slice("GLIBC_".length));
+  const newest = asked.sort(compareVersions).pop();
+  if (newest && compareVersions(newest, target.glibcFloor) > 0) {
+    fail(`The staged ${target.outName || target.artifact} needs glibc ${newest}, above the ${target.glibcFloor} floor.`);
+  }
+  console.log(`glibc verified: newest symbol version ${newest || "none"}, floor ${target.glibcFloor}`);
 }
 
 if (target.staticCrt) {

@@ -27,6 +27,7 @@
     "rust:pumpkin-bin": "node scripts/build-rust.js pumpkin-bin",
     "rust:pumpkin-bin-x86_64": "node scripts/build-rust.js pumpkin-bin-x86_64",
     "rust:core-node": "node scripts/build-rust.js core-node",
+    "rust:core-node-linux-x64": "node scripts/build-rust.js core-node-linux-x64",
     "rust:game-runner": "node scripts/build-rust.js game-runner",
     "test:desktop-artifacts": "node --test scripts/desktop-artifacts.test.js",
     "rust:pumpkin-bin-windows": "node scripts/build-rust.js pumpkin-bin-windows",

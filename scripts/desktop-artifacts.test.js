@@ -5,7 +5,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 const {
-  prepareArtifacts, verifyArtifacts, resolveChannel, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV,
+  prepareArtifacts, verifyArtifacts, resolveChannel, resolveTarget, fileFor, LAYOUT, CHANNELS, DEFAULT_CHANNEL, CHANNEL_ENV,
+  TARGET_KINDS,
 } = require("./publish-desktop-artifacts");
 const { TARGETS } = require("./targets");
 
@@ -13,6 +14,7 @@ const metadata = {
   pumpkin: { minecraftVersion: "1.21.11", protocol: 774 },
   "game-runner": { version: "0.1.0", protocol: 1, features: ["runtime-mounts"] },
   "core-node": { version: "0.1.0", abi: 1, sourceBuild: "fixture-revision" },
+  wireproxy: { version: "006916920fc5", rev: "006916920fc50f7eadca3976b156ecfe39dfe88f" },
 };
 function fixture(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "homerun-artifacts-"));
@@ -325,4 +327,69 @@ test("the usage line refuses arguments it does not understand", (t) => {
     assert.equal(run.exitCode, 1, `must refuse: ${args.join(" ")}`);
     assert.equal(manifestsWritten(run.dir).length, 0);
   }
+});
+
+// ── Targets other than Windows: one keyed manifest per target ─────────────────
+
+/** A target's built artifacts, named as they are built for it. */
+function targetFixture(t, target) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `homerun-artifacts-${target}-`));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  for (const kind of TARGET_KINDS[target]) {
+    fs.writeFileSync(path.join(dir, fileFor(LAYOUT[kind], target)), `${target} ${kind}`);
+  }
+  return dir;
+}
+
+test("a Linux target is keyed: its manifest and its object both name the target", (t) => {
+  const artifacts = prepareArtifacts(targetFixture(t, "linux-x64"), ["core-node", "wireproxy"], metadata, "dev", "linux-x64");
+  assert.deepEqual(artifacts.map((a) => a.manifestKey), ["core/linux-x64/latest.json", "wireproxy/linux-x64/latest.json"]);
+  assert.match(artifacts[0].objectKey, /^core\/linux-x64\/homerun-core-[a-f0-9]{12}\.node$/);
+  // An executable off Windows has no extension, in its file or its key.
+  assert.match(artifacts[1].objectKey, /^wireproxy\/linux-x64\/homerun-desktop-server-proxy-[a-f0-9]{12}$/);
+  assert.equal(path.basename(artifacts[1].file), "homerun-desktop-server-proxy");
+  for (const artifact of artifacts) {
+    assert.equal(artifact.manifest.url, `${CHANNELS.dev.public}/${artifact.objectKey}`);
+    assert.equal(artifact.target, "linux-x64");
+  }
+  assert.equal(artifacts[1].manifest.rev, metadata.wireproxy.rev);
+});
+
+test("Windows stays unkeyed, wireproxy included, so released desktops see no change", (t) => {
+  const [wireproxy] = prepareArtifacts(fixture(t), ["wireproxy"], metadata, "prod");
+  assert.equal(wireproxy.manifestKey, "wireproxy/latest.json");
+  assert.match(wireproxy.objectKey, /^wireproxy\/homerun-desktop-server-proxy-[a-f0-9]{12}\.exe$/);
+});
+
+test("an artifact a target does not have yet is refused, not published under a key nothing reads", (t) => {
+  const dir = targetFixture(t, "linux-x64");
+  fs.writeFileSync(path.join(dir, "homerun-desktop-minecraft-pumpkin"), "a Linux engine nobody reads");
+  assert.throws(() => prepareArtifacts(dir, ["pumpkin"], metadata, "dev", "linux-x64"), /There is no pumpkin for linux-x64 yet/);
+  assert.throws(() => prepareArtifacts(targetFixture(t, "darwin-arm64"), ["core-node"], metadata, "dev", "darwin-arm64"), /no core-node for darwin-arm64/);
+});
+
+test("an unknown target is refused rather than resolved", () => {
+  assert.equal(resolveTarget(undefined), "win32-x64");
+  assert.throws(() => resolveTarget("linux-x86_64"), /Unknown target: linux-x86_64/);
+  assert.throws(() => resolveTarget("darwin-x64"), /Unknown target/, "no Intel Macs");
+});
+
+test("wireproxy must name the fork revision it was built from", (t) => {
+  assert.throws(
+    () => prepareArtifacts(targetFixture(t, "linux-arm64"), ["wireproxy"], { wireproxy: { version: "x" } }, "dev", "linux-arm64"),
+    /must name the fork revision/
+  );
+});
+
+test("--verify refuses a manifest prepared for another target", (t) => {
+  const dir = targetFixture(t, "linux-x64");
+  prepareArtifacts(dir, ["wireproxy"], metadata, "dev", "linux-x64");
+  // Same bytes, same name, other target: the url names linux-x64, so arm64 must not accept it.
+  fs.mkdirSync(path.join(dir, "arm"));
+  fs.copyFileSync(path.join(dir, "homerun-desktop-server-proxy"), path.join(dir, "arm", "homerun-desktop-server-proxy"));
+  fs.copyFileSync(path.join(dir, LAYOUT.wireproxy.manifest), path.join(dir, "arm", LAYOUT.wireproxy.manifest));
+  assert.deepEqual(verifyArtifacts(dir, ["wireproxy"], "dev", "linux-x64"), []);
+  const problems = verifyArtifacts(path.join(dir, "arm"), ["wireproxy"], "dev", "linux-arm64");
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /is not the dev channel's linux-arm64/);
 });
