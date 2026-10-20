@@ -49,7 +49,7 @@ impl Audit {
         *self.data.lock().unwrap() = Record::default();
     }
     pub fn report(&self) -> serde_json::Value {
-        let mut report = serde_json::json!({"scope":if cfg!(windows) { "owned-process-tree" } else { "server-pid" }, "pollIntervalMs":250,
+        let mut report = serde_json::json!({"scope":if cfg!(any(windows, target_os = "linux")) { "owned-process-tree" } else { "server-pid" }, "pollIntervalMs":250,
             "timingOrigin":"network watcher start, before child spawn", "inventory":*self.data.lock().unwrap()});
         if self.strict {
             let dynamic = self.dynamic_ports();
