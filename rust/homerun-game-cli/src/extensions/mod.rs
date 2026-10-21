@@ -636,12 +636,7 @@ fn find(name: &str) -> Option<(&'static dyn GameExtension, &'static ExtensionSpe
 /// The feature names this runner's extensions add to `ready.features`.
 pub fn features() -> Vec<String> {
     let mut out = vec![specs::FEATURE.to_string()];
-    out.extend(
-        registry()
-            .iter()
-            .filter(|e| can_keep_what_it_needs(e.name()))
-            .map(|e| specs::feature(e.name())),
-    );
+    out.extend(registry().iter().map(|e| specs::feature(e.name())));
     out
 }
 
@@ -649,15 +644,19 @@ pub fn features() -> Vec<String> {
 /// in their [`MachineStore`].
 const KEEPS_A_SIGN_IN: &[&str] = &["hytale"];
 
-/// An extension that keeps a sign-in can run only where it can be sealed
-/// (`local_secret`): with DPAPI, or with a key the host keeps. A runner that
-/// can take a host's key is asked for its features before any host has given
-/// one, so that counts; the host decides whether it has a key to give
-/// (`seal-host-key`), and the extension refuses in words if none came.
-fn can_keep_what_it_needs(name: &str) -> bool {
-    !KEEPS_A_SIGN_IN.contains(&name)
-        || homerun_supervisor::local_secret::current().is_some()
-        || homerun_supervisor::local_secret::HOST_KEY_SUPPORTED
+/// Where its sign-in will be kept unencrypted (`local_secret`, an owner-only
+/// file: off Windows, with no key from the host), the words that tell the
+/// person so, and what would change it. Nothing is refused for it.
+fn kept_in_the_clear_note(name: &str, game: &str) -> Option<String> {
+    (KEEPS_A_SIGN_IN.contains(&name) && homerun_supervisor::local_secret::keeps_in_the_clear())
+        .then(|| {
+            format!(
+                "No system keyring was found, so your {game} sign-in is kept in a file only \
+                 your account on this computer can read, as {game}'s own downloader keeps \
+                 its. To keep it encrypted, install GNOME Keyring or KWallet and restart \
+                 Homerun Desktop."
+            )
+        })
 }
 
 // ─── running one ───────────────────────────────────────────────────────────
@@ -731,6 +730,9 @@ pub fn begin(
             policy: policy.clone(),
             prompts,
         };
+        if let Some(note) = kept_in_the_clear_note(spec.name, &d.name) {
+            ctx.note(note);
+        }
         match catch_unwind(AssertUnwindSafe(|| extension.begin(&mut ctx))) {
             Ok(Ok(begun)) => begun,
             Ok(Err(e)) => return Err(e.failure()),
@@ -1378,9 +1380,8 @@ mod tests {
         let features = features();
         assert_eq!(features[0], "extensions");
         for extension in registry() {
-            assert_eq!(
+            assert!(
                 features.contains(&format!("extension:{}", extension.name())),
-                can_keep_what_it_needs(extension.name()),
                 "{}",
                 extension.name()
             );
@@ -1389,17 +1390,19 @@ mod tests {
         assert!(features.contains(&"extension:palworld".to_string()));
     }
 
-    /// Hytale would fail just after the person signed in where the sign-in
-    /// cannot be sealed, so it is offered only where it can be: with DPAPI,
-    /// or with a key the host gives.
+    /// A sign-in kept unencrypted is said to be, by the game's own name,
+    /// with the keyring that would change it; one sealed is not mentioned.
     #[test]
-    fn an_extension_that_keeps_a_sign_in_is_offered_only_where_it_can_be_sealed() {
-        let sealing = homerun_supervisor::local_secret::current().is_some()
-            || homerun_supervisor::local_secret::HOST_KEY_SUPPORTED;
+    fn a_sign_in_kept_in_the_clear_is_said_to_be() {
+        let note = kept_in_the_clear_note("hytale", "Hytale");
         assert_eq!(
-            features().contains(&"extension:hytale".to_string()),
-            sealing
+            note.is_some(),
+            homerun_supervisor::local_secret::keeps_in_the_clear()
         );
+        if let Some(note) = note {
+            assert!(note.contains("your Hytale sign-in") && note.contains("GNOME Keyring"));
+        }
+        assert_eq!(kept_in_the_clear_note("palworld", "Palworld"), None);
     }
 
     // ─── what an extension reaches on loopback ─────────────────────────────

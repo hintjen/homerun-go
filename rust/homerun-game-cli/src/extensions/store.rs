@@ -80,7 +80,10 @@ impl MachineStore {
         match &next {
             Some(value) => {
                 let plain = serde_json::to_vec(value).map_err(|_| cannot_save())?;
-                let sealed = local_secret::seal(&plain, self.name).map_err(|_| cannot_save())?;
+                // The seal's own words: they say what is missing (a keyring),
+                // which "free disk space" would send a person looking past.
+                let sealed = local_secret::seal(&plain, self.name)
+                    .map_err(|why| ExtError::new(codes::EXTENSION_FAILED, why))?;
                 write_atomically(&self.dir.join(DOCUMENT), &sealed).map_err(|_| cannot_save())?;
             }
             None => match fs::remove_file(self.dir.join(DOCUMENT)) {
@@ -175,7 +178,15 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     let staging = path.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| {
-        let mut file = File::create(&staging)?;
+        // Owner-only from the first byte: off Windows with no key, what is
+        // written here is a sign-in as it is (`Scheme::OwnerOnly`). The
+        // rename keeps these modes, so a file an older build left readable
+        // by others is replaced by one that is not.
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&staging)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

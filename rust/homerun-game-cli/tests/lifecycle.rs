@@ -2976,6 +2976,61 @@ mod extensions {
         h.eof();
     }
 
+    /// Off Windows, a host with no secret keyring sends no key. Hytale still
+    /// runs: the sign-in is kept in an owner-only file, unencrypted, and the
+    /// person is told so and what would change it. A later runner given a key
+    /// reads that file without a new sign-in and seals it from then on.
+    #[cfg(unix)]
+    #[test]
+    fn hytale_with_no_seal_key_keeps_its_sign_in_owner_only_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let fake = super::fake_hytale::FakeHytale::start();
+        let mut f = Fixture::new();
+        f.d["extension"] = json!({ "name": "hytale", "config": fake.config() });
+        let store = f.root.join("extensions/hytale/store.bin");
+
+        let mut h = Host::new();
+        h.send(f.start());
+        assert_eq!(h.until("sign-in")["purpose"], "server");
+        h.until("server-started");
+        assert!(
+            h.seen.iter().any(|v| v["event"] == "fetch-progress"
+                && v["message"].as_str().is_some_and(
+                    |m| m.contains("only your account") && m.contains("GNOME Keyring")
+                )),
+            "the person is told where the sign-in is kept"
+        );
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        h.eof();
+        let kept = fs::read(&store).unwrap();
+        assert_eq!(kept[0], 3, "the owner-only scheme");
+        assert_eq!(
+            fs::metadata(&store).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "only its owner can read it"
+        );
+
+        // The keyring arrives: no new sign-in, and sealed on the next save.
+        let mut h = Host::new();
+        h.give_seal_key();
+        let before = h.seen.len();
+        h.send(f.start());
+        h.until("server-started");
+        assert!(
+            !h.seen[before..].iter().any(|v| v["event"] == "sign-in"),
+            "what was kept is still read"
+        );
+        h.send(json!({"cmd":"stop","serverId":"s1"}));
+        h.until("server-stopped");
+        h.eof();
+        assert_eq!(
+            fs::read(&store).unwrap()[0],
+            2,
+            "sealed under the host's key"
+        );
+    }
+
     // ─── a stop the extension asks for ─────────────────────────────────────
     //
     // The fixture's stop, against a fake game whose only way out is its
