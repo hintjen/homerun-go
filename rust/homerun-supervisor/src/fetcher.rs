@@ -1379,6 +1379,9 @@ fn run_streaming(
     }
     drop(tx);
     let mut collected = String::new();
+    // steamcmd's progress lines become byte progress, at most about once a
+    // second per phase; see `steamcmd_progress`.
+    let mut last_bytes: Option<(&'static str, std::time::Instant)> = None;
     loop {
         if (ctx.cancelled)() {
             let _ = child.kill();
@@ -1403,10 +1406,30 @@ fn run_streaming(
             collected.push_str(&line);
             return Ok(collected);
         }
-        (ctx.on_progress)(Progress::Note {
-            phase,
-            message: line.clone(),
-        });
+        if let Some(update) = steamcmd_progress(&line) {
+            // Numbers a host can turn into a bar, a speed and a time left,
+            // instead of steamcmd's own line. A new phase and the last line of
+            // one always go through; between them, about one a second.
+            let due = match last_bytes {
+                Some((was, at)) => {
+                    was != update.phase || at.elapsed() >= std::time::Duration::from_secs(1)
+                }
+                None => true,
+            };
+            if due || update.received >= update.total {
+                (ctx.on_progress)(Progress::Bytes {
+                    phase: update.phase,
+                    received: update.received,
+                    total: Some(update.total),
+                });
+                last_bytes = Some((update.phase, std::time::Instant::now()));
+            }
+        } else {
+            (ctx.on_progress)(Progress::Note {
+                phase,
+                message: line.clone(),
+            });
+        }
         // Keep success markers and the recent tail, not an install's
         // potentially enormous lifetime output.
         if collected.len() > 65536
@@ -1421,6 +1444,57 @@ fn run_streaming(
 
     let _ = child.wait();
     Ok(collected)
+}
+
+/// One of steamcmd's progress lines, as numbers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SteamcmdProgress {
+    pub phase: &'static str,
+    pub received: u64,
+    pub total: u64,
+}
+
+/// Read `Update state (0x61) downloading, progress: 35.10 (767421176 / 2186637152)`.
+///
+/// The state word becomes the phase a host already knows from the other
+/// fetchers (`download`, `verify`), or a name for steamcmd's own steps
+/// (`preallocate`, `commit`). The byte counts are steamcmd's own, so a
+/// percentage, a speed and a time left come from them rather than from the
+/// rounded number in the middle. A line that is not this shape, or has no
+/// total, is not progress and stays a note.
+///
+/// steamcmd starts its lines with a colour reset (`\x1b[0m`) even when its
+/// output is a pipe, so the escapes go before anything else is read.
+pub fn steamcmd_progress(line: &str) -> Option<SteamcmdProgress> {
+    let line = without_escapes(line);
+    let rest = line.trim().strip_prefix("Update state (0x")?;
+    let (_, rest) = rest.split_once(") ")?;
+    let (state, rest) = rest.split_once(", progress: ")?;
+    let (_, counts) = rest.split_once('(')?;
+    let counts = counts.strip_suffix(')')?;
+    let (received, total) = counts.split_once(" / ")?;
+    let received = received.trim().parse().ok()?;
+    let total: u64 = total.trim().parse().ok()?;
+    if total == 0 {
+        return None;
+    }
+    let state = state.to_ascii_lowercase();
+    let phase = if state.contains("downloading") {
+        "download"
+    } else if state.contains("verifying") {
+        "verify"
+    } else if state.contains("preallocating") {
+        "preallocate"
+    } else if state.contains("committing") {
+        "commit"
+    } else {
+        "install"
+    };
+    Some(SteamcmdProgress {
+        phase,
+        received,
+        total,
+    })
 }
 
 /// Whether some output is asking a person to agree to something.
@@ -2030,6 +2104,92 @@ mod tests {
         );
     }
 
+    /// Not a test: a steamcmd that downloads, then verifies, as fast as it
+    /// can print. Spawned by the test below.
+    #[test]
+    #[ignore = "spawned as a child by the test below"]
+    fn i_am_fake_steamcmd_downloading() {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        for i in 1..=50u64 {
+            writeln!(
+                out,
+                // The colour reset real steamcmd puts at the start of a line.
+                "\u{1b}[0m Update state (0x61) downloading, progress: {i}.00 ({} / 5000)",
+                i * 100
+            )
+            .unwrap();
+        }
+        for i in 1..=20u64 {
+            writeln!(
+                out,
+                "\u{1b}[0m Update state (0x81) verifying update, progress: {}.00 ({} / 5000)",
+                i * 5,
+                i * 250
+            )
+            .unwrap();
+        }
+        writeln!(out, "Success! App '896660' fully installed.").unwrap();
+        out.flush().unwrap();
+        std::process::exit(0);
+    }
+
+    /// The numbers a host makes a bar and a time left from, not steamcmd's own
+    /// lines, and not one event per line: each phase's first and last, and
+    /// about one a second between them.
+    #[test]
+    fn steamcmd_progress_reaches_a_host_as_throttled_bytes() {
+        let program = std::env::current_exe().expect("the test binary must be locatable");
+        let args: Vec<String> = [
+            "--exact",
+            "fetcher::tests::i_am_fake_steamcmd_downloading",
+            "--nocapture",
+            "--ignored",
+        ]
+        .iter()
+        .map(|a| (*a).to_string())
+        .collect();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        let on_progress = move |p: Progress| sink.lock().unwrap().push(p);
+        let ctx = Context {
+            tools_dir: std::env::temp_dir(),
+            on_progress: &on_progress,
+            cancelled: &|| false,
+        };
+        let output = run_streaming(&program, &args, &[], "steamcmd", &ctx).unwrap();
+        assert!(output.contains("Success! App"), "{output}");
+
+        let seen = seen.lock().unwrap();
+        let bytes: Vec<(&str, u64, Option<u64>)> = seen
+            .iter()
+            .filter_map(|p| match p {
+                Progress::Bytes {
+                    phase,
+                    received,
+                    total,
+                } => Some((*phase, *received, *total)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !seen.iter().any(
+                |p| matches!(p, Progress::Note { message, .. } if message.contains("Update state"))
+            ),
+            "a progress line went out as text"
+        );
+        // Seventy lines in well under a second: each phase's first and last.
+        assert_eq!(
+            bytes,
+            vec![
+                ("download", 100, Some(5000)),
+                ("download", 5000, Some(5000)),
+                ("verify", 250, Some(5000)),
+                ("verify", 5000, Some(5000)),
+            ]
+        );
+    }
+
     #[test]
     fn output_asking_someone_to_agree_is_recognised() {
         for asking in [
@@ -2040,6 +2200,61 @@ mod tests {
             "Press 'I' to accept",
         ] {
             assert!(prompt_detected(asking), "missed: {asking:?}");
+        }
+    }
+
+    #[test]
+    fn steamcmd_progress_lines_become_numbers_with_a_phase() {
+        let line = |s: &str| steamcmd_progress(s);
+        assert_eq!(
+            line(" Update state (0x61) downloading, progress: 35.10 (767421176 / 2186637152)"),
+            Some(SteamcmdProgress {
+                phase: "download",
+                received: 767421176,
+                total: 2186637152
+            })
+        );
+        assert_eq!(
+            line(" Update state (0x81) verifying update, progress: 11.48 (667814245 / 5816529537)"),
+            Some(SteamcmdProgress {
+                phase: "verify",
+                received: 667814245,
+                total: 5816529537
+            })
+        );
+        // As steamcmd really prints it, through a pipe.
+        assert_eq!(
+            line("\u{1b}[0m Update state (0x61) downloading, progress: 14.33 (313300947 / 2186637152)\u{1b}[0m"),
+            Some(SteamcmdProgress {
+                phase: "download",
+                received: 313300947,
+                total: 2186637152
+            })
+        );
+        assert_eq!(
+            line(" Update state (0x11) preallocating, progress: 50.00 (1 / 2)").map(|p| p.phase),
+            Some("preallocate")
+        );
+        assert_eq!(
+            line(" Update state (0x101) committing, progress: 99.00 (99 / 100)").map(|p| p.phase),
+            Some("commit")
+        );
+        assert_eq!(
+            line(" Update state (0x5) validating, progress: 1.00 (1 / 100)").map(|p| p.phase),
+            Some("install")
+        );
+    }
+
+    #[test]
+    fn other_steamcmd_lines_are_not_progress() {
+        for other in [
+            "Success! App '896660' fully installed.",
+            " Update state (0x61) downloading, progress: 42.13",
+            " Update state (0x3) reconfiguring, progress: 0.00 (0 / 0)",
+            "Logging in user 'anonymous' to Steam Public...",
+            "",
+        ] {
+            assert_eq!(steamcmd_progress(other), None, "{other:?}");
         }
     }
 
