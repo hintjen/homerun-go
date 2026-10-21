@@ -409,7 +409,14 @@ test("an artifact a target does not have yet is refused, not published under a k
   const dir = targetFixture(t, "linux-arm64");
   fs.writeFileSync(path.join(dir, "homerun-desktop-minecraft-pumpkin"), "an arm64 engine nobody reads");
   assert.throws(() => prepareArtifacts(dir, ["pumpkin"], metadata, "dev", "linux-arm64"), /There is no pumpkin for linux-arm64 yet/);
-  assert.throws(() => prepareArtifacts(targetFixture(t, "darwin-arm64"), ["core-node"], metadata, "dev", "darwin-arm64"), /no core-node for darwin-arm64/);
+  assert.throws(() => prepareArtifacts(targetFixture(t, "linux-arm64"), ["core-node"], metadata, "dev", "linux-arm64"), /no core-node for linux-arm64/);
+});
+
+test("darwin-arm64 has all four, keyed like linux-x64", (t) => {
+  const artifacts = prepareArtifacts(targetFixture(t, "darwin-arm64"), ["core-node", "wireproxy"], metadata, "dev", "darwin-arm64");
+  assert.deepEqual(artifacts.map((a) => a.manifestKey), ["core/darwin-arm64/latest.json", "wireproxy/darwin-arm64/latest.json"]);
+  assert.match(artifacts[0].objectKey, /^core\/darwin-arm64\/homerun-core-[a-f0-9]{12}\.node$/);
+  assert.deepEqual(TARGET_KINDS["darwin-arm64"], TARGET_KINDS["linux-x64"]);
 });
 
 test("an unknown target is refused rather than resolved", () => {

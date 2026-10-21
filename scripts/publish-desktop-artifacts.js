@@ -95,12 +95,12 @@ const LAYOUT = {
   wireproxy: { file: "homerun-desktop-server-proxy.exe", prefix: "wireproxy", stem: "homerun-desktop-server-proxy", ext: "exe", manifest: "wireproxy-latest.json" },
 };
 
-/** The artifacts each desktop target has. Pumpkin and the runner come later on macOS. */
+/** The artifacts each desktop target has. */
 const TARGET_KINDS = {
   "win32-x64": ["pumpkin", "game-runner", "core-node", "wireproxy"],
   "linux-x64": ["pumpkin", "game-runner", "core-node", "wireproxy"],
   "linux-arm64": ["wireproxy"],
-  "darwin-arm64": ["wireproxy"],
+  "darwin-arm64": ["pumpkin", "game-runner", "core-node", "wireproxy"],
 };
 const DEFAULT_TARGET = "win32-x64";
 

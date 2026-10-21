@@ -30,8 +30,8 @@
  * is one a caller could log and carry on past.
  *
  * Skips rather than fails when the addon is not built: it is an artifact,
- * built for Windows and Linux, so a Mac running `npm test` has nothing to
- * check and should say so instead of going red.
+ * built per desktop target, so a machine without one has nothing to check
+ * and should say so instead of going red.
  */
 const crypto = require("crypto");
 const fs = require("fs");
@@ -41,14 +41,17 @@ const { signingPayload } = require("./sign-manifest");
 const { ROOT, TARGETS } = require("./targets");
 
 // The addon this machine can load: an addon is checked by loading it.
-const targetName = process.platform === "linux" ? "core-node-linux-x64" : "core-node";
+const targetName =
+  process.platform === "linux" ? "core-node-linux-x64"
+  : process.platform === "darwin" ? "core-node-darwin-arm64"
+  : "core-node";
 const target = TARGETS[targetName];
 const addon = path.join(target.outDir, target.outName);
 
 if (!fs.existsSync(addon)) {
   console.log(
     `SKIP — no addon at ${path.relative(ROOT, addon)}\n` +
-      `       Build it with: npm run rust:${targetName}   (${process.platform === "linux" ? "on glibc 2.31" : "Windows only"})`
+      `       Build it with: npm run rust:${targetName}   (${{ linux: "on glibc 2.31", darwin: "on a Mac" }[process.platform] ?? "Windows only"})`
   );
   process.exit(0);
 }
