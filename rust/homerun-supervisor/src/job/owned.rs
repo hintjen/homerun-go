@@ -1,5 +1,6 @@
 //! The strict Windows spawn path uses JOB_LIST at CreateProcess, so no game
-//! instruction (or descendant) can run before ownership is established.
+//! instruction (or descendant) can run before ownership is established. Linux
+//! gets the same from `pre_exec` (`job/tree.rs`).
 //! std's spawn_with_attributes is unstable; keep this small adapter until it
 //! stabilizes. Ordinary, unmounted engines keep std::process unchanged.
 use std::{
@@ -84,12 +85,22 @@ impl Process {
 }
 
 impl super::Job {
-    pub(crate) fn spawn(&self, command: &Command) -> io::Result<Process> {
+    pub(crate) fn spawn(&self, command: &mut Command) -> io::Result<Process> {
         #[cfg(windows)]
         {
             windows::spawn(self.handle, command)
         }
-        #[cfg(not(windows))]
+        // Membership is decided before exec here too: the tag, the group and
+        // the parent-death signal are all set in the child before any game
+        // instruction runs.
+        #[cfg(target_os = "linux")]
+        {
+            self.prepare(command);
+            let child = command.spawn()?;
+            self.adopt(&child);
+            Ok(Process::from(child))
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = command;
             Err(io::Error::new(
@@ -481,7 +492,7 @@ mod tests {
         let job =
             crate::job::Job::required(&format!("Global\\HomerunSave-argv-{}", std::process::id()))
                 .unwrap();
-        let mut child = job.spawn(&command).unwrap();
+        let mut child = job.spawn(&mut command).unwrap();
         let mut stdout = String::new();
         child
             .stdout

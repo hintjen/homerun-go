@@ -361,10 +361,19 @@ test("Windows stays unkeyed, wireproxy included, so released desktops see no cha
   assert.match(wireproxy.objectKey, /^wireproxy\/homerun-desktop-server-proxy-[a-f0-9]{12}\.exe$/);
 });
 
+test("the runner and Pumpkin for linux-x64 are keyed executables, with no .exe", (t) => {
+  const artifacts = prepareArtifacts(targetFixture(t, "linux-x64"), ["game-runner", "pumpkin"], metadata, "dev", "linux-x64");
+  assert.deepEqual(artifacts.map((a) => a.manifestKey), ["game-runner/linux-x64/latest.json", "pumpkin/linux-x64/latest.json"]);
+  assert.match(artifacts[0].objectKey, /^game-runner\/linux-x64\/homerun-game-[a-f0-9]{12}$/);
+  assert.match(artifacts[1].objectKey, /^pumpkin\/linux-x64\/homerun-desktop-minecraft-pumpkin-[a-f0-9]{12}$/);
+  assert.deepEqual(artifacts.map((a) => path.basename(a.file)), ["homerun-game", "homerun-desktop-minecraft-pumpkin"]);
+  assert.deepEqual(artifacts[0].manifest.features, metadata["game-runner"].features);
+});
+
 test("an artifact a target does not have yet is refused, not published under a key nothing reads", (t) => {
-  const dir = targetFixture(t, "linux-x64");
-  fs.writeFileSync(path.join(dir, "homerun-desktop-minecraft-pumpkin"), "a Linux engine nobody reads");
-  assert.throws(() => prepareArtifacts(dir, ["pumpkin"], metadata, "dev", "linux-x64"), /There is no pumpkin for linux-x64 yet/);
+  const dir = targetFixture(t, "linux-arm64");
+  fs.writeFileSync(path.join(dir, "homerun-desktop-minecraft-pumpkin"), "an arm64 engine nobody reads");
+  assert.throws(() => prepareArtifacts(dir, ["pumpkin"], metadata, "dev", "linux-arm64"), /There is no pumpkin for linux-arm64 yet/);
   assert.throws(() => prepareArtifacts(targetFixture(t, "darwin-arm64"), ["core-node"], metadata, "dev", "darwin-arm64"), /no core-node for darwin-arm64/);
 });
 

@@ -471,7 +471,7 @@ mod tests {
                 "--test-threads=1",
             ])
             .env("HOMERUN_TEST_BREAK_SERVER", "1");
-        let mut server = job.spawn(&command).unwrap();
+        let mut server = job.spawn(&mut command).unwrap();
         let (tx, lines) = std::sync::mpsc::channel();
         let stdout = server.stdout.take().unwrap();
         std::thread::spawn(move || {

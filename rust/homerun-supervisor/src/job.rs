@@ -1,4 +1,4 @@
-//! Owning a child's whole process tree, on the one platform that needs it.
+//! Owning a child's whole process tree.
 //!
 //! # What was wrong
 //!
@@ -76,18 +76,28 @@
 //! for — trades a window nothing has ever fallen through for a failure mode
 //! where the game never starts at all.
 //!
+//! # Linux
+//!
+//! A tag every member inherits, a process group and a parent-death signal,
+//! in `job/tree.rs`, which says why not a cgroup and what that leaves
+//! uncovered. Call sites differ from Windows in one way: [`Job::prepare`]
+//! has to see the command before it is spawned, because none of the three can
+//! be added to a process afterwards.
+//!
 //! # Everywhere else
 //!
-//! Mounted launches refuse off Windows until equivalent ownership exists.
-//! [`Job::kill_on_close`] returns `None` off Windows, so legacy call sites carry no
+//! Mounted launches refuse on macOS until equivalent ownership exists.
+//! [`Job::kill_on_close`] returns `None` there, so legacy call sites carry no
 //! `cfg`. Android and iOS keep exactly the behaviour they had: Android's
 //! stop ladder ends in `SIGKILL` to a pid, which on a platform with process
 //! groups and no re-parenting launchers is the right answer already.
 
-use std::process::Child;
+use std::process::{Child, Command};
 
 mod owned;
 pub(crate) use owned::Process;
+#[cfg(target_os = "linux")]
+mod tree;
 
 /// A child process and everything it goes on to start.
 ///
@@ -97,6 +107,16 @@ pub(crate) use owned::Process;
 pub struct Job {
     #[cfg(windows)]
     handle: windows_sys::Win32::Foundation::HANDLE,
+    /// The name every member carries in its environment.
+    #[cfg(target_os = "linux")]
+    tag: String,
+    /// The root's pid, once one has been spawned; 0 before.
+    #[cfg(target_os = "linux")]
+    root: std::sync::atomic::AtomicU32,
+    /// Set once a drain has seen every member gone. Nothing can join a tree
+    /// with no members left, so there is nothing for `Drop` to look for.
+    #[cfg(target_os = "linux")]
+    drained: std::sync::atomic::AtomicBool,
 }
 
 // SAFETY: a job handle is a kernel object, and the three calls made on it
@@ -119,16 +139,62 @@ impl Job {
         Self::create(None).ok()
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn kill_on_close() -> Option<Job> {
+        Some(Self::tagged(Self::unique_tag()))
+    }
+
     /// Descriptor network enforcement requires ownership before game code executes.
     pub fn required_process() -> Result<Job, String> {
         #[cfg(windows)]
         {
             Self::create(None).map_err(|e| format!("Cannot own the game process tree: {e}"))
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            Err("Checked game process ownership requires Windows.".into())
+            Ok(Self::tagged(Self::unique_tag()))
         }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            Err("Checked game process ownership requires Windows or Linux.".into())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tagged(tag: String) -> Job {
+        Job {
+            tag,
+            root: std::sync::atomic::AtomicU32::new(0),
+            drained: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// A name no other job of this machine's has had: the runner's pid, the
+    /// time and a serial, the parts `Runtime::install` names a mounted
+    /// runtime's job with.
+    #[cfg(target_os = "linux")]
+    fn unique_tag() -> String {
+        static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        format!(
+            "HomerunGame-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
+    }
+
+    /// Make `command`'s process, once spawned, the root of this job.
+    ///
+    /// Required before the spawn on Linux (see `job/tree.rs`); nothing on
+    /// Windows, where membership is given to a process that already exists.
+    pub fn prepare(&self, command: &mut Command) {
+        #[cfg(target_os = "linux")]
+        tree::prepare(&self.tag, command);
+        #[cfg(not(target_os = "linux"))]
+        let _ = command;
     }
 
     /// Current job membership, including descendants whose parent already exited.
@@ -177,9 +243,13 @@ impl Job {
             }
             Err("The game process tree is too large to inspect.".into())
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
-            Err("Checked process ownership requires Windows.".into())
+            tree::members(&self.tag)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            Err("Checked process ownership requires Windows or Linux.".into())
         }
     }
 
@@ -189,10 +259,22 @@ impl Job {
         {
             Self::create(Some(name)).map_err(|e| format!("Cannot own the game's process tree: {e}"))
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            // The same refusal `CreateJobObjectW` gives a name in use: a
+            // tree already carrying it belongs to somebody else's run.
+            if !tree::members(name)?.is_empty() {
+                return Err("Cannot own the game's process tree: the process ownership name is already in use.".into());
+            }
+            Ok(Self::tagged(name.to_string()))
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             let _ = name;
-            Err("Save mounts require Windows process-tree ownership on this runner.".into())
+            Err(
+                "Save mounts require Windows or Linux process-tree ownership on this runner."
+                    .into(),
+            )
         }
     }
 
@@ -267,7 +349,13 @@ impl Job {
             }
             Job { handle }.terminate_and_wait()
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            // There is no object to reopen: the tree is whatever still carries
+            // the name. No member left is the same answer as a destroyed job.
+            tree::kill_and_wait(name, None)
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Err(
                 "Cannot establish that the previous mounted game has exited on this platform."
@@ -321,15 +409,27 @@ impl Job {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            tree::kill_and_wait(&self.tag, self.root())?;
+            self.drained
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         {
             Err("Process-tree exit cannot be established on this platform.".into())
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub fn kill_on_close() -> Option<Job> {
         None
+    }
+
+    #[cfg(target_os = "linux")]
+    fn root(&self) -> Option<u32> {
+        Some(self.root.load(std::sync::atomic::Ordering::SeqCst)).filter(|pid| *pid != 0)
     }
 
     /// Put a freshly spawned child, and everything it starts, in this job.
@@ -348,7 +448,18 @@ impl Job {
         unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle()) != 0 }
     }
 
-    #[cfg(not(windows))]
+    /// On Linux the child is already a member if it was [`prepare`]d; this
+    /// records it as the root, whose group the kill also signals.
+    ///
+    /// [`prepare`]: Job::prepare
+    #[cfg(target_os = "linux")]
+    pub fn adopt(&self, child: &Child) -> bool {
+        self.root
+            .store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub fn adopt(&self, _child: &Child) -> bool {
         false
     }
@@ -366,8 +477,27 @@ impl Job {
         unsafe { TerminateJobObject(self.handle, 1) };
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    pub fn terminate(&self) {
+        if let Err(e) = tree::kill_all(&self.tag, self.root()) {
+            log::warn!("{e}");
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
     pub fn terminate(&self) {}
+}
+
+/// Kill-on-close, done by hand: what is left when the last owner lets go is
+/// ended, as Windows ends it when the last handle closes. Unlike Windows this
+/// needs the runner to get this far, which is what `PR_SET_PDEATHSIG` is for.
+#[cfg(target_os = "linux")]
+impl Drop for Job {
+    fn drop(&mut self) {
+        if !self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+            self.terminate();
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -390,9 +520,37 @@ mod tests {
     /// Off Windows there is nothing to own: a process group and a signal
     /// already do this, and Android's ladder ends in `SIGKILL`.
     #[test]
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "linux")))]
     fn there_is_no_job_where_the_platform_does_not_need_one() {
         assert!(Job::kill_on_close().is_none());
+    }
+
+    /// A mounted runtime's job outlives the run that made it in name only:
+    /// a later runner, with nothing but the journal's name, must find the
+    /// tree, refuse to reuse the name while it lives, and end it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_later_runner_recovers_a_tree_by_its_recorded_name() {
+        use std::process::Stdio;
+
+        let name = format!("Global\\HomerunSave-test-{}", std::process::id());
+        let job = Job::required(&name).expect("an unused name");
+        let mut command = Command::new("sleep");
+        command.arg("120").stdin(Stdio::null());
+        job.prepare(&mut command);
+        let mut child = command.spawn().expect("sleep must be spawnable");
+        assert!(job.adopt(&child));
+        assert_eq!(job.process_ids().unwrap(), vec![child.id()]);
+        assert!(
+            Job::required(&name).is_err(),
+            "a live tree's name was handed out again"
+        );
+
+        // The previous runner is gone; only its record's name is left.
+        std::mem::forget(job);
+        Job::recover(&name).expect("the tree must be ended and confirmed gone");
+        assert!(child.wait().is_ok());
+        assert!(Job::required(&name).is_ok());
     }
 
     /// The two things every call site depends on, before any child is

@@ -25,23 +25,26 @@ release job: a Rust compilation alone does not prove Node can load it.
 
 ## Linux and macOS builds
 
-Homerun Desktop is coming to Linux, then macOS (Apple silicon), and two of
-these artifacts are needed there first:
+Homerun Desktop is coming to Linux, then macOS (Apple silicon). Linux x64
+has all four artifacts; macOS and Linux arm64 have wireproxy so far:
 
 ```text
 npm run rust:core-node-linux-x64                       # on glibc 2.31
+npm run rust:game-runner-linux-x64                     # on glibc 2.31
+npm run rust:pumpkin-bin-linux-x64                     # on glibc 2.31
 node scripts/build-wireproxy.js desktop-linux-x64     # any machine with Go
 node scripts/build-wireproxy.js desktop-linux-arm64
 node scripts/build-wireproxy.js desktop-darwin-arm64
 node scripts/build-wireproxy.js desktop-win32-x64
 ```
 
-- **The Linux addon is built on its floor.** A `.node` linked on a newer
-  glibc asks for newer symbols and fails to load on an older distro, which is
-  the desktop's main process failing at startup. `core-node-linux-x64`
-  refuses a machine above glibc 2.31 (Ubuntu 20.04) and checks the symbol
-  versions the staged file asks for. Build it on Ubuntu 20.04 or in an
-  `ubuntu:20.04` container.
+- **The Linux binaries are built on their floor.** A `.node` linked on a
+  newer glibc asks for newer symbols and fails to load on an older distro,
+  which is the desktop's main process failing at startup; the runner and
+  Pumpkin fail the same way, at a server's start. The three `-linux-x64`
+  targets refuse a machine above glibc 2.31 (Ubuntu 20.04) and check the
+  symbol versions the staged file asks for. Build them on Ubuntu 20.04 or in
+  an `ubuntu:20.04` container.
 - **wireproxy is the desktop's tunnel,** `homerun-desktop-server-proxy`,
   built from the fork at `scripts/wireproxy.rev`, the revision the phones
   ship. cgo is off, so one machine builds all four targets and the Linux
@@ -149,11 +152,13 @@ desktop reads. Every other target is **keyed**, one manifest per target:
 `wireproxy/linux-x64/homerun-desktop-server-proxy-<build>` (an executable off
 Windows has no `.exe`). A manifest per target rather than a map in one file,
 because the desktop's pin is "this manifest names one object and its
-digest". What each target has is `TARGET_KINDS`: today `linux-x64` has the
-addon and wireproxy, and `linux-arm64` and `darwin-arm64` have wireproxy.
+digest". What each target has is `TARGET_KINDS`: today `linux-x64` has all
+four, and `linux-arm64` and `darwin-arm64` have wireproxy.
 Anything else is refused rather than published under a key nothing reads.
-The addon is published from a machine of its own target, since its version
-and ABI are asked of the addon; wireproxy carries `rev`, the fork revision
+The addon, the runner and Pumpkin are published from a machine of their own
+target, since what each manifest says is asked of the binary (the addon's
+version and ABI, the runner's `--features`, Pumpkin's `--minecraft-version`);
+wireproxy carries `rev`, the fork revision
 from `scripts/wireproxy.rev`.
 
 The runner adds `version` (Cargo package version) and `protocol: 1`. The addon

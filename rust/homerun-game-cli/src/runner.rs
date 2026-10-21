@@ -101,6 +101,17 @@ impl Runner {
     pub fn idle(&self) -> bool {
         self.job.as_ref().is_none_or(|j| j.task.is_finished())
     }
+    /// Whether the run has published its last word and is only letting go of
+    /// what it held: its process tree, its save mounts, its runtime lease.
+    /// The state is set just before the lifecycle thread returns, and the
+    /// event follows it, so a host that saw `server-stopped` and starts again
+    /// at once finds the thread still finishing. That start waits for it
+    /// rather than being refused as busy.
+    fn ending(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|j| matches!(j.live.lock().unwrap().state.as_str(), "stopped" | "crashed"))
+    }
     pub fn tick(&mut self) {
         self.console_tasks.retain(|t| !t.is_finished());
         if self.idle() {
@@ -143,7 +154,12 @@ impl Runner {
     pub fn command(&mut self, command: Command) -> bool {
         self.tick();
         match command {
-            Command::Hello { protocol } => {
+            Command::Hello { protocol, seal_key } => {
+                if let Some(key) = seal_key {
+                    if let Err(e) = homerun_supervisor::local_secret::set_host_key(&key) {
+                        eprintln!("{e}");
+                    }
+                }
                 if protocol == PROTOCOL {
                     self.ready();
                 } else {
@@ -284,13 +300,16 @@ impl Runner {
                     self.out.send(Event::TunnelFailed { server_id, message: "Start the server before opening its gateway connection, and open only one connection.".into() });
                 } else {
                     let job = ProcessJob::kill_on_close();
-                    match Process::new(bin_path)
+                    let mut tunnel = Process::new(bin_path);
+                    tunnel
                         .args(["-c", &conf_path])
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
-                        .stderr(Stdio::null())
-                        .spawn()
-                    {
+                        .stderr(Stdio::null());
+                    if let Some(job) = &job {
+                        job.prepare(&mut tunnel);
+                    }
+                    match tunnel.spawn() {
                         Ok(child) => {
                             if let Some(job) = &job {
                                 job.adopt(&child);
@@ -332,7 +351,7 @@ impl Runner {
                 return;
             }
         };
-        if !self.idle() {
+        if !self.idle() && !self.ending() {
             self.out.error(
                 Some(&id),
                 fail(
@@ -499,7 +518,7 @@ fn run(
         if let Some(job) = runtime_owner.process_job() {
             p.engine.require_job(job);
         } else {
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             p.engine.require_job(Arc::new(
                 ProcessJob::required_process().map_err(|e| fail(codes::SPAWN_FAILED, e))?,
             ));
@@ -778,7 +797,7 @@ fn run(
     );
     // Root exit does not mean its descendants have exited. Drain ownership before
     // ending enforcement or publishing any terminal event.
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     if let Err(e) = engine.terminate_owned_tree() {
         audit.inspection_failed(&e);
         exposed.store(true, Ordering::SeqCst);
@@ -957,6 +976,17 @@ pub fn supervise() -> std::result::Result<(), String> {
         let _ = w.flush();
     });
     let mut runner = Runner::new(out.clone())?;
+    // A signal to stop is the host going away by another route, and gets the
+    // same answer as stdin closing: `shutdown`, which runs each server's stop
+    // ladder. Unix only; see `Cargo.toml` for why not Windows.
+    #[cfg(unix)]
+    let signalled = {
+        let flag = Arc::new(AtomicBool::new(false));
+        let set = flag.clone();
+        ctrlc::set_handler(move || set.store(true, Ordering::SeqCst))
+            .map_err(|_| "The runner could not install its shutdown handler.".to_string())?;
+        flag
+    };
     let (tx, rx) = mpsc::sync_channel(32);
     thread::spawn(move || {
         let mut input = std::io::stdin().lock();
@@ -982,6 +1012,10 @@ pub fn supervise() -> std::result::Result<(), String> {
     });
     runner.ready();
     loop {
+        #[cfg(unix)]
+        if signalled.load(Ordering::SeqCst) {
+            break;
+        }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(command) => {
                 if !runner.command(command) {

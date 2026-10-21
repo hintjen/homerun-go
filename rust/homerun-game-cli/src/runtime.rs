@@ -283,7 +283,7 @@ impl Drop for Runtime {
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "linux"))]
     #[test]
     fn unconfirmed_tree_exit_preserves_junction_and_journal() {
         let root =

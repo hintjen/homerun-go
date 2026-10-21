@@ -47,10 +47,15 @@ pub const IMPORTER: Importer = Importer {
 /// Where the server's worlds live, relative to its folder (the descriptor
 /// mounts the runtime's `Pal/Saved` onto the server's `Saved`).
 const WORLDS: &str = "Saved/SaveGames/0";
-const SETTINGS_FILE: &str = "Saved/Config/WindowsServer/GameUserSettings.ini";
+/// The server reads its settings from a folder named for its OS, and an
+/// importer does not know which OS it is planning for: both are written, and
+/// each server ignores the other's. The descriptor does the same with its own
+/// config entries.
+const CONFIG_DIRS: [&str; 2] = ["Saved/Config/WindowsServer", "Saved/Config/LinuxServer"];
+const SETTINGS_FILE: &str = "GameUserSettings.ini";
 const SETTINGS_SECTION: &str = "/Script/Pal.PalGameLocalSettings";
 const WORLD_KEY: &str = "DedicatedServerName";
-const WORLD_SETTINGS: &str = "Saved/Config/WindowsServer/PalWorldSettings.ini";
+const WORLD_SETTINGS: &str = "PalWorldSettings.ini";
 const CO_OP_HOST: &str = "00000000000000000000000000000001.sav";
 const MAX_CANDIDATES: usize = 32;
 
@@ -290,10 +295,12 @@ fn plan_one(source: &Source, dir: &str) -> Step {
     }
     let configs = config_files(source, "PalWorldSettings.ini");
     if let Some(first) = configs.first() {
-        copy.push(CopyFile {
-            from: first.clone(),
-            to: WORLD_SETTINGS.into(),
-        });
+        for dir in CONFIG_DIRS {
+            copy.push(CopyFile {
+                from: first.clone(),
+                to: format!("{dir}/{WORLD_SETTINGS}"),
+            });
+        }
         if configs.len() > 1 {
             warnings.push(format!(
                 "There was more than one PalWorldSettings.ini; the one in {} was used.",
@@ -327,12 +334,15 @@ fn plan_one(source: &Source, dir: &str) -> Step {
         warnings,
         copy,
         present: vec![format!("{WORLDS}/*/Level.sav")],
-        ini: vec![IniEdit {
-            file: SETTINGS_FILE.into(),
-            section: SETTINGS_SECTION.into(),
-            key: WORLD_KEY.into(),
-            value: name,
-        }],
+        ini: CONFIG_DIRS
+            .iter()
+            .map(|dir| IniEdit {
+                file: format!("{dir}/{SETTINGS_FILE}"),
+                section: SETTINGS_SECTION.into(),
+                key: WORLD_KEY.into(),
+                value: name.clone(),
+            })
+            .collect(),
         json: Vec::new(),
     })
 }
@@ -396,13 +406,24 @@ mod tests {
             &format!("Saved/SaveGames/0/{WORLD}/Players/6D454EEE000000000000000000000000.sav")
                 .as_str()
         ));
+        // Both OS folders, since the plan cannot know which the server reads.
         assert!(to.contains(&"Saved/Config/WindowsServer/PalWorldSettings.ini"));
-        assert_eq!(p.ini.len(), 1);
+        assert!(to.contains(&"Saved/Config/LinuxServer/PalWorldSettings.ini"));
+        let files: Vec<&str> = p.ini.iter().map(|e| e.file.as_str()).collect();
         assert_eq!(
-            p.ini[0].managed_key(),
-            "[/Script/Pal.PalGameLocalSettings]DedicatedServerName"
+            files,
+            [
+                "Saved/Config/WindowsServer/GameUserSettings.ini",
+                "Saved/Config/LinuxServer/GameUserSettings.ini"
+            ]
         );
-        assert_eq!(p.ini[0].value, WORLD);
+        for edit in &p.ini {
+            assert_eq!(
+                edit.managed_key(),
+                "[/Script/Pal.PalGameLocalSettings]DedicatedServerName"
+            );
+            assert_eq!(edit.value, WORLD);
+        }
         assert_eq!(p.present, vec!["Saved/SaveGames/0/*/Level.sav".to_string()]);
         let world = p.world.unwrap();
         assert_eq!(world.name, "", "a folder id is not a name to show");

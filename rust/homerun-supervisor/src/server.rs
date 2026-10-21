@@ -136,6 +136,10 @@ impl Sampling {
     }
 }
 
+/// How long the first reading of a run waits for the engine's process to
+/// exist. Spawning is milliseconds; this is the bound, not the wait.
+const FIRST_READING_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -480,8 +484,28 @@ impl ServerHost {
         let inner = Arc::clone(&self.inner);
 
         let handle = thread::spawn(move || loop {
-            if finished.should_stop() {
-                return;
+            // Started just before the engine spawns its process, so a reading
+            // taken at once was always of nothing: the first point of every
+            // graph read "unavailable", and the next came a whole interval
+            // later. A short grace lets the process appear first. Any engine
+            // still has its first reading taken -- one with nothing to report
+            // anchors the clock, as below -- and a stop during the grace takes
+            // it at once.
+            if engine.usage().is_none()
+                && inner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .metrics
+                    .samples()
+                    .is_empty()
+            {
+                let grace = std::time::Instant::now() + FIRST_READING_GRACE;
+                while engine.usage().is_none()
+                    && std::time::Instant::now() < grace
+                    && !finished.should_stop()
+                {
+                    thread::sleep(std::time::Duration::from_millis(20));
+                }
             }
 
             let (mem, cpu) = match engine.usage() {
@@ -680,8 +704,15 @@ mod tests {
             slice.lines
         );
 
-        // Sampled while it ran, by the supervisor rather than by a host.
-        let graph = host.metrics();
+        // Sampled while it ran, by the supervisor rather than by a host. The
+        // sampler is its own thread, and the fake server is up in well under
+        // its first reading's grace, so this waits for that reading.
+        let mut graph = host.metrics();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while graph.is_empty() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+            graph = host.metrics();
+        }
         assert!(!graph.is_empty(), "the run was never sampled");
 
         // The readings themselves come from `/proc`, which exists on the

@@ -2,11 +2,12 @@
 //!
 //! # Why this module exists at all
 //!
-//! Windows is the only host for descriptor-driven games, and not just for
-//! now: iOS cannot spawn a process, and Android can only exec files shipped
-//! inside the APK, so a *downloaded* server binary is unrunnable on both.
+//! Descriptor-driven games are hosted on the desktop, Windows and Linux, and
+//! never on a phone: iOS cannot spawn a process, and Android can only exec
+//! files shipped inside the APK, so a *downloaded* server binary is
+//! unrunnable on both.
 //!
-//! That would be an argument for writing Windows code inline and being done
+//! That would be an argument for writing desktop code inline and being done
 //! with it. The reason not to is the suite: this crate builds and tests
 //! host-native on any machine in seconds, and that is what makes it worth
 //! having. A `#[cfg(windows)]` sprinkled through the fetcher and the engine
@@ -14,10 +15,9 @@
 //! developing a game on a Mac could not run the tests that matter.
 //!
 //! So the OS assumptions live here, behind functions with one meaning each,
-//! and everything else in the crate is portable by construction. A session on
-//! Linux can probe a game whose server ships for Linux — that is development
-//! evidence, never a verdict — and `win32-x64` remains the only platform a
-//! verdict is given for.
+//! and everything else in the crate is portable by construction. A game runs
+//! on a platform its descriptor has a `platforms` entry for, and on no other:
+//! a fact observed on one platform says nothing about another.
 //!
 //! # What this module refuses to do
 //!
@@ -311,6 +311,23 @@ pub fn machine_capacity(path: &Path) -> homerun_core::engine::doctor::Machine {
 /// [`set_interrupt_helper`] -- `homerun-game` does, at startup.
 pub fn graceful_interrupt(pid: u32) -> Result<(), String> {
     imp::graceful_interrupt(pid)
+}
+
+/// The `kill` target that asks `pid` to stop: its whole group when it leads
+/// one, itself otherwise.
+///
+/// A server spawned under a Linux job leads its own group (`job/tree.rs`);
+/// one spawned without, as on Android, is in the runner's group, and
+/// signalling that group would signal the runner.
+#[cfg(unix)]
+pub(crate) fn signal_target(pid: u32) -> i32 {
+    let pid = pid as i32;
+    // SAFETY: getpgid only reads; a reaped pid is an error, not a hazard.
+    if unsafe { libc::getpgid(pid) } == pid {
+        -pid
+    } else {
+        pid
+    }
 }
 
 #[path = "console_interrupt.rs"]
@@ -1097,7 +1114,7 @@ mod imp {
     pub fn graceful_interrupt(pid: u32) -> Result<(), String> {
         // SAFETY: `kill` with a pid this process spawned and a valid signal.
         // The worst a reaped pid can do is return ESRCH.
-        let sent = unsafe { libc::kill(pid as i32, libc::SIGINT) };
+        let sent = unsafe { libc::kill(super::signal_target(pid), libc::SIGINT) };
         if sent == 0 {
             Ok(())
         } else {

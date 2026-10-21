@@ -38,6 +38,17 @@ fn main() {
         });
     }
     platform::set_interrupt_helper(interrupt_helper);
+    // A runner started from a terminal on a platform without DPAPI has no
+    // host to give it a key; a developer can name a file holding one. Electron
+    // never sets this: it sends the key in `hello`.
+    if let Some(path) = std::env::var_os("HOMERUN_SEAL_KEY_FILE") {
+        if let Err(message) =
+            homerun_supervisor::local_secret::load_key_file(std::path::Path::new(&path))
+        {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    }
     if let Err(message) = cli::run() {
         eprintln!("{message}");
         std::process::exit(1);

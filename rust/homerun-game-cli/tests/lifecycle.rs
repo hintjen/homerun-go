@@ -152,6 +152,21 @@ fn fake_game() {
     // dedicated server with no console verb and no admin API: it saves on
     // Ctrl+Break and exits 0. Nothing else ends it promptly -- stdin is never
     // read -- so a quick, clean exit can only have come from the interrupt.
+    // Off Windows the interrupt is SIGINT, as for a Unity server on Linux.
+    #[cfg(unix)]
+    if std::env::var("HOMERUN_TEST_BREAK").is_ok() {
+        ctrlc::set_handler(|| {
+            let save = std::env::var("HOMERUN_TEST_SAVE").unwrap_or_else(|_| "saved".into());
+            fs::write(save, "saved on break").unwrap();
+            println!("fixture: saved on break");
+            std::io::stdout().flush().unwrap();
+            std::process::exit(0);
+        })
+        .unwrap();
+        eprintln!("FAKE READY");
+        thread::sleep(Duration::from_secs(30));
+        std::process::exit(3);
+    }
     #[cfg(windows)]
     if std::env::var("HOMERUN_TEST_BREAK").is_ok() {
         use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT};
@@ -541,7 +556,7 @@ impl Fixture {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn runtime_assets_and_server_saves_work_together_and_unmount_on_eof() {
     let f = Fixture::with_runtime_saves();
@@ -566,7 +581,7 @@ fn runtime_assets_and_server_saves_work_together_and_unmount_on_eof() {
     assert!(f.root.join("server/settings.json").exists());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn shared_runtime_lease_refuses_a_second_runner_without_touching_saves() {
     let f = Fixture::with_runtime_saves();
@@ -600,7 +615,7 @@ fn existing_real_runtime_save_directory_is_never_replaced() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn stale_save_link_is_removed_before_downloader_runs() {
     let mut f = Fixture::with_runtime_saves();
@@ -672,7 +687,7 @@ fn stale_save_link_is_removed_before_downloader_runs() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn runtime_save_mounts_are_removed_on_game_crash() {
     let f = Fixture::with_runtime_saves();
@@ -689,7 +704,7 @@ fn runtime_save_mounts_are_removed_on_game_crash() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn a_spawn_failure_rolls_back_created_save_mounts() {
     let f = Fixture::with_runtime_saves();
@@ -735,7 +750,7 @@ fn save_mount_parents_cannot_redirect_either_end() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn hard_kill_recovers_stale_mount_before_another_server_uses_runtime() {
     let f = Fixture::with_runtime_saves();
@@ -782,13 +797,9 @@ fn hard_kill_recovers_stale_mount_before_another_server_uses_runtime() {
     assert!(!f.root.join("runtime/fake/server").exists());
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn recovery_drains_a_still_live_job_before_removing_its_mounts() {
-    use std::os::windows::io::{FromRawHandle, OwnedHandle};
-    use windows_sys::Win32::System::{
-        JobObjects::OpenJobObjectW, SystemServices::JOB_OBJECT_QUERY,
-    };
     let f = Fixture::with_runtime_saves();
     let mut first = Host::new();
     let mut command = f.start();
@@ -811,22 +822,40 @@ fn recovery_drains_a_still_live_job_before_removing_its_mounts() {
         &fs::read(f.root.join("runtime/.homerun-mounts-fake.json")).unwrap(),
     )
     .unwrap();
-    let name: Vec<u16> = record["job"]
-        .as_str()
-        .unwrap()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    // Keep one extra handle: last-handle-close cannot kill the game yet.
-    // This deterministically exercises recovery while old code is still alive.
-    let handle = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name.as_ptr()) };
-    assert!(!handle.is_null());
-    let _retained = unsafe { OwnedHandle::from_raw_handle(handle) };
+    #[cfg(windows)]
+    let _retained = {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::{
+            JobObjects::OpenJobObjectW, SystemServices::JOB_OBJECT_QUERY,
+        };
+        let name: Vec<u16> = record["job"]
+            .as_str()
+            .unwrap()
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        // Keep one extra handle: last-handle-close cannot kill the game yet.
+        // This deterministically exercises recovery while old code is still alive.
+        let handle = unsafe { OpenJobObjectW(JOB_OBJECT_QUERY, 0, name.as_ptr()) };
+        assert!(!handle.is_null());
+        unsafe { OwnedHandle::from_raw_handle(handle) }
+    };
+    #[cfg(not(windows))]
+    let _ = &record;
     first.child.kill().unwrap();
     first.child.wait().unwrap();
+    // On Windows the retained handle keeps the whole job alive. On Linux the
+    // root dies with the runner (its parent-death signal) and the descendant
+    // does not: that is the case `job/tree.rs` leaves to recovery, and the
+    // one this proves recovery covers.
+    #[cfg(windows)]
     assert!(
         TcpListener::bind(("127.0.0.1", f.port)).is_err(),
         "fixture must still be alive before recovery"
+    );
+    assert!(
+        TcpListener::bind(("127.0.0.1", descendant_port)).is_err(),
+        "the descendant must still be alive before recovery"
     );
     let mut recovery = Host::new();
     let mut descriptor = f.d.clone();
@@ -895,6 +924,15 @@ impl Host {
     fn send(&mut self, value: Value) {
         writeln!(self.child.stdin.as_mut().unwrap(), "{value}").unwrap();
     }
+    /// What Homerun Desktop does off Windows, where there is no DPAPI: hand
+    /// the runner the key it seals sign-ins under, from the keyring.
+    fn give_seal_key(&mut self) {
+        if cfg!(windows) {
+            return;
+        }
+        self.send(json!({"cmd":"hello","protocol":1,"sealKey":"5a".repeat(32)}));
+        self.until("ready");
+    }
     fn until(&mut self, event: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(25);
         loop {
@@ -960,7 +998,7 @@ fn port_freed(port: u16) -> bool {
 /// the next start either fails `port_unavailable` or, past the preflight,
 /// becomes a second server on the same world.
 #[test]
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn an_abrupt_runner_death_takes_the_game_with_it() {
     let f = Fixture::new();
     let mut start = f.start();
@@ -991,7 +1029,7 @@ fn an_abrupt_runner_death_takes_the_game_with_it() {
 /// pid doing the work. `taskkill /PID n /F` ended a process that had already
 /// gone; even `/T` walks parent links the launcher broke on its way out.
 #[test]
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn a_game_that_starts_another_program_has_all_of_it_stopped() {
     let f = Fixture::new();
     let grandchild = free_port();
@@ -1030,9 +1068,10 @@ fn a_game_that_starts_another_program_has_all_of_it_stopped() {
 /// job), and its stop ladder has `homerun-game __console-break` send
 /// Ctrl+Break to the game's own console. The game saves and exits 0 well
 /// inside the grace, and the runner -- which must not be on that console --
-/// carries on and shuts down normally afterwards.
+/// carries on and shuts down normally afterwards. On Linux the rung is
+/// SIGINT to the game's process group, and the fixture saves on that.
 #[test]
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn an_interrupt_stopped_console_game_saves_on_ctrl_break() {
     let f = Fixture::new();
     let mut start = f.start();
@@ -2293,7 +2332,7 @@ fn a_vendor_runtime_is_fetched_per_version_and_a_changed_file_is_refused() {
 /// runtime: the executable, a `runtime` working directory, `{runtimeDir}`
 /// and save mounts. The fake game asserts its cwd is `{runtimeDir}` and
 /// finds its asset there.
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn a_vendor_runtime_is_launched_from_its_versions_directory() {
     let mut f = Fixture::with_runtime_saves();
@@ -2608,7 +2647,7 @@ fn network_private_port_widening_during_stop_is_refused() {
     h.eof();
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn network_private_descendant_is_inspected_and_terminated() {
     let f = Fixture::binding_wide();
@@ -2749,7 +2788,7 @@ fn network_verify_records_an_os_assigned_udp_socket_and_refuses_a_fixed_one() {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn network_refusal_kills_even_when_runner_output_is_not_drained() {
     let f = Fixture::binding_wide();
@@ -2790,7 +2829,7 @@ fn network_refusal_kills_even_when_runner_output_is_not_drained() {
     );
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 #[test]
 fn network_descendants_are_gone_before_clean_stop_is_reported() {
     let f = Fixture::new();
@@ -2886,6 +2925,7 @@ mod extensions {
         env["HOMERUN_TEST_ECHO"] = json!("{extension:sessionToken}");
 
         let mut h = Host::new();
+        h.give_seal_key();
         h.send(f.start());
         let sign_in = h.until("sign-in");
         assert_eq!(sign_in["purpose"], "server");
@@ -3071,7 +3111,10 @@ mod extensions {
             .collect();
         assert!(features.contains(&"extensions"), "{features:?}");
         assert!(features.contains(&"extension:fixture"), "{features:?}");
+        // Hytale keeps a sealed sign-in: DPAPI on Windows, the host's key
+        // elsewhere.
         assert!(features.contains(&"extension:hytale"), "{features:?}");
+        assert!(features.contains(&"seal-host-key"), "{features:?}");
         h.eof();
     }
 
@@ -3367,6 +3410,7 @@ mod extensions {
     fn a_remembered_sign_in_is_sealed_reported_and_forgotten() {
         let f = with_extension(json!({ "remember": true }));
         let mut h = Host::new();
+        h.give_seal_key();
         h.send(f.start());
         h.until("server-started");
         h.send(json!({"cmd":"stop","serverId":"s1"}));

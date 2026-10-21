@@ -238,6 +238,9 @@ fn vendor_tool(
     if !program.is_file() {
         return Err("the game's downloader did not contain the program it should.".to_string());
     }
+    // The same zip serves every platform's downloader, and was not made with
+    // Unix modes.
+    crate::platform::make_executable(&program)?;
 
     let credentials_dir = ctx.tools_dir.join("credentials");
     fs::create_dir_all(&credentials_dir).map_err(|_| cannot_write(&credentials_dir))?;
@@ -1056,6 +1059,22 @@ fn copy_checked(
 /// Valve's own download for the Windows client. Never mirrored by us.
 const STEAMCMD_WINDOWS: &str = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip";
 
+/// And for the Linux one, the URL Valve's SteamCMD page gives. A tarball,
+/// whose modes matter: `steamcmd.sh` and `linux32/steamcmd` must stay runnable.
+const STEAMCMD_LINUX: &str =
+    "https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz";
+
+/// Where a 32-bit program's loader lives on the distributions we know of:
+/// Debian and Ubuntu (`libc6-i386`), Fedora (`glibc.i686`), Arch
+/// (`lib32-glibc`). Linux steamcmd is a 32-bit program, and without the
+/// loader the kernel's answer is "No such file or directory" about a file
+/// that is plainly there.
+const LINUX_32BIT_LOADERS: &[&str] = &[
+    "/lib/ld-linux.so.2",
+    "/lib32/ld-linux.so.2",
+    "/usr/lib32/ld-linux.so.2",
+];
+
 /// Where an already-installed `steamcmd` can be named, for a machine that has
 /// one or a platform this cannot bootstrap on.
 pub const STEAMCMD_OVERRIDE: &str = "HOMERUN_STEAMCMD";
@@ -1080,8 +1099,9 @@ fn steamcmd(
     });
 
     let args = steamcmd_args(dir, app_id, build_id, verify);
+    let env = steamcmd_env(ctx)?;
     for run in 1..=STEAMCMD_RUNS {
-        let output = run_streaming(&binary, &args, "steamcmd", ctx)?;
+        let output = run_streaming(&binary, &args, &env, "steamcmd", ctx)?;
 
         if prompt_detected(&output) {
             return Err(
@@ -1205,15 +1225,25 @@ fn steamcmd_binary(ctx: &Context) -> Result<PathBuf, String> {
     }
 
     let dir = ctx.tools_dir.join("steamcmd");
-    let binary = crate::platform::executable(&dir, "steamcmd");
+    // On Linux the entry point is Valve's wrapper, not the binary: it sets
+    // the library path, and it is what restarts steamcmd after the
+    // self-update every fresh copy does on its first run.
+    let binary = if cfg!(target_os = "linux") {
+        dir.join("steamcmd.sh")
+    } else {
+        crate::platform::executable(&dir, "steamcmd")
+    };
+    if cfg!(target_os = "linux") {
+        has_32bit_loader(LINUX_32BIT_LOADERS)?;
+    }
     if binary.exists() {
         return Ok(binary);
     }
 
-    if !cfg!(windows) {
+    if !cfg!(any(windows, target_os = "linux")) {
         return Err(format!(
-            "Homerun can only install Steam's downloader on Windows. Install \
-             steamcmd yourself and point {STEAMCMD_OVERRIDE} at it."
+            "Homerun can only install Steam's downloader on Windows and Linux. \
+             Install steamcmd yourself and point {STEAMCMD_OVERRIDE} at it."
         ));
     }
 
@@ -1228,10 +1258,17 @@ fn steamcmd_binary(ctx: &Context) -> Result<PathBuf, String> {
     // turn every Steam game into a failed download the day after it moved.
     // What makes that acceptable is that it is HTTPS direct from Valve and
     // it is the same file Steam's own documentation tells a person to fetch.
-    let archive = dir.join("steamcmd.zip");
-    download(STEAMCMD_WINDOWS, &archive, None, None, ctx)?;
-    extract_zip(&archive, &dir, ctx)?;
-    let _ = fs::remove_file(&archive);
+    if cfg!(target_os = "linux") {
+        let archive = dir.join("steamcmd_linux.tar.gz");
+        download(STEAMCMD_LINUX, &archive, None, None, ctx)?;
+        extract_tarball(&archive, &dir)?;
+        let _ = fs::remove_file(&archive);
+    } else {
+        let archive = dir.join("steamcmd.zip");
+        download(STEAMCMD_WINDOWS, &archive, None, None, ctx)?;
+        extract_zip(&archive, &dir, ctx)?;
+        let _ = fs::remove_file(&archive);
+    }
 
     if !binary.exists() {
         return Err("Steam's downloader did not arrive in one piece.".to_string());
@@ -1239,16 +1276,73 @@ fn steamcmd_binary(ctx: &Context) -> Result<PathBuf, String> {
     Ok(binary)
 }
 
+/// The environment steamcmd runs with, beyond the runner's own.
+///
+/// On Linux, steamcmd keeps its state (app info, logs, a library file) under
+/// `$HOME/Steam`, and can link `~/.steam` -- the folder a player's own Steam
+/// client is found through. On Windows it keeps everything beside itself. So
+/// on Linux it is given a home of its own under the tools folder: what it
+/// writes stays with the rest of Homerun's cache, and a player's Steam is
+/// never touched.
+fn steamcmd_env(ctx: &Context) -> Result<Vec<(&'static str, std::ffi::OsString)>, String> {
+    if !cfg!(target_os = "linux") {
+        return Ok(Vec::new());
+    }
+    let home = ctx.tools_dir.join("steamcmd").join("home");
+    fs::create_dir_all(&home).map_err(|_| cannot_write(&home))?;
+    Ok(vec![("HOME", home.into_os_string())])
+}
+
+/// Refuse, in words a player can act on, when 32-bit programs cannot run.
+fn has_32bit_loader(candidates: &[&str]) -> Result<(), String> {
+    if candidates.iter().any(|path| Path::new(path).exists()) {
+        return Ok(());
+    }
+    Err(
+        "Steam's downloader needs this computer's 32-bit system libraries, and they \
+         are not installed. Install them, then try again: on Ubuntu or Debian \
+         `sudo apt install lib32gcc-s1`, on Fedora `sudo dnf install glibc.i686 \
+         libstdc++.i686`, on Arch `sudo pacman -S lib32-gcc-libs` (with the multilib \
+         repository enabled)."
+            .to_string(),
+    )
+}
+
+/// Unpack a `.tar.gz` with the system's `tar`, which every Linux desktop has
+/// and which keeps the modes Valve's archive was made with. The download is
+/// HTTPS from Valve, as the Windows zip is.
+fn extract_tarball(archive: &Path, dir: &Path) -> Result<(), String> {
+    let status = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(archive)
+        .arg("-C")
+        .arg(dir)
+        .arg("--no-same-owner")
+        .stdin(std::process::Stdio::null())
+        .status()
+        .map_err(|_| "Homerun could not run tar to unpack Steam's downloader.".to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(
+            "Steam's downloader did not arrive in one piece. Trying again usually fixes this."
+                .to_string(),
+        )
+    }
+}
+
 /// Run a program, reporting its output as it arrives.
 fn run_streaming(
     program: &Path,
     args: &[String],
+    env: &[(&str, std::ffi::OsString)],
     phase: &'static str,
     ctx: &Context,
 ) -> Result<String, String> {
     use std::process::{Command, Stdio};
 
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(args)
         // stdin is closed rather than inherited. If steamcmd ever *does* want
         // an answer, it gets end-of-file and gives up, which is the behaviour
@@ -1256,6 +1350,13 @@ fn run_streaming(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .envs(env.iter().map(|(k, v)| (k, v)));
+    // Linux's `steamcmd.sh` runs the real steamcmd as its child, so killing
+    // the pid on a cancel would leave the download going. The job ends the
+    // whole tree when it is dropped, on every way out of this function.
+    #[cfg(target_os = "linux")]
+    let _job = crate::job::Job::kill_on_close().inspect(|job| job.prepare(&mut command));
+    let mut child = command
         .spawn()
         .map_err(|_| format!("Homerun could not run {}.", program.display()))?;
 
@@ -1874,6 +1975,26 @@ mod tests {
         std::process::exit(0);
     }
 
+    /// Linux steamcmd writes `$HOME/Steam` and may link `~/.steam`, which
+    /// is where a player's own Steam client is found: it gets a home of its
+    /// own, inside the tools folder.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn steamcmd_on_linux_is_given_a_home_inside_the_tools_folder() {
+        let tools = std::env::temp_dir().join(format!("steamcmd-home-{}", std::process::id()));
+        let ctx = Context {
+            tools_dir: tools.clone(),
+            on_progress: &|_| {},
+            cancelled: &|| false,
+        };
+        let env = steamcmd_env(&ctx).unwrap();
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].0, "HOME");
+        let home = PathBuf::from(&env[0].1);
+        assert!(home.starts_with(&tools) && home.is_dir(), "{home:?}");
+        let _ = fs::remove_dir_all(tools);
+    }
+
     #[test]
     fn steamcmd_output_that_is_not_utf8_still_shows_the_line_that_matters() {
         let program = std::env::current_exe().expect("the test binary must be locatable");
@@ -1892,7 +2013,7 @@ mod tests {
             on_progress: &|_| {},
             cancelled: &|| false,
         };
-        let output = run_streaming(&program, &args, "steamcmd", &ctx)
+        let output = run_streaming(&program, &args, &[], "steamcmd", &ctx)
             .expect("a program that exits cleanly is not a failure");
 
         assert!(

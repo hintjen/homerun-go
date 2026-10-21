@@ -351,8 +351,8 @@ happened ("Nothing answered on the server's admin port.").
 Seals bytes to this computer's current user with Windows DPAPI
 (`CryptProtectData`, UI forbidden). The extension's name is mixed in as
 DPAPI's optional entropy, so one extension's file moved into another's folder
-does not open. **Elsewhere it refuses** rather than fall back to a plain
-file: the runner is Windows-first.
+does not open. **Off Windows it seals under the host's key** (below), and
+with no key it refuses rather than fall back to a plain file.
 
 **Every sealed value starts with one scheme byte** (`Scheme`; `1` is DPAPI).
 It is there so the backend can change without making anyone sign in again:
@@ -362,15 +362,23 @@ on the next save (`MachineStore::update` always re-seals). A scheme this build
 does not know is refused in words that say a newer Homerun wrote it, rather
 than read as damage.
 
-**Other platforms, when they come.** Keystores (macOS Keychain, Linux Secret
-Service, iOS Keychain, Android Keystore) hold small items, while DPAPI holds
-nothing and has no size limit, so the expected shape is envelope encryption:
-a random key per extension in the keystore, the document encrypted with it on
-disk, as a new `Scheme`. `seal`/`open` and every caller stay as they are.
-Still to decide then: whether headless Linux, which usually has no Secret
-Service, refuses (the default) or offers an explicit owner-only-file mode;
-and, for phones, the host supplies the key over the FFI, since their
-keystores are reachable from Kotlin and Swift rather than Rust.
+**Linux: the host's key** (`Scheme::HostKey`, `2`). Envelope encryption, with
+the envelope's key kept by the host rather than the runner: Homerun Desktop
+keeps a random 256-bit key in the system keyring through Electron's
+`safeStorage` and sends it in `hello.sealKey` (64 hex digits) to a runner that
+advertises `seal-host-key`. The runner seals with AES-256-GCM under it, the
+extension's name as associated data, a fresh nonce each time. The runner never
+reaches a keystore itself, so it needs no D-Bus client, and the desktop already
+knows which keyring backend it has: where `safeStorage` falls back to
+`basic_text`, which is not secret, the desktop sends no key and the extension
+refuses after saying which keyring to install. `HOMERUN_SEAL_KEY_FILE` (an
+owner-only file holding the key in hex) is for a runner started from a
+terminal, for development; the desktop never sets it.
+
+**Other platforms, when they come.** macOS can take the same route
+(`safeStorage` is the Keychain there). For phones, the host supplies the key over
+the FFI, since their keystores are reachable from Kotlin and Swift rather than
+Rust.
 
 ## The protocol
 
