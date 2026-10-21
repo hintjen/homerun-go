@@ -1462,7 +1462,11 @@ pub struct SteamcmdProgress {
 /// percentage, a speed and a time left come from them rather than from the
 /// rounded number in the middle. A line that is not this shape, or has no
 /// total, is not progress and stays a note.
+///
+/// steamcmd starts its lines with a colour reset (`\x1b[0m`) even when its
+/// output is a pipe, so the escapes go before anything else is read.
 pub fn steamcmd_progress(line: &str) -> Option<SteamcmdProgress> {
+    let line = without_escapes(line);
     let rest = line.trim().strip_prefix("Update state (0x")?;
     let (_, rest) = rest.split_once(") ")?;
     let (state, rest) = rest.split_once(", progress: ")?;
@@ -2110,7 +2114,8 @@ mod tests {
         for i in 1..=50u64 {
             writeln!(
                 out,
-                " Update state (0x61) downloading, progress: {i}.00 ({} / 5000)",
+                // The colour reset real steamcmd puts at the start of a line.
+                "\u{1b}[0m Update state (0x61) downloading, progress: {i}.00 ({} / 5000)",
                 i * 100
             )
             .unwrap();
@@ -2118,7 +2123,7 @@ mod tests {
         for i in 1..=20u64 {
             writeln!(
                 out,
-                " Update state (0x81) verifying update, progress: {}.00 ({} / 5000)",
+                "\u{1b}[0m Update state (0x81) verifying update, progress: {}.00 ({} / 5000)",
                 i * 5,
                 i * 250
             )
@@ -2215,6 +2220,15 @@ mod tests {
                 phase: "verify",
                 received: 667814245,
                 total: 5816529537
+            })
+        );
+        // As steamcmd really prints it, through a pipe.
+        assert_eq!(
+            line("\u{1b}[0m Update state (0x61) downloading, progress: 14.33 (313300947 / 2186637152)\u{1b}[0m"),
+            Some(SteamcmdProgress {
+                phase: "download",
+                received: 313300947,
+                total: 2186637152
             })
         );
         assert_eq!(
