@@ -57,6 +57,14 @@ pub fn current() -> Option<Scheme> {
     imp::CURRENT.or_else(|| host_key().map(|_| Scheme::HostKey))
 }
 
+/// Whether [`seal`] would work now, and if not, the words that say why: the
+/// same refusal `seal` gives, asked for before there is anything to seal.
+pub fn ensure_can_seal() -> Result<(), String> {
+    current()
+        .map(|_| ())
+        .ok_or_else(|| imp::REFUSAL.to_string())
+}
+
 /// Whether this build seals with a host's key when given one. True for every
 /// build: what decides whether it *can* is whether the host has a key, which
 /// `--features` cannot know.

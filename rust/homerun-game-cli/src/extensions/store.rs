@@ -80,7 +80,10 @@ impl MachineStore {
         match &next {
             Some(value) => {
                 let plain = serde_json::to_vec(value).map_err(|_| cannot_save())?;
-                let sealed = local_secret::seal(&plain, self.name).map_err(|_| cannot_save())?;
+                // The seal's own words: they say what is missing (a keyring),
+                // which "free disk space" would send a person looking past.
+                let sealed = local_secret::seal(&plain, self.name)
+                    .map_err(|why| ExtError::new(codes::EXTENSION_FAILED, why))?;
                 write_atomically(&self.dir.join(DOCUMENT), &sealed).map_err(|_| cannot_save())?;
             }
             None => match fs::remove_file(self.dir.join(DOCUMENT)) {

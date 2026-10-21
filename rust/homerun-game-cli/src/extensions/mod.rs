@@ -660,6 +660,23 @@ fn can_keep_what_it_needs(name: &str) -> bool {
         || homerun_supervisor::local_secret::HOST_KEY_SUPPORTED
 }
 
+/// Refuse a game whose extension keeps a sign-in this computer cannot seal,
+/// before anything is downloaded or anyone is asked to sign in.
+///
+/// `features` cannot know whether a host will give a key, so the feature is
+/// advertised wherever one could be taken; this is where its absence is
+/// found out, in the refusal's own words (which keyring to install), rather
+/// than after a person has signed in twice and waited for a download.
+pub fn refuse_unsealable(d: &GameDescriptor) -> Result<()> {
+    match &d.extension {
+        Some(named) if KEEPS_A_SIGN_IN.contains(&named.name.as_str()) => {
+            homerun_supervisor::local_secret::ensure_can_seal()
+                .map_err(|why| fail(codes::REQUIRES_UNMET, why))
+        }
+        _ => Ok(()),
+    }
+}
+
 // ─── running one ───────────────────────────────────────────────────────────
 
 /// An extension that has begun a run, as the lifecycle holds it.

@@ -2976,6 +2976,34 @@ mod extensions {
         h.eof();
     }
 
+    /// Off Windows, a host with no secret keyring sends no key. Hytale is
+    /// then refused before anyone is asked to sign in, in words that say
+    /// which keyring to install -- not after two sign-ins and a download,
+    /// blaming the disk.
+    #[cfg(not(windows))]
+    #[test]
+    fn hytale_with_no_seal_key_is_refused_before_anyone_signs_in() {
+        let fake = super::fake_hytale::FakeHytale::start();
+        let mut f = Fixture::new();
+        f.d["extension"] = json!({ "name": "hytale", "config": fake.config() });
+
+        let mut h = Host::new();
+        h.send(f.start());
+        let error = h.until("error");
+        assert_eq!(error["code"], "requires_unmet");
+        assert!(
+            error["message"].as_str().unwrap().contains("GNOME Keyring"),
+            "{error}"
+        );
+        assert!(
+            !h.seen.iter().any(|v| v["event"] == "sign-in"),
+            "nobody was asked to sign in"
+        );
+        assert!(fake.calls().is_empty(), "Hytale's services were not called");
+        assert!(never_spawned(&f));
+        h.eof();
+    }
+
     // ─── a stop the extension asks for ─────────────────────────────────────
     //
     // The fixture's stop, against a fake game whose only way out is its

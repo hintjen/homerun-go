@@ -446,6 +446,9 @@ fn run(
         ),
         _ => unreachable!(),
     };
+    // Also before anything is downloaded: a sign-in this computer cannot keep
+    // should be refused before the person is asked for one.
+    extensions::refuse_unsealable(d)?;
     let mut runtime_owner = crate::runtime::Runtime::acquire(d, &root, version.as_deref())?;
     let runtime = prepare::fetch(d, &root, version.as_deref(), &id, out, stop)?;
     let Command::Start {
