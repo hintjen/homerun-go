@@ -402,11 +402,11 @@ function main(args, env = {}) {
       const crate = kind === "pumpkin" ? "homerun-pumpkin-bin" : "homerun-game-cli";
       const cargo = fs.readFileSync(path.join(ROOT, "rust", crate, "Cargo.toml"), "utf8");
       metadata[kind] = kind === "pumpkin"
-        ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1], ...engineMinecraftVersion(path.join(dir, LAYOUT.pumpkin.file)) }
+        ? { rev: cargo.match(/rev\s*=\s*"([0-9a-f]{7,40})"/)?.[1], ...engineMinecraftVersion(path.join(dir, fileFor(LAYOUT.pumpkin, options.target))) }
         : {
             version: cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1],
             protocol: 1,
-            features: runnerFeatures(path.join(dir, LAYOUT["game-runner"].file)),
+            features: runnerFeatures(path.join(dir, fileFor(LAYOUT["game-runner"], options.target))),
           };
     }
   }

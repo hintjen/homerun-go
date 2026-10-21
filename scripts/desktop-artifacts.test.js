@@ -370,6 +370,41 @@ test("the runner and Pumpkin for linux-x64 are keyed executables, with no .exe",
   assert.deepEqual(artifacts[0].manifest.features, metadata["game-runner"].features);
 });
 
+// The publish itself, not prepareArtifacts with metadata handed to it: what the
+// runner and Pumpkin say about themselves is asked of the binaries, and off
+// Windows those are named without `.exe`.
+test("a linux-x64 publish asks the Linux binaries themselves, by their own names", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "homerun-publish-linux-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dir = path.join(root, "dist", "desktop", "linux-x64");
+  fs.mkdirSync(dir, { recursive: true });
+  for (const kind of ["game-runner", "pumpkin"]) fs.writeFileSync(path.join(dir, fileFor(LAYOUT[kind], "linux-x64")), `linux-x64 ${kind}`);
+  for (const [crate, toml] of [["homerun-game-cli", 'version = "0.1.0"'], ["homerun-pumpkin-bin", 'rev = "123456789abcdef"']]) {
+    fs.mkdirSync(path.join(root, "rust", crate), { recursive: true });
+    fs.writeFileSync(path.join(root, "rust", crate, "Cargo.toml"), toml);
+  }
+  const asked = [];
+  function imports(name) {
+    if (name === "./targets") return { ROOT: root };
+    if (name === "child_process") return { execFileSync(file, args) {
+      asked.push(`${path.basename(file)} ${args.join(" ")}`);
+      return args[0] === "--features" ? '["runtime-mounts"]\n' : '{"minecraftVersion":"26.2","protocol":776}\n';
+    } };
+    return require(name);
+  }
+  for (const kind of ["game-runner", "pumpkin"]) {
+    const entry = { exports: {} };
+    imports.main = entry;
+    const processStub = { argv: ["node", "publish", "--target", "linux-x64", "--only", kind], env: {}, exitCode: 0, platform: "linux", arch: "x64" };
+    require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "publish-desktop-artifacts.js"), "utf8"), {
+      require: imports, module: entry, process: processStub, console: { log() {}, error() {} },
+    });
+    assert.equal(processStub.exitCode, 0, `${kind} for linux-x64 must publish`);
+  }
+  assert.deepEqual(asked, ["homerun-game --features", "homerun-desktop-minecraft-pumpkin --minecraft-version"]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, LAYOUT.pumpkin.manifest))).minecraftVersion, "26.2");
+});
+
 test("an artifact a target does not have yet is refused, not published under a key nothing reads", (t) => {
   const dir = targetFixture(t, "linux-arm64");
   fs.writeFileSync(path.join(dir, "homerun-desktop-minecraft-pumpkin"), "an arm64 engine nobody reads");
