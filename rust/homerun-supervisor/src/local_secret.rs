@@ -14,11 +14,21 @@
 //! `safeStorage` is the system keyring. So the desktop keeps a random 256-bit
 //! key there and hands it to the runner in `hello`, and the runner seals with
 //! AES-256-GCM under it ([`Scheme::HostKey`]): envelope encryption, with the
-//! envelope's key in the keystore and the data on disk. Without a key -- a
-//! runner started by something that has none, or a desktop whose keyring is
-//! only `basic_text` -- both calls refuse rather than fall back to a plain
-//! file. For development on such a machine, `HOMERUN_SEAL_KEY_FILE` names an
-//! owner-only file holding the key in hex ([`load_key_file`]).
+//! envelope's key in the keystore and the data on disk. For development,
+//! `HOMERUN_SEAL_KEY_FILE` names an owner-only file holding the key in hex
+//! ([`load_key_file`]).
+//!
+//! **Without a key, an owner-only file, and it says so.** A runner started by
+//! something that has none, or a desktop whose keyring is only `basic_text`
+//! (no GNOME Keyring or KWallet), keeps the value as it is, under
+//! [`Scheme::OwnerOnly`], in a file only this user can read. That protects it
+//! from the machine's other users and from nothing else, which is also what a
+//! vendor's own tool does in the same place: Hytale's downloader keeps a token
+//! for the same account in an owner-only JSON file. It is not dressed up as
+//! encryption. Refusing instead barred everyone without a keyring from the
+//! game while that token sat on disk anyway. A caller says so to the person
+//! ([`keeps_in_the_clear`]), and a key that arrives later takes over on the
+//! next save.
 //!
 //! # The first byte says how the rest was sealed
 //!
@@ -39,6 +49,10 @@ pub enum Scheme {
     /// nonce, then the ciphertext and its tag, with the label as the
     /// associated data.
     HostKey = 2,
+    /// **Not encrypted.** The label, a NUL, then the value as it is, for a
+    /// file only its owner can read (the caller writes it so). Off Windows,
+    /// when the host gave no key.
+    OwnerOnly = 3,
 }
 
 impl Scheme {
@@ -46,23 +60,24 @@ impl Scheme {
         match byte {
             1 => Some(Self::Dpapi),
             2 => Some(Self::HostKey),
+            3 => Some(Self::OwnerOnly),
             _ => None,
         }
     }
 }
 
-/// The scheme [`seal`] uses on this platform, if it can seal at all: DPAPI
-/// on Windows, the host's key wherever one was given.
+/// The scheme [`seal`] uses now: DPAPI on Windows; elsewhere the host's key
+/// if one was given, and an owner-only file if not.
 pub fn current() -> Option<Scheme> {
-    imp::CURRENT.or_else(|| host_key().map(|_| Scheme::HostKey))
+    imp::CURRENT
+        .or_else(|| host_key().map(|_| Scheme::HostKey))
+        .or(imp::FALLBACK)
 }
 
-/// Whether [`seal`] would work now, and if not, the words that say why: the
-/// same refusal `seal` gives, asked for before there is anything to seal.
-pub fn ensure_can_seal() -> Result<(), String> {
-    current()
-        .map(|_| ())
-        .ok_or_else(|| imp::REFUSAL.to_string())
+/// Whether what is sealed now is kept unencrypted, in an owner-only file:
+/// the case a person should be told about, with what would change it.
+pub fn keeps_in_the_clear() -> bool {
+    current() == Some(Scheme::OwnerOnly)
 }
 
 /// Whether this build seals with a host's key when given one. True for every
@@ -129,6 +144,7 @@ pub fn seal(plain: &[u8], label: &str) -> Result<Vec<u8>, String> {
     let body = match scheme {
         Scheme::Dpapi => imp::seal(plain, label)?,
         Scheme::HostKey => host::seal(&host_key().expect("current() said so"), plain, label)?,
+        Scheme::OwnerOnly => [label.as_bytes(), &[0], plain].concat(),
     };
     let mut sealed = Vec::with_capacity(body.len() + 1);
     sealed.push(scheme as u8);
@@ -150,6 +166,12 @@ pub fn open(sealed: &[u8], label: &str) -> Result<Vec<u8>, String> {
                     .into(),
             ),
         },
+        // The label still has to match: one extension's file moved into
+        // another's folder is not read as that one's.
+        Some(Scheme::OwnerOnly) => match body.strip_prefix(label.as_bytes()) {
+            Some([0, plain @ ..]) => Ok(plain.to_vec()),
+            _ => Err("This was kept for another part of Homerun.".into()),
+        },
         None => Err("This was kept by a newer version of Homerun, which can read it.".into()),
     }
 }
@@ -159,6 +181,7 @@ mod imp {
     use super::Scheme;
 
     pub const CURRENT: Option<Scheme> = Some(Scheme::Dpapi);
+    pub const FALLBACK: Option<Scheme> = None;
     // Only reached when `CURRENT` is `None`, which it is not here.
     #[allow(dead_code)]
     pub const REFUSAL: &str = "This computer cannot keep a sign-in safe yet.";
@@ -292,9 +315,10 @@ mod imp {
     use super::Scheme;
 
     pub const CURRENT: Option<Scheme> = None;
-    pub const REFUSAL: &str = "Homerun can keep a sign-in safe only with your system keyring, \
-        through Homerun Desktop, and none was available. Install and unlock one \
-        (GNOME Keyring or KWallet), then start Homerun Desktop again.";
+    pub const FALLBACK: Option<Scheme> = Some(Scheme::OwnerOnly);
+    // Only reached when nothing above is current, which `FALLBACK` prevents.
+    #[allow(dead_code)]
+    pub const REFUSAL: &str = "This computer cannot keep a sign-in yet.";
 
     pub fn seal(_plain: &[u8], _label: &str) -> Result<Vec<u8>, String> {
         Err(REFUSAL.into())
@@ -330,6 +354,16 @@ mod format_tests {
         assert_eq!(scheme_of(&[1, 0xAA]), Some(Scheme::Dpapi));
         assert_eq!(Scheme::HostKey as u8, 2);
         assert_eq!(scheme_of(&[2, 0xAA]), Some(Scheme::HostKey));
+        assert_eq!(Scheme::OwnerOnly as u8, 3);
+        assert_eq!(scheme_of(&[3, 0xAA]), Some(Scheme::OwnerOnly));
+    }
+
+    #[test]
+    fn an_owner_only_value_opens_with_its_own_label_only() {
+        let kept = [&[Scheme::OwnerOnly as u8][..], b"hytale\0token"].concat();
+        assert_eq!(open(&kept, "hytale").unwrap(), b"token");
+        assert!(open(&kept, "palworld").is_err(), "another label");
+        assert!(open(&kept, "hytal").is_err(), "a prefix of the label");
     }
 
     const KEY: [u8; 32] = [7; 32];
@@ -374,7 +408,17 @@ mod format_tests {
     #[test]
     #[cfg(not(windows))]
     fn given_a_host_key_this_platform_seals_and_opens() {
+        // Before any key: the owner-only file, said to be in the clear. (The
+        // key is process-wide, so this test is the one that sets it.)
+        let before = seal(b"token", "fixture").unwrap();
+        if host_key().is_none() {
+            assert!(keeps_in_the_clear());
+            assert_eq!(scheme_of(&before), Some(Scheme::OwnerOnly));
+        }
         set_host_key(&"5a".repeat(32)).unwrap();
+        assert!(!keeps_in_the_clear());
+        // What was kept before the key still opens, so nobody signs in again.
+        assert_eq!(open(&before, "fixture").unwrap(), b"token");
         assert_eq!(current(), Some(Scheme::HostKey));
         let sealed = seal(b"token", "fixture").unwrap();
         assert_eq!(scheme_of(&sealed), Some(Scheme::HostKey));

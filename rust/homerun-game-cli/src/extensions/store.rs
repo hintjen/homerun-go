@@ -178,7 +178,15 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     let staging = path.with_extension(format!("{}.tmp", std::process::id()));
     let result = (|| {
-        let mut file = File::create(&staging)?;
+        // Owner-only from the first byte: off Windows with no key, what is
+        // written here is a sign-in as it is (`Scheme::OwnerOnly`). The
+        // rename keeps these modes, so a file an older build left readable
+        // by others is replaced by one that is not.
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut file = options.open(&staging)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

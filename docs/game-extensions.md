@@ -370,10 +370,22 @@ advertises `seal-host-key`. The runner seals with AES-256-GCM under it, the
 extension's name as associated data, a fresh nonce each time. The runner never
 reaches a keystore itself, so it needs no D-Bus client, and the desktop already
 knows which keyring backend it has: where `safeStorage` falls back to
-`basic_text`, which is not secret, the desktop sends no key and the extension
-refuses after saying which keyring to install. `HOMERUN_SEAL_KEY_FILE` (an
-owner-only file holding the key in hex) is for a runner started from a
+`basic_text`, which is not secret, the desktop sends no key. `HOMERUN_SEAL_KEY_FILE`
+(an owner-only file holding the key in hex) is for a runner started from a
 terminal, for development; the desktop never sets it.
+
+**Linux with no keyring: an owner-only file, not encrypted** (`Scheme::OwnerOnly`,
+`3`). With no key from the host, the value is kept as it is, after the
+extension's name and a NUL, in a file written mode 0600 from its first byte.
+That protects it from the machine's other users and from nothing else, and it
+is not presented as more: at each start the person is told that their sign-in
+is in a file only their account can read, and that GNOME Keyring or KWallet
+would keep it encrypted. It is what the vendor's own tool does in the same
+place (Hytale's downloader keeps a token for the same account in an owner-only
+JSON file), so refusing the game instead protected nothing while barring
+everyone without a keyring. When a key arrives later, the next save re-seals
+under it, with no new sign-in; a key that goes away leaves a scheme-`2` file
+that no longer opens, which reads as "not signed in".
 
 **Other platforms, when they come.** macOS can take the same route
 (`safeStorage` is the Keychain there). For phones, the host supplies the key over
