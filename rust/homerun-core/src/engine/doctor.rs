@@ -117,11 +117,10 @@ pub fn doctor_version(
 
     let requires = &descriptor.requires;
     if requires.ram_mb > 0 && machine.ram_mb > 0 && machine.ram_mb < requires.ram_mb {
+        let (needs, has) = amounts(requires.ram_mb, machine.ram_mb);
         problems.push(format!(
-            "{} needs {} of memory and this computer has {}.",
+            "{} needs {needs} of memory and this computer has {has}.",
             display_name(descriptor),
-            gigabytes(requires.ram_mb),
-            gigabytes(machine.ram_mb)
         ));
     }
 
@@ -129,7 +128,10 @@ pub fn doctor_version(
     // the runtime already on it does not need room for it a second time.
     // A vendor-downloader runtime is never `AlreadyPresent` at planning time
     // (only the downloader knows whether it is current), but one that is
-    // installed does not need room for a whole second copy either.
+    // installed does not need room for a whole second copy either. Nor does
+    // a Steam game with no build pinned: it is never `AlreadyPresent`, since
+    // steamcmd decides what is current, but one recorded as whole is updated
+    // in place (`verify: false`) rather than downloaded again.
     let runtime_present = matches!(
         fetch::plan_version(descriptor, &machine.host, "", present, runtime_version),
         Ok(fetch::Plan::AlreadyPresent { .. })
@@ -137,6 +139,7 @@ pub fn doctor_version(
                 present_build_id: Some(_),
                 ..
             })
+            | Ok(fetch::Plan::SteamCmd { verify: false, .. })
     );
     if let Some(version) = runtime_version {
         if fetch::is_vendor(descriptor, &machine.host) {
@@ -147,11 +150,10 @@ pub fn doctor_version(
     }
     let needed = if runtime_present { 0 } else { requires.disk_mb };
     if needed > 0 && machine.disk_mb > 0 && machine.disk_mb < needed {
+        let (needs, has) = amounts(needed, machine.disk_mb);
         problems.push(format!(
-            "{} needs {} of free space and this drive has {}.",
+            "{} needs {needs} of free space and this drive has {has}.",
             display_name(descriptor),
-            gigabytes(needed),
-            gigabytes(machine.disk_mb)
         ));
     }
 
@@ -203,6 +205,22 @@ fn display_name(descriptor: &GameDescriptor) -> String {
 }
 
 /// Megabytes as something a person reads, rounded the way a person would.
+/// What is needed and what there is, never written the same: one decimal can
+/// make 3000 MB and 2947 MB both "2.9 GB", which reads as no shortfall at all.
+/// Two decimals then, and megabytes if even those agree.
+fn amounts(needed_mb: u64, have_mb: u64) -> (String, String) {
+    let (needs, has) = (gigabytes(needed_mb), gigabytes(have_mb));
+    if needs != has {
+        return (needs, has);
+    }
+    let precise = |mb: u64| format!("{:.2} GB", mb as f64 / 1024.0);
+    let (needs, has) = (precise(needed_mb), precise(have_mb));
+    if needs != has && needed_mb >= 1024 && have_mb >= 1024 {
+        return (needs, has);
+    }
+    (format!("{needed_mb} MB"), format!("{have_mb} MB"))
+}
+
 fn gigabytes(mb: u64) -> String {
     if mb < 1024 {
         return format!("{mb} MB");
@@ -378,6 +396,55 @@ mod tests {
         let again = doctor(&pinned, &cramped, &present, true);
         assert!(again.ok, "{:?}", again.problems);
         assert!(again.runtime_present);
+    }
+
+    /// Found moving an install to a nearly full drive: Valheim, installed and
+    /// stamped, was refused for want of room for a second copy of itself.
+    #[test]
+    fn an_installed_steam_game_with_no_build_pinned_is_not_charged_for_again() {
+        let unpinned: GameDescriptor = serde_json::from_value(json!({
+            "id": "valheim", "name": "Valheim", "hosts": ["win32-x64"],
+            "requires": { "ramMb": 2048, "diskMb": 3000 },
+            "ready": { "marker": "up", "timeoutMs": 1000 },
+            "console": { "via": "stdin" },
+            "stop": { "via": "console", "command": "quit", "graceMs": 1000 },
+            "saves": { "paths": ["world"] },
+            "platforms": { "win32-x64": {
+                "runtime": { "source": "steamcmd", "appId": 896660 },
+                "launch": { "exe": "valheim_server.exe" } } }
+        }))
+        .unwrap();
+        let cramped = Machine {
+            disk_mb: 2947,
+            ..capable()
+        };
+
+        let fresh = doctor(&unpinned, &cramped, &NOTHING, true);
+        assert!(!fresh.ok, "a fresh install needs the space");
+
+        let installed = fetch::Present {
+            suspect: false,
+            build_id: Some("app896660".into()),
+        };
+        let again = doctor(&unpinned, &cramped, &installed, true);
+        assert!(again.ok, "{:?}", again.problems);
+        assert!(again.runtime_present);
+
+        // One the host thinks is damaged is fetched whole again, so it still
+        // needs the room.
+        let suspect = fetch::Present {
+            suspect: true,
+            ..installed
+        };
+        assert!(!doctor(&unpinned, &cramped, &suspect, true).ok);
+    }
+
+    #[test]
+    fn a_shortfall_never_reads_as_the_same_amount_twice() {
+        assert_eq!(amounts(3000, 2947), ("2.93 GB".into(), "2.88 GB".into()));
+        assert_eq!(amounts(3000, 2998), ("3000 MB".into(), "2998 MB".into()));
+        assert_eq!(amounts(16000, 2000), ("15.6 GB".into(), "2 GB".into()));
+        assert_eq!(amounts(900, 512), ("900 MB".into(), "512 MB".into()));
     }
 
     #[test]
