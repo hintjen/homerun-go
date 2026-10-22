@@ -287,6 +287,13 @@ fs.mkdirSync(target.outDir, { recursive: true });
 const dest = path.join(target.outDir, target.outName || target.artifact);
 fs.copyFileSync(built, dest);
 
+// A macOS dylib records its own path as its install name, which here is the
+// build machine's target tree. Nothing loads the addon by that name, but it
+// would ship inside the app; name it for what it is instead.
+if (target.triple.endsWith("-apple-darwin") && target.artifact.endsWith(".dylib")) {
+  run("install_name_tool", ["-id", `@rpath/${path.basename(dest)}`, dest]);
+}
+
 const mb = (fs.statSync(dest).size / 1024 / 1024).toFixed(1);
 console.log(`\n${target.artifact} -> ${dest}  (${mb} MB)`);
 

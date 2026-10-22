@@ -210,6 +210,17 @@ const TARGETS = {
     requiresLinux: true,
     glibcFloor: "2.31",
   },
+  // And on macOS, Apple silicon only: the desktop has no Intel Mac build.
+  "pumpkin-bin-darwin-arm64": {
+    label: "Pumpkin server, Homerun Desktop (macOS arm64)",
+    kind: "cargo",
+    crate: PUMPKIN_CRATE,
+    triple: "aarch64-apple-darwin",
+    artifact: "homerun-pumpkin",
+    outName: "homerun-desktop-minecraft-pumpkin",
+    outDir: path.join(ROOT, "dist", "desktop", "darwin-arm64"),
+    requiresMacOS: true,
+  },
   // Windows x64 only, because that is the only architecture Homerun Desktop
   // ships. A `.node` is a plain shared library with a renamed extension;
   // Node-API is ABI-stable across Node *and* Electron versions, so this needs
@@ -251,6 +262,19 @@ const TARGETS = {
     requiresLinux: true,
     glibcFloor: "2.31",
   },
+  // The same addon for Homerun Desktop on Apple silicon. napi-build links it
+  // with Node-API's symbols left for the host to supply, so it loads into any
+  // Electron, as on the other targets.
+  "core-node-darwin-arm64": {
+    label: "homerun-core for Homerun Desktop (Node addon, macOS arm64)",
+    kind: "cargo",
+    crate: CORE_NODE_CRATE,
+    triple: "aarch64-apple-darwin",
+    artifact: "libhomerun_core_node.dylib",
+    outName: "homerun_core.node",
+    outDir: path.join(ROOT, "dist", "desktop", "darwin-arm64"),
+    requiresMacOS: true,
+  },
   "game-runner": {
     label: "Descriptor game runner, Windows x64 (Homerun Desktop)",
     kind: "cargo",
@@ -270,6 +294,15 @@ const TARGETS = {
     outDir: path.join(ROOT, "dist", "desktop", "linux-x64"),
     requiresLinux: true,
     glibcFloor: "2.31",
+  },
+  "game-runner-darwin-arm64": {
+    label: "Descriptor game runner, macOS arm64 (Homerun Desktop)",
+    kind: "cargo",
+    crate: path.join(ROOT, "rust", "homerun-game-cli"),
+    triple: "aarch64-apple-darwin",
+    artifact: "homerun-game",
+    outDir: path.join(ROOT, "dist", "desktop", "darwin-arm64"),
+    requiresMacOS: true,
   },
   host: {
     label: "this machine (tests only)",

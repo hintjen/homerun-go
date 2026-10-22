@@ -26,12 +26,15 @@ release job: a Rust compilation alone does not prove Node can load it.
 ## Linux and macOS builds
 
 Homerun Desktop is coming to Linux, then macOS (Apple silicon). Linux x64
-has all four artifacts; macOS and Linux arm64 have wireproxy so far:
+and macOS arm64 have all four artifacts; Linux arm64 has wireproxy so far:
 
 ```text
 npm run rust:core-node-linux-x64                       # on glibc 2.31
 npm run rust:game-runner-linux-x64                     # on glibc 2.31
 npm run rust:pumpkin-bin-linux-x64                     # on glibc 2.31
+npm run rust:core-node-darwin-arm64                    # on a Mac
+npm run rust:game-runner-darwin-arm64                  # on a Mac
+npm run rust:pumpkin-bin-darwin-arm64                  # on a Mac
 node scripts/build-wireproxy.js desktop-linux-x64     # any machine with Go
 node scripts/build-wireproxy.js desktop-linux-arm64
 node scripts/build-wireproxy.js desktop-darwin-arm64
@@ -45,6 +48,11 @@ node scripts/build-wireproxy.js desktop-win32-x64
   targets refuse a machine above glibc 2.31 (Ubuntu 20.04) and check the
   symbol versions the staged file asks for. Build them on Ubuntu 20.04 or in
   an `ubuntu:20.04` container.
+- **The macOS binaries are built on a Mac,** for `aarch64-apple-darwin` only
+  (there is no Intel Mac build). They are not signed here: the desktop's
+  packaging signs every binary in the app with its Developer ID, and one it
+  downloads at run time (Pumpkin, the runner) has to be signed before it is
+  published, as on Windows.
 - **wireproxy is the desktop's tunnel,** `homerun-desktop-server-proxy`,
   built from the fork at `scripts/wireproxy.rev`, the revision the phones
   ship. cgo is off, so one machine builds all four targets and the Linux
